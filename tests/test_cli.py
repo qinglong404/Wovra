@@ -17,16 +17,27 @@ def _use_tmp_root(monkeypatch, tmp_path):
 def test_new_creates_task_and_prints_id(monkeypatch, tmp_path, capsys):
     _use_tmp_root(monkeypatch, tmp_path)
 
-    cli_main(["new", "测试目标", "--req", "约束A", "--criteria", "标准B"])
+    cli_main(["new", "测试目标"])
 
     out = capsys.readouterr().out
-    assert "已创建任务" in out
+    assert "已创建新会话" in out
     # 输出里的任务 id 应与磁盘上的目录对应
     task_id = out.split(":")[1].split()[0]
     data = json.loads((tmp_path / task_id / "task.json").read_text(encoding="utf-8"))
     assert data["goal"] == "测试目标"
-    assert data["requirements"] == ["约束A"]
-    assert data["acceptance_criteria"] == ["标准B"]
+
+
+def test_new_without_goal_starts_blank(monkeypatch, tmp_path, capsys):
+    """新会话不强制目标：目标由 AI 随对话逐步成形。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+
+    cli_main(["new"])
+
+    out = capsys.readouterr().out
+    task_id = out.split(":")[1].split()[0]
+    data = json.loads((tmp_path / task_id / "task.json").read_text(encoding="utf-8"))
+    assert data["goal"] == ""
+    assert data["status"] == "in_progress"
 
 
 def test_list_shows_existing_tasks(monkeypatch, tmp_path, capsys):

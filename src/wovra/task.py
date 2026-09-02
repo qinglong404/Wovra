@@ -141,6 +141,26 @@ class Task:
         self.summary = text.strip()
         self.updated_at = datetime.now().isoformat(timespec="seconds")
 
+    def apply_state(
+        self,
+        goal: str | None = None,
+        status: str | None = None,
+        summary: str | None = None,
+    ) -> None:
+        """AI 每轮对任务状态的更新入口。
+
+        目标不是建任务时定死的，而是随对话逐步成形、也可能被修正——
+        所以 goal/status/summary 都是"谁最新谁说了算"。只有传入了
+        的字段才覆盖；status 只接受合法值，防止模型输出污染状态机。
+        """
+        if goal:
+            self.goal = goal
+        if status in ("in_progress", "done"):
+            self.status = status
+        if summary is not None:
+            self.summary = summary
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+
     # ---- 持久化 ---------------------------------------------------------
 
     def save(self) -> None:
@@ -160,8 +180,17 @@ class Task:
 
         这里体现"上下文生命周期"的第一步：模型不需要整个 history，
         只需要目标、约束、当前摘要和最近几条事件就能继续工作。
+        目标可能尚未成形（新会话）——明确告诉模型这一点，
+        它的角色是"在对话中逐步澄清目标"，而不是硬套一个不存在的目标。
         """
-        lines = [f"# 当前任务\n\n目标：{self.goal}"]
+        lines = ["# 当前任务"]
+        if self.goal:
+            lines.append(f"\n目标：{self.goal}")
+        else:
+            lines.append(
+                "\n目标：尚未明确。请在对话中逐步理解用户想做什么，"
+                "目标会随交流自动更新，不必追问或强行定义。"
+            )
         if self.requirements:
             lines.append("\n## 需求\n" + "\n".join(f"- {r}" for r in self.requirements))
         if self.acceptance_criteria:

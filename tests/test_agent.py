@@ -9,7 +9,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from wovra import task as task_module
 from wovra.agent import Agent, _schema_of, read_file
+from wovra.task import Task
 
 
 class _StubLLM:
@@ -260,6 +262,58 @@ def test_run_always_uses_streaming():
 
 
 # ---- 任务绑定 ------------------------------------------------------------
+
+
+def test_state_refresh_updates_goal_and_status_from_conversation(monkeypatch, tmp_path):
+    """目标由 AI 每轮重估：一轮结束后 goal/status/summary 被更新。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    state_json = '{"goal": "搞清测试覆盖", "status": "done", "summary": "全部完成"}'
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+        [_chunk(_delta(content=state_json))],
+    ]
+    task = Task.create(goal="初始的模糊想法")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    answer = agent.run("把活干完")
+
+    assert answer == "干完了"
+    assert task.goal == "搞清测试覆盖"
+    assert task.status == "done"
+    assert task.summary == "全部完成"
+
+
+def test_state_refresh_survives_invalid_json(monkeypatch, tmp_path):
+    """状态评估输出不是合法 JSON 时，保留原状态而不是覆盖坏数据。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    responses = [
+        [_chunk(_delta(content="回答"))],
+        [_chunk(_delta(content="这不是 JSON {{{"))],
+    ]
+    task = Task.create(goal="初始目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    agent.run("问")
+
+    assert task.goal == "初始目标"  # 原状态未被破坏
+    assert task.status == "in_progress"
+
+
+def test_state_refresh_does_not_downgrade_done_arbitrarily(monkeypatch, tmp_path):
+    """apply_state 只接受合法 status；模型输出别的值不生效。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    state_json = '{"goal": "x", "status": "completed", "summary": "s"}'
+    responses = [
+        [_chunk(_delta(content="回答"))],
+        [_chunk(_delta(content=state_json))],
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    agent.run("问")
+
+    assert task.status == "in_progress"  # "completed" 非法，保留原值
+    assert task.goal == "x"              # 合法字段照常更新
 
 
 def test_agent_records_events_into_task(monkeypatch, tmp_path):

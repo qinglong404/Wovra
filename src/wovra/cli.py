@@ -168,16 +168,17 @@ def _run_turn(agent: Agent, instruction: str) -> str:
 
 
 def cmd_new(args: argparse.Namespace) -> None:
-    """wovra new：新建一个会话（任务）。"""
-    task = Task.create(
-        goal=args.goal,
-        requirements=args.req or [],
-        acceptance_criteria=args.criteria or [],
-    )
+    """wovra new：新建一个会话（任务）。
+
+    目标参数是可选的：目标不是开工的前提，而是对话的产物——
+    AI 会在每轮对话后重新评估并更新它。
+    """
+    task = Task.create(goal=args.goal or "")
     task.save()
-    print(ui.success(f"已创建任务: {task.id}"))
-    print(f"目标: {task.goal}")
-    print(ui.info(f"下一步: `wovra chat 1` 或 `wovra run {task.id} \"指令\"`"))
+    print(ui.success(f"已创建新会话: {task.id}"))
+    if task.goal:
+        print(f"初始意图: {task.goal}")
+    print(ui.info(f"直接 `wovra chat {task.id}` 开始对话，目标会随对话自动成形。"))
 
 
 def cmd_run(args: argparse.Namespace) -> None:
@@ -208,16 +209,21 @@ def _chat_help() -> None:
 def cmd_chat(args: argparse.Namespace) -> None:
     """wovra chat：交互模式，多轮对话。
 
-    与 run 的区别：一次进程内可以连续对话（内存里的 messages 保持
-    完整），每一轮结束后状态都已落盘，Ctrl+C / exit 随时离开，
-    下次 `wovra chat` 同一个 id 从磁盘接着来——包括回放之前的历史。
+    不带 id 时自动新建会话——想聊就直接聊，不需要先想清楚目标；
+    带 id（或编号）则续上既有会话。每一轮结束后状态都已落盘，
+    Ctrl+C / exit 随时离开，下次从磁盘接着来。
     """
-    task = _load_task(args.task_id)
+    if args.task_id:
+        task = _load_task(args.task_id)
+    else:
+        task = Task.create(goal="")
+        task.save()
+        print(ui.info(f"已创建新会话 {task.id}"))
     agent = _build_agent(task)
 
     print(ui.rule("Wovra 会话"))
     print(f"{ui.paint('任务', 'bold')}  {task.id}")
-    print(f"{ui.paint('目标', 'bold')}  {task.goal}")
+    print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
     print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
     print(ui.rule())
 
@@ -264,7 +270,8 @@ def cmd_list(args: argparse.Namespace) -> None:
     )
     print(header)
     for number, t in enumerate(tasks, start=1):
-        goal = t["goal"] if len(t["goal"]) <= 36 else t["goal"][:36] + "…"
+        goal = t["goal"] or "（目标待明确）"
+        goal = goal if len(goal) <= 36 else goal[:36] + "…"
         updated = t["updated_at"].replace("T", " ")[:16]
         print(
             ui.paint(ui.pad(str(number), 6), "cyan")
@@ -292,10 +299,11 @@ def main(argv: list[str] | None = None) -> None:
         description=ui.paint("Wovra：面向结构化、长时运行 AI 工作的运行时。", "bold"),
         epilog=(
             "示例：\n"
-            '  wovra new "调研某主题" --criteria "输出总结报告"   新建任务\n'
-            "  wovra list                                        查看所有任务（带编号）\n"
-            "  wovra chat 1                                      用编号进入交互会话\n"
-            "  wovra show 1                                      查看任务报告\n"
+            "  wovra chat                  开一个新会话直接聊，目标随对话成形\n"
+            '  wovra new "调研某主题"       带初始意图新建会话（也可以不填）\n'
+            "  wovra list                  查看所有会话（带编号）\n"
+            "  wovra chat 1                用编号续上某个会话\n"
+            "  wovra show 1                查看会话报告\n"
             "\n"
             "<id> 位置既可用编号（list 里的 1、2、3…），也可用完整任务 id。"
         ),
@@ -303,10 +311,8 @@ def main(argv: list[str] | None = None) -> None:
     )
     sub = parser.add_subparsers(dest="command")
 
-    p_new = sub.add_parser("new", help="新建任务（新会话）")
-    p_new.add_argument("goal", help="任务目标")
-    p_new.add_argument("--req", action="append", help="需求约束，可多次指定")
-    p_new.add_argument("--criteria", action="append", help="验收标准，可多次指定")
+    p_new = sub.add_parser("new", help="新建会话（目标可不填，随对话成形）")
+    p_new.add_argument("goal", nargs="?", default="", help="可选的初始意图")
     p_new.set_defaults(func=cmd_new)
 
     p_run = sub.add_parser("run", help="对任务执行一轮")
@@ -314,8 +320,8 @@ def main(argv: list[str] | None = None) -> None:
     p_run.add_argument("instruction", nargs="?", help="本轮指令；省略则由 AI 自主继续")
     p_run.set_defaults(func=cmd_run)
 
-    p_chat = sub.add_parser("chat", help="进入交互式多轮对话")
-    p_chat.add_argument("task_id", help="任务编号或完整任务 id")
+    p_chat = sub.add_parser("chat", help="交互式多轮对话（不带 id 则新建会话）")
+    p_chat.add_argument("task_id", nargs="?", default="", help="任务编号或完整任务 id；省略则新建")
     p_chat.set_defaults(func=cmd_chat)
 
     p_list = sub.add_parser("list", help="列出所有任务（带编号）")

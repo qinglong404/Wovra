@@ -276,9 +276,9 @@ class Agent:
             self.messages.append({"role": "assistant", "content": answer})
             if self.task is not None:
                 self.task.record("final_answer", answer)
-                # 先刷新摘要再记录 usage：摘要生成的调用也是真实开销，
+                # 先刷新状态再记录 usage：状态评估的调用也是真实开销，
                 # 应当包含在本次 run 的成本核算里
-                self._refresh_summary(answer)
+                self._refresh_state(answer)
                 self.task.record(
                     "usage",
                     f"{self.last_stats['seconds']:.1f}s, "
@@ -295,30 +295,36 @@ class Agent:
             f"agent 超过最大循环次数（{self.max_turns} 轮）仍未给出最终回答"
         )
 
-    def _refresh_summary(self, latest_answer: str) -> None:
-        """让模型基于任务状态生成一份给人看的状态摘要。
+    def _refresh_state(self, latest_answer: str) -> None:
+        """每轮结束后让模型重新评估任务状态。
 
-        这是"报告"概念的雏形：独立于对话，回答 README 里那五个问题
-        （发生了什么/在哪/还剩什么/什么阻塞/下一步）。目前每轮 run()
-        都刷新一次；频率和触发策略以后可以做成可配置的。
+        与"目标前置"的旧设计相反：目标不建任务时定死，而是随对话
+        逐步成形、演化，甚至被推翻。模型每轮重新输出它对
+        目标 / 状态（未完成或已完成）/ 进展的最新理解，写回任务。
+
+        输出约定为 JSON；解析失败则整体保留原状态——宁可这轮不更新，
+        也不用坏数据覆盖。这次调用同样流式并计入成本核算。
         """
         if self.task is None:
             return
         prompt = (
-            "请根据任务信息和最近发生的事件，写一份简洁的中文状态报告，"
-            "用 Markdown 列表组织，包含三部分：当前状态、已完成、下一步。"
-            "不超过 8 行，直接输出正文。\n\n"
+            "请根据任务上下文和最近的对话，重新评估这个任务，"
+            "只输出一个 JSON 对象（不要代码块围栏、不要解释）：\n"
+            '{"goal": "当前对任务目标的理解；若对话尚未形成明确目标则为空字符串",\n'
+            ' "status": "in_progress 或 done（仅当任务目标已达成才填 done）",\n'
+            ' "summary": "当前进展摘要，Markdown 列表，不超过 6 行；'
+            '闲聊或与任务无关的内容不必写进进展"}\n\n'
             f"{self.task.context()}\n\n最近一次回答：{latest_answer[:2000]}"
         )
         try:
             summary_parts: list[str] = []
-            # 摘要调用同样走流式（为了拿 usage 计入成本核算）；
+            # 状态评估同样走流式（为了拿 usage 计入成本核算）；
             # 不需要工具，显式传 None 防止把工具 schema 带进这次
             # 与工作无关的调用
             start = time.monotonic()
-            summary_messages = [{"role": "user", "content": prompt}]
+            state_messages = [{"role": "user", "content": prompt}]
             usage = None
-            for chunk in self.llm.chat(summary_messages, tools=None, stream=True):
+            for chunk in self.llm.chat(state_messages, tools=None, stream=True):
                 if getattr(chunk, "usage", None):
                     usage = chunk.usage
                 if getattr(chunk, "choices", None):
@@ -328,14 +334,22 @@ class Agent:
             self.last_stats["seconds"] += time.monotonic() - start
             if usage is not None:
                 self._accumulate_usage(usage)
-                estimated = tokens.breakdown("", "", [], summary_messages)
+                estimated = tokens.breakdown("", "", [], state_messages)
                 for category, value in estimated.items():
                     self.last_stats["prompt_breakdown"][category] += value
-            summary = "".join(summary_parts)
-        except Exception:  # noqa: BLE001——摘要失败不应影响主流程
-            summary = ""  # 保留旧摘要，历史里留下失败痕迹即可
-        if summary:
-            self.task.set_summary(summary)
+            raw = "".join(summary_parts).strip()
+            # 容错：剥掉模型偶尔坚持要加的 ```json 围栏
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                raw = raw[raw.find("{"):] if "{" in raw else ""
+            state = json.loads(raw) if raw else {}
+        except Exception:  # noqa: BLE001——状态评估失败不应影响主流程
+            return  # 保留原状态，本轮不更新
+        self.task.apply_state(
+            goal=state.get("goal"),
+            status=state.get("status"),
+            summary=state.get("summary"),
+        )
 
     def _accumulate_usage(self, usage) -> None:
         """把一次调用的 usage 累加进 last_stats。
