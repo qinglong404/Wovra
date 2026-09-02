@@ -1,0 +1,180 @@
+"""任务状态：Wovra 的核心数据结构（路线图阶段 2）。
+
+一个 Task 是一个持久的工作空间，对应 README 里的那棵树：
+
+    Task
+    ├── Goal（目标）              要做成什么
+    ├── Requirements（需求）      约束条件
+    ├── Acceptance Criteria（验收标准）  怎样才算完成
+    ├── Current State（当前状态）  status + 摘要报告
+    └── History（历史）           发生过什么，只追加不修改
+
+落盘格式刻意选择"人类可读的文件"而不是数据库：
+
+    tasks/<task-id>/
+    ├── task.json    结构化状态（给程序读）
+    └── report.md    进度报告（给人看——人与 AI 的共享接口）
+
+选择文件而不是 SQLite：阶段 2 的规模下文件完全够用，且人类
+可以直接打开看、直接手改（手改后下次 load 就生效），这本身就是
+一种最朴素的人工干预方式。等并发和规模成为真实问题时再换存储。
+
+当前实现用一个 dataclass + dict 承载数据，没有引入 pydantic：
+字段还很少，标准库足够；schema 复杂起来后再引入校验库也不迟。
+"""
+
+import json
+import uuid
+from dataclasses import asdict, dataclass, field
+from datetime import datetime
+from pathlib import Path
+
+# 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
+TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
+
+
+@dataclass
+class Task:
+    """一个长时运行任务的全部持久状态。
+
+    status 取值约定（阶段 2 只需要这几个粗粒度值）：
+        in_progress -- 正在进行
+        blocked     -- 被阻塞（等待人类输入或外部资源）
+        done        -- 已完成
+    """
+
+    id: str
+    goal: str
+    requirements: list[str] = field(default_factory=list)
+    acceptance_criteria: list[str] = field(default_factory=list)
+    status: str = "in_progress"
+    # summary 是 Agent 周期性生成的状态摘要（markdown 片段），
+    # 对应 README 里 "What happened? Where are we now? ..." 的那份报告
+    summary: str = ""
+    # history 只追加：每条是 {"time", "kind", "detail"}，
+    # 追加式历史让"发生过什么"永远可追溯，这是可恢复性的基础
+    history: list[dict] = field(default_factory=list)
+    created_at: str = ""
+    updated_at: str = ""
+
+    # ---- 构造与加载 -----------------------------------------------------
+
+    @classmethod
+    def create(
+        cls,
+        goal: str,
+        requirements: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+    ) -> "Task":
+        """新建一个任务。id 用日期 + 短随机串，保证可读又不冲突。"""
+        now = datetime.now()
+        task_id = now.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
+        return cls(
+            id=task_id,
+            goal=goal,
+            requirements=list(requirements or []),
+            acceptance_criteria=list(acceptance_criteria or []),
+            created_at=now.isoformat(timespec="seconds"),
+            updated_at=now.isoformat(timespec="seconds"),
+        )
+
+    @classmethod
+    def load(cls, task_id: str) -> "Task":
+        """从磁盘加载任务。task.json 是唯一的事实来源（source of truth）。"""
+        path = TASKS_ROOT / task_id / "task.json"
+        data = json.loads(path.read_text(encoding="utf-8"))
+        return cls(**data)
+
+    @classmethod
+    def load_or_create(
+        cls,
+        task_id: str,
+        goal: str,
+        requirements: list[str] | None = None,
+        acceptance_criteria: list[str] | None = None,
+    ) -> "Task":
+        """已存在则加载（断点续做），否则新建。演示"停止-恢复"的入口。"""
+        if (TASKS_ROOT / task_id / "task.json").exists():
+            return cls.load(task_id)
+        task = cls.create(goal, requirements, acceptance_criteria)
+        task.id = task_id  # 固定 id，让第二次运行能找到同一个任务
+        return task
+
+    # ---- 状态更新 -------------------------------------------------------
+
+    def record(self, kind: str, detail: str) -> None:
+        """向历史追加一条事件，并刷新更新时间。"""
+        self.history.append(
+            {
+                "time": datetime.now().isoformat(timespec="seconds"),
+                "kind": kind,      # 如 user_input / tool_call / tool_result / final_answer
+                "detail": detail,
+            }
+        )
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    def set_summary(self, text: str) -> None:
+        """更新状态摘要（由 Agent 周期性调用）。"""
+        self.summary = text.strip()
+        self.updated_at = datetime.now().isoformat(timespec="seconds")
+
+    # ---- 持久化 ---------------------------------------------------------
+
+    def save(self) -> None:
+        """把当前状态写到磁盘：task.json + report.md。"""
+        directory = TASKS_ROOT / self.id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "task.json").write_text(
+            json.dumps(asdict(self), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (directory / "report.md").write_text(self._render_report(), encoding="utf-8")
+
+    # ---- 给模型和报告用的视图 --------------------------------------------
+
+    def context(self, last_n: int = 10) -> str:
+        """生成给模型看的任务上下文（作为 system prompt 的一部分）。
+
+        这里体现"上下文生命周期"的第一步：模型不需要整个 history，
+        只需要目标、约束、当前摘要和最近几条事件就能继续工作。
+        """
+        lines = [f"# 当前任务\n\n目标：{self.goal}"]
+        if self.requirements:
+            lines.append("\n## 需求\n" + "\n".join(f"- {r}" for r in self.requirements))
+        if self.acceptance_criteria:
+            lines.append(
+                "\n## 验收标准\n"
+                + "\n".join(f"- {c}" for c in self.acceptance_criteria)
+            )
+        lines.append(f"\n状态：{self.status}")
+        if self.summary:
+            lines.append("\n## 之前的进展摘要\n" + self.summary)
+        if self.history:
+            lines.append("\n## 最近发生\n" + "\n".join(
+                f"- [{e['time']}] {e['kind']}: {e['detail']}"
+                for e in self.history[-last_n:]
+            ))
+        return "\n".join(lines)
+
+    def _render_report(self) -> str:
+        """渲染人类可读的 report.md。history 只展示最近 20 条，全部历史在 json 里。"""
+        lines = [
+            f"# 任务报告：{self.id}",
+            "",
+            f"- **目标**：{self.goal}",
+            f"- **状态**：{self.status}",
+            f"- **创建时间**：{self.created_at}",
+            f"- **更新时间**：{self.updated_at}",
+        ]
+        if self.requirements:
+            lines.append("\n## 需求\n")
+            lines += [f"- {r}" for r in self.requirements]
+        if self.acceptance_criteria:
+            lines.append("\n## 验收标准\n")
+            lines += [f"- {c}" for c in self.acceptance_criteria]
+        lines.append("\n## 当前进展（AI 维护）\n")
+        lines.append(self.summary or "_尚无进展摘要。_")
+        if self.history:
+            lines.append("\n## 最近历史\n")
+            lines += [f"- `[{e['time']}]` **{e['kind']}**：{e['detail']}" for e in self.history[-20:]]
+        return "\n".join(lines) + "\n"

@@ -34,6 +34,9 @@ htmlcov/
 .env.*
 !.env.example
 
+# Wovra 运行时数据（任务状态是本地的工作产物，不进版本库）
+tasks/
+
 # Logs
 *.log
 logs/

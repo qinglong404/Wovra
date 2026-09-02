@@ -314,8 +314,8 @@ The initial implementation focuses on validating the core concepts rather than b
 Current priorities include:
 
 * [x] Minimal agent runtime
-* [ ] Task representation
-* [ ] Persistent task state
+* [x] Task representation
+* [x] Persistent task state
 * [ ] Context management
 * [ ] Report generation
 * [ ] Context folding and retrieval
