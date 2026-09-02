@@ -129,13 +129,20 @@ def thinking_delta(text: str) -> str:
 
 
 def usage_line(stats: dict) -> str:
-    """一次 run 的成本核算行：耗时 + tokens 用量、占比与输入构成。
+    """一次 run 的成本核算行：轮次/步数/工具调用 + tokens 用量与构成。
 
     输入构成（系统提示词/工具定义/注入内容/用户消息/助手消息/工具结果）
     来自本地估算的相对占比，按服务端返回的真实 prompt_tokens 等比
     校准后展示——所以各分项之和恰好等于输入总量。
+    缓存命中依赖服务端返回 prompt_tokens_details，没返回就不显示，
+    不伪造 0。
     """
-    parts = [f"耗时 {stats['seconds']:.1f}s"]
+    parts = [
+        f"耗时 {stats['seconds']:.1f}s",
+        f"轮次 第{stats.get('turn', 1)}轮",
+        f"步数 {stats.get('llm_calls', 0)}",
+        f"工具调用 {stats.get('tool_calls', 0)} 次",
+    ]
     total = stats.get("total_tokens", 0)
     if total:
         prompt = stats.get("prompt_tokens", 0)
@@ -146,6 +153,11 @@ def usage_line(stats: dict) -> str:
         if reasoning:
             parts.append(f"其中思考 {reasoning:,} tok")
         parts.append(f"合计 {total:,} tok")
+        cached = stats.get("cached_tokens")
+        if cached is not None:
+            miss = stats.get("cache_miss_tokens") or 0
+            parts.append(f"缓存命中 {cached:,} tok")
+            parts.append(f"未命中 {miss:,} tok")
     else:
         parts.append("tokens：服务端未返回 usage")
 
@@ -155,7 +167,7 @@ def usage_line(stats: dict) -> str:
     estimated_total = sum(breakdown.values())
     if total and estimated_total:
         # 估算值只代表占比，按真实总量缩放后展示
-        scale = prompt / estimated_total
+        scale = stats.get("prompt_tokens", 0) / estimated_total
         detail = " ┃ ".join(
             f"{tokens_module.LABELS[category]} {round(value * scale):,}"
             for category, value in breakdown.items()

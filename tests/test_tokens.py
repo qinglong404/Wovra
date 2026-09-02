@@ -52,6 +52,50 @@ def test_breakdown_without_tools_or_context():
     assert result["user"] > 0
 
 
+def test_usage_line_shows_turns_steps_tools_and_cache():
+    stats = {
+        "seconds": 2.0,
+        "turn": 2,
+        "llm_calls": 3,
+        "tool_calls": 2,
+        "prompt_tokens": 60,
+        "completion_tokens": 40,
+        "total_tokens": 100,
+        "reasoning_tokens": 0,
+        "cached_tokens": 40,
+        "cache_miss_tokens": 20,
+        "prompt_breakdown": {"user": 10},
+    }
+
+    line = ui.usage_line(stats)
+
+    assert "轮次 第2轮" in line
+    assert "步数 3" in line
+    assert "工具调用 2 次" in line
+    assert "缓存命中 40" in line
+    assert "未命中 20" in line
+
+
+def test_usage_line_omits_cache_when_server_does_not_report():
+    stats = {
+        "seconds": 1.0,
+        "turn": 1,
+        "llm_calls": 1,
+        "tool_calls": 0,
+        "prompt_tokens": 10,
+        "completion_tokens": 5,
+        "total_tokens": 15,
+        "reasoning_tokens": 0,
+        "cached_tokens": None,  # 服务端没返回 prompt_tokens_details
+        "cache_miss_tokens": None,
+        "prompt_breakdown": {},
+    }
+
+    line = ui.usage_line(stats)
+
+    assert "缓存" not in line
+
+
 def test_usage_line_scales_breakdown_to_real_total():
     stats = {
         "seconds": 1.0,

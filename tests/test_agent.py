@@ -52,13 +52,18 @@ def _chunk(delta=None, usage=None):
     return SimpleNamespace(choices=choices, usage=usage)
 
 
-def _usage(prompt, completion, total, reasoning=None):
-    details = SimpleNamespace(reasoning_tokens=reasoning) if reasoning else None
+def _usage(prompt, completion, total, reasoning=None, cached=None):
+    completion_details = SimpleNamespace(reasoning_tokens=reasoning) if reasoning else None
+    # cached=None 时不提供 prompt_tokens_details，模拟服务端不支持缓存统计
+    prompt_details = (
+        SimpleNamespace(cached_tokens=cached) if cached is not None else None
+    )
     return SimpleNamespace(
         prompt_tokens=prompt,
         completion_tokens=completion,
         total_tokens=total,
-        completion_tokens_details=details,
+        completion_tokens_details=completion_details,
+        prompt_tokens_details=prompt_details,
     )
 
 
@@ -211,6 +216,38 @@ def test_usage_accumulates_across_turns():
     assert agent.last_stats["prompt_tokens"] == 30
     assert agent.last_stats["completion_tokens"] == 15
     assert agent.last_stats["total_tokens"] == 45
+
+
+def test_turns_steps_tool_calls_and_cache_accounting():
+    def noop():
+        """什么也不做。"""
+
+    responses = [
+        [
+            _chunk(_delta(tool_calls=[_fragment(0, id="c1", name="noop", arguments="{}")])),
+            _chunk(usage=_usage(10, 2, 12, cached=4)),
+        ],
+        [_chunk(_delta(content="ok")), _chunk(usage=_usage(20, 8, 28, cached=6))],
+        # 第二次 run：服务端这次没返回 prompt_tokens_details
+        [_chunk(_delta(content="done")), _chunk(usage=_usage(5, 1, 6))],
+    ]
+    agent = _agent_with([noop], responses)
+
+    agent.run("第一轮")
+    stats = agent.last_stats
+    # 一次 run = 2 步（工具轮 + 回答轮），1 次工具调用
+    assert stats["turn"] == 1
+    assert stats["llm_calls"] == 2
+    assert stats["tool_calls"] == 1
+    # 缓存命中累加：4 + 6；未命中 = 各轮 prompt - 命中
+    assert stats["cached_tokens"] == 10
+    assert stats["cache_miss_tokens"] == (10 - 4) + (20 - 6)
+
+    agent.run("第二轮")
+    assert agent.last_stats["turn"] == 2  # 轮次跨 run 累计
+    assert agent.last_stats["llm_calls"] == 1
+    # 服务端没返回缓存明细 → 保持 None，展示层据此省略
+    assert agent.last_stats["cached_tokens"] is None
 
 
 def test_run_always_uses_streaming():

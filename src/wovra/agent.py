@@ -114,6 +114,8 @@ class Agent:
         # 由这两部分拼成（见下），只有这里知道各自的长度
         self.system_prompt = system_prompt
         self.task_context = task.context() if task is not None else ""
+        # 对话轮次：本 Agent 实例经历过的 run() 次数（跨步累计）
+        self.turn_count = 0
 
         # system 消息 = 调用方给的提示词 + 任务上下文。
         # 任务上下文来自磁盘上的持久状态，因此"新进程 + 新 Agent"也能
@@ -158,13 +160,22 @@ class Agent:
         # 本轮 run 的累计开销（可能经历多次 LLM 调用，跨轮累加），
         # 供调用方做成本核算；也随任务事件落盘。
         # prompt_breakdown 是提示词的分类估算（见 tokens.py），
-        # 展示时会按真实总量校准，这里累加的是原始估算值
+        # 展示时会按真实总量校准，这里累加的是原始估算值。
+        # 轮次 = 本会话第几次 run；步数 = 本次 run 内的 LLM 调用数。
+        # 缓存字段在服务端返回 prompt_tokens_details 时才有值，
+        # 保持 None 以便展示层区分"没返回"和"命中 0"
+        self.turn_count += 1
         self.last_stats = {
             "seconds": 0.0,
+            "turn": self.turn_count,
+            "llm_calls": 0,
+            "tool_calls": 0,
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "reasoning_tokens": 0,
             "total_tokens": 0,
+            "cached_tokens": None,
+            "cache_miss_tokens": None,
             "prompt_breakdown": dict.fromkeys(tokens.CATEGORIES, 0),
         }
 
@@ -180,6 +191,7 @@ class Agent:
             # 快照此刻的消息列表：用量返回后按它做分类估算，
             # 避免["回答轮"追加的新消息]混进本次调用的提示词里
             prompt_snapshot = list(self.messages)
+            self.last_stats["llm_calls"] += 1
             stream = self.llm.chat(self.messages, tools=self._schemas or None, stream=True)
             for chunk in stream:
                 # usage 只在最后一个分块上，且该分块 choices 为空
@@ -225,6 +237,19 @@ class Agent:
                 if reasoning_tokens:
                     # 推理模型的思考 token 也计费，单列出来成本核算才准确
                     self.last_stats["reasoning_tokens"] += reasoning_tokens
+                # 缓存命中：prompt_tokens_details.cached_tokens（OpenAI
+                # 协议扩展）。字段缺失说明服务端不支持，保持 None；
+                # 未命中 = 提示词总量 - 命中量
+                prompt_details = getattr(usage, "prompt_tokens_details", None)
+                cached = getattr(prompt_details, "cached_tokens", None)
+                if cached is not None:
+                    self.last_stats["cached_tokens"] = (
+                        (self.last_stats["cached_tokens"] or 0) + cached
+                    )
+                    miss = max(0, (usage.prompt_tokens or 0) - cached)
+                    self.last_stats["cache_miss_tokens"] = (
+                        (self.last_stats["cache_miss_tokens"] or 0) + miss
+                    )
                 # 分类占比按"本次调用发出前的消息快照"估算后累加
                 estimated = tokens.breakdown(
                     self.system_prompt, self.task_context, self._schemas, prompt_snapshot
@@ -253,6 +278,7 @@ class Agent:
                         ],
                     }
                 )
+                self.last_stats["tool_calls"] += len(ordered)
                 for tc in ordered:
                     self._execute(call_id=tc["id"], name=tc["name"], arguments=tc["arguments"])
                 continue
