@@ -162,8 +162,8 @@ class Agent:
         # prompt_breakdown 是提示词的分类估算（见 tokens.py），
         # 展示时会按真实总量校准，这里累加的是原始估算值。
         # 轮次 = 本会话第几次 run；步数 = 本次 run 内的 LLM 调用数。
-        # 缓存字段在服务端返回 prompt_tokens_details 时才有值，
-        # 保持 None 以便展示层区分"没返回"和"命中 0"
+        # 缓存口径：服务端没返回 prompt_tokens_details 的调用按 0 命中
+        # 计入未命中——宁可保守，也保证 命中+未命中 恒等于输入总量
         self.turn_count += 1
         self.last_stats = {
             "seconds": 0.0,
@@ -174,8 +174,8 @@ class Agent:
             "completion_tokens": 0,
             "reasoning_tokens": 0,
             "total_tokens": 0,
-            "cached_tokens": None,
-            "cache_miss_tokens": None,
+            "cached_tokens": 0,
+            "cache_miss_tokens": 0,
             "prompt_breakdown": dict.fromkeys(tokens.CATEGORIES, 0),
         }
 
@@ -229,27 +229,7 @@ class Agent:
 
             self.last_stats["seconds"] += time.monotonic() - start
             if usage is not None:
-                self.last_stats["prompt_tokens"] += usage.prompt_tokens or 0
-                self.last_stats["completion_tokens"] += usage.completion_tokens or 0
-                self.last_stats["total_tokens"] += usage.total_tokens or 0
-                details = getattr(usage, "completion_tokens_details", None)
-                reasoning_tokens = getattr(details, "reasoning_tokens", None)
-                if reasoning_tokens:
-                    # 推理模型的思考 token 也计费，单列出来成本核算才准确
-                    self.last_stats["reasoning_tokens"] += reasoning_tokens
-                # 缓存命中：prompt_tokens_details.cached_tokens（OpenAI
-                # 协议扩展）。字段缺失说明服务端不支持，保持 None；
-                # 未命中 = 提示词总量 - 命中量
-                prompt_details = getattr(usage, "prompt_tokens_details", None)
-                cached = getattr(prompt_details, "cached_tokens", None)
-                if cached is not None:
-                    self.last_stats["cached_tokens"] = (
-                        (self.last_stats["cached_tokens"] or 0) + cached
-                    )
-                    miss = max(0, (usage.prompt_tokens or 0) - cached)
-                    self.last_stats["cache_miss_tokens"] = (
-                        (self.last_stats["cache_miss_tokens"] or 0) + miss
-                    )
+                self._accumulate_usage(usage)
                 # 分类占比按"本次调用发出前的消息快照"估算后累加
                 estimated = tokens.breakdown(
                     self.system_prompt, self.task_context, self._schemas, prompt_snapshot
@@ -339,9 +319,7 @@ class Agent:
                         summary_parts.append(piece)
             self.last_stats["seconds"] += time.monotonic() - start
             if usage is not None:
-                self.last_stats["prompt_tokens"] += usage.prompt_tokens or 0
-                self.last_stats["completion_tokens"] += usage.completion_tokens or 0
-                self.last_stats["total_tokens"] += usage.total_tokens or 0
+                self._accumulate_usage(usage)
                 estimated = tokens.breakdown("", "", [], summary_messages)
                 for category, value in estimated.items():
                     self.last_stats["prompt_breakdown"][category] += value
@@ -350,6 +328,33 @@ class Agent:
             summary = ""  # 保留旧摘要，历史里留下失败痕迹即可
         if summary:
             self.task.set_summary(summary)
+
+    def _accumulate_usage(self, usage) -> None:
+        """把一次调用的 usage 累加进 last_stats。
+
+        所有 LLM 调用（工具轮/回答轮/摘要生成）都必须经过这里，
+        否则就会漏计——此前摘要调用漏掉了缓存与思考 token，
+        导致 命中+未命中 对不上输入总量，就是这么来的。
+        """
+        self.last_stats["prompt_tokens"] += usage.prompt_tokens or 0
+        self.last_stats["completion_tokens"] += usage.completion_tokens or 0
+        self.last_stats["total_tokens"] += usage.total_tokens or 0
+
+        details = getattr(usage, "completion_tokens_details", None)
+        reasoning_tokens = getattr(details, "reasoning_tokens", None)
+        if reasoning_tokens:
+            # 推理模型的思考 token 也计费，单列出来成本核算才准确
+            self.last_stats["reasoning_tokens"] += reasoning_tokens
+
+        # 缓存命中：prompt_tokens_details.cached_tokens（OpenAI 协议扩展）。
+        # 方舟等端点会漏报部分调用的明细——漏报的按 0 命中计入未命中，
+        # 保证 命中+未命中 ≡ 输入总量
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(prompt_details, "cached_tokens", None) or 0
+        self.last_stats["cached_tokens"] += cached
+        self.last_stats["cache_miss_tokens"] += max(
+            0, (usage.prompt_tokens or 0) - cached
+        )
 
     def _execute(self, call_id: str, name: str, arguments: str) -> None:
         """执行单个工具调用，并把结果作为 tool 消息追加到历史。

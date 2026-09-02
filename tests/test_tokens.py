@@ -72,11 +72,12 @@ def test_usage_line_shows_turns_steps_tools_and_cache():
     assert "轮次 第2轮" in line
     assert "步数 3" in line
     assert "工具调用 2 次" in line
-    assert "缓存命中 40" in line
-    assert "未命中 20" in line
+    # 占比保留 1 位小数：40/60 与 20/60
+    assert "缓存命中 40 tok（66.7%）" in line
+    assert "未命中 20 tok（33.3%）" in line
 
 
-def test_usage_line_omits_cache_when_server_does_not_report():
+def test_usage_line_treats_missing_cache_report_as_zero_hit():
     stats = {
         "seconds": 1.0,
         "turn": 1,
@@ -86,14 +87,15 @@ def test_usage_line_omits_cache_when_server_does_not_report():
         "completion_tokens": 5,
         "total_tokens": 15,
         "reasoning_tokens": 0,
-        "cached_tokens": None,  # 服务端没返回 prompt_tokens_details
-        "cache_miss_tokens": None,
+        "cached_tokens": 0,  # 服务端漏报 → 保守按 0 命中
+        "cache_miss_tokens": 10,
         "prompt_breakdown": {},
     }
 
     line = ui.usage_line(stats)
 
-    assert "缓存" not in line
+    assert "缓存命中 0 tok（0.0%）" in line
+    assert "未命中 10 tok（100.0%）" in line
 
 
 def test_usage_line_scales_breakdown_to_real_total():
@@ -113,9 +115,10 @@ def test_usage_line_scales_breakdown_to_real_total():
     line = ui.usage_line(stats)
 
     assert "输入构成" in line
-    assert "系统提示词 20" in line  # 40 * 0.5
-    assert "工具定义 30" in line   # 60 * 0.5
-    assert "用户消息 15" in line
+    # 缩放后各分项之和 = 真实输入 100；占比取估算份额，保留 1 位小数
+    assert "系统提示词 20 tok（20.0%）" in line  # 40 * 0.5
+    assert "工具定义 30 tok（30.0%）" in line   # 60 * 0.5
+    assert "用户消息 15 tok（15.0%）" in line
 
 
 def test_usage_line_without_breakdown_or_usage():

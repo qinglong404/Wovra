@@ -246,8 +246,9 @@ def test_turns_steps_tool_calls_and_cache_accounting():
     agent.run("第二轮")
     assert agent.last_stats["turn"] == 2  # 轮次跨 run 累计
     assert agent.last_stats["llm_calls"] == 1
-    # 服务端没返回缓存明细 → 保持 None，展示层据此省略
-    assert agent.last_stats["cached_tokens"] is None
+    # 服务端没返回缓存明细 → 按 0 命中计入未命中（保守口径）
+    assert agent.last_stats["cached_tokens"] == 0
+    assert agent.last_stats["cache_miss_tokens"] == 5
 
 
 def test_run_always_uses_streaming():

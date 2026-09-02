@@ -131,11 +131,10 @@ def thinking_delta(text: str) -> str:
 def usage_line(stats: dict) -> str:
     """一次 run 的成本核算行：轮次/步数/工具调用 + tokens 用量与构成。
 
-    输入构成（系统提示词/工具定义/注入内容/用户消息/助手消息/工具结果）
-    来自本地估算的相对占比，按服务端返回的真实 prompt_tokens 等比
-    校准后展示——所以各分项之和恰好等于输入总量。
-    缓存命中依赖服务端返回 prompt_tokens_details，没返回就不显示，
-    不伪造 0。
+    所有占比保留 1 位小数；输入构成来自本地估算的相对占比，按
+    服务端返回的真实 prompt_tokens 等比校准——各分项之和等于输入
+    总量。缓存命中依赖服务端的 prompt_tokens_details，漏报的调用
+    按 0 命中计入未命中（口径见 Agent）。
     """
     parts = [
         f"耗时 {stats['seconds']:.1f}s",
@@ -147,17 +146,17 @@ def usage_line(stats: dict) -> str:
     if total:
         prompt = stats.get("prompt_tokens", 0)
         completion = stats.get("completion_tokens", 0)
-        parts.append(f"输入 {prompt:,} tok（{prompt / total:.0%}）")
-        parts.append(f"输出 {completion:,} tok（{completion / total:.0%}）")
+        parts.append(f"输入 {prompt:,} tok（{prompt / total:.1%}）")
+        parts.append(f"输出 {completion:,} tok（{completion / total:.1%}）")
         reasoning = stats.get("reasoning_tokens", 0)
         if reasoning:
             parts.append(f"其中思考 {reasoning:,} tok")
         parts.append(f"合计 {total:,} tok")
-        cached = stats.get("cached_tokens")
-        if cached is not None:
-            miss = stats.get("cache_miss_tokens") or 0
-            parts.append(f"缓存命中 {cached:,} tok")
-            parts.append(f"未命中 {miss:,} tok")
+        cached = stats.get("cached_tokens", 0)
+        miss = stats.get("cache_miss_tokens", 0)
+        if prompt:
+            parts.append(f"缓存命中 {cached:,} tok（{cached / prompt:.1%}）")
+            parts.append(f"未命中 {miss:,} tok（{miss / prompt:.1%}）")
     else:
         parts.append("tokens：服务端未返回 usage")
 
@@ -166,10 +165,10 @@ def usage_line(stats: dict) -> str:
     breakdown = stats.get("prompt_breakdown") or {}
     estimated_total = sum(breakdown.values())
     if total and estimated_total:
-        # 估算值只代表占比，按真实总量缩放后展示
+        # 估算值只代表占比，按真实总量缩放后展示；占比取估算份额
         scale = stats.get("prompt_tokens", 0) / estimated_total
         detail = " ┃ ".join(
-            f"{tokens_module.LABELS[category]} {round(value * scale):,}"
+            f"{tokens_module.LABELS[category]} {round(value * scale):,} tok（{value / estimated_total:.1%}）"
             for category, value in breakdown.items()
             if value
         )
