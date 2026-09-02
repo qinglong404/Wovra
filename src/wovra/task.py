@@ -204,9 +204,11 @@ class Task:
         lines.append(self.summary or "_尚无进展摘要。_")
         if self.history:
             lines.append("\n## 时间线\n")
-            lines += self._render_timeline(self.history[-20:])
+            # 全量渲染：每条事件已降噪为单行，没有截断的理由——
+            # 报告砍掉头部活动会让人"没头没尾"。超长原文仍在 task.json
+            lines += self._render_timeline(self.history)
             lines.append(
-                "\n> 完整历史（含工具返回原文）见同目录 task.json。"
+                "\n> 各事件为单行摘要；未截断的工具返回原文见同目录 task.json。"
             )
         return "\n".join(lines) + "\n"
 
