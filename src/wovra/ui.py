@@ -11,6 +11,7 @@
 
 import os
 import sys
+import unicodedata
 
 _ENABLED = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -33,6 +34,22 @@ def paint(text: str, *styles: str) -> str:
         return text
     prefix = "".join(f"\033[{_CODES[s]}m" for s in styles)
     return f"{prefix}{text}\033[0m"
+
+
+def display_width(text: str) -> int:
+    """文本在终端里占的列数：中文等全角字符占 2 列，其余占 1 列。"""
+    return sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in text)
+
+
+def pad(text: str, width: int) -> str:
+    """按"显示宽度"补齐空格。
+
+    不能用 f-string 的 :<N：一是它按字符数而不是显示宽度算
+    （中文会错位），二是它必须作用在着色前的纯文本上——先着色再
+    补齐会把转义码也数进长度，导致补齐完全失效（列会粘在一起）。
+    正确顺序永远是：先 pad，再 paint。
+    """
+    return text + " " * max(0, width - display_width(text))
 
 
 # ---- 语义化的输出助手：调用方说"这是什么消息"，样式集中在这里管 ----------
@@ -86,12 +103,14 @@ def rule(text: str = "") -> str:
     return paint("─" * 56, "dim")
 
 
-def status(status_value: str) -> str:
-    """任务状态 → 中文 + 颜色。"""
+def status(status_value: str, width: int | None = None) -> str:
+    """任务状态 → 中文 + 颜色；width 用于表格列对齐（先补齐再着色）。"""
     mapping = {
         "in_progress": ("进行中", "yellow"),
         "done": ("已完成", "green"),
         "blocked": ("已阻塞", "red"),
     }
     label, color = mapping.get(status_value, (status_value, "cyan"))
-    return paint(f"{label:<4}", color)
+    if width is not None:
+        label = pad(label, width)
+    return paint(label, color)

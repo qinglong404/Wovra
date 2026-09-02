@@ -211,16 +211,26 @@ def cmd_list(args: argparse.Namespace) -> None:
         print(ui.info('还没有任何任务。用 `wovra new "目标"` 创建第一个。'))
         return
 
-    print(
-        f"\n{ui.paint('编号', 'bold'):<8}{ui.paint('任务 id', 'bold'):<28}"
-        f"{ui.paint('状态', 'bold'):<10}{ui.paint('更新时间', 'bold'):<18}目标\n"
+    print()
+    # 列对齐必须"先 pad 再 paint"（见 ui.pad 的说明），否则着色码
+    # 会破坏 f-string 的补齐计算，列会粘在一起
+    header = (
+        ui.paint(ui.pad("编号", 6), "bold")
+        + ui.paint(ui.pad("任务 id", 26), "bold")
+        + ui.paint(ui.pad("状态", 10), "bold")
+        + ui.paint(ui.pad("更新时间", 18), "bold")
+        + ui.paint("目标", "bold")
     )
+    print(header)
     for number, t in enumerate(tasks, start=1):
         goal = t["goal"] if len(t["goal"]) <= 36 else t["goal"][:36] + "…"
         updated = t["updated_at"].replace("T", " ")[:16]
         print(
-            f"{ui.paint(str(number), 'cyan'):<8}{t['id']:<28}"
-            f"{ui.status(t['status']):<10}{updated:<18}{goal}"
+            ui.paint(ui.pad(str(number), 6), "cyan")
+            + ui.pad(t["id"], 26)
+            + ui.status(t["status"], width=10)
+            + ui.pad(updated, 18)
+            + goal
         )
     print(ui.info("\n编号按最近更新排序，run/chat/show 可直接用编号作为 <id>。"))
 
