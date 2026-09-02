@@ -19,6 +19,7 @@ from rich.console import Console
 from rich.markdown import Markdown
 
 from . import tokens as tokens_module
+from .tools import FAILURE_MARKERS
 
 _ENABLED = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -112,14 +113,13 @@ def tool_call(name: str, arguments: str) -> str:
     return paint(f"  [调用工具] {name}({arguments})", "yellow")
 
 
-# 工具结果里出现这些字样说明执行失败了（与 Task._result_tail 的判定一致）
-_FAILURE_TAGS = ("工具执行出错", "未知工具", "合法 JSON")
+# 工具结果里的失败判定统一用 tools.FAILURE_MARKERS（与任务报告同源）
 
 
 def tool_result(name: str, result: str, limit: int = 80) -> str:
     """工具返回事件：成功绿色、失败红色，一眼区分。"""
     preview = result if len(result) <= limit else result[:limit] + "…"
-    style = "red" if any(tag in result for tag in _FAILURE_TAGS) else "green"
+    style = "red" if any(tag in result for tag in FAILURE_MARKERS) else "green"
     return paint(f"  [工具结果] {name} -> {preview}", style)
 
 

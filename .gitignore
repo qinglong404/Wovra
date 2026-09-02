@@ -37,6 +37,9 @@ htmlcov/
 # Wovra 运行时数据（任务状态是本地的工作产物，不进版本库）
 tasks/
 
+# Agent 产出的工作产物
+output/
+
 # Logs
 *.log
 logs/

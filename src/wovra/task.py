@@ -29,6 +29,8 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from .tools import FAILURE_MARKERS
+
 # 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
 TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
 
@@ -39,6 +41,8 @@ _KIND_LABELS = {
     "tool_result": "工具结果",
     "final_answer": "最终回答",
     "task_context_loaded": "加载上下文",
+    "file_change": "文件变更",
+    "usage": "用量",
 }
 
 
@@ -254,7 +258,7 @@ class Task:
     @staticmethod
     def _result_tail(result: str) -> str:
         """把工具结果文本转成给人看的一句话（错误原文/字数/短结果）。"""
-        if any(tag in result for tag in ("工具执行出错", "未知工具", "合法 JSON")):
+        if any(tag in result for tag in FAILURE_MARKERS):
             return "，失败：" + _one_line(result, 80)
         if len(result) > 60:
             return f"，返回 {len(result)} 字（详见 task.json）"

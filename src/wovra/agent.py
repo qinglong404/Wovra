@@ -15,12 +15,20 @@
 import inspect
 import json
 import time
-from pathlib import Path
 from typing import Callable, Optional
 
 from . import tokens
 from .llm import LLM, reasoning_of
 from .task import Task
+from .tools import (
+    AUDITED_TOOLS,
+    edit_file,
+    get_current_time,
+    list_files,
+    read_file,
+    run_command,
+    write_file,
+)
 
 # Python 类型注解 → JSON Schema 类型 的对应表。
 # 工具的参数 schema 就是由它自动生成的，因此工具函数的参数
@@ -396,42 +404,13 @@ class Agent:
         if self.task is not None:
             self.task.record("tool_call", f"{name}({arguments})")
             self.task.record("tool_result", f"{name} -> {result[:500]}")
+            # 变更类工具（写文件/改文件/执行命令）额外记一条完整审计：
+            # arguments 含全部新内容，且不截断——"agent 到底改了什么"
+            # 必须能从 task.json 完整还原，这是"审计换权限"的兑现
+            if name in AUDITED_TOOLS:
+                self.task.record("file_change", f"{name} {arguments}")
             self.task.save()
 
         self.messages.append(
             {"role": "tool", "tool_call_id": call_id, "content": result}
         )
-
-
-# ---- 内置的安全示例工具 -------------------------------------------------
-# 放在 agent.py 里作为最简单的参考实现；路径类工具都把访问范围
-# 限制在项目根目录内，避免模型读到项目之外的东西。
-
-
-def _safe_path(relative: str) -> Path:
-    """把相对路径解析到项目根目录内，越界直接报错。"""
-    root = Path(__file__).resolve().parent.parent.parent
-    path = (root / relative).resolve()
-    if not path.is_relative_to(root):
-        raise ValueError(f"路径越界，只允许访问项目目录内的文件: {relative}")
-    return path
-
-
-def list_files(directory: str = ".") -> list[str]:
-    """列出项目内某个目录下的文件和子目录（不含递归）。"""
-    path = _safe_path(directory)
-    return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
-
-
-def read_file(path: str) -> str:
-    """读取项目内一个文本文件的内容（最多前 4000 字符）。"""
-    target = _safe_path(path)
-    text = target.read_text(encoding="utf-8")
-    return text[:4000] + ("\n...(已截断)" if len(text) > 4000 else "")
-
-
-def get_current_time() -> str:
-    """获取当前本地时间（ISO 格式）。"""
-    from datetime import datetime
-
-    return datetime.now().isoformat(timespec="seconds")

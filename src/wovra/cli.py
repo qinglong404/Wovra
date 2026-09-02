@@ -26,18 +26,30 @@ import json
 
 from . import task as task_module
 from . import ui
-from .agent import Agent, get_current_time, list_files, read_file
+from .agent import Agent, edit_file, get_current_time, list_files, read_file, run_command, write_file
 from .task import Task
 
 
 def _build_agent(task: Task) -> Agent:
-    """为任务构造一个带默认工具集的 Agent。"""
+    """为任务构造一个带默认工具集的 Agent。
+
+    工具分两类：只读（时间/列目录/读文件）与变更类
+    （写文件/改文件/执行命令，均有审计记录与破坏性防护，见 tools.py）。
+    """
     return Agent(
         system_prompt=(
             "你是 Wovra，一个长时运行任务的管理执行助手。"
-            "需要时使用提供的工具获取真实信息，回答保持简洁。"
+            "需要时使用提供的工具获取真实信息；可以创建、修改项目内的文件，"
+            "运行安全的 shell 命令来完成任务。回答保持简洁。"
         ),
-        tools=[get_current_time, list_files, read_file],
+        tools=[
+            get_current_time,
+            list_files,
+            read_file,
+            write_file,
+            edit_file,
+            run_command,
+        ],
         task=task,
         on_tool_call=lambda name, args: print(ui.tool_call(name, args)),
         on_tool_result=lambda name, result: print(ui.tool_result(name, result)),
