@@ -179,13 +179,13 @@ def test_streaming_forwards_thinking_and_answer_deltas():
     assert answer == "最终回答"
     assert thinking_seen == ["先想一下"]
     assert answer_seen == ["最终", "回答"]
-    # 用量跨分块聚合，思考 token 单独记录
-    assert agent.last_stats == {
-        "seconds": agent.last_stats["seconds"],  # 耗时是真实时间，只验证字段存在
-        "prompt_tokens": 10,
-        "completion_tokens": 20,
-        "reasoning_tokens": 8,
-        "total_tokens": 30,
+    # 用量跨分块聚合，思考 token 单独记录；提示词分类各字段齐备
+    assert agent.last_stats["prompt_tokens"] == 10
+    assert agent.last_stats["completion_tokens"] == 20
+    assert agent.last_stats["reasoning_tokens"] == 8
+    assert agent.last_stats["total_tokens"] == 30
+    assert set(agent.last_stats["prompt_breakdown"]) == {
+        "system", "context", "tools", "user", "assistant", "tool",
     }
 
 

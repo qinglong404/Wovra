@@ -11,6 +11,7 @@ dependencies = [
     "openai>=3.6.0",
     "python-dotenv>=1.2.3",
     "rich>=15.0.0",
+    "tiktoken>=0.14.0",
 ]
 
 [project.scripts]

@@ -18,6 +18,8 @@ import unicodedata
 from rich.console import Console
 from rich.markdown import Markdown
 
+from . import tokens as tokens_module
+
 _ENABLED = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
 # rich 只在真正要渲染 Markdown 时才创建；样式开关跟随 _ENABLED
@@ -127,11 +129,11 @@ def thinking_delta(text: str) -> str:
 
 
 def usage_line(stats: dict) -> str:
-    """一次 run 的成本核算行：耗时 + tokens 用量与占比。
+    """一次 run 的成本核算行：耗时 + tokens 用量、占比与输入构成。
 
-    占比按 prompt / completion 各占总 tokens 的百分比展示；
-    推理模型单列思考 token（它是 completion 的一部分，已含在内）。
-    服务端没回 usage 时如实说明，而不是显示 0 误导人。
+    输入构成（系统提示词/工具定义/注入内容/用户消息/助手消息/工具结果）
+    来自本地估算的相对占比，按服务端返回的真实 prompt_tokens 等比
+    校准后展示——所以各分项之和恰好等于输入总量。
     """
     parts = [f"耗时 {stats['seconds']:.1f}s"]
     total = stats.get("total_tokens", 0)
@@ -146,7 +148,21 @@ def usage_line(stats: dict) -> str:
         parts.append(f"合计 {total:,} tok")
     else:
         parts.append("tokens：服务端未返回 usage")
-    return paint("  " + " ┃ ".join(parts), "dim")
+
+    lines = [paint("  " + " ┃ ".join(parts), "dim")]
+
+    breakdown = stats.get("prompt_breakdown") or {}
+    estimated_total = sum(breakdown.values())
+    if total and estimated_total:
+        # 估算值只代表占比，按真实总量缩放后展示
+        scale = prompt / estimated_total
+        detail = " ┃ ".join(
+            f"{tokens_module.LABELS[category]} {round(value * scale):,}"
+            for category, value in breakdown.items()
+            if value
+        )
+        lines.append(paint(f"  输入构成：{detail}", "dim"))
+    return "\n".join(lines)
 
 
 def rule(text: str = "") -> str:

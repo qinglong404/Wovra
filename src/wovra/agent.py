@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Callable, Optional
 
+from . import tokens
 from .llm import LLM, reasoning_of
 from .task import Task
 
@@ -109,6 +110,11 @@ class Agent:
         for fn in tools:
             self.register(fn)
 
+        # 为 token 分类核算保存两个边界：注入前后的 system 消息
+        # 由这两部分拼成（见下），只有这里知道各自的长度
+        self.system_prompt = system_prompt
+        self.task_context = task.context() if task is not None else ""
+
         # system 消息 = 调用方给的提示词 + 任务上下文。
         # 任务上下文来自磁盘上的持久状态，因此"新进程 + 新 Agent"也能
         # 无缝接续之前的工作——这就是停止/恢复能力的实现点。
@@ -150,13 +156,16 @@ class Agent:
             self.task.save()  # 先落盘再干活：进程崩溃也不丢这条输入
 
         # 本轮 run 的累计开销（可能经历多次 LLM 调用，跨轮累加），
-        # 供调用方做成本核算；也随任务事件落盘
+        # 供调用方做成本核算；也随任务事件落盘。
+        # prompt_breakdown 是提示词的分类估算（见 tokens.py），
+        # 展示时会按真实总量校准，这里累加的是原始估算值
         self.last_stats = {
             "seconds": 0.0,
             "prompt_tokens": 0,
             "completion_tokens": 0,
             "reasoning_tokens": 0,
             "total_tokens": 0,
+            "prompt_breakdown": dict.fromkeys(tokens.CATEGORIES, 0),
         }
 
         for _ in range(self.max_turns):
@@ -168,6 +177,9 @@ class Agent:
             usage = None
 
             start = time.monotonic()
+            # 快照此刻的消息列表：用量返回后按它做分类估算，
+            # 避免["回答轮"追加的新消息]混进本次调用的提示词里
+            prompt_snapshot = list(self.messages)
             stream = self.llm.chat(self.messages, tools=self._schemas or None, stream=True)
             for chunk in stream:
                 # usage 只在最后一个分块上，且该分块 choices 为空
@@ -213,6 +225,12 @@ class Agent:
                 if reasoning_tokens:
                     # 推理模型的思考 token 也计费，单列出来成本核算才准确
                     self.last_stats["reasoning_tokens"] += reasoning_tokens
+                # 分类占比按"本次调用发出前的消息快照"估算后累加
+                estimated = tokens.breakdown(
+                    self.system_prompt, self.task_context, self._schemas, prompt_snapshot
+                )
+                for category, value in estimated.items():
+                    self.last_stats["prompt_breakdown"][category] += value
 
             if tool_calls_acc:
                 # 请求了工具：先把这条 assistant 消息（含 tool_calls）放回历史，
@@ -244,6 +262,9 @@ class Agent:
             self.messages.append({"role": "assistant", "content": answer})
             if self.task is not None:
                 self.task.record("final_answer", answer)
+                # 先刷新摘要再记录 usage：摘要生成的调用也是真实开销，
+                # 应当包含在本次 run 的成本核算里
+                self._refresh_summary(answer)
                 self.task.record(
                     "usage",
                     f"{self.last_stats['seconds']:.1f}s, "
@@ -251,9 +272,6 @@ class Agent:
                     f"completion={self.last_stats['completion_tokens']}, "
                     f"total={self.last_stats['total_tokens']}",
                 )
-                # 每轮结束刷新一次状态摘要并落盘，
-                # report.md 因此始终反映"此刻"的进展
-                self._refresh_summary(answer)
                 self.task.save()
             return answer
 
@@ -279,14 +297,30 @@ class Agent:
             f"{self.task.context()}\n\n最近一次回答：{latest_answer[:2000]}"
         )
         try:
-            response = self.llm.chat(
-                [{"role": "user", "content": prompt}],
-                # 摘要生成不需要工具；显式传 None 防止模型把工具 schema
-                # 带进这次与工作无关的调用
-                tools=None,
-            )
-            summary = response.choices[0].message.content or ""
-        except Exception as error:  # noqa: BLE001——摘要失败不应影响主流程
+            summary_parts: list[str] = []
+            # 摘要调用同样走流式（为了拿 usage 计入成本核算）；
+            # 不需要工具，显式传 None 防止把工具 schema 带进这次
+            # 与工作无关的调用
+            start = time.monotonic()
+            summary_messages = [{"role": "user", "content": prompt}]
+            usage = None
+            for chunk in self.llm.chat(summary_messages, tools=None, stream=True):
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                if getattr(chunk, "choices", None):
+                    piece = chunk.choices[0].delta.content
+                    if piece:
+                        summary_parts.append(piece)
+            self.last_stats["seconds"] += time.monotonic() - start
+            if usage is not None:
+                self.last_stats["prompt_tokens"] += usage.prompt_tokens or 0
+                self.last_stats["completion_tokens"] += usage.completion_tokens or 0
+                self.last_stats["total_tokens"] += usage.total_tokens or 0
+                estimated = tokens.breakdown("", "", [], summary_messages)
+                for category, value in estimated.items():
+                    self.last_stats["prompt_breakdown"][category] += value
+            summary = "".join(summary_parts)
+        except Exception:  # noqa: BLE001——摘要失败不应影响主流程
             summary = ""  # 保留旧摘要，历史里留下失败痕迹即可
         if summary:
             self.task.set_summary(summary)
