@@ -121,6 +121,34 @@ def tool_result(name: str, result: str, limit: int = 80) -> str:
     return paint(f"  [工具结果] {name} -> {preview}", style)
 
 
+def thinking_delta(text: str) -> str:
+    """流式思考内容：暗紫（magenta + dim），与正式回答明显区分。"""
+    return paint(text, "magenta", "dim")
+
+
+def usage_line(stats: dict) -> str:
+    """一次 run 的成本核算行：耗时 + tokens 用量与占比。
+
+    占比按 prompt / completion 各占总 tokens 的百分比展示；
+    推理模型单列思考 token（它是 completion 的一部分，已含在内）。
+    服务端没回 usage 时如实说明，而不是显示 0 误导人。
+    """
+    parts = [f"耗时 {stats['seconds']:.1f}s"]
+    total = stats.get("total_tokens", 0)
+    if total:
+        prompt = stats.get("prompt_tokens", 0)
+        completion = stats.get("completion_tokens", 0)
+        parts.append(f"输入 {prompt:,} tok（{prompt / total:.0%}）")
+        parts.append(f"输出 {completion:,} tok（{completion / total:.0%}）")
+        reasoning = stats.get("reasoning_tokens", 0)
+        if reasoning:
+            parts.append(f"其中思考 {reasoning:,} tok")
+        parts.append(f"合计 {total:,} tok")
+    else:
+        parts.append("tokens：服务端未返回 usage")
+    return paint("  " + " ┃ ".join(parts), "dim")
+
+
 def rule(text: str = "") -> str:
     """分隔线，可带标题。"""
     if text:

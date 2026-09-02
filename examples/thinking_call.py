@@ -17,6 +17,7 @@ import os
 
 from dotenv import load_dotenv
 from openai import OpenAI
+from wovra.llm import reasoning_of as get_reasoning
 
 # 从项目根目录（examples/ 的上一级）加载 .env；已存在的环境变量不会被覆盖
 load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), "..", ".env"))
@@ -30,13 +31,6 @@ def make_client() -> OpenAI:
     if not API_KEY:
         raise SystemExit("请先在项目根目录的 .env 中填写 Wovra_API_KEY")
     return OpenAI(api_key=API_KEY, base_url=BASE_URL)
-
-
-def get_reasoning(message) -> str:
-    """兼容地取出思考内容：SDK 没有这个标准字段，它以扩展字段形式存在。"""
-    return getattr(message, "reasoning_content", None) or (
-        (message.model_extra or {}).get("reasoning_content") or ""
-    )
 
 
 def chat_with_thinking(client: OpenAI, user_message: str) -> None:

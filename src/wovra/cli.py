@@ -126,6 +126,35 @@ def _split_call(detail: str) -> tuple[str, str]:
 # ---- 子命令实现 -----------------------------------------------------------
 
 
+def _run_turn(agent: Agent, instruction: str) -> str:
+    """执行一轮流式对话并负责全部展示。
+
+    思考内容暗紫流式输出、正式回答默认色打字机输出，二者用横幅
+    分隔；结束后打印成本核算行。状态字典在闭包间共享，用来保证
+    各横幅只打印一次。
+    """
+    state = {"thinking": False, "answer": False}
+
+    def on_thinking(text: str) -> None:
+        if not state["thinking"]:
+            print(ui.rule("思考过程"))
+            state["thinking"] = True
+        print(ui.thinking_delta(text), end="", flush=True)
+
+    def on_answer_delta(text: str) -> None:
+        if state["thinking"] and not state["answer"]:
+            print("\n" + ui.rule("回答"))
+            state["answer"] = True
+        print(text, end="", flush=True)
+
+    answer = agent.run(
+        instruction, on_thinking=on_thinking, on_answer_delta=on_answer_delta
+    )
+    print()
+    print(ui.usage_line(agent.last_stats))
+    return answer
+
+
 def cmd_new(args: argparse.Namespace) -> None:
     """wovra new：新建一个会话（任务）。"""
     task = Task.create(
@@ -151,9 +180,7 @@ def cmd_run(args: argparse.Namespace) -> None:
         "请根据任务目标、之前的进展摘要和最近事件，自主决定下一步并继续推进。"
         "如果任务已无法推进，说明原因。"
     )
-    answer = agent.run(instruction)
-    print()
-    ui.assistant_markdown(answer)
+    _run_turn(agent, instruction)
 
 
 def _chat_help() -> None:
@@ -201,8 +228,9 @@ def cmd_chat(args: argparse.Namespace) -> None:
             _chat_help()
             continue
 
-        answer = agent.run(user_input)
-        ui.assistant_markdown(answer)
+        answer = _run_turn(agent, user_input)
+        if answer:
+            print()
 
 
 def cmd_list(args: argparse.Namespace) -> None:

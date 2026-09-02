@@ -14,10 +14,11 @@
 
 import inspect
 import json
+import time
 from pathlib import Path
 from typing import Callable, Optional
 
-from .llm import LLM
+from .llm import LLM, reasoning_of
 from .task import Task
 
 # Python 类型注解 → JSON Schema 类型 的对应表。
@@ -131,51 +132,130 @@ class Agent:
         self.tools[fn.__name__] = fn
         self._schemas.append(_schema_of(fn))
 
-    def run(self, user_input: str) -> str:
-        """处理一条用户输入，返回模型的最终文本回答。"""
+    def run(
+        self,
+        user_input: str,
+        on_thinking: Optional[Callable[[str], None]] = None,
+        on_answer_delta: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """处理一条用户输入，返回模型的最终文本回答。
+
+        统一走流式：无论是否传回调，循环机制完全相同——
+        on_thinking / on_answer_delta 只是把增量转发给调用方做展示
+        （CLI 用它实现打字机效果），不传就是静默累积。
+        """
         self.messages.append({"role": "user", "content": user_input})
         if self.task is not None:
             self.task.record("user_input", user_input)
             self.task.save()  # 先落盘再干活：进程崩溃也不丢这条输入
 
+        # 本轮 run 的累计开销（可能经历多次 LLM 调用，跨轮累加），
+        # 供调用方做成本核算；也随任务事件落盘
+        self.last_stats = {
+            "seconds": 0.0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "reasoning_tokens": 0,
+            "total_tokens": 0,
+        }
+
         for _ in range(self.max_turns):
-            response = self.llm.chat(self.messages, tools=self._schemas or None)
-            message = response.choices[0].message
-            # 调试观察用：print(f"\n[上下文] {self.messages or ''}")
+            reasoning_started = False  # 供回调做"只打印一次横幅"的判断
+            content_parts: list[str] = []
+            # 流式协议下，工具调用是分片到达的：同一调用的参数 JSON
+            # 会被拆成多个 delta 追加式下发，必须按 index 聚合
+            tool_calls_acc: dict[int, dict] = {}
+            usage = None
+
+            start = time.monotonic()
+            stream = self.llm.chat(self.messages, tools=self._schemas or None, stream=True)
+            for chunk in stream:
+                # usage 只在最后一个分块上，且该分块 choices 为空
+                if getattr(chunk, "usage", None):
+                    usage = chunk.usage
+                if not getattr(chunk, "choices", None):
+                    continue
+                delta = chunk.choices[0].delta
+                if delta is None:
+                    continue
+
+                thinking = reasoning_of(delta)
+                if thinking:
+                    if not reasoning_started:
+                        reasoning_started = True
+                    if on_thinking:
+                        on_thinking(thinking)
+
+                if delta.content:
+                    content_parts.append(delta.content)
+                    if on_answer_delta:
+                        on_answer_delta(delta.content)
+
+                for fragment in delta.tool_calls or []:
+                    index = fragment.index or 0
+                    acc = tool_calls_acc.setdefault(
+                        index, {"id": "", "name": "", "arguments": ""}
+                    )
+                    if fragment.id:
+                        acc["id"] = fragment.id
+                    if fragment.function and fragment.function.name:
+                        acc["name"] = fragment.function.name
+                    if fragment.function and fragment.function.arguments:
+                        acc["arguments"] += fragment.function.arguments
+
+            self.last_stats["seconds"] += time.monotonic() - start
+            if usage is not None:
+                self.last_stats["prompt_tokens"] += usage.prompt_tokens or 0
+                self.last_stats["completion_tokens"] += usage.completion_tokens or 0
+                self.last_stats["total_tokens"] += usage.total_tokens or 0
+                details = getattr(usage, "completion_tokens_details", None)
+                reasoning_tokens = getattr(details, "reasoning_tokens", None)
+                if reasoning_tokens:
+                    # 推理模型的思考 token 也计费，单列出来成本核算才准确
+                    self.last_stats["reasoning_tokens"] += reasoning_tokens
+
+            if tool_calls_acc:
+                # 请求了工具：先把这条 assistant 消息（含 tool_calls）放回历史，
+                # 协议要求紧随其后的必须是每个工具调用对应的 tool 消息。
+                ordered = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
+                self.messages.append(
+                    {
+                        "role": "assistant",
+                        "content": "".join(content_parts),
+                        "tool_calls": [
+                            {
+                                "id": tc["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": tc["name"],
+                                    "arguments": tc["arguments"] or "{}",
+                                },
+                            }
+                            for tc in ordered
+                        ],
+                    }
+                )
+                for tc in ordered:
+                    self._execute(call_id=tc["id"], name=tc["name"], arguments=tc["arguments"])
+                continue
 
             # 模型不再请求工具，说明它认为可以直接回答了，循环结束。
-            if not message.tool_calls:
-                answer = message.content or ""
-                self.messages.append({"role": "assistant", "content": answer})
-                if self.task is not None:
-                    self.task.record("final_answer", answer)
-                    # 每轮结束刷新一次状态摘要并落盘，
-                    # report.md 因此始终反映"此刻"的进展
-                    self._refresh_summary(answer)
-                    self.task.save()
-                return answer
-
-            # 请求了工具：先把这条 assistant 消息（含 tool_calls）放回历史，
-            # 协议要求紧随其后的必须是每个工具调用对应的 tool 消息。
-            self.messages.append(
-                {
-                    "role": "assistant",
-                    "content": message.content or "",
-                    "tool_calls": [
-                        {
-                            "id": tc.id,
-                            "type": "function",
-                            "function": {
-                                "name": tc.function.name,
-                                "arguments": tc.function.arguments or "{}",
-                            },
-                        }
-                        for tc in message.tool_calls
-                    ],
-                }
-            )
-            for tool_call in message.tool_calls:
-                self._execute(tool_call)
+            answer = "".join(content_parts)
+            self.messages.append({"role": "assistant", "content": answer})
+            if self.task is not None:
+                self.task.record("final_answer", answer)
+                self.task.record(
+                    "usage",
+                    f"{self.last_stats['seconds']:.1f}s, "
+                    f"prompt={self.last_stats['prompt_tokens']}, "
+                    f"completion={self.last_stats['completion_tokens']}, "
+                    f"total={self.last_stats['total_tokens']}",
+                )
+                # 每轮结束刷新一次状态摘要并落盘，
+                # report.md 因此始终反映"此刻"的进展
+                self._refresh_summary(answer)
+                self.task.save()
+            return answer
 
         # 防御性上限：模型可能陷入"永远在调工具"的死循环，
         # max_turns 保证循环一定终止。报告/干预机制成熟后由人接管。
@@ -211,20 +291,21 @@ class Agent:
         if summary:
             self.task.set_summary(summary)
 
-    def _execute(self, tool_call) -> None:
+    def _execute(self, call_id: str, name: str, arguments: str) -> None:
         """执行单个工具调用，并把结果作为 tool 消息追加到历史。
+
+        参数是拆开的协议字段而不是整个 tool_call 对象：调用方
+        （流式聚合或测试）手里就是这三个值，没必要再造一层包装。
 
         任何失败（参数不是 JSON、工具名不存在、函数抛异常）都
         不抛出，而是把错误文本作为工具结果回传给模型——让模型
         自己看到错误并尝试纠正，循环才不会因为一次失败而中断。
         """
-        name = tool_call.function.name
-
         if self.on_tool_call:
-            self.on_tool_call(name, tool_call.function.arguments)
+            self.on_tool_call(name, arguments)
 
         try:
-            arguments = json.loads(tool_call.function.arguments or "{}")
+            parsed = json.loads(arguments or "{}")
         except json.JSONDecodeError as error:
             result = f"工具参数不是合法 JSON: {error}"
         else:
@@ -234,7 +315,7 @@ class Agent:
                 result = f"未知工具: {name}，可用工具: {list(self.tools)}"
             else:
                 try:
-                    result = fn(**arguments)
+                    result = fn(**parsed)
                 except Exception as error:  # noqa: BLE001——错误要回传给模型而不是中断循环
                     result = f"工具执行出错: {error!r}"
 
@@ -248,12 +329,12 @@ class Agent:
         # 每次工具调用与结果都进入任务历史——
         # 这就是"Execution history"的最小形态，crash 后据此追溯
         if self.task is not None:
-            self.task.record("tool_call", f"{name}({tool_call.function.arguments})")
+            self.task.record("tool_call", f"{name}({arguments})")
             self.task.record("tool_result", f"{name} -> {result[:500]}")
             self.task.save()
 
         self.messages.append(
-            {"role": "tool", "tool_call_id": tool_call.id, "content": result}
+            {"role": "tool", "tool_call_id": call_id, "content": result}
         )
 
 

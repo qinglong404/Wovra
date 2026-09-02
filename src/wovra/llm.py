@@ -19,6 +19,18 @@ _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
 
 
+def reasoning_of(part) -> str:
+    """兼容地取出思考内容（reasoning content）。
+
+    思考内容不是 OpenAI 协议的标准字段，各服务以扩展字段
+    `reasoning_content` 下发；SDK 没有为它生成属性时，会落进
+    pydantic 的 model_extra。message 和流式 delta 都适用。
+    """
+    return getattr(part, "reasoning_content", None) or (
+        (getattr(part, "model_extra", None) or {}).get("reasoning_content") or ""
+    )
+
+
 class LLM:
     """对 OpenAI 协议客户端的薄封装。
 
@@ -47,16 +59,23 @@ class LLM:
         # base_url 允许为 None：此时 SDK 使用 OpenAI 官方地址。
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
-    def chat(self, messages: list[dict], tools: Optional[list[dict]] = None, **kwargs: Any):
-        """发送一次对话补全请求，返回原始 response 对象。
+    def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
+             stream: bool = False, **kwargs: Any):
+        """发送一次对话补全请求；stream=True 时返回分块迭代器。
 
-        返回原始对象而不是只返回文本：工具调用场景需要访问
-        response 里的 tool_calls、finish_reason 等细节，封装掉反而碍事。
+        返回原始对象/分块而不是只返回文本：工具调用场景需要访问
+        tool_calls、usage 等细节，封装掉反而碍事。
         tools=None 时 SDK 会自动省略该参数，不影响普通对话。
         """
+        if stream:
+            # 流式默认要求服务端在最后一个分块附带 usage 统计
+            # （OpenAI 协议扩展 stream_options，主流兼容服务都支持）。
+            # 没有它，流式调用就拿不到 tokens 数，成本核算无从谈起。
+            kwargs.setdefault("stream_options", {"include_usage": True})
         return self._client.chat.completions.create(
             model=self.model,
             messages=messages,
             tools=tools,
+            stream=stream or None,
             **kwargs,
         )
