@@ -313,7 +313,7 @@ The initial implementation focuses on validating the core concepts rather than b
 
 Current priorities include:
 
-* [ ] Minimal agent runtime
+* [x] Minimal agent runtime
 * [ ] Task representation
 * [ ] Persistent task state
 * [ ] Context management
