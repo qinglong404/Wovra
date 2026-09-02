@@ -12,6 +12,28 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 
+
+def _normalize_proxy_schemes() -> None:
+    """把 httpx 不认识的 `socks://` 代理协议名改写为 `socks5://`。
+
+    常见代理工具（clash 等）导出的环境变量用 `socks://` 这个
+    非 URL 标准的协议名，httpx 构造客户端时会直接抛
+    "Unknown scheme for proxy URL"，导致 wovra 崩溃。
+    在模块导入时归一化，保证发生在任何 OpenAI 客户端构造之前；
+    实际的 socks 转发能力由 socksio 依赖提供。
+    """
+    for name in (
+        "ALL_PROXY", "all_proxy",
+        "HTTP_PROXY", "http_proxy",
+        "HTTPS_PROXY", "https_proxy",
+    ):
+        value = os.environ.get(name, "")
+        if value.startswith("socks://"):
+            os.environ[name] = "socks5://" + value[len("socks://"):]
+
+
+_normalize_proxy_schemes()
+
 # .env 约定放在项目根目录（本文件位于 src/wovra/，向上三级即根目录）。
 # 包被安装到别处时该路径不存在，load_dotenv 会静默跳过，不影响运行；
 # 真正的部署环境应当用真实的环境变量注入配置。
