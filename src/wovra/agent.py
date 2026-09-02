@@ -18,15 +18,16 @@ import time
 from typing import Callable, Optional
 
 from . import tokens
+from . import tools as tools_module
 from .llm import LLM, reasoning_of
 from .task import Task
 from .tools import (
-    AUDITED_TOOLS,
     edit_file,
     get_current_time,
     list_files,
     read_file,
     run_command,
+    search_files,
     write_file,
 )
 
@@ -124,6 +125,12 @@ class Agent:
         self.task_context = task.context() if task is not None else ""
         # 对话轮次：本 Agent 实例经历过的 run() 次数（跨步累计）
         self.turn_count = 0
+        # 注册审计挂钩：变更类工具（写/改/执行命令）通过它把
+        # 参数之外的事实（如被覆盖文件的旧内容）记入任务历史。
+        # 绑定的 task 每次构造都会覆盖旧挂钩，避免写进上一个任务
+        tools_module.set_audit_recorder(
+            lambda detail: task.record("file_change", detail) if task else None
+        )
 
         # system 消息 = 调用方给的提示词 + 任务上下文。
         # 任务上下文来自磁盘上的持久状态，因此"新进程 + 新 Agent"也能
@@ -414,15 +421,12 @@ class Agent:
             self.on_tool_result(name, result)
 
         # 每次工具调用与结果都进入任务历史——
-        # 这就是"Execution history"的最小形态，crash 后据此追溯
+        # 这就是"Execution history"的最小形态，crash 后据此追溯。
+        # 变更类工具的完整审计（旧内容留底/替换片段/命令原文）
+        # 由工具自身通过审计挂钩写入
         if self.task is not None:
             self.task.record("tool_call", f"{name}({arguments})")
             self.task.record("tool_result", f"{name} -> {result[:500]}")
-            # 变更类工具（写文件/改文件/执行命令）额外记一条完整审计：
-            # arguments 含全部新内容，且不截断——"agent 到底改了什么"
-            # 必须能从 task.json 完整还原，这是"审计换权限"的兑现
-            if name in AUDITED_TOOLS:
-                self.task.record("file_change", f"{name} {arguments}")
             self.task.save()
 
         self.messages.append(
