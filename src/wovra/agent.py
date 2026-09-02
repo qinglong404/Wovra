@@ -141,7 +141,7 @@ class Agent:
         for _ in range(self.max_turns):
             response = self.llm.chat(self.messages, tools=self._schemas or None)
             message = response.choices[0].message
-            print(f"\n[上下文] {self.messages or ''}")
+            # 调试观察用：print(f"\n[上下文] {self.messages or ''}")
 
             # 模型不再请求工具，说明它认为可以直接回答了，循环结束。
             if not message.tool_calls:
