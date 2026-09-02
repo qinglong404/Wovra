@@ -139,3 +139,15 @@ def test_bare_command_prints_help(monkeypatch, tmp_path, capsys):
 
     cli_main(["help"])
     assert "usage:" in capsys.readouterr().out
+
+
+def test_tool_result_green_on_success_red_on_failure(monkeypatch):
+    from wovra import ui
+
+    monkeypatch.setattr(ui, "_ENABLED", True)  # 测试捕获环境非 TTY，强制开启着色
+
+    success_line = ui.tool_result("read_file", "文件内容")
+    failure_line = ui.tool_result("read_file", "工具执行出错: ValueError()")
+    assert "\033[92m" in success_line  # 高亮绿 = 成功
+    assert "\033[91m" in failure_line  # 高亮红 = 失败
+    assert "\033[92m" not in failure_line and "\033[91m" not in success_line

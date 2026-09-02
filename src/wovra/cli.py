@@ -104,7 +104,7 @@ def _replay_history(task: Task, last_n: int = 12) -> None:
         if event["kind"] == "user_input":
             print(ui.user(event["detail"]))
         elif event["kind"] == "final_answer":
-            print(ui.assistant(event["detail"]))
+            ui.assistant_markdown(event["detail"])
         elif event["kind"] == "tool_call":
             name, call_args = _split_call(event["detail"])
             # 折叠换行：工具参数/结果可能多行，回放里必须保持单行
@@ -152,7 +152,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         "如果任务已无法推进，说明原因。"
     )
     answer = agent.run(instruction)
-    print(f"\n{ui.assistant(answer)}")
+    print()
+    ui.assistant_markdown(answer)
 
 
 def _chat_help() -> None:
@@ -201,7 +202,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
             continue
 
         answer = agent.run(user_input)
-        print(f"\n{ui.assistant(answer)}\n")
+        ui.assistant_markdown(answer)
 
 
 def cmd_list(args: argparse.Namespace) -> None:

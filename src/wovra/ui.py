@@ -1,30 +1,39 @@
-"""终端输出的着色与排版助手。
+"""终端输出的着色与排版。
 
-为什么不用 rich 等第三方库：项目调性是"低成本优先"，当前需要的
-只是几种颜色和缩进，30 行 ANSI 转义就够了；等排版需求真的复杂起来
-（表格、进度条、markdown 渲染）再考虑引入。
+双层方案：
+    * 简单的行级消息（工具活动、提示、列表）→ 本模块的 ANSI 转义，
+      依赖为零、行内粒度可控；
+    * AI 回答是多行 Markdown（标题/列表/代码块）→ 用 rich 的
+      Markdown 渲染，自己解析不现实。这是当初预留的升级点。
 
 降级策略：输出不是终端（重定向/管道/测试捕获）或设置了 NO_COLOR
-时，所有函数自动退化为纯文本——保证 `wovra show > out.md` 这类
-用法不会混入转义码。
+时，ANSI 助手退化为纯文本，rich 也会自动关闭样式——保证
+`wovra show > out.md` 这类用法不会混入转义码。
 """
 
 import os
 import sys
 import unicodedata
 
+from rich.console import Console
+from rich.markdown import Markdown
+
 _ENABLED = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
-# ANSI SGR 转义码：字体样式 1/2，前景色 30-37
+# rich 只在真正要渲染 Markdown 时才创建；样式开关跟随 _ENABLED
+_console = Console(no_color=not _ENABLED)
+
+# ANSI SGR 转义码：1/2 是字体样式；前景色用 90-97（高亮系列），
+# 比 30-37 的标准色亮，暗色终端里可读性更好
 _CODES = {
     "bold": 1,
     "dim": 2,
-    "red": 31,
-    "green": 32,
-    "yellow": 33,
-    "blue": 34,
-    "magenta": 35,
-    "cyan": 36,
+    "red": 91,
+    "green": 92,
+    "yellow": 93,
+    "blue": 94,
+    "magenta": 95,
+    "cyan": 96,
 }
 
 
@@ -85,15 +94,31 @@ def assistant(text: str) -> str:
     return paint("助手> ", "green", "bold") + text
 
 
+def assistant_markdown(text: str) -> None:
+    """AI 回答的正式输出：标签行 + Markdown 渲染。
+
+    rich 会按终端宽度折行、给标题/列表/代码块加结构和颜色；
+    非 TTY 环境下自动退化为无样式的纯文本排版。
+    """
+    _console.print(paint("助手>", "green", "bold"))
+    _console.print(Markdown(text))
+    _console.print()
+
+
 def tool_call(name: str, arguments: str) -> str:
     """工具调用事件：黄色，属于过程信息。"""
     return paint(f"  [调用工具] {name}({arguments})", "yellow")
 
 
+# 工具结果里出现这些字样说明执行失败了（与 Task._result_tail 的判定一致）
+_FAILURE_TAGS = ("工具执行出错", "未知工具", "合法 JSON")
+
+
 def tool_result(name: str, result: str, limit: int = 80) -> str:
-    """工具返回事件：暗色，只留预览。"""
+    """工具返回事件：成功绿色、失败红色，一眼区分。"""
     preview = result if len(result) <= limit else result[:limit] + "…"
-    return paint(f"  [工具结果] {name} -> {preview}", "dim")
+    style = "red" if any(tag in result for tag in _FAILURE_TAGS) else "green"
+    return paint(f"  [工具结果] {name} -> {preview}", style)
 
 
 def rule(text: str = "") -> str:
