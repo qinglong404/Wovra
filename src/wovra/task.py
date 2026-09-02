@@ -32,6 +32,25 @@ from pathlib import Path
 # 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
 TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
 
+# history 事件的 kind → 报告里显示的中文标签
+_KIND_LABELS = {
+    "user_input": "用户输入",
+    "tool_call": "调用工具",
+    "tool_result": "工具结果",
+    "final_answer": "最终回答",
+    "task_context_loaded": "加载上下文",
+}
+
+
+def _one_line(text: str, limit: int = 120) -> str:
+    """把任意多行文本压成一行摘要（换行折叠为空格、超长截断）。
+
+    报告里的每个事件必须恰好占一行——否则工具返回的文件内容、
+    多行回答会把 Markdown 列表结构冲垮，这正是报告"看不懂"的根源。
+    """
+    collapsed = " ".join(text.split())
+    return collapsed if len(collapsed) <= limit else collapsed[:limit] + "…"
+
 
 @dataclass
 class Task:
@@ -157,7 +176,12 @@ class Task:
         return "\n".join(lines)
 
     def _render_report(self) -> str:
-        """渲染人类可读的 report.md。history 只展示最近 20 条，全部历史在 json 里。"""
+        """渲染人类可读的 report.md。
+
+        原则：report.md 是给人"一眼看懂"的，history 里每个事件
+        压成一行摘要；完整内容（工具返回的原文、多行回答）在
+        task.json 里，需要追溯时再去查。
+        """
         lines = [
             f"# 任务报告：{self.id}",
             "",
@@ -175,6 +199,63 @@ class Task:
         lines.append("\n## 当前进展（AI 维护）\n")
         lines.append(self.summary or "_尚无进展摘要。_")
         if self.history:
-            lines.append("\n## 最近历史\n")
-            lines += [f"- `[{e['time']}]` **{e['kind']}**：{e['detail']}" for e in self.history[-20:]]
+            lines.append("\n## 时间线\n")
+            lines += self._render_timeline(self.history[-20:])
+            lines.append(
+                "\n> 完整历史（含工具返回原文）见同目录 task.json。"
+            )
         return "\n".join(lines) + "\n"
+
+    def _render_timeline(self, events: list[dict]) -> list[str]:
+        """把事件列表渲染成人类可读的时间线。
+
+        两个降噪规则：
+        1. 相邻的 tool_call + tool_result 合并成一行——正常人关心的是
+           "调了什么、成功没有"，而不是工具返回的内容原文；
+        2. 其余每个事件压成一行（_one_line），避免多行内容冲垮列表。
+        """
+        merged: list[str] = []
+        i = 0
+        while i < len(events):
+            event = events[i]
+            time = event["time"]
+            label = _KIND_LABELS.get(event["kind"], event["kind"])
+            detail = _one_line(event["detail"])
+
+            if (
+                event["kind"] == "tool_call"
+                and i + 1 < len(events)
+                and events[i + 1]["kind"] == "tool_result"
+            ):
+                result_event = events[i + 1]
+                # tool_result 的 detail 格式为 "工具名 -> 结果"
+                _, _, result = result_event["detail"].partition(" -> ")
+                merged.append(
+                    f"- `{time}` **{label}**：{detail}{self._result_tail(result)}"
+                )
+                i += 2  # 结果事件已并入本行，跳过
+                continue
+
+            if event["kind"] == "tool_result":
+                # 孤立的 tool_result：通常是因为"最近 N 条"窗口恰好切在
+                # 一对事件的中间，找不到配对的 tool_call。同样只报字数，
+                # 不贴内容原文。
+                name, _, result = event["detail"].partition(" -> ")
+                merged.append(
+                    f"- `{time}` **{label}**：{_one_line(name)}{self._result_tail(result)}"
+                )
+                i += 1
+                continue
+
+            merged.append(f"- `{time}` **{label}**：{detail}")
+            i += 1
+        return merged
+
+    @staticmethod
+    def _result_tail(result: str) -> str:
+        """把工具结果文本转成给人看的一句话（错误原文/字数/短结果）。"""
+        if any(tag in result for tag in ("工具执行出错", "未知工具", "合法 JSON")):
+            return "，失败：" + _one_line(result, 80)
+        if len(result) > 60:
+            return f"，返回 {len(result)} 字（详见 task.json）"
+        return "，结果：" + _one_line(result, 60)
