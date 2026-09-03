@@ -58,6 +58,26 @@ def _flush_stdin() -> None:
         pass
 
 
+def _read_input() -> str:
+    """读取一行用户输入。
+
+    交互终端用 prompt_toolkit：它按显示宽度（wcwidth）处理光标，
+    中文/emoji 的退格编辑不会错位；同时自带输入历史（上箭头翻历史）。
+    管道/重定向等非终端场景退化为普通 input()。
+    """
+    if not sys.stdin.isatty():
+        return input()
+    try:
+        from prompt_toolkit import prompt
+        from prompt_toolkit.formatted_text import HTML
+
+        return prompt(HTML("<ansibrightcyan><b>你&gt; </b></ansibrightcyan>"))
+    except KeyboardInterrupt:
+        raise
+    except Exception:  # noqa: BLE001——prompt_toolkit 不可用时退回 input()
+        return input(ui.user_prompt())
+
+
 def _build_agent(task: Task, mode: str = MODE_MANAGED) -> Agent:
     """为任务构造一个带默认工具集的 Agent（展示回调在 _run_turn 注入）。
 
@@ -312,7 +332,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
     while True:
         try:
             _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
-            user_input = input(ui.user_prompt()).strip()
+            user_input = _read_input().strip()
         except (EOFError, KeyboardInterrupt):
             # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
             print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
