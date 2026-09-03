@@ -465,7 +465,7 @@ class Agent:
         query = self.current_round["user_input"]["original"] if self.current_round else ""
         candidates = sorted(
             (
-                (self._relevance(query, self._round_text(r)), r)
+                (_relevance(query, self._round_text(r)), r)
                 for r in past
                 if id(r) not in recent_ids
             ),
@@ -476,7 +476,7 @@ class Agent:
         for score, r in candidates:
             if score < _RELEVANCE_MIN_SCORE:
                 break
-            cost = tokens.estimate(self._render_round_view(r))
+            cost = self._round_view_tokens(r)
             if used + cost > self.max_history_tokens:
                 continue
             selected_ids.add(id(r))
@@ -527,6 +527,17 @@ class Agent:
                 r.get("summary", ""),
             ])
         )
+
+    @staticmethod
+    def _round_view_tokens(r: dict) -> int:
+        """估算一个轮次浓缩视图的 token 数（预算裁剪用）。"""
+        body = [
+            r["user_input"]["original"],
+            r["user_input"].get("normalized", ""),
+            r.get("summary", ""),
+        ]
+        body += [e["truncated"] for e in r["events"]]
+        return tokens.estimate("\n".join(body))
 
     @staticmethod
     def _head_text(text: str, limit: int) -> str:

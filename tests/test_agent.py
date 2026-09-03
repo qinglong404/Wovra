@@ -458,6 +458,33 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     assert task.rounds[-1]["summary"] == "重试后的摘要"
 
 
+def test_relevance_selection_runs_with_many_rounds(monkeypatch):
+    """回归：轮数超过 max_recent_rounds 时相关性选择路径必须可用
+    （此前 _relevance/_render_round_view 误挂到 self 上，4+ 轮才炸）。"""
+    task = Task.create(goal="多轮回归")
+    task.rounds = [
+        _round(1, "处理 ICP 配准误差问题", "ICP 误差分析完成"),
+        _round(2, "修改界面按钮颜色", "按钮改好了"),
+        _round(3, "调整界面布局间距", "布局调整完毕"),
+        _round(4, "继续处理 ICP 配准", "ICP 参数已更新"),
+    ]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.current_round = {
+        "seq": 5, "user_input": {"original": "ICP 误差为什么还是这么大", "normalized": ""},
+        "events": [], "summary": "", "end_state": "",
+    }
+    agent.rounds.append(agent.current_round)
+    agent.messages = []
+    agent._record_event("user", {"role": "user", "content": "ICP 误差为什么还是这么大"})
+
+    msgs = agent._assemble_messages()
+    bodies = "\n".join(m.get("content", "") for m in msgs)
+
+    # R4 在"最近 3 轮"里恒选；R1 通过相关性入选（摘要进入视图）
+    assert "ICP 误差分析完成" in bodies
+    assert "ICP 参数已更新" in bodies
+
+
 def test_agent_records_events_into_task(monkeypatch, tmp_path):
     from wovra import task as task_module
     from wovra.task import Task
