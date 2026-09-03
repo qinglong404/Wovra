@@ -34,6 +34,83 @@ from .tools import FAILURE_MARKERS
 # 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
 TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
 
+# TaskState 每类列表的容量上限：超出淘汰最旧。
+# 被淘汰的内容仍在 History（Round/Event）里，可通过 expand_history 找回——
+# 状态是"当前是什么"，历史是"过去发生了什么"，淘汰只影响前者
+STATE_LIST_CAP = 20
+
+# state_patch 里允许的列表类字段与 TaskState 字段的对应关系
+_PATCH_LIST_FIELDS = ("constraints", "decisions", "completed", "known_issues", "open_questions")
+
+
+@dataclass
+class TaskState:
+    """任务当前状态的增量可变视图（History 之外的另一本账）。
+
+    History 回答"过去发生了什么"；TaskState 回答"现在是什么状态"。
+    它通过 Round Organization 产出的 patch 增量更新，从不整体重写；
+    设有大小限制，防止它自己变成新的无限上下文。
+    """
+
+    goal: str = ""
+    constraints: list[str] = field(default_factory=list)
+    decisions: list[str] = field(default_factory=list)
+    completed: list[str] = field(default_factory=list)
+    known_issues: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    current_status: str = ""
+    is_done: bool = False
+
+    def apply_patch(self, patch: dict) -> None:
+        """应用一轮 Organization 产出的状态补丁。
+
+        * 列表字段：追加去重，超出容量淘汰最旧
+        * current_status / goal：直接覆盖
+        * is_done：仅接受布尔
+        * 非法/缺失字段一律忽略，不让坏数据进状态
+        """
+        if patch.get("goal"):
+            self.goal = str(patch["goal"])
+        if isinstance(patch.get("is_done"), bool):
+            self.is_done = patch["is_done"]
+        if patch.get("current_status"):
+            self.current_status = str(patch["current_status"])
+        for name in _PATCH_LIST_FIELDS:
+            items = patch.get(name)
+            if not isinstance(items, list):
+                continue
+            merged = getattr(self, name)
+            for item in items:
+                text = str(item).strip()
+                if text and text not in merged:
+                    merged.append(text)
+            del merged[: max(0, len(merged) - STATE_LIST_CAP)]
+
+    def render(self, budget: int | None = None) -> str:
+        """渲染成给模型看的文本块（注入 system context）。"""
+        lines = ["[任务状态]"]
+        if self.goal:
+            lines.append(f"目标：{self.goal}")
+        if self.current_status:
+            lines.append(f"当前状态：{self.current_status}")
+        if self.is_done:
+            lines.append("任务已完成。")
+        for label, name in (
+            ("已完成", "completed"),
+            ("已决策", "decisions"),
+            ("已知问题", "known_issues"),
+            ("待解决问题", "open_questions"),
+            ("约束", "constraints"),
+        ):
+            items = getattr(self, name)
+            if items:
+                lines.append(f"{label}：" + "；".join(items))
+        text = "\n".join(lines)
+        if budget and len(text) > budget:
+            text = text[:budget] + "\n(任务状态过长已截断)"
+        return text
+
+
 # history 事件的 kind → 报告里显示的中文标签
 _KIND_LABELS = {
     "user_input": "用户输入",
@@ -77,8 +154,23 @@ class Task:
     # history 只追加：每条是 {"time", "kind", "detail"}，
     # 追加式历史让"发生过什么"永远可追溯，这是可恢复性的基础
     history: list[dict] = field(default_factory=list)
+    # V1 Context Runtime：Round/Event 结构化历史与任务状态（见 agent.py）
+    rounds: list[dict] = field(default_factory=list)
+    task_state: dict = field(default_factory=dict)
     created_at: str = ""
     updated_at: str = ""
+
+    def apply_state_patch(self, patch: dict) -> None:
+        """把 Organization 的 state_patch 合并进任务状态（持久化字段）。"""
+        state = TaskState(**(self.task_state or {}))
+        state.apply_patch(patch)
+        self.task_state = asdict(state)
+
+    def get_state(self) -> TaskState:
+        """以 TaskState 对象的形式读取当前任务状态。"""
+        state = TaskState()
+        state.__dict__.update(self.task_state or {})
+        return state
 
     # ---- 构造与加载 -----------------------------------------------------
 

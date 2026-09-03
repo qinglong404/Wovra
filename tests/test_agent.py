@@ -264,13 +264,22 @@ def test_run_always_uses_streaming():
 # ---- 任务绑定 ------------------------------------------------------------
 
 
-def test_state_refresh_updates_goal_and_status_from_conversation(monkeypatch, tmp_path):
-    """目标由 AI 每轮重估：一轮结束后 goal/status/summary 被更新。"""
+def test_organization_updates_state_and_round_summary(monkeypatch, tmp_path):
+    """Round 结束后 Organization 更新状态补丁与轮次摘要/意图。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    state_json = '{"goal": "搞清测试覆盖", "status": "done", "summary": "全部完成"}'
+    org_json = json.dumps({
+        "normalized_user_input": "用户想搞清楚项目的测试覆盖情况",
+        "round_summary": "阅读了全部测试文件，覆盖情况已梳理。",
+        "state_patch": {
+            "completed": ["梳理测试覆盖"],
+            "current_status": "测试覆盖已梳理完成",
+            "goal": "搞清测试覆盖",
+            "is_done": True,
+        },
+    }, ensure_ascii=False)
     responses = [
         [_chunk(_delta(content="干完了"))],
-        [_chunk(_delta(content=state_json))],
+        [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="初始的模糊想法")
     agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
@@ -278,42 +287,175 @@ def test_state_refresh_updates_goal_and_status_from_conversation(monkeypatch, tm
     answer = agent.run("把活干完")
 
     assert answer == "干完了"
-    assert task.goal == "搞清测试覆盖"
-    assert task.status == "done"
-    assert task.summary == "全部完成"
+    # State Patch 增量合并进任务状态
+    assert task.task_state["goal"] == "搞清测试覆盖"
+    assert task.task_state["is_done"] is True
+    assert task.task_state["completed"] == ["梳理测试覆盖"]
+    # Round 结构持久化：摘要与 normalized 输入写回
+    assert task.rounds[-1]["summary"] == "阅读了全部测试文件，覆盖情况已梳理。"
+    assert task.rounds[-1]["user_input"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
 
 
-def test_state_refresh_survives_invalid_json(monkeypatch, tmp_path):
-    """状态评估输出不是合法 JSON 时，保留原状态而不是覆盖坏数据。"""
+def test_organization_survives_invalid_json(monkeypatch, tmp_path):
+    """整理输出不是合法 JSON 时，保留原状态而不是覆盖坏数据。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     responses = [
         [_chunk(_delta(content="回答"))],
         [_chunk(_delta(content="这不是 JSON {{{"))],
+        [_chunk(_delta(content="重试了还是 {{{ 不是"))],  # 重试仍失败
     ]
     task = Task.create(goal="初始目标")
     agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
 
     agent.run("问")
 
-    assert task.goal == "初始目标"  # 原状态未被破坏
-    assert task.status == "in_progress"
+    assert task.task_state == {}  # 原状态未被破坏
+    assert task.rounds[-1]["summary"] == ""
 
 
-def test_state_refresh_does_not_downgrade_done_arbitrarily(monkeypatch, tmp_path):
-    """apply_state 只接受合法 status；模型输出别的值不生效。"""
+def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
+    """state_patch 里的非法字段被忽略，合法字段照常合并。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    state_json = '{"goal": "x", "status": "completed", "summary": "s"}'
+    org_json = json.dumps({
+        "normalized_user_input": "x",
+        "round_summary": "s",
+        "state_patch": {"completed": "不是列表", "current_status": "进行中"},
+    }, ensure_ascii=False)
     responses = [
         [_chunk(_delta(content="回答"))],
-        [_chunk(_delta(content=state_json))],
+        [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
 
     agent.run("问")
 
-    assert task.status == "in_progress"  # "completed" 非法，保留原值
-    assert task.goal == "x"              # 合法字段照常更新
+    assert task.task_state.get("completed", []) == []  # 非法列表被忽略
+    assert task.task_state.get("current_status") == "进行中"
+
+
+# ---- V1 Context Runtime：加载视图 / 展开 / baseline 对照 ---------------------
+
+
+def _round(seq: int, user: str, answer: str) -> dict:
+    """构造一个已整理的 Round（含原始协议消息与截断视图）。
+
+    truncated 模拟 Runtime 规则：只保留前面 ~120 字符。
+    """
+    return {
+        "seq": seq,
+        "user_input": {"original": user, "normalized": f"澄清：{user}"},
+        "events": [
+            {"id": f"R{seq}-E01", "type": "user", "status": "", "truncated": user[:120],
+             "message": {"role": "user", "content": user}},
+            {"id": f"R{seq}-E02", "type": "final_answer", "status": "", "truncated": answer[:120],
+             "message": {"role": "assistant", "content": answer}},
+        ],
+        "summary": f"第{seq}轮摘要",
+        "end_state": "completed",
+    }
+
+
+def test_managed_assembly_condenses_organized_rounds():
+    """加载视图：过去轮次=用户原文+整理摘要+截断索引，长回答只进头部。"""
+    long_answer = "很长的回答开头。" + "细节" * 100 + "很长的回答结尾。"
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "第一轮原始提问", long_answer)]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.current_round = {
+        "seq": 2, "user_input": {"original": "继续", "normalized": ""},
+        "events": [], "summary": "", "end_state": "",
+    }
+    agent.rounds.append(agent.current_round)
+    agent.messages = []
+    agent._record_event("user", {"role": "user", "content": "继续"})
+
+    msgs = agent._assemble_messages()
+    bodies = [m.get("content", "") for m in msgs]
+
+    assert any("第一轮原始提问" in b for b in bodies)       # 用户原文全量保留
+    assert any("第1轮摘要" in b for b in bodies)             # 整理摘要进入视图
+    assert any("[R1-E02]" in b for b in bodies)              # 事件截断索引（可展开定位）
+    assert any("很长的回答开头" in b for b in bodies)         # 头部内容可见
+    assert not any("很长的回答结尾" in b for b in bodies)     # 头部之后的细节不进上下文
+
+
+def test_expand_history_reads_full_content():
+    long_answer = "很长的回答开头。" + "细节" * 100 + "很长的回答结尾。"
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "第一轮原始提问", long_answer)]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    full = agent.expand_history(["R1-E02"], level="full")
+    assert "很长的回答结尾" in full  # 展开能取回头部之外的原文
+
+    summary = agent.expand_history(["R1"], level="summary")
+    assert "第1轮摘要" in summary and "[R1-E01]" in summary
+
+
+def test_baseline_replays_full_and_skips_organization():
+    """对照组：全量原文回放（含过去的完整回答），且不做任何整理调用。"""
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "第一轮原始提问", "第一轮完整回答内容")]
+    responses = [[_chunk(_delta(content="ok"))]]
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, context_mode="baseline")
+
+    agent.run("再来")
+
+    assert agent.last_stats["llm_calls"] == 1  # 只有干活调用，没有整理调用
+    sent = agent.llm.calls[-1]["messages"]
+    assert any("第一轮完整回答内容" in (m.get("content") or "") for m in sent)
+
+
+def test_managed_mode_uses_full_for_current_round():
+    """当前 Round 全量保留：自己的完整回答不出现在截断索引里。"""
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "第一轮原始提问", "第一轮完整回答内容")]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.current_round = {
+        "seq": 2, "user_input": {"original": "继续", "normalized": ""},
+        "events": [], "summary": "", "end_state": "",
+    }
+    agent.rounds.append(agent.current_round)
+    agent.messages = []
+    agent._record_event("final_answer", {"role": "assistant", "content": "本轮完整的最终回答"})
+
+    msgs = agent._assemble_messages()
+
+    assert any("本轮完整的最终回答" in (m.get("content") or "") for m in msgs)
+
+
+def test_expand_history_tolerates_string_ids_and_case(monkeypatch):
+    """模型偶尔传逗号字符串 ids 和大写 level，必须容错。"""
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "第一轮原始提问", "第一轮完整回答内容")]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    result = agent.expand_history("R1-E01,R1-E02", level="Full")
+    assert "第一轮原始提问" in result
+    assert "第一轮完整回答内容" in result
+
+
+def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
+    """整理输出非法 JSON 时重试一次，重试成功则正常应用。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_json = json.dumps({
+        "normalized_user_input": "澄清的意图",
+        "round_summary": "重试后的摘要",
+        "state_patch": {"completed": ["完成项"]},
+    }, ensure_ascii=False)
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+        [_chunk(_delta(content="我觉得应该这样：blahblah"))],  # 第一次：夹带说明文字
+        [_chunk(_delta(content=org_json))],                     # 重试：合法 JSON
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    agent.run("问")
+
+    assert task.task_state.get("completed") == ["完成项"]
+    assert task.rounds[-1]["summary"] == "重试后的摘要"
 
 
 def test_agent_records_events_into_task(monkeypatch, tmp_path):

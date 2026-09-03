@@ -27,6 +27,8 @@ import json
 from . import task as task_module
 from . import ui
 from .agent import (
+    MODE_BASELINE,
+    MODE_MANAGED,
     Agent,
     edit_file,
     get_current_time,
@@ -39,11 +41,13 @@ from .agent import (
 from .task import Task
 
 
-def _build_agent(task: Task) -> Agent:
+def _build_agent(task: Task, mode: str = MODE_MANAGED) -> Agent:
     """为任务构造一个带默认工具集的 Agent。
 
     工具分两类：只读（时间/列目录/读文件/搜索）与变更类
     （写文件/改文件/执行命令，均有审计记录与破坏性防护，见 tools.py）。
+    mode 决定上下文策略：managed（分层上下文，默认）或
+    baseline（全量回放的对照组）。
     """
     return Agent(
         system_prompt=(
@@ -153,8 +157,8 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     """执行一轮流式对话并负责全部展示。
 
     思考内容暗紫流式输出、正式回答默认色打字机输出，二者用横幅
-    分隔；结束后打印成本核算行。状态字典在闭包间共享，用来保证
-    各横幅只打印一次。
+    分隔；结束后打印成本核算行。异常/中断时收尾当前 Round
+    （failed/interrupted），保证历史与状态一致。
     """
     state = {"thinking": False, "answer": False}
 
@@ -170,9 +174,16 @@ def _run_turn(agent: Agent, instruction: str) -> str:
             state["answer"] = True
         print(text, end="", flush=True)
 
-    answer = agent.run(
-        instruction, on_thinking=on_thinking, on_answer_delta=on_answer_delta
-    )
+    try:
+        answer = agent.run(
+            instruction, on_thinking=on_thinking, on_answer_delta=on_answer_delta
+        )
+    except KeyboardInterrupt:
+        agent.finalize_round("interrupted")
+        raise
+    except Exception:
+        agent.finalize_round("failed")
+        raise
     print()
     print(ui.usage_line(agent.last_stats))
     return answer
@@ -195,13 +206,13 @@ def cmd_new(args: argparse.Namespace) -> None:
 def cmd_run(args: argparse.Namespace) -> None:
     """wovra run：对既有任务执行一轮。
 
-    不给指令时，让模型根据目标、摘要和最近事件自主决定下一步——
+    不给指令时，让模型根据任务状态和最近事件自主决定下一步——
     这是"长时任务自主推进"的雏形。
     """
     task = _load_task(args.task_id)
-    agent = _build_agent(task)
+    agent = _build_agent(task, mode=args.mode)
     instruction = args.instruction or (
-        "请根据任务目标、之前的进展摘要和最近事件，自主决定下一步并继续推进。"
+        "请根据任务状态和最近事件，自主决定下一步并继续推进。"
         "如果任务已无法推进，说明原因。"
     )
     _run_turn(agent, instruction)
@@ -230,10 +241,11 @@ def cmd_chat(args: argparse.Namespace) -> None:
         task = Task.create(goal="")
         task.save()
         print(ui.info(f"已创建新会话 {task.id}"))
-    agent = _build_agent(task)
+    agent = _build_agent(task, mode=args.mode)
 
     print(ui.rule("Wovra 会话"))
     print(f"{ui.paint('任务', 'bold')}  {task.id}")
+    print(f"{ui.paint('模式', 'bold')}  {args.mode}")
     print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
     print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
     print(ui.rule())
@@ -329,10 +341,14 @@ def main(argv: list[str] | None = None) -> None:
     p_run = sub.add_parser("run", help="对任务执行一轮")
     p_run.add_argument("task_id", help="任务编号或完整任务 id")
     p_run.add_argument("instruction", nargs="?", help="本轮指令；省略则由 AI 自主继续")
+    p_run.add_argument("--mode", choices=[MODE_MANAGED, MODE_BASELINE], default=MODE_MANAGED,
+                       help="上下文策略：managed=分层上下文（默认），baseline=全量对照组")
     p_run.set_defaults(func=cmd_run)
 
     p_chat = sub.add_parser("chat", help="交互式多轮对话（不带 id 则新建会话）")
     p_chat.add_argument("task_id", nargs="?", default="", help="任务编号或完整任务 id；省略则新建")
+    p_chat.add_argument("--mode", choices=[MODE_MANAGED, MODE_BASELINE], default=MODE_MANAGED,
+                        help="上下文策略：managed=分层上下文（默认），baseline=全量对照组")
     p_chat.set_defaults(func=cmd_chat)
 
     p_list = sub.add_parser("list", help="列出所有任务（带编号）")
