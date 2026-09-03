@@ -141,6 +141,9 @@ def status_line(text: str) -> str:
     return paint(f"  … {text}", "cyan")
 
 
+_CACHE_RATE = 30  # 缓存价 = 未命中的 1/30（与 agent/truncate 口径一致）
+
+
 def usage_line(stats: dict) -> str:
     """一次 run 的成本核算行：轮次/步数/工具调用 + tokens 用量与构成。
 
@@ -170,8 +173,17 @@ def usage_line(stats: dict) -> str:
         if prompt:
             parts.append(f"缓存命中 {cached:,} tok（{cached / prompt:.1%}）")
             parts.append(f"未命中 {miss:,} tok（{miss / prompt:.1%}）")
+            parts.append(f"等效输入 {miss + cached / _CACHE_RATE:,.0f} tok")
     else:
         parts.append("tokens：服务端未返回 usage")
+
+    purpose = stats.get("purpose") or {}
+    org = purpose.get("organization", {}).get("total", 0)
+    comp = purpose.get("compaction", {}).get("total", 0)
+    if org:
+        parts.append(f"整理 {org:,} tok")
+    if comp:
+        parts.append(f"压缩 {comp:,} tok")
 
     lines = [paint("  " + " ┃ ".join(parts), "dim")]
 

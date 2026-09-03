@@ -36,8 +36,9 @@ TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
 
 # TaskState 每类列表的容量上限：超出淘汰最旧。
 # 被淘汰的内容仍在 History（Round/Event）里，可通过 expand_history 找回——
-# 状态是"当前是什么"，历史是"过去发生了什么"，淘汰只影响前者
-STATE_LIST_CAP = 20
+# 状态是"当前是什么"，历史是"过去发生了什么"，淘汰只影响前者。
+# 容量按亿级使用规模设计（V2 定稿），不再使用测试期的小数值
+STATE_LIST_CAP = 200
 
 # state_patch 里允许的列表类字段与 TaskState 字段的对应关系
 _PATCH_LIST_FIELDS = ("constraints", "decisions", "completed", "known_issues", "open_questions")
@@ -157,6 +158,9 @@ class Task:
     # V1 Context Runtime：Round/Event 结构化历史与任务状态（见 agent.py）
     rounds: list[dict] = field(default_factory=list)
     task_state: dict = field(default_factory=dict)
+    # baseline 记账：累计输入 token（用于 80% 阈值压缩触发）与压缩摘要
+    baseline_prompt_used: int = 0
+    baseline_summary: str = ""
     created_at: str = ""
     updated_at: str = ""
 

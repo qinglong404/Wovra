@@ -162,3 +162,36 @@ def test_tool_result_green_on_success_red_on_failure(monkeypatch):
     assert "\033[92m" in success_line and "成功" in success_line
     assert "\033[91m" in failure_line and "失败" in failure_line
     assert "exit_code=1" in failure_line  # 失败原因简要保留
+
+
+def test_session_lock_rejects_live_holder_and_cleans_stale(tmp_path):
+    """会话锁：活进程持锁 → 拒绝；死进程的陈旧锁 → 清除后放行。"""
+    import os as _os
+
+    from wovra import task as task_module
+    from wovra.cli import _acquire_session_lock
+    from wovra.task import Task
+
+    monkeypatch_root = tmp_path
+    original_root = task_module.TASKS_ROOT
+    task_module.TASKS_ROOT = monkeypatch_root
+    try:
+        task = Task.create(goal="锁测试")
+        task.save()
+
+        # 当前测试进程持有锁（存活）→ 第二次获取必须被拒
+        _acquire_session_lock(task)
+        try:
+            _acquire_session_lock(task)
+        except SystemExit as e:
+            assert "正在另一个进程中使用" in str(e)
+        else:
+            raise AssertionError("活进程持锁时应拒绝")
+
+        # 持锁进程"死亡"（伪造一个必然不存在的 PID）→ 陈旧锁清除后放行
+        dead = tmp_path / task.id / ".lock"
+        dead.write_text("999999999", encoding="utf-8")
+        _acquire_session_lock(task)  # 不应抛异常
+        assert dead.read_text() == str(_os.getpid())  # 锁被当前进程重新持有
+    finally:
+        task_module.TASKS_ROOT = original_root

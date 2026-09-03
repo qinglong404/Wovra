@@ -23,6 +23,7 @@ run / chat / show 的 <id> 既接受完整任务 id，也接受这个数字编�
 
 import argparse
 import json
+import os
 import sys
 
 from . import task as task_module
@@ -42,13 +43,69 @@ from .agent import (
 from .task import Task
 
 
+def _session_lock_path(task: Task):
+    return task_module.TASKS_ROOT / task.id / ".lock"
+
+
+def _acquire_session_lock(task: Task) -> None:
+    """会话锁：同一会话同一时刻只允许一个进程操作（V2 单写者假设的显式防护）。
+
+    用 O_CREAT|O_EXCL 原子创建锁文件（写内容不能用覆盖写——那永远
+    不会报"已存在"，锁就形同虚设）；锁文件记录持有者 PID，
+    持锁进程已死亡时视为陈旧锁并清除。
+    """
+    import time as _time
+
+    lock = _session_lock_path(task)
+    for _ in range(2):
+        try:
+            fd = os.open(str(lock), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            return
+        except FileExistsError:
+            pass
+        except OSError:
+            return  # 文件系统不支持时降级为无锁
+        pid = 0
+        try:
+            pid = int(lock.read_text(encoding="utf-8").strip() or 0)
+        except Exception:  # noqa: BLE001
+            pass
+        # 探测持锁进程是否存活：ProcessLookupError = 已死（陈旧锁）；
+        # PermissionError = 进程存在但非本人所有（同样算存活，要拒绝）
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            try:
+                lock.unlink()  # 陈旧锁（持锁进程已退出）
+                continue
+            except OSError:
+                pass
+        except PermissionError:
+            raise SystemExit(
+                ui.error(f"会话 {task.id} 正在另一个进程中使用（pid {pid}），请先关闭该会话。")
+            )
+        else:
+            raise SystemExit(
+                ui.error(f"会话 {task.id} 正在另一个进程中使用（pid {pid}），请先关闭该会话。")
+            )
+    raise SystemExit(ui.error(f"会话 {task.id} 的锁无法获取。"))
+
+
+def _release_session_lock(task: Task) -> None:
+    try:
+        _session_lock_path(task).unlink()
+    except OSError:
+        pass
+
+
 def _flush_stdin() -> None:
     """清空终端输入缓冲。
 
     流式输出的几十秒里用户往往已经开始敲下一个问题——这些按键
-    会留在 tty 缓冲区里，等 input() 一调用就被瞬间吞掉当成输入
-    提交（"我还没输入就自动发送了"就是这么来的）。提示输入前
-    先丢弃缓冲，宁可让用户重打这几个字，也不误发半句话。
+    会留在 tty 缓冲区里，等下一次读输入时被瞬间吞掉当成输入提交。
+    提示输入前先丢弃缓冲，宁可让用户重打这几个字，也不误发半句话。
     """
     try:
         import termios
@@ -78,13 +135,15 @@ def _read_input() -> str:
         return input(ui.user_prompt())
 
 
-def _build_agent(task: Task, mode: str = MODE_MANAGED) -> Agent:
+def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool = False) -> Agent:
     """为任务构造一个带默认工具集的 Agent（展示回调在 _run_turn 注入）。
 
     工具分两类：只读（时间/列目录/读文件/搜索）与变更类
     （写文件/改文件/执行命令，均有审计记录与破坏性防护，见 tools.py）。
     mode 决定上下文策略：managed（分层上下文，默认）或
-    baseline（全量回放的对照组）。
+    baseline（全量回放 + 阈值压缩的对照组）。
+    async_organization：整理是否后台异步执行（chat 模式开，
+    run 模式关——一次性进程退出前必须同步完成）。
     """
     return Agent(
         system_prompt=(
@@ -104,6 +163,7 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED) -> Agent:
         ],
         task=task,
         context_mode=mode,
+        async_organization=async_organization,
     )
 
 
@@ -255,10 +315,10 @@ def _run_turn(agent: Agent, instruction: str) -> str:
             instruction, on_thinking=on_thinking, on_answer_delta=on_answer_delta
         )
     except KeyboardInterrupt:
-        agent.finalize_round("interrupted")
+        agent.finalize_round("open")  # 中断不闭合轮次，事件并入开放轮
         raise
     except Exception:
-        agent.finalize_round("failed")
+        agent.finalize_round("open")  # 异常同理；失败尝试并入本轮，不产生整理成本
         raise
     _break_line()
     print(ui.usage_line(agent.last_stats))
@@ -286,12 +346,17 @@ def cmd_run(args: argparse.Namespace) -> None:
     这是"长时任务自主推进"的雏形。
     """
     task = _load_task(args.task_id)
-    agent = _build_agent(task, mode=args.mode)
-    instruction = args.instruction or (
-        "请根据任务状态和最近事件，自主决定下一步并继续推进。"
-        "如果任务已无法推进，说明原因。"
-    )
-    _run_turn(agent, instruction)
+    _acquire_session_lock(task)
+    try:
+        # 一次性进程：整理同步执行，退出前结果必须落盘
+        agent = _build_agent(task, mode=args.mode, async_organization=False)
+        instruction = args.instruction or (
+            "请根据任务状态和最近事件，自主决定下一步并继续推进。"
+            "如果任务已无法推进，说明原因。"
+        )
+        _run_turn(agent, instruction)
+    finally:
+        _release_session_lock(task)
 
 
 def _chat_help() -> None:
@@ -317,38 +382,47 @@ def cmd_chat(args: argparse.Namespace) -> None:
         task = Task.create(goal="")
         task.save()
         print(ui.info(f"已创建新会话 {task.id}"))
-    agent = _build_agent(task, mode=args.mode)
+    _acquire_session_lock(task)
+    try:
+        # 交互模式：整理异步后台执行，不阻塞对话；退出时限时等待收尾
+        agent = _build_agent(task, mode=args.mode, async_organization=True)
 
-    print(ui.rule("Wovra 会话"))
-    print(f"{ui.paint('任务', 'bold')}  {task.id}")
-    print(f"{ui.paint('模式', 'bold')}  {args.mode}")
-    print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
-    print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
-    print(ui.rule())
+        print(ui.rule("Wovra 会话"))
+        print(f"{ui.paint('任务', 'bold')}  {task.id}")
+        print(f"{ui.paint('模式', 'bold')}  {args.mode}")
+        print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
+        print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
+        print(ui.rule())
 
-    _replay_history(task)
-    print(ui.info("输入指令开始对话，help 查看帮助，exit 退出。\n"))
+        _replay_history(task)
+        print(ui.info("输入指令开始对话，help 查看帮助，exit 退出。\n"))
 
-    while True:
-        try:
-            _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
-            user_input = _read_input().strip()
-        except (EOFError, KeyboardInterrupt):
-            # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
-            print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
-            break
-        if not user_input:
-            continue
-        if user_input.lower() in ("exit", "quit", "退出"):
-            print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
-            break
-        if user_input.lower() in ("help", "帮助"):
-            _chat_help()
-            continue
+        while True:
+            try:
+                _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
+                user_input = _read_input().strip()
+            except (EOFError, KeyboardInterrupt):
+                # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
+                print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in ("exit", "quit", "退出"):
+                print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
+                break
+            if user_input.lower() in ("help", "帮助"):
+                _chat_help()
+                continue
 
-        answer = _run_turn(agent, user_input)
-        if answer:
-            print()
+            answer = _run_turn(agent, user_input)
+            if answer:
+                print()
+
+        # 退出前等待后台整理收尾（最多 10 秒），未完成的轮次标记 pending
+        if not agent.flush_organization(timeout=10.0):
+            print(ui.info("仍有整理任务在后台未完成，将在下次打开会话时补跑。"))
+    finally:
+        _release_session_lock(task)
 
 
 def cmd_list(args: argparse.Namespace) -> None:

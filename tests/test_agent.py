@@ -264,12 +264,15 @@ def test_run_always_uses_streaming():
 # ---- 任务绑定 ------------------------------------------------------------
 
 
-def test_organization_updates_state_and_round_summary(monkeypatch, tmp_path):
-    """Round 结束后 Organization 更新状态补丁与轮次摘要/意图。"""
+def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
+    """Round 闭合后 Organization 更新状态补丁、Normalized 意图与精修索引。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
         "normalized_user_input": "用户想搞清楚项目的测试覆盖情况",
-        "round_summary": "阅读了全部测试文件，覆盖情况已梳理。",
+        "refined_index": [
+            {"id": "R1-E01", "line": "询问测试覆盖"},
+            {"id": "R1-E02", "line": "给出覆盖结论"},
+        ],
         "state_patch": {
             "completed": ["梳理测试覆盖"],
             "current_status": "测试覆盖已梳理完成",
@@ -291,9 +294,10 @@ def test_organization_updates_state_and_round_summary(monkeypatch, tmp_path):
     assert task.task_state["goal"] == "搞清测试覆盖"
     assert task.task_state["is_done"] is True
     assert task.task_state["completed"] == ["梳理测试覆盖"]
-    # Round 结构持久化：摘要与 normalized 输入写回
-    assert task.rounds[-1]["summary"] == "阅读了全部测试文件，覆盖情况已梳理。"
+    # Round 结构持久化：Normalized 意图与精修索引写回
     assert task.rounds[-1]["user_input"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
+    assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出覆盖结论"
+    assert task.rounds[-1]["org_state"] == "done"
 
 
 def test_organization_survives_invalid_json(monkeypatch, tmp_path):
@@ -310,7 +314,8 @@ def test_organization_survives_invalid_json(monkeypatch, tmp_path):
     agent.run("问")
 
     assert task.task_state == {}  # 原状态未被破坏
-    assert task.rounds[-1]["summary"] == ""
+    assert task.rounds[-1]["refined_index"] == {}
+    assert task.rounds[-1]["user_input"]["normalized"] == ""
 
 
 def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
@@ -338,7 +343,7 @@ def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
 
 
 def _round(seq: int, user: str, answer: str) -> dict:
-    """构造一个已整理的 Round（含原始协议消息与截断视图）。
+    """构造一个已整理的 Round（V2 结构：refined_index + 事件双份信息）。
 
     truncated 模拟 Runtime 规则：只保留前面 ~120 字符。
     """
@@ -351,32 +356,50 @@ def _round(seq: int, user: str, answer: str) -> dict:
             {"id": f"R{seq}-E02", "type": "final_answer", "status": "", "truncated": answer[:120],
              "message": {"role": "assistant", "content": answer}},
         ],
-        "summary": f"第{seq}轮摘要",
+        "refined_index": {
+            f"R{seq}-E01": f"{user}（精修）",
+            f"R{seq}-E02": f"{answer[:20]}（精修）",
+        },
         "end_state": "completed",
+        "org_state": "done",
     }
 
 
-def test_managed_assembly_condenses_organized_rounds():
-    """加载视图：过去轮次=用户原文+整理摘要+截断索引，长回答只进头部。"""
-    long_answer = "很长的回答开头。" + "细节" * 100 + "很长的回答结尾。"
-    task = Task.create(goal="x")
-    task.rounds = [_round(1, "第一轮原始提问", long_answer)]
-    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+def _make_open_round(agent: Agent, seq: int, user: str):
+    """在 agent 上挂一个开放 Round（模拟中断后未闭合的场景）。"""
     agent.current_round = {
-        "seq": 2, "user_input": {"original": "继续", "normalized": ""},
-        "events": [], "summary": "", "end_state": "",
+        "seq": seq, "user_input": {"original": user, "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open", "org_state": "",
     }
     agent.rounds.append(agent.current_round)
     agent.messages = []
-    agent._record_event("user", {"role": "user", "content": "继续"})
+    agent._record_event("user", {"role": "user", "content": user})
+
+
+def test_managed_assembly_condenses_organized_rounds():
+    """加载视图：近 1 轮全量；更早轮次 = 用户原文 + 意图 + 精修索引。
+
+    长回答的尾部细节不进上下文，头部与精修索引进入。
+    """
+    long_answer = "很长的回答开头。" + "细节" * 100 + "很长的回答结尾。"
+    task = Task.create(goal="x")
+    task.rounds = [
+        _round(1, "第一轮原始提问", long_answer),
+        _round(2, "第二轮 UI 修改", "按钮改好了"),
+        _round(3, "第三轮闲聊", "哈哈"),
+        _round(4, "第四轮 ICP 调试", "误差降低了"),
+    ]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task, max_recent_rounds=1)
+    _make_open_round(agent, 5, "继续")
 
     msgs = agent._assemble_messages()
     bodies = [m.get("content", "") for m in msgs]
 
-    assert any("第一轮原始提问" in b for b in bodies)       # 用户原文全量保留
-    assert any("第1轮摘要" in b for b in bodies)             # 整理摘要进入视图
-    assert any("[R1-E02]" in b for b in bodies)              # 事件截断索引（可展开定位）
-    assert any("很长的回答开头" in b for b in bodies)         # 头部内容可见
+    assert any("误差降低了" in b for b in bodies)            # 近 1 轮全量
+    assert any("第一轮原始提问" in b for b in bodies)         # 用户原文全量保留
+    assert any("澄清：第一轮原始提问" in b for b in bodies)   # Normalized 意图
+    assert any("R1-E02" in b for b in bodies)                 # 精修事件索引
+    assert any("很长的回答开头" in b for b in bodies)         # 截断头部可见
     assert not any("很长的回答结尾" in b for b in bodies)     # 头部之后的细节不进上下文
 
 
@@ -390,7 +413,7 @@ def test_expand_history_reads_full_content():
     assert "很长的回答结尾" in full  # 展开能取回头部之外的原文
 
     summary = agent.expand_history(["R1"], level="summary")
-    assert "第1轮摘要" in summary and "[R1-E01]" in summary
+    assert "澄清：第一轮原始提问" in summary and "[R1-E01]" in summary
 
 
 def test_baseline_replays_full_and_skips_organization():
@@ -407,17 +430,45 @@ def test_baseline_replays_full_and_skips_organization():
     assert any("第一轮完整回答内容" in (m.get("content") or "") for m in sent)
 
 
+def test_baseline_threshold_compaction(monkeypatch, tmp_path):
+    """对照组：累计输入达 80% × 窗口时压缩旧轮次（市面惯例的常规处理）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "第一轮", "第一轮回答"), _round(2, "第二轮", "第二轮回答")]
+    summary_text = "前两轮的压缩摘要：完成了若干工作。"
+    responses = [
+        [_chunk(_delta(content="r3")), _chunk(usage=_usage(500, 10, 510))],
+        [_chunk(_delta(content="r4")), _chunk(usage=_usage(500, 10, 510))],
+        [_chunk(_delta(content=summary_text))],  # 阈值触发后的压缩调用
+    ]
+    agent = Agent(
+        llm=_StubLLM(responses), tools=[], task=task,
+        context_mode="baseline", context_limit=1000,  # 80% = 800
+    )
+
+    agent.run("第三轮")
+    agent.run("第四轮")  # 累计输入 1000 ≥ 800 → 触发压缩
+
+    assert task.baseline_summary == summary_text
+    assert task.rounds[0].get("compacted") is True
+    assert task.rounds[1].get("compacted") is True
+    assert not task.rounds[2].get("compacted", False)
+    assert not task.rounds[3].get("compacted", False)
+
+    # 装配：压缩摘要进入上下文，被压缩轮次的原文退出
+    agent.current_round = None
+    msgs = agent._assemble_messages()
+    bodies = "\n".join(m.get("content", "") for m in msgs)
+    assert "前两轮的压缩摘要" in bodies
+    assert "第一轮回答" not in bodies
+
+
 def test_managed_mode_uses_full_for_current_round():
     """当前 Round 全量保留：自己的完整回答不出现在截断索引里。"""
     task = Task.create(goal="x")
     task.rounds = [_round(1, "第一轮原始提问", "第一轮完整回答内容")]
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
-    agent.current_round = {
-        "seq": 2, "user_input": {"original": "继续", "normalized": ""},
-        "events": [], "summary": "", "end_state": "",
-    }
-    agent.rounds.append(agent.current_round)
-    agent.messages = []
+    _make_open_round(agent, 2, "继续")
     agent._record_event("final_answer", {"role": "assistant", "content": "本轮完整的最终回答"})
 
     msgs = agent._assemble_messages()
@@ -441,7 +492,7 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
         "normalized_user_input": "澄清的意图",
-        "round_summary": "重试后的摘要",
+        "refined_index": [{"id": "R1-E02", "line": "给出结论"}],
         "state_patch": {"completed": ["完成项"]},
     }, ensure_ascii=False)
     responses = [
@@ -455,34 +506,66 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     agent.run("问")
 
     assert task.task_state.get("completed") == ["完成项"]
-    assert task.rounds[-1]["summary"] == "重试后的摘要"
+    assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出结论"
 
 
-def test_relevance_selection_runs_with_many_rounds(monkeypatch):
-    """回归：轮数超过 max_recent_rounds 时相关性选择路径必须可用
-    （此前 _relevance/_render_round_view 误挂到 self 上，4+ 轮才炸）。"""
-    task = Task.create(goal="多轮回归")
+def test_tier_degradation_under_budget(monkeypatch):
+    """预算吃紧时按"最老的先降档"逐级降档：档1 → 档2 → 档3。
+
+    回归：此前轮数超过 max_recent_rounds 时选择路径炸过一次
+    （_relevance 误挂到 self 上），本测试覆盖多轮装配路径。
+    """
+    task = Task.create(goal="分层回归")
     task.rounds = [
         _round(1, "处理 ICP 配准误差问题", "ICP 误差分析完成"),
         _round(2, "修改界面按钮颜色", "按钮改好了"),
         _round(3, "调整界面布局间距", "布局调整完毕"),
         _round(4, "继续处理 ICP 配准", "ICP 参数已更新"),
     ]
-    agent = Agent(llm=_StubLLM(), tools=[], task=task)
-    agent.current_round = {
-        "seq": 5, "user_input": {"original": "ICP 误差为什么还是这么大", "normalized": ""},
-        "events": [], "summary": "", "end_state": "",
-    }
-    agent.rounds.append(agent.current_round)
-    agent.messages = []
-    agent._record_event("user", {"role": "user", "content": "ICP 误差为什么还是这么大"})
+    agent = Agent(
+        llm=_StubLLM(), tools=[], task=task,
+        max_recent_rounds=1, history_budget=200,  # 极小预算，强制逐级降档
+    )
+    _make_open_round(agent, 5, "ICP 误差为什么还是这么大")
 
     msgs = agent._assemble_messages()
     bodies = "\n".join(m.get("content", "") for m in msgs)
 
-    # R4 在"最近 3 轮"里恒选；R1 通过相关性入选（摘要进入视图）
-    assert "ICP 误差分析完成" in bodies
+    # 近 1 轮（R4）全量；R3 预算内保留档 1；R1/R2 被降到档 3 一行索引
     assert "ICP 参数已更新" in bodies
+    assert "布局调整完毕" in bodies or "调整界面布局间距" in bodies
+    assert "[R1]" in bodies and "[R2]" in bodies  # 档 3 的一行话题行
+    assert "ICP 误差分析完成" not in bodies  # 档 3 不再携带事件索引
+
+
+def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):
+    """轮闭合规则：中断/异常不闭合 Round，多条用户输入并入同一开放轮。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_json = json.dumps({
+        "normalized_user_input": "用户想把 ICP 调试完（合并了两条输入的意图）",
+        "refined_index": [],
+        "state_patch": {},
+    }, ensure_ascii=False)
+    responses = [
+        [_chunk(_delta(content="继续干"))],
+        [_chunk(_delta(content=org_json))],
+    ]
+    task = Task.create(goal="ICP 调试")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    # 第一次 run 模拟被中断：不闭合（仅持久化，轮保持开放）
+    agent._open_or_reuse_round("开始调试 ICP")
+    agent._record_event("user", {"role": "user", "content": "开始调试 ICP"})
+    agent.finalize_round("open")
+    # 第二次 run 续上同一个开放轮直到最终回答
+    agent.run("继续，把 ICP 调试完")
+
+    assert len(task.rounds) == 1  # 两条输入属于同一个 Round
+    user_events = [e for e in task.rounds[0]["events"] if e["type"] == "user"]
+    assert len(user_events) == 2  # 两条原始输入都保留为事件
+    # 整理产物：合并澄清后的意图覆盖整个开放轮
+    assert task.rounds[0]["user_input"]["normalized"] == "用户想把 ICP 调试完（合并了两条输入的意图）"
+    assert task.rounds[0]["end_state"] == "completed"
 
 
 def test_agent_records_events_into_task(monkeypatch, tmp_path):
