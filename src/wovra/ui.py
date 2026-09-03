@@ -108,24 +108,37 @@ def assistant_markdown(text: str) -> None:
     _console.print()
 
 
-def tool_call(name: str, arguments: str) -> str:
-    """工具调用事件：黄色，属于过程信息。"""
-    return paint(f"  [调用工具] {name}({arguments})", "yellow")
+def tool_call(name: str) -> str:
+    """工具调用：只说调用了什么，参数不展开（细节在 task.json 可查）。"""
+    return paint(f"  [调用] {name}", "yellow")
 
 
-# 工具结果里的失败判定统一用 tools.FAILURE_MARKERS（与任务报告同源）
+def tool_result(result: str, limit: int = 100) -> str:
+    """工具结果：一行说清成功/失败，失败才给简短原因。"""
+    failed = any(tag in result for tag in FAILURE_MARKERS)
+    if failed:
+        return paint(f"  [结果] 失败：{_head_reason(result, limit)}", "red")
+    return paint("  [结果] 成功", "green")
 
 
-def tool_result(name: str, result: str, limit: int = 80) -> str:
-    """工具返回事件：成功绿色、失败红色，一眼区分。"""
-    preview = result if len(result) <= limit else result[:limit] + "…"
-    style = "red" if any(tag in result for tag in FAILURE_MARKERS) else "green"
-    return paint(f"  [工具结果] {name} -> {preview}", style)
+def _head_reason(text: str, limit: int) -> str:
+    """从失败结果里提取简短原因（跳过标记词本身）。"""
+    for tag in FAILURE_MARKERS:
+        position = text.find(tag)
+        if position != -1:
+            reason = text[position + len(tag):].lstrip("：（:,， ")
+            return " ".join(reason.split())[:limit]
+    return " ".join(text.split())[:limit]
 
 
 def thinking_delta(text: str) -> str:
-    """流式思考内容：暗紫（magenta + dim），与正式回答明显区分。"""
-    return paint(text, "magenta", "dim")
+    """流式思考内容：品红，与正式回答明显区分。"""
+    return paint(text, "magenta")
+
+
+def status_line(text: str) -> str:
+    """系统后台动作的状态行（如"正在整理本轮对话"）。"""
+    return paint(f"  … {text}", "cyan")
 
 
 def usage_line(stats: dict) -> str:

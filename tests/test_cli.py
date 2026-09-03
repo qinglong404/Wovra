@@ -157,8 +157,8 @@ def test_tool_result_green_on_success_red_on_failure(monkeypatch):
 
     monkeypatch.setattr(ui, "_ENABLED", True)  # 测试捕获环境非 TTY，强制开启着色
 
-    success_line = ui.tool_result("read_file", "文件内容")
-    failure_line = ui.tool_result("read_file", "工具执行出错: ValueError()")
-    assert "\033[92m" in success_line  # 高亮绿 = 成功
-    assert "\033[91m" in failure_line  # 高亮红 = 失败
-    assert "\033[92m" not in failure_line and "\033[91m" not in success_line
+    success_line = ui.tool_result("文件内容正常")
+    failure_line = ui.tool_result("命令执行失败（exit_code=1）\nstderr:\nxxx")
+    assert "\033[92m" in success_line and "成功" in success_line
+    assert "\033[91m" in failure_line and "失败" in failure_line
+    assert "exit_code=1" in failure_line  # 失败原因简要保留

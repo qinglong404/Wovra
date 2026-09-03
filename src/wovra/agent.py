@@ -106,6 +106,7 @@ class Agent:
         max_history_tokens: Optional[int] = None,
         on_tool_call: Optional[Callable[[str, str], None]] = None,
         on_tool_result: Optional[Callable[[str, str], None]] = None,
+        on_status: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.llm = llm or LLM()
         self.max_turns = max_turns
@@ -117,6 +118,8 @@ class Agent:
         # 观察性钩子：Wovra 关注"可观察"，CLI 用它把工具调用过程打印出来
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
+        # 后台动作（如 Round 整理）耗时较长，状态回调让界面"不卡"
+        self.on_status = on_status
 
         # 注册审计挂钩：变更类工具（写/改/执行命令）通过它把
         # 参数之外的事实（如被覆盖文件的旧内容）记入任务历史
@@ -541,6 +544,8 @@ class Agent:
         使整理成本不随 Round 内工具数量线性失控。
         解析失败则保留原状态——宁可这轮不整理，也不用坏数据覆盖。
         """
+        if self.on_status:
+            self.on_status("正在整理本轮对话…")
         round_data = self.current_round
         seq = round_data["seq"]
         transcript = truncate.render_round_events(round_data)

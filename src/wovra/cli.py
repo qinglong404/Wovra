@@ -23,6 +23,7 @@ run / chat / show 的 <id> 既接受完整任务 id，也接受这个数字编�
 
 import argparse
 import json
+import sys
 
 from . import task as task_module
 from . import ui
@@ -41,8 +42,24 @@ from .agent import (
 from .task import Task
 
 
+def _flush_stdin() -> None:
+    """清空终端输入缓冲。
+
+    流式输出的几十秒里用户往往已经开始敲下一个问题——这些按键
+    会留在 tty 缓冲区里，等 input() 一调用就被瞬间吞掉当成输入
+    提交（"我还没输入就自动发送了"就是这么来的）。提示输入前
+    先丢弃缓冲，宁可让用户重打这几个字，也不误发半句话。
+    """
+    try:
+        import termios
+
+        termios.tcflush(sys.stdin, termios.TCIFLUSH)
+    except Exception:  # noqa: BLE001——非 POSIX 平台没有 termios，跳过即可
+        pass
+
+
 def _build_agent(task: Task, mode: str = MODE_MANAGED) -> Agent:
-    """为任务构造一个带默认工具集的 Agent。
+    """为任务构造一个带默认工具集的 Agent（展示回调在 _run_turn 注入）。
 
     工具分两类：只读（时间/列目录/读文件/搜索）与变更类
     （写文件/改文件/执行命令，均有审计记录与破坏性防护，见 tools.py）。
@@ -66,8 +83,7 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED) -> Agent:
             run_command,
         ],
         task=task,
-        on_tool_call=lambda name, args: print(ui.tool_call(name, args)),
-        on_tool_result=lambda name, result: print(ui.tool_result(name, result)),
+        context_mode=mode,
     )
 
 
@@ -133,21 +149,19 @@ def _replay_history(task: Task, last_n: int = 12) -> None:
         elif event["kind"] == "final_answer":
             ui.assistant_markdown(event["detail"])
         elif event["kind"] == "tool_call":
-            name, call_args = _split_call(event["detail"])
-            # 折叠换行：工具参数/结果可能多行，回放里必须保持单行
-            print(ui.tool_call(name, " ".join(call_args.split())))
+            # 工具活动只回放一行极简摘要，参数/结果细节在 task.json
+            name = _split_call(event["detail"])[0]
+            print(ui.tool_call(name))
         else:  # tool_result
-            name, _, result = event["detail"].partition(" -> ")
-            print(ui.tool_result(name, " ".join(result.split())))
+            print(ui.tool_result(event["detail"]))
     if len(dialogue) > last_n:
         print(ui.info(f"（仅显示最近 {last_n} 条，完整记录见 report.md）"))
     print(ui.rule())
 
 
-def _split_call(detail: str) -> tuple[str, str]:
-    """把 "tool_name({...})" 形式的工具调用 detail 拆回名字和参数。"""
-    name, _, arguments = detail.partition("(")
-    return name, arguments.removesuffix(")")
+def _split_call(detail: str) -> str:
+    """从 "tool_name({...})" 形式的工具调用 detail 里取工具名。"""
+    return detail.partition("(")[0]
 
 
 # ---- 子命令实现 -----------------------------------------------------------
@@ -156,23 +170,65 @@ def _split_call(detail: str) -> tuple[str, str]:
 def _run_turn(agent: Agent, instruction: str) -> str:
     """执行一轮流式对话并负责全部展示。
 
-    思考内容暗紫流式输出、正式回答默认色打字机输出，二者用横幅
-    分隔；结束后打印成本核算行。异常/中断时收尾当前 Round
-    （failed/interrupted），保证历史与状态一致。
+    行纪律（解决"思考与回答混在一起、事件行粘连"的问题）：
+    * line_open 记录当前终端行是否被流式输出占着——任何事件行
+      （工具调用/结果/状态）打印前，先补一个换行把流式行断开；
+    * 每一次 LLM 调用都可能重新进入思考阶段，所以思考横幅按
+      "进入思考" 事件打印，而不是整个 Turn 只打印一次；
+    * 工具行只写"调用了什么 + 成功/失败"，不展开参数与输出。
+
+    异常/中断时收尾当前 Round（failed/interrupted），保证历史与
+    状态一致。managed 模式 Round 结束后的整理调用耗时较长，
+    通过 on_status 打印状态行，避免"输出完了卡住不动"的困惑。
     """
-    state = {"thinking": False, "answer": False}
+    line_open = False  # 流式输出（思考/回答）是否有未换行的半行
+    phase = ""         # 当前流式阶段：thinking / answer
+
+    def _break_line() -> None:
+        nonlocal line_open
+        if line_open:
+            print(flush=True)
+            line_open = False
 
     def on_thinking(text: str) -> None:
-        if not state["thinking"]:
-            print(ui.rule("思考过程"))
-            state["thinking"] = True
+        nonlocal line_open, phase
+        if phase != "thinking":
+            _break_line()
+            print(ui.rule("思考过程"), flush=True)
+            phase = "thinking"
         print(ui.thinking_delta(text), end="", flush=True)
+        line_open = True
 
     def on_answer_delta(text: str) -> None:
-        if state["thinking"] and not state["answer"]:
-            print("\n" + ui.rule("回答"))
-            state["answer"] = True
+        nonlocal line_open, phase
+        if phase != "answer":
+            _break_line()
+            print(ui.rule("回答"), flush=True)
+            phase = "answer"
         print(text, end="", flush=True)
+        line_open = True
+
+    def on_tool_call(name: str, arguments: str) -> None:
+        nonlocal line_open, phase
+        _break_line()
+        phase = ""
+        print(ui.tool_call(name), flush=True)
+
+    def on_tool_result(name: str, result: str) -> None:
+        nonlocal line_open, phase
+        _break_line()
+        phase = ""
+        print(ui.tool_result(result), flush=True)
+
+    def on_status(text: str) -> None:
+        nonlocal line_open, phase
+        _break_line()
+        phase = ""
+        print(ui.status_line(text), flush=True)
+
+    agent.on_tool_call = on_tool_call
+    agent.on_tool_result = on_tool_result
+    agent.on_status = on_status
 
     try:
         answer = agent.run(
@@ -184,7 +240,7 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     except Exception:
         agent.finalize_round("failed")
         raise
-    print()
+    _break_line()
     print(ui.usage_line(agent.last_stats))
     return answer
 
@@ -255,6 +311,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
 
     while True:
         try:
+            _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
             user_input = input(ui.user_prompt()).strip()
         except (EOFError, KeyboardInterrupt):
             # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
