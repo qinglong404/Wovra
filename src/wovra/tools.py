@@ -155,7 +155,8 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*") -> str:
             continue
         for line_number, line in enumerate(text.splitlines(), start=1):
             if regex.search(line):
-                relative = path.relative_to(PROJECT_ROOT)
+                # 统一用 / 分隔，输出跨平台一致（也便于回填给 read_file 等工具）
+                relative = path.relative_to(PROJECT_ROOT).as_posix()
                 matches.append(f"{relative}:{line_number}: {line.strip()[:200]}")
                 if len(matches) >= 50:
                     return "\n".join(matches) + "\n...(已达 50 条上限，请缩小搜索范围)"

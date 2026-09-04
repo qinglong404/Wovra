@@ -47,6 +47,50 @@ def _session_lock_path(task: Task):
     return task_module.TASKS_ROOT / task.id / ".lock"
 
 
+def _process_alive(pid: int) -> bool:
+    """跨平台探测进程是否存活（无法确认时保守视为存活）。
+
+    Windows 不支持 os.kill(pid, 0)——直接报 WinError 87，只能走
+    OpenProcess：打不开句柄且错误码为 ERROR_ACCESS_DENIED 说明
+    进程存在但无权查询，同样算存活。
+    """
+    if pid <= 0:
+        return False
+    if os.name == "nt":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        ERROR_ACCESS_DENIED = 5
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.GetExitCodeProcess.argtypes = [wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD)]
+        kernel32.GetExitCodeProcess.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+
+        handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        if not handle:
+            return ctypes.get_last_error() == ERROR_ACCESS_DENIED
+        try:
+            exit_code = wintypes.DWORD()
+            if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                return exit_code.value == STILL_ACTIVE
+            return True
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass  # 进程存在但非本人所有（PermissionError）等，保守视为存活
+    return True
+
+
 def _acquire_session_lock(task: Task) -> None:
     """会话锁：同一会话同一时刻只允许一个进程操作（V2 单写者假设的显式防护）。
 
@@ -72,20 +116,14 @@ def _acquire_session_lock(task: Task) -> None:
             pid = int(lock.read_text(encoding="utf-8").strip() or 0)
         except Exception:  # noqa: BLE001
             pass
-        # 探测持锁进程是否存活：ProcessLookupError = 已死（陈旧锁）；
-        # PermissionError = 进程存在但非本人所有（同样算存活，要拒绝）
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
+        # 探测持锁进程是否存活：已退出 = 陈旧锁，清除后重试；
+        # 存活（含无权查询、无法排除存活的情形）= 拒绝
+        if not _process_alive(pid):
             try:
                 lock.unlink()  # 陈旧锁（持锁进程已退出）
                 continue
             except OSError:
                 pass
-        except PermissionError:
-            raise SystemExit(
-                ui.error(f"会话 {task.id} 正在另一个进程中使用（pid {pid}），请先关闭该会话。")
-            )
         else:
             raise SystemExit(
                 ui.error(f"会话 {task.id} 正在另一个进程中使用（pid {pid}），请先关闭该会话。")
