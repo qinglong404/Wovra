@@ -247,19 +247,25 @@ def _split_call(detail: str) -> str:
 # ---- 子命令实现 -----------------------------------------------------------
 
 
+def _drain_status(agent: Agent) -> None:
+    """取走并打印后台整理管线投递的状态消息（主线程打印，线程安全）。"""
+    for line in agent.drain_status():
+        print(ui.status_line(line), flush=True)
+
+
 def _run_turn(agent: Agent, instruction: str) -> str:
     """执行一轮流式对话并负责全部展示。
 
     行纪律（解决"思考与回答混在一起、事件行粘连"的问题）：
     * line_open 记录当前终端行是否被流式输出占着——任何事件行
-      （工具调用/结果/状态）打印前，先补一个换行把流式行断开；
+      （工具调用/结果）打印前，先补一个换行把流式行断开；
     * 每一次 LLM 调用都可能重新进入思考阶段，所以思考横幅按
       "进入思考" 事件打印，而不是整个 Turn 只打印一次；
-    * 工具行只写"调用了什么 + 成功/失败"，不展开参数与输出。
+    * 工具行只写"调用了什么 + 成功/失败"，不展开参数与输出；
+    * 后台整理的状态不实时打印（后台线程打印会打碎输入行），
+      由 _drain_status 在安全时机统一显示。
 
-    异常/中断时收尾当前 Round（failed/interrupted），保证历史与
-    状态一致。managed 模式 Round 结束后的整理调用耗时较长，
-    通过 on_status 打印状态行，避免"输出完了卡住不动"的困惑。
+    异常/中断时收尾当前 Round（保持开放），保证历史与状态一致。
     """
     line_open = False  # 流式输出（思考/回答）是否有未换行的半行
     phase = ""         # 当前流式阶段：thinking / answer
@@ -300,15 +306,8 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         phase = ""
         print(ui.tool_result(result), flush=True)
 
-    def on_status(text: str) -> None:
-        nonlocal line_open, phase
-        _break_line()
-        phase = ""
-        print(ui.status_line(text), flush=True)
-
     agent.on_tool_call = on_tool_call
     agent.on_tool_result = on_tool_result
-    agent.on_status = on_status
 
     try:
         answer = agent.run(
@@ -321,6 +320,7 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         agent.finalize_round("open")  # 异常同理；失败尝试并入本轮，不产生整理成本
         raise
     _break_line()
+    _drain_status(agent)  # 后台整理/压缩的完成消息，排在成本行之前
     print(ui.usage_line(agent.last_stats))
     return answer
 
@@ -397,37 +397,27 @@ def cmd_chat(args: argparse.Namespace) -> None:
         _replay_history(task)
         print(ui.info("输入指令开始对话，help 查看帮助，exit 退出。\n"))
 
-        # patch_stdout：后台整理线程的打印会自动出现在输入行上方，
-        # 输入行完整重绘——后台状态文字不会再叠进"你>"的输入里
-        from contextlib import nullcontext
+        while True:
+            try:
+                _drain_status(agent)  # 后台整理的状态行（出现在输入行上方）
+                _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
+                user_input = _read_input().strip()
+            except (EOFError, KeyboardInterrupt):
+                # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
+                print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
+                break
+            if not user_input:
+                continue
+            if user_input.lower() in ("exit", "quit", "退出"):
+                print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
+                break
+            if user_input.lower() in ("help", "帮助"):
+                _chat_help()
+                continue
 
-        try:
-            from prompt_toolkit.patch_stdout import patch_stdout
-            stdout_ctx = patch_stdout()
-        except ImportError:
-            stdout_ctx = nullcontext()
-
-        with stdout_ctx:
-            while True:
-                try:
-                    _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
-                    user_input = _read_input().strip()
-                except (EOFError, KeyboardInterrupt):
-                    # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
-                    print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
-                    break
-                if not user_input:
-                    continue
-                if user_input.lower() in ("exit", "quit", "退出"):
-                    print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
-                    break
-                if user_input.lower() in ("help", "帮助"):
-                    _chat_help()
-                    continue
-
-                answer = _run_turn(agent, user_input)
-                if answer:
-                    print()
+            answer = _run_turn(agent, user_input)
+            if answer:
+                print()
 
         # 退出前等待后台整理收尾（最多 10 秒），未完成的轮次标记 pending
         if not agent.flush_organization(timeout=10.0):

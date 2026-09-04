@@ -85,7 +85,6 @@ class Agent:
         async_organization: bool = False,
         on_tool_call: Optional[Callable[[str, str], None]] = None,
         on_tool_result: Optional[Callable[[str, str], None]] = None,
-        on_status: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.llm = llm or LLM()
         self.max_turns = max_turns
@@ -99,7 +98,10 @@ class Agent:
         self.async_organization = async_organization
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
-        self.on_status = on_status
+        # 后台动作（如 Round 整理）耗时较长，状态消息进入 feed，
+        # 由主线程在安全时机（提示输入前）统一打印——后台线程绝不直接
+        # print：会打碎输入行，且 patch_stdout 会吞掉 ANSI 颜色码（踩过的坑）
+        self._status_feed: list[str] = []
 
         tools_module.set_audit_recorder(
             lambda detail: task.record("file_change", detail) if task else None
@@ -204,6 +206,17 @@ class Agent:
         self.current_round["events"].append(event)
         self.messages.append(event["message"])
         return event
+
+    def _emit_status(self, text: str) -> None:
+        """后台线程往状态队列里投递一条消息（线程安全：list.append 原子）。"""
+        self._status_feed.append(text)
+
+    def drain_status(self) -> list[str]:
+        """主线程取走全部待打印的后台状态（打印时机由主线程决定）。"""
+        out = []
+        while self._status_feed:
+            out.append(self._status_feed.pop(0))
+        return out
 
     def _persist_rounds(self) -> None:
         if self.task is not None:
@@ -374,10 +387,9 @@ class Agent:
             # 提示每次会话只发一次，避免每轮刷屏
             if not self._degrade_warned:
                 self._degrade_warned = True
-                if self.on_status:
-                    self.on_status(
-                        "后台整理：当前模型不支持整理用的参数，已自动降级重试（本次会话仅提示一次）"
-                    )
+                self._emit_status(
+                    "后台整理：当前模型不支持整理用的参数，已自动降级重试（本次会话仅提示一次）"
+                )
             stream = self.llm.chat(messages, tools=tools, stream=True)
         content_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
@@ -637,8 +649,7 @@ class Agent:
         关闭思考（格式化任务）。解析失败重试一次，仍失败则保持
         Runtime 视图，原始层永远不受影响。
         """
-        if self.on_status:
-            self.on_status(f"后台整理：第 {round_data['seq']} 轮归档中…（不影响继续对话）")
+        self._emit_status(f"后台整理：第 {round_data['seq']} 轮归档中…（不影响继续对话）")
         user_inputs = [
             e["message"].get("content", "")
             for e in round_data["events"] if e["type"] == "user"
@@ -738,8 +749,7 @@ class Agent:
                 patch["is_done"] = bool(state["is_done"])
             self.task.apply_state_patch(patch)
         round_data["org_state"] = "done"
-        if self.on_status:
-            self.on_status("整理完成")
+        self._emit_status("整理完成")
         self._persist_rounds()
 
     def _organize_schemas(self) -> list[dict]:
@@ -855,8 +865,7 @@ class Agent:
         older = [r for r in self.rounds if not r.get("compacted")][:-2]
         if len(older) < 1:
             return  # 保留最近 2 轮原文；没有可压缩的历史就等下一轮
-        if self.on_status:
-            self.on_status("历史接近窗口上限，正在压缩较早的对话…")
+        self._emit_status("历史接近窗口上限，正在压缩较早的对话…")
         transcript = "\n\n".join(
             f"[R{r['seq']}] " + truncate.render_round_events(r) for r in older
         )
