@@ -1,6 +1,6 @@
-"""CLI 的离线测试：new / list / show 不依赖模型调用，可以完整覆盖。
+"""CLI 的离线测试：list / delete 不依赖模型调用，可以完整覆盖。
 
-run / chat 会发起真实模型调用，不属于单元测试范围——它们的逻辑
+chat / run 会发起真实模型调用，不属于单元测试范围——它们的逻辑
 （任务加载、Agent 绑定）已被其他测试覆盖。
 """
 
@@ -10,62 +10,32 @@ import pytest
 
 from wovra import task as task_module
 from wovra.cli import main as cli_main
+from wovra.task import Task
 
 
 def _use_tmp_root(monkeypatch, tmp_path):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
 
 
-def test_new_creates_task_and_prints_id(monkeypatch, tmp_path, capsys):
-    _use_tmp_root(monkeypatch, tmp_path)
-
-    cli_main(["new", "测试目标"])
-
-    out = capsys.readouterr().out
-    assert "已创建新会话" in out
-    # 输出里的任务 id 应与磁盘上的目录对应
-    task_id = out.split(":")[1].split()[0]
-    data = json.loads((tmp_path / task_id / "task.json").read_text(encoding="utf-8"))
-    assert data["goal"] == "测试目标"
-
-
-def test_new_without_goal_starts_blank(monkeypatch, tmp_path, capsys):
-    """新会话不强制目标：目标由 AI 随对话逐步成形。"""
-    _use_tmp_root(monkeypatch, tmp_path)
-
-    cli_main(["new"])
-
-    out = capsys.readouterr().out
-    task_id = out.split(":")[1].split()[0]
-    data = json.loads((tmp_path / task_id / "task.json").read_text(encoding="utf-8"))
-    assert data["goal"] == ""
-    assert data["status"] == "in_progress"
+def _seed_task(goal: str, updated_at: str | None = None) -> str:
+    """直接落盘一个任务（new 命令已移除，测试自行构造数据）。"""
+    task = Task.create(goal=goal)
+    if updated_at:
+        task.updated_at = updated_at
+    task.save()
+    return task.id
 
 
 def test_list_shows_existing_tasks(monkeypatch, tmp_path, capsys):
     _use_tmp_root(monkeypatch, tmp_path)
-
-    cli_main(["new", "第一个任务"])
-    cli_main(["new", "第二个任务"])
-    capsys.readouterr()  # 丢弃 new 的输出
+    _seed_task("第一个任务")
+    _seed_task("第二个任务")
 
     cli_main(["list"])
     out = capsys.readouterr().out
     assert "第一个任务" in out
     assert "第二个任务" in out
     assert "进行中" in out
-
-
-def test_show_prints_report(monkeypatch, tmp_path, capsys):
-    _use_tmp_root(monkeypatch, tmp_path)
-
-    cli_main(["new", "要被展示的目标"])
-    task_id = capsys.readouterr().out.split(":")[1].split()[0]
-
-    cli_main(["show", task_id])
-    out = capsys.readouterr().out
-    assert "# 任务报告：" in out
-    assert "要被展示的目标" in out
 
 
 def test_run_with_missing_task_fails_friendly(monkeypatch, tmp_path):
@@ -81,21 +51,9 @@ def test_run_with_missing_task_fails_friendly(monkeypatch, tmp_path):
 
 def test_list_assigns_recency_numbers(monkeypatch, tmp_path, capsys):
     _use_tmp_root(monkeypatch, tmp_path)
-
-    cli_main(["new", "较早的任务"])
-    cli_main(["new", "较新的任务"])
-    capsys.readouterr()
-
-    # 同一秒内创建的两个任务 updated_at 相同，排序会退化为目录顺序；
-    # 显式把第一个任务的时间改早，让"最近更新" deterministic
-    import json as _json
-
-    for directory in task_module.TASKS_ROOT.iterdir():
-        state = directory / "task.json"
-        data = _json.loads(state.read_text(encoding="utf-8"))
-        if data["goal"] == "较早的任务":
-            data["updated_at"] = "2020-01-01T00:00:00"
-            state.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    # updated_at 显式错开，避免"最近更新"排序受同秒创建影响
+    _seed_task("较早的任务", updated_at="2020-01-01T00:00:00")
+    _seed_task("较新的任务")
 
     cli_main(["list"])
     lines = [l for l in capsys.readouterr().out.splitlines() if l.strip()]
@@ -107,25 +65,10 @@ def test_list_assigns_recency_numbers(monkeypatch, tmp_path, capsys):
     assert task_lines[1].strip().startswith("2")
 
 
-def test_resolve_numeric_id_maps_to_recency_order(monkeypatch, tmp_path, capsys):
+def test_resolve_numeric_id_maps_to_recency_order(monkeypatch, tmp_path):
     _use_tmp_root(monkeypatch, tmp_path)
-
-    cli_main(["new", "较早"])
-    first_id = sorted(
-        p.name for p in task_module.TASKS_ROOT.iterdir() if (p / "task.json").exists()
-    )[0]
-    cli_main(["new", "较晚"])
-    capsys.readouterr()
-
-    # 同秒创建导致 updated_at 相同、排序不稳定；把第一个任务时间改早
-    import json as _json
-
-    for directory in task_module.TASKS_ROOT.iterdir():
-        state = directory / "task.json"
-        data = _json.loads(state.read_text(encoding="utf-8"))
-        if data["goal"] == "较早":
-            data["updated_at"] = "2020-01-01T00:00:00"
-            state.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    first_id = _seed_task("较早", updated_at="2020-01-01T00:00:00")
+    _seed_task("较晚")
 
     from wovra.cli import _resolve_task_id
 
@@ -164,6 +107,77 @@ def test_tool_result_green_on_success_red_on_failure(monkeypatch):
     assert "\033[92m" in success_line and "成功" in success_line
     assert "\033[91m" in failure_line and "失败" in failure_line
     assert "exit_code=1" in failure_line  # 失败原因简要保留
+
+
+# ---- delete：编号/完整 id、确认交互、--force、活锁拒绝 -----------------------
+
+
+def test_delete_removes_directory_and_keeps_others(monkeypatch, tmp_path, capsys):
+    _use_tmp_root(monkeypatch, tmp_path)
+    doomed = _seed_task("要删的")
+    survivor = _seed_task("要留的")
+
+    monkeypatch.setattr("builtins.input", lambda _: "y")
+    cli_main(["delete", doomed])
+
+    assert not (task_module.TASKS_ROOT / doomed).exists()
+    assert (task_module.TASKS_ROOT / survivor).exists()
+    assert "已删除会话" in capsys.readouterr().out
+
+
+def test_delete_decline_keeps_task(monkeypatch, tmp_path, capsys):
+    _use_tmp_root(monkeypatch, tmp_path)
+    task_id = _seed_task("不删的")
+
+    monkeypatch.setattr("builtins.input", lambda _: "n")
+    cli_main(["delete", task_id])
+
+    assert (task_module.TASKS_ROOT / task_id).exists()
+    assert "已取消" in capsys.readouterr().out
+
+
+def test_delete_force_skips_confirm(monkeypatch, tmp_path, capsys):
+    _use_tmp_root(monkeypatch, tmp_path)
+    task_id = _seed_task("强制删")
+
+    def _no_prompt(_):
+        raise AssertionError("不该出现确认提示")
+
+    monkeypatch.setattr("builtins.input", _no_prompt)
+    cli_main(["delete", task_id, "--force"])
+
+    assert not (task_module.TASKS_ROOT / task_id).exists()
+
+
+def test_delete_refuses_when_locked_by_live_process(monkeypatch, tmp_path):
+    _use_tmp_root(monkeypatch, tmp_path)
+    import os as _os
+
+    task_id = _seed_task("正被使用")
+    lock = task_module.TASKS_ROOT / task_id / ".lock"
+    lock.write_text(str(_os.getpid()), encoding="utf-8")  # 当前测试进程=活持有者
+
+    try:
+        cli_main(["delete", task_id])
+    except SystemExit as e:
+        assert "正在另一个进程中使用" in str(e)
+    else:
+        raise AssertionError("活进程持锁时应拒绝删除")
+    assert (task_module.TASKS_ROOT / task_id).exists()
+
+
+def test_delete_missing_task_fails_friendly(monkeypatch, tmp_path):
+    _use_tmp_root(monkeypatch, tmp_path)
+
+    try:
+        cli_main(["delete", "不存在的任务"])
+    except SystemExit as e:
+        assert "任务不存在" in str(e)
+    else:
+        raise AssertionError("应该以 SystemExit 报错")
+
+
+# ---- 会话锁（跨平台探活见 test_lock） ----------------------------------------
 
 
 def test_session_lock_rejects_live_holder_and_cleans_stale(tmp_path):

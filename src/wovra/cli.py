@@ -5,11 +5,11 @@
 每个都是一次性的硬编码剧本，导致"会话"和"磁盘上的任务"对不上号。
 CLI 补上这扇门：
 
-    wovra new   <目标>          新建会话（新任务）
+    wovra chat                  进入交互模式，多轮对话，实时落盘
+                                （不带 id 自动新建会话）
     wovra run   <id> [指令]      对既有任务执行一轮
-    wovra chat  <id>            进入交互模式，多轮对话，实时落盘
     wovra list                  列出所有会话（带数字编号）
-    wovra show  <id>            查看某会话的报告（人类视角）
+    wovra delete <id>           删除会话及其全部本地数据（不可恢复）
 
 编号与短 id：list 按更新时间倒序给每个会话编号（1、2、3…），
 run / chat / show 的 <id> 既接受完整任务 id，也接受这个数字编号——
@@ -24,6 +24,7 @@ run / chat / show 的 <id> 既接受完整任务 id，也接受这个数字编�
 import argparse
 import json
 import os
+import shutil
 import sys
 
 from . import task as task_module
@@ -389,20 +390,6 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     return answer
 
 
-def cmd_new(args: argparse.Namespace) -> None:
-    """wovra new：新建一个会话（任务）。
-
-    目标参数是可选的：目标不是开工的前提，而是对话的产物——
-    AI 会在每轮对话后重新评估并更新它。
-    """
-    task = Task.create(goal=args.goal or "")
-    task.save()
-    print(ui.success(f"已创建新会话: {task.id}"))
-    if task.goal:
-        print(f"初始意图: {task.goal}")
-    print(ui.info(f"直接 `wovra chat {task.id}` 开始对话，目标会随对话自动成形。"))
-
-
 def cmd_run(args: argparse.Namespace) -> None:
     """wovra run：对既有任务执行一轮。
 
@@ -498,7 +485,7 @@ def cmd_list(args: argparse.Namespace) -> None:
     """wovra list：列出所有任务（按更新时间倒序，带数字编号）。"""
     tasks = _all_tasks()
     if not tasks:
-        print(ui.info('还没有任何任务。用 `wovra new "目标"` 创建第一个。'))
+        print(ui.info("还没有任何任务。直接 `wovra chat` 开始第一个会话。"))
         return
 
     print()
@@ -526,11 +513,59 @@ def cmd_list(args: argparse.Namespace) -> None:
     print(ui.info("\n编号按最近更新排序，run/chat/show 可直接用编号作为 <id>。"))
 
 
-def cmd_show(args: argparse.Namespace) -> None:
-    """wovra show：打印某任务的人类可读报告。"""
-    task = _load_task(args.task_id)
-    report = task_module.TASKS_ROOT / task.id / "report.md"
-    print(report.read_text(encoding="utf-8"))
+def cmd_delete(args: argparse.Namespace) -> None:
+    """wovra delete：删除一个会话及其全部本地数据（不可恢复）。
+
+    支持 list 里的编号或完整 id。正被另一个进程持锁使用的会话
+    拒绝删除——否则那个进程的每一步落盘都会把半份数据写回来；
+    陈旧锁随目录一起清掉。删除前确认，脚本化使用加 --force。
+    """
+    task_id = _resolve_task_id(args.task_id)
+    directory = task_module.TASKS_ROOT / task_id
+    if not directory.exists():
+        raise SystemExit(
+            ui.error(f"任务不存在: {args.task_id}（用 `wovra list` 查看现有任务）")
+        )
+
+    # 展示字段尽力而为地读：半途损坏的 task.json 也是合法的删除对象
+    try:
+        data = json.loads((directory / "task.json").read_text(encoding="utf-8"))
+        goal = data.get("goal") or "（目标待明确）"
+        updated = data.get("updated_at", "").replace("T", " ")[:16]
+    except (OSError, ValueError):
+        goal, updated = "（task.json 损坏或缺失）", "未知"
+
+    lock = directory / ".lock"
+    if lock.exists():
+        pid = 0
+        try:
+            pid = int(lock.read_text(encoding="utf-8").strip() or 0)
+        except (OSError, ValueError):
+            pass
+        # 活进程持锁 → 拒绝；读不出的锁视为陈旧，随目录一起删掉
+        if _process_alive(pid):
+            raise SystemExit(
+                ui.error(
+                    f"会话 {task_id} 正在另一个进程中使用（pid {pid}），"
+                    "请先关闭该会话再删除。"
+                )
+            )
+
+    if not args.force:
+        try:
+            answer = input(
+                f"确认删除会话 {task_id}（目标：{goal}，更新于 {updated}）？"
+                "删除后不可恢复 [y/N] "
+            )
+        except EOFError:
+            print(ui.info("无交互输入可用，已取消。确定删除请加 --force。"))
+            return
+        if answer.strip().lower() not in ("y", "yes"):
+            print(ui.info("已取消，未删除。"))
+            return
+
+    shutil.rmtree(directory)
+    print(ui.success(f"已删除会话: {task_id}"))
 
 
 # ---- 参数解析与入口 ---------------------------------------------------------
@@ -543,20 +578,15 @@ def main(argv: list[str] | None = None) -> None:
         epilog=(
             "示例：\n"
             "  wovra chat                  开一个新会话直接聊，目标随对话成形\n"
-            '  wovra new "调研某主题"       带初始意图新建会话（也可以不填）\n'
             "  wovra list                  查看所有会话（带编号）\n"
             "  wovra chat 1                用编号续上某个会话\n"
-            "  wovra show 1                查看会话报告\n"
+            "  wovra delete 1              删除某个会话（不可恢复）\n"
             "\n"
             "<id> 位置既可用编号（list 里的 1、2、3…），也可用完整任务 id。"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sub = parser.add_subparsers(dest="command")
-
-    p_new = sub.add_parser("new", help="新建会话（目标可不填，随对话成形）")
-    p_new.add_argument("goal", nargs="?", default="", help="可选的初始意图")
-    p_new.set_defaults(func=cmd_new)
 
     p_run = sub.add_parser("run", help="对任务执行一轮")
     p_run.add_argument("task_id", help="任务编号或完整任务 id")
@@ -574,9 +604,12 @@ def main(argv: list[str] | None = None) -> None:
     p_list = sub.add_parser("list", help="列出所有任务（带编号）")
     p_list.set_defaults(func=cmd_list)
 
-    p_show = sub.add_parser("show", help="查看任务报告")
-    p_show.add_argument("task_id", help="任务编号或完整任务 id")
-    p_show.set_defaults(func=cmd_show)
+    p_delete = sub.add_parser("delete", help="删除会话及其全部本地数据（不可恢复）")
+    p_delete.add_argument("task_id", help="任务编号或完整任务 id")
+    p_delete.add_argument(
+        "-f", "--force", action="store_true", help="跳过确认提示（脚本化使用）"
+    )
+    p_delete.set_defaults(func=cmd_delete)
 
     sub.add_parser("help", help="显示帮助")
 

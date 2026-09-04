@@ -8,7 +8,7 @@
 
 降级策略：输出不是终端（重定向/管道/测试捕获）或设置了 NO_COLOR
 时，ANSI 助手退化为纯文本，rich 也会自动关闭样式——保证
-`wovra show > out.md` 这类用法不会混入转义码。
+`wovra list > out.md` 这类用法不会混入转义码。
 """
 
 import os
