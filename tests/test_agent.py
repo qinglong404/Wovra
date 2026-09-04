@@ -431,36 +431,62 @@ def test_baseline_replays_full_and_skips_organization():
 
 
 def test_baseline_threshold_compaction(monkeypatch, tmp_path):
-    """对照组：累计输入达 80% × 窗口时压缩旧轮次（市面惯例的常规处理）。"""
+    """对照组：真实上下文体量（下一次请求的估算）达 80% × 窗口时压缩。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
     task = Task.create(goal="x")
-    task.rounds = [_round(1, "第一轮", "第一轮回答"), _round(2, "第二轮", "第二轮回答")]
+    # 甲/乙可区分：R1 压缩后其原文应退出装配，R2 保留
+    task.rounds = [_round(1, "甲" * 2400, "甲" * 2400), _round(2, "乙" * 2400, "乙" * 2400)]
     summary_text = "前两轮的压缩摘要：完成了若干工作。"
     responses = [
-        [_chunk(_delta(content="r3")), _chunk(usage=_usage(500, 10, 510))],
-        [_chunk(_delta(content="r4")), _chunk(usage=_usage(500, 10, 510))],
-        [_chunk(_delta(content=summary_text))],  # 阈值触发后的压缩调用
+        [_chunk(_delta(content="第三轮的回答"))],  # 干活调用
+        [_chunk(_delta(content=summary_text))],    # 触发后的压缩调用
     ]
     agent = Agent(
         llm=_StubLLM(responses), tools=[], task=task,
         context_mode="baseline", context_limit=1000,  # 80% = 800
     )
 
+    # 水位 = R1+R2+R3 的内容估算 ≈ 1200+ ≥ 800 → 本轮闭合即触发
     agent.run("第三轮")
-    agent.run("第四轮")  # 累计输入 1000 ≥ 800 → 触发压缩
 
     assert task.baseline_summary == summary_text
     assert task.rounds[0].get("compacted") is True
-    assert task.rounds[1].get("compacted") is True
-    assert not task.rounds[2].get("compacted", False)
-    assert not task.rounds[3].get("compacted", False)
+    assert not task.rounds[1].get("compacted")  # 最近 2 轮保留原文
 
     # 装配：压缩摘要进入上下文，被压缩轮次的原文退出
     agent.current_round = None
     msgs = agent._assemble_messages()
     bodies = "\n".join(m.get("content", "") for m in msgs)
     assert "前两轮的压缩摘要" in bodies
-    assert "第一轮回答" not in bodies
+    assert "甲" * 2400 not in bodies
+    assert "乙" * 2400 in bodies
+
+
+def test_baseline_compaction_ignores_billing_watermark(monkeypatch, tmp_path):
+    """回归：水位按窗口占用口径，不再被计费口径虚增提前触发。
+
+    实测（会话 3c87e1）：累计计费口径把水位推到真实上下文的 19 倍，
+    真实上下文仅 3 万 tok 就被提前压缩。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "轻量对话", "轻量回答")]
+    responses = [
+        [_chunk(_delta(content="r2")), _chunk(usage=_usage(500_000, 10, 500_010))],
+        [_chunk(_delta(content="r3")), _chunk(usage=_usage(500_000, 10, 500_010))],
+    ]
+    agent = Agent(
+        llm=_StubLLM(responses), tools=[], task=task,
+        context_mode="baseline", context_limit=1000,
+    )
+
+    agent.run("第二轮")
+    agent.run("第三轮")  # 计费累计 100 万 ≥ 800，但真实上下文极小
+
+    assert agent._baseline_prompt_used == 1_000_000  # 计费口径照记（成本记录）
+    assert task.baseline_summary == ""  # 水位按内容估算 → 不触发压缩
+    assert not any(r.get("compacted") for r in task.rounds)
 
 
 def test_managed_mode_uses_full_for_current_round():

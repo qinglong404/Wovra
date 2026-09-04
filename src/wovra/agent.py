@@ -1032,13 +1032,40 @@ class Agent:
 
     # ---- baseline 阈值压缩（设计文档第 6 节） ------------------------------------
 
+    def _baseline_context_estimate(self) -> int:
+        """下一次请求的上下文体量估算（窗口占用口径）。
+
+        摘要 + 未压缩轮次的全部事件（正文与工具调用参数）。
+        水位曾误用累计计费口径——每步重复计整段 prompt，成倍虚增
+        （实测真实上下文 3 万 tok、账本 58 万，提前触发压缩）。
+        """
+        parts = []
+        if self.task is not None and self.task.baseline_summary:
+            parts.append(self.task.baseline_summary)
+        for r in self.rounds:
+            if r.get("compacted"):
+                continue
+            for e in r["events"]:
+                m = e["message"]
+                parts.append(str(m.get("content") or ""))
+                for tc in m.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    parts.append(str(fn.get("arguments") or ""))
+        return tokens.estimate("\n".join(parts))
+
     def _baseline_accounting(self) -> None:
-        """baseline：累计输入达到 80% × 窗口时触发常规阈值压缩。"""
+        """baseline：真实上下文体量达 80% × 窗口时触发阈值压缩。
+
+        水位 = _baseline_context_estimate（下一次请求的体量），与
+        managed 的窗口保底同口径；触发后压缩较早轮次为摘要，水位
+        下次检查时自然反映压缩后的体量。baseline_prompt_used 只做
+        计费口径的成本记录，不参与触发。
+        """
         self._baseline_prompt_used += self.last_stats["prompt_tokens"]
         if self.task is not None:
             self.task.baseline_prompt_used = self._baseline_prompt_used
         threshold = self.context_limit * _COMPRESS_THRESHOLD
-        if self._baseline_prompt_used < threshold:
+        if self._baseline_context_estimate() < threshold:
             return
         older = [r for r in self.rounds if not r.get("compacted")][:-2]
         if len(older) < 1:
@@ -1067,17 +1094,6 @@ class Agent:
             )
         for r in older:
             r["compacted"] = True
-        # 水位重置：压缩后基座 ≈ 摘要 + 保留轮次的体积
-        kept = [r for r in self.rounds if not r.get("compacted")]
-        self._baseline_prompt_used = tokens.estimate(
-            (self.task.baseline_summary if self.task else "")
-            + "\n".join(
-                e["message"].get("content", "")
-                for r in kept for e in r["events"]
-            )
-        )
-        if self.task is not None:
-            self.task.baseline_prompt_used = self._baseline_prompt_used
 
 
 def _action_word(name: str) -> str:
