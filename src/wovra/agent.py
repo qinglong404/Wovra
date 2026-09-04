@@ -120,6 +120,8 @@ class Agent:
         self._org_queue: queue.Queue = queue.Queue()
         self._org_thread: Optional[threading.Thread] = None
         self._save_lock = threading.Lock()
+        # 端点不支持整理参数的降级提示：每次会话只提示一次，避免每轮刷屏
+        self._degrade_warned = False
 
         # baseline 记账：累计输入 token（触发阈值压缩）
         self._baseline_prompt_used = task.baseline_prompt_used if task else 0
@@ -368,9 +370,14 @@ class Agent:
             if not extra_body:
                 raise
             # 部分端点不支持 extra_body 里的参数（如关闭思考的 thinking 开关），
-            # 降级为不带该参数重发——宁可让整理调用多思考，也不能直接失败
-            if self.on_status:
-                self.on_status("当前模型不支持该调用参数，已降级重试…")
+            # 降级为不带该参数重发——宁可让整理调用多思考，也不能直接失败。
+            # 提示每次会话只发一次，避免每轮刷屏
+            if not self._degrade_warned:
+                self._degrade_warned = True
+                if self.on_status:
+                    self.on_status(
+                        "后台整理：当前模型不支持整理用的参数，已自动降级重试（本次会话仅提示一次）"
+                    )
             stream = self.llm.chat(messages, tools=tools, stream=True)
         content_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
@@ -631,7 +638,7 @@ class Agent:
         Runtime 视图，原始层永远不受影响。
         """
         if self.on_status:
-            self.on_status("正在整理本轮对话…")
+            self.on_status(f"后台整理：第 {round_data['seq']} 轮归档中…（不影响继续对话）")
         user_inputs = [
             e["message"].get("content", "")
             for e in round_data["events"] if e["type"] == "user"

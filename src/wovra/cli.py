@@ -397,26 +397,41 @@ def cmd_chat(args: argparse.Namespace) -> None:
         _replay_history(task)
         print(ui.info("输入指令开始对话，help 查看帮助，exit 退出。\n"))
 
-        while True:
-            try:
-                _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
-                user_input = _read_input().strip()
-            except (EOFError, KeyboardInterrupt):
-                # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
-                print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
-                break
-            if not user_input:
-                continue
-            if user_input.lower() in ("exit", "quit", "退出"):
-                print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
-                break
-            if user_input.lower() in ("help", "帮助"):
-                _chat_help()
-                continue
+        # patch_stdout：后台整理线程的打印会自动出现在输入行上方，
+        # 输入行完整重绘——后台状态文字不会再叠进"你>"的输入里
+        from contextlib import nullcontext
 
-            answer = _run_turn(agent, user_input)
-            if answer:
-                print()
+        try:
+            from prompt_toolkit.patch_stdout import patch_stdout
+            stdout_ctx = patch_stdout()
+        except ImportError:
+            stdout_ctx = nullcontext()
+
+        with stdout_ctx:
+            while True:
+                try:
+                    _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
+                    user_input = _read_input().strip()
+                except (EOFError, KeyboardInterrupt):
+                    # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
+                    print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
+                    break
+                if not user_input:
+                    continue
+                if user_input.lower() in ("exit", "quit", "退出"):
+                    print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
+                    break
+                if user_input.lower() in ("help", "帮助"):
+                    _chat_help()
+                    continue
+
+                answer = _run_turn(agent, user_input)
+                if answer:
+                    print()
+
+        # 退出前等待后台整理收尾（最多 10 秒），未完成的轮次标记 pending
+        if not agent.flush_organization(timeout=10.0):
+            print(ui.info("仍有整理任务在后台未完成，将在下次打开会话时补跑。"))
 
         # 退出前等待后台整理收尾（最多 10 秒），未完成的轮次标记 pending
         if not agent.flush_organization(timeout=10.0):
