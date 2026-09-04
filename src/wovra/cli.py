@@ -40,6 +40,7 @@ from .agent import (
     search_files,
     write_file,
 )
+from .llm import LLMConfigError
 from .task import Task
 
 
@@ -363,6 +364,12 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     except KeyboardInterrupt:
         agent.finalize_round("open")  # 中断不闭合轮次，事件并入开放轮
         raise
+    except LLMConfigError:
+        # 配置错误（端点/模型/密钥）在会话内修不了：收尾轮次后原样上抛，
+        # 由 main 统一打印提示并退出。绝不能落进下面的 RuntimeError 分支——
+        # 那会把"配置错了"误报成"步数超限，继续对话即可"
+        agent.finalize_round("open")
+        raise
     except RuntimeError as error:
         # 步数超限：不是故障，是"本轮干了很多活还没干完"——
         # 轮次保持开放，用户继续对话即可接着干
@@ -580,7 +587,13 @@ def main(argv: list[str] | None = None) -> None:
         parser.print_help()
         return
 
-    args.func(args)
+    try:
+        args.func(args)
+    except LLMConfigError as error:
+        # 配置错误用户可自行修复：一条人话 + 指向 .env 的检查项，
+        # 不打 traceback（服务端原始信息已附在提示里）
+        print(ui.error(str(error)))
+        raise SystemExit(1) from None
 
 
 if __name__ == "__main__":

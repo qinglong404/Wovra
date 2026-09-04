@@ -10,7 +10,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import (
+    APIConnectionError,
+    AuthenticationError,
+    NotFoundError,
+    OpenAI,
+    PermissionDeniedError,
+)
 
 
 def _normalize_proxy_schemes() -> None:
@@ -53,11 +59,52 @@ def reasoning_of(part) -> str:
     )
 
 
+class LLMConfigError(RuntimeError):
+    """模型服务接入配置错误（BASE_URL / 模型名 / 密钥 / 网络）。
+
+    这类错误用户自己就能修，报错必须直说"检查哪里"，而不是甩一屏
+    SDK traceback；原始异常通过 __cause__ 保留，排查时仍可见。
+    """
+
+
+def _raw_detail(error: Exception) -> str:
+    """压成单行的原始错误信息（截断），拼在友好提示后面供排查。"""
+    text = " ".join(str(error).split())
+    return text[:300] + ("…" if len(text) > 300 else "")
+
+
+def _config_hint(error: Exception, model: str, base_url: Optional[str]) -> str:
+    """按错误类型给出"检查哪里"的提示，全部指向 .env 里的配置项。"""
+    where = base_url or "OpenAI 官方地址"
+    if isinstance(error, NotFoundError):
+        return (
+            f"模型配置问题：端点 {where} 上不存在模型 {model}，或当前密钥无权访问。\n"
+            "请检查 .env：Wovra_BASE_URL 与 Wovra_MODEL 必须配套——不同服务商的"
+            "模型名不通用（例如火山方舟上要填方舟的模型 ID，GLM 要配智谱的端点）。"
+        )
+    if isinstance(error, AuthenticationError):
+        return (
+            f"模型配置问题：密钥无效或已过期（{where} 返回 401）。"
+            "请检查 .env 中的 Wovra_API_KEY。"
+        )
+    if isinstance(error, PermissionDeniedError):
+        return (
+            f"模型配置问题：当前密钥无权访问模型 {model}（{where} 返回 403）。"
+            "部分模型需要单独开通或升级付费。"
+        )
+    return (
+        f"模型配置问题：无法连接到 {where}。"
+        "请检查网络、代理，以及 Wovra_BASE_URL 的域名与路径。"
+    )
+
+
 class LLM:
     """对 OpenAI 协议客户端的薄封装。
 
     只做三件事：读取配置、持有客户端、转发调用。
     刻意不做流式封装、不做重试——阶段 1 保持最小，够用就好。
+    配置类错误（端点/模型/密钥/网络）翻译成 LLMConfigError 给出
+    可操作的提示——"薄"不等于把 SDK 原始报错原样甩给用户。
     """
 
     def __init__(
@@ -79,6 +126,7 @@ class LLM:
             )
 
         # base_url 允许为 None：此时 SDK 使用 OpenAI 官方地址。
+        self.base_url = base_url
         self._client = OpenAI(api_key=api_key, base_url=base_url)
 
     def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
@@ -94,10 +142,16 @@ class LLM:
             # （OpenAI 协议扩展 stream_options，主流兼容服务都支持）。
             # 没有它，流式调用就拿不到 tokens 数，成本核算无从谈起。
             kwargs.setdefault("stream_options", {"include_usage": True})
-        return self._client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-            stream=stream or None,
-            **kwargs,
-        )
+        try:
+            return self._client.chat.completions.create(
+                model=self.model,
+                messages=messages,
+                tools=tools,
+                stream=stream or None,
+                **kwargs,
+            )
+        except (NotFoundError, AuthenticationError, PermissionDeniedError, APIConnectionError) as error:
+            raise LLMConfigError(
+                f"{_config_hint(error, self.model, self.base_url)}\n"
+                f"服务端原始信息：{_raw_detail(error)}"
+            ) from error

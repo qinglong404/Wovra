@@ -6,6 +6,8 @@ run / chat 会发起真实模型调用，不属于单元测试范围——它们
 
 import json
 
+import pytest
+
 from wovra import task as task_module
 from wovra.cli import main as cli_main
 
@@ -195,3 +197,35 @@ def test_session_lock_rejects_live_holder_and_cleans_stale(tmp_path):
         assert dead.read_text() == str(_os.getpid())  # 锁被当前进程重新持有
     finally:
         task_module.TASKS_ROOT = original_root
+
+
+def test_config_error_exits_with_friendly_message(monkeypatch, capsys):
+    """配置错误由 main 统一打印提示并以非零码退出，不打 traceback。"""
+    from wovra.llm import LLMConfigError
+
+    def fake_cmd(args):
+        raise LLMConfigError("模型配置问题：端点上不存在该模型")
+
+    monkeypatch.setattr("wovra.cli.cmd_chat", fake_cmd)
+    with pytest.raises(SystemExit) as excinfo:
+        cli_main(["chat"])
+    assert excinfo.value.code == 1
+    assert "模型配置问题" in capsys.readouterr().out
+
+
+def test_run_turn_propagates_config_error_not_turn_limit():
+    """回归：LLMConfigError 不能被 _run_turn 的 RuntimeError 分支吞成"步数超限"。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import _run_turn
+    from wovra.llm import LLMConfigError
+
+    finalized = []
+
+    def _raise(*args, **kwargs):
+        raise LLMConfigError("模型配置问题")
+
+    agent = SimpleNamespace(run=_raise, finalize_round=finalized.append)
+    with pytest.raises(LLMConfigError):
+        _run_turn(agent, "hi")
+    assert finalized == ["open"]  # 轮次已收尾为开放，异常原样上抛
