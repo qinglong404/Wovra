@@ -605,7 +605,8 @@ def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
     }, ensure_ascii=False)
     responses = [
         [_chunk(_delta(content="干完了"))],
-        [_chunk(_delta(content=org_json))],  # 整理调用（managed 同步）
+        # 整理调用（managed 同步闭合时执行），带 usage 验证分账
+        [_chunk(_delta(content=org_json)), _chunk(usage=_usage(60, 30, 90))],
     ]
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
