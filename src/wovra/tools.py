@@ -13,8 +13,11 @@
 """
 
 import json
+import locale
+import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 # 项目根目录（本文件位于 src/wovra/，向上三级）
@@ -222,13 +225,42 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
     return f"已修改 {path}（{len(old_text)} 字符 → {len(new_text)} 字符）"
 
 
+def _kill_process_tree(pid: int) -> None:
+    """强杀 pid 及其全部后代进程。
+
+    Windows 的 Popen.kill() 只杀 shell 本身（shell=True 时是
+    cmd.exe），孙进程会变成孤儿活下来——既泄漏进程/端口，还攥着
+    输出管道让清理阶段的 communicate 永久阻塞。整树强杀
+    （taskkill /T）从根上杜绝这两件事。POSIX 侧配合
+    start_new_session：子进程自成一个进程组，killpg 一网打尽。
+    """
+    if os.name == "nt":
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(pid)],
+            capture_output=True,
+        )
+        return
+    import signal
+
+    try:
+        os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except OSError:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
 def run_command(command: str) -> str:
-    """在项目根目录运行一条 shell 命令，返回退出码与输出。
+    """在项目根目录运行一条 shell 命令，返回退出码与输出。超时 60 秒整树
+    强杀；不要运行前台常驻服务（http.server 之类永不退出的命令只会白等
+    60 秒）——预览网页用系统方式打开文件（Windows: start 文件名），确需
+    服务时用非阻塞方式后台启动。
 
     防护：
         * 黑名单匹配到破坏性模式时直接拒绝，不执行；
           拒绝文本会回传给模型（它能看到原因并换方案）
-        * 60 秒超时强制终止，防止长命令卡死整个任务
+        * 60 秒超时强制终止整棵进程树，防止长命令卡死整个任务
         * 输出各截断 1500 字符，防止超长输出撑爆上下文
     """
     _audit(f"[run_command] {command}")  # 无论执行与否，命令原文都进审计
@@ -239,24 +271,39 @@ def run_command(command: str) -> str:
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
 
-    try:
-        proc = subprocess.run(
+    # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
+    # 的问题（http.server 这类孤儿进程曾把管道清理阶段永久挂死），
+    # 也没有 PIPE 缓冲写满导致的子进程阻塞，超时后的清理必然可返回
+    with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        proc = subprocess.Popen(
             command,
             shell=True,
-            capture_output=True,
-            text=True,
-            timeout=_COMMAND_TIMEOUT,
+            stdout=out_f,
+            stderr=err_f,
             cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            # POSIX：让子进程自成进程组，超时后 killpg 整组杀掉而不伤自身
+            start_new_session=os.name != "nt",
         )
-    except subprocess.TimeoutExpired:
-        return f"命令执行失败（超时 {_COMMAND_TIMEOUT} 秒被强制终止）：{command[:200]}"
+        try:
+            proc.wait(timeout=_COMMAND_TIMEOUT)
+        except subprocess.TimeoutExpired:
+            _kill_process_tree(proc.pid)
+            try:
+                proc.wait(timeout=5)  # 整树已灭，这只是兜底限时
+            except subprocess.TimeoutExpired:
+                pass
+            return f"命令执行失败（超时 {_COMMAND_TIMEOUT} 秒被强制终止）：{command[:200]}"
 
-    stdout = (proc.stdout or "").strip() or "(无输出)"
-    stderr = (proc.stderr or "").strip() or "(无输出)"
+        out_f.seek(0)
+        err_f.seek(0)
+        encoding = locale.getpreferredencoding(False)  # 与原 text=True 口径一致
+        stdout = out_f.read().decode(encoding, errors="replace").strip() or "(无输出)"
+        stderr = err_f.read().decode(encoding, errors="replace").strip() or "(无输出)"
+
     header = (
         f"命令执行失败（exit_code={proc.returncode}）"
         if proc.returncode != 0
-        else f"exit_code=0"
+        else "exit_code=0"
     )
     return (
         f"{header}\n"

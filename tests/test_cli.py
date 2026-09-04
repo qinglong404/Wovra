@@ -109,6 +109,24 @@ def test_tool_result_green_on_success_red_on_failure(monkeypatch):
     assert "exit_code=1" in failure_line  # 失败原因简要保留
 
 
+def test_system_prompt_matches_mode_and_environment(monkeypatch):
+    """系统提示词按模式写实：managed 才提 expand_history，并附带运行环境。"""
+    import os as _os
+
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    managed = _system_prompt(MODE_MANAGED)
+    baseline = _system_prompt(MODE_BASELINE)
+    assert "expand_history" in managed
+    assert "expand_history" not in baseline  # baseline 没注册这个工具，不能预告
+    # 运行环境信息防止模型在 Windows 上跑类 Unix 命令
+    if _os.name == "nt":
+        assert "cmd.exe" in managed and "Windows" in managed
+    else:
+        assert "Linux" in managed
+
+
 # ---- delete：编号/完整 id、确认交互、--force、活锁拒绝 -----------------------
 
 

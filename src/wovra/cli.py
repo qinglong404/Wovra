@@ -26,6 +26,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 
 from . import task as task_module
 from . import ui
@@ -143,10 +144,20 @@ def _release_session_lock(task: Task) -> None:
 def _flush_stdin() -> None:
     """清空终端输入缓冲。
 
-    流式输出的几十秒里用户往往已经开始敲下一个问题——这些按键
-    会留在 tty 缓冲区里，等下一次读输入时被瞬间吞掉当成输入提交。
-    提示输入前先丢弃缓冲，宁可让用户重打这几个字，也不误发半句话。
+    流式输出/工具执行的几十秒里用户往往已经开始敲键——这些按键
+    会留在终端输入缓冲里，等下一次读输入时被瞬间吞掉当成提交。
+    Windows 没有 termios，此前这里是静默 no-op，等待期的回车会
+    堆积成连串空输入；Windows 用 msvcrt 逐个取走缓冲事件。
+    宁可让用户重打这几个字，也不误发半句话。
     """
+    if os.name == "nt":
+        import msvcrt
+
+        for _ in range(1000):  # 上限防病态循环
+            if not msvcrt.kbhit():
+                break
+            msvcrt.getwch()  # 宽字符版：中文/功能键也一并丢弃
+        return
     try:
         import termios
 
@@ -175,6 +186,44 @@ def _read_input() -> str:
         return input(ui.user_prompt())
 
 
+def _system_prompt(mode: str) -> str:
+    """按模式生成系统提示词：只写已实现的能力，并附带当前运行环境。
+
+    写实约束：模型会把提示词当成"已有能力清单"，写了没实现的功能
+    它就会真的去调用——所以每个模式只描述自己实际的行为。
+    环境信息（OS/Shell）防止在 Windows 上跑类 Unix 命令
+    （ls/rm/apt），白白浪费一步工具调用。
+    """
+    import platform
+
+    if os.name == "nt":
+        env = (
+            f"当前环境：Windows {platform.release()}，shell 是 cmd.exe——"
+            "命令用 Windows 语法（dir/copy/del/start），没有 ls/rm/grep/apt。"
+        )
+    else:
+        env = "当前环境：Linux，shell 是 POSIX sh。"
+
+    common = (
+        "你是 Wovra 的执行助手。会话持久化在磁盘上：每轮结束自动保存，"
+        "用户可随时退出、下次接着做。需要时使用工具获取真实信息或完成任务："
+        "找内容用 search_files，读大文件用 read_file 的 start_line 分段；"
+        "可以创建、修改项目内的文件，运行安全的 shell 命令。回答保持简洁。"
+    )
+    if mode == MODE_MANAGED:
+        extra = (
+            "上下文由 Runtime 分层管理：最近几轮全量保留，更早的轮次被"
+            "降档成一行索引；需要更早轮次的细节时，用 expand_history 工具"
+            "按 ID（如 R3 或 R3-E02）展开，不要凭记忆猜测。"
+        )
+    else:
+        extra = (
+            "上下文为全量回放，接近窗口上限时较早轮次会自动压缩成摘要"
+            "（baseline 对照模式，行为与常见 Agent 一致）。"
+        )
+    return f"{common}{extra}{env}"
+
+
 def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool = False) -> Agent:
     """为任务构造一个带默认工具集的 Agent（展示回调在 _run_turn 注入）。
 
@@ -186,12 +235,7 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
     run 模式关——一次性进程退出前必须同步完成）。
     """
     return Agent(
-        system_prompt=(
-            "你是 Wovra，一个长时运行任务的管理执行助手。"
-            "需要时使用提供的工具获取真实信息：找内容用 search_files，"
-            "读大文件用 start_line 分段；可以创建、修改项目内的文件，"
-            "运行安全的 shell 命令来完成任务。回答保持简洁。"
-        ),
+        system_prompt=_system_prompt(mode),
         tools=[
             get_current_time,
             list_files,
@@ -334,14 +378,41 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         print(text, end="", flush=True)
         line_open = True
 
+    # 工具执行看门狗：超过一步工具的等待里终端完全静默，用户分不清
+    # "在干活"和"卡死"。执行窗口内主线程阻塞在工具里、流式输出和
+    # 输入行都不活跃，这个看门狗线程是唯一安全的打印者
+    tool_watch_stop = threading.Event()
+    tool_watch_thread: threading.Thread | None = None
+
+    def _start_tool_watch(name: str) -> None:
+        nonlocal tool_watch_thread
+        tool_watch_stop.clear()
+        step = 10
+
+        def _tick() -> None:
+            waited = 0
+            while not tool_watch_stop.wait(step):
+                waited += step
+                print(ui.wait_hint(f"{name} 已执行 {waited} 秒…"), flush=True)
+
+        tool_watch_thread = threading.Thread(target=_tick, daemon=True)
+        tool_watch_thread.start()
+
+    def _stop_tool_watch() -> None:
+        tool_watch_stop.set()
+        if tool_watch_thread is not None:
+            tool_watch_thread.join(timeout=1)  # 等待中的 tick 自然退出，不会补打
+
     def on_tool_call(name: str, arguments: str) -> None:
         nonlocal line_open, phase
         _break_line()
         phase = ""
         print(ui.tool_call(name), flush=True)
+        _start_tool_watch(name)
 
     def on_tool_result(name: str, result: str) -> None:
         nonlocal line_open, phase
+        _stop_tool_watch()
         _break_line()
         phase = ""
         print(ui.tool_result(result), flush=True)

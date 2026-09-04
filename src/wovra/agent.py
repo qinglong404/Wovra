@@ -945,7 +945,11 @@ def _schema_of(fn: Callable) -> dict:
         properties[name] = {"type": json_type}
 
     doc = inspect.getdoc(fn)
-    description = doc.splitlines()[0] if doc else fn.__name__
+    # 描述取首段（空行分隔、折叠空白）：关键使用约束（如 run_command
+    # 的超时与常驻服务警告）往往一行装不下，首段才能完整送达模型
+    description = (
+        " ".join(doc.split("\n\n")[0].split()) if doc else fn.__name__
+    )
 
     return {
         "type": "function",

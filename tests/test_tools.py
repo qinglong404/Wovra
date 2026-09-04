@@ -222,3 +222,40 @@ def test_dangerous_command_is_audited_and_not_executed(monkeypatch, tmp_path):
     assert "已拒绝执行危险命令" in tool_msg["content"]
     # 审计记录完整保留了试图执行的命令原文
     assert any("rm -rf /" in e["detail"] for e in task.history if e["kind"] == "file_change")
+
+
+def test_run_command_timeout_kills_whole_tree(monkeypatch):
+    """超时后返回失败消息、不留孤儿进程：孙进程攥着管道曾把清理阶段
+    永久挂死（Windows），整树击杀后限时清理必然快速返回。"""
+    import os as _os
+    import subprocess as _subprocess
+    import time as _time
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "_COMMAND_TIMEOUT", 1)
+    # 前台常驻命令：shell 外壳下跑一个远超超时时间的休眠子进程
+    sleeper = "ping -n 11 127.0.0.1" if _os.name == "nt" else "sleep 10"
+
+    started = _time.monotonic()
+    result = run_command(sleeper)
+    elapsed = _time.monotonic() - started
+
+    assert "超时 1 秒被强制终止" in result
+    assert elapsed < 8  # 清理若挂死会远超此值
+
+    if _os.name == "nt":
+        listing = _subprocess.run(
+            ["tasklist", "/FI", "IMAGENAME eq ping.exe"],
+            capture_output=True,
+        ).stdout.decode("utf-8", errors="replace")
+        assert "ping.exe" not in listing  # 孙进程不留孤儿
+
+
+def test_schema_description_carries_first_paragraph():
+    """工具描述取 docstring 首段：run_command 的常驻服务警告必须送达模型。"""
+    from wovra.agent import _schema_of
+
+    description = _schema_of(run_command)["function"]["description"]
+    assert "常驻服务" in description
+    assert "60 秒" in description
