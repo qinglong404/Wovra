@@ -43,3 +43,6 @@ output/
 # Logs
 *.log
 logs/
+
+# Wovra agent 的工作目录（会话内动态创建）
+.wovra-workspace-*/

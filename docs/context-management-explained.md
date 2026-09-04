@@ -283,7 +283,6 @@ compaction    压缩的钱（对照组的阈值压缩）
 | `WOVRA_HISTORY_BUDGET_RATIO` | 0.3 | 历史加载预算 = 窗口 × 比例（决定几轮后开始降档） |
 | `WOVRA_CONTEXT_LIMIT` | 1,000,000 | 模型窗口（决定预算绝对值与 baseline 阈值） |
 | `WOVRA_COMPRESS_THRESHOLD` | 0.8 | baseline 压缩触发点（× 窗口） |
-| `WOVRA_OPEN_ROUND_EVENT_LIMIT` | 50 | 开放轮事件软限制（超出部分折叠为索引） |
 | `TRUNCATED_LIMIT` | 120 字符 | 每条索引行的长度 |
 | `SAFE_RESULT_LIMIT` | 2000 字符 | 安全阈值 |
 | `STATE_LIST_CAP` | 200 条 | 任务状态每类容量 |
