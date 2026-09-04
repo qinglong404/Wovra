@@ -596,7 +596,7 @@ def test_read_file_blocks_escape_from_project_root():
 
 
 def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
-    """步数只统计干活的步；整理调用在用途分账里单独体现。"""
+    """步数只统计干活的步；整理成本走维护账本，随 usage 行落盘不漏记。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
         "normalized_user_input": "意图",
@@ -614,5 +614,117 @@ def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
     agent.run("问")
 
     assert agent.last_stats["llm_calls"] == 1  # 只有干活的 1 步
-    org = agent.last_stats["purpose"]["organization"]
-    assert org["total"] > 0  # 整理的成本单独记账
+    assert agent.last_stats["total_tokens"] == 0  # 整理成本不混进干活的账
+    assert agent.last_maint["organization"]["total"] == 90  # 记账时取走的快照（展示层用）
+    recorded = [e for e in task.history if e["kind"] == "usage"][-1]["detail"]
+    assert "org=90" in recorded  # usage 记账发生在 drain 之后，成本落盘
+    assert agent.drain_maintenance_usage()["organization"]["total"] == 0  # 账已清零不重复记
+
+
+def test_open_round_records_usage_on_finalize(monkeypatch, tmp_path):
+    """超限/中断的开放轮也要记账——失败尝试的成本不能在账本上隐身。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+
+    def noop():
+        """什么也不做。"""
+
+    responses = [
+        [
+            _chunk(_delta(tool_calls=[_fragment(0, id="c1", name="noop", arguments="{}")])),
+            _chunk(usage=_usage(10, 5, 15)),
+        ]
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[noop], task=task, max_turns=1)
+
+    with pytest.raises(RuntimeError):
+        agent.run("问")
+    agent.finalize_round("open")
+
+    usage_events = [e for e in task.history if e["kind"] == "usage"]
+    assert usage_events, "开放轮也要有 usage 记账"
+    detail = usage_events[-1]["detail"]
+    assert "total=15" in detail
+    assert "轮未闭合" in detail
+
+
+def test_usage_record_includes_cache_fields(monkeypatch, tmp_path):
+    """usage 落盘要带缓存命中/未命中/等效输入——缓存是成本差异的核心变量。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    responses = [[_chunk(_delta(content="ok")), _chunk(usage=_usage(10, 2, 12, cached=4))]]
+    task = Task.create(goal="g")
+    # baseline：不触发整理调用，账目只来自这一次干活调用
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, context_mode="baseline")
+
+    agent.run("问")
+
+    detail = [e for e in task.history if e["kind"] == "usage"][-1]["detail"]
+    assert "缓存命中 4 tok（40.0%）" in detail
+    assert "等效输入 6 tok" in detail  # 未命中 6 + 命中 4/30 ≈ 6
+
+
+def test_current_round_events_not_folded():
+    """轮内赦免：开放轮事件全量进上下文（旧折叠机制曾诱发重读死循环）。"""
+    from wovra import truncate
+
+    agent = _agent_with([])
+    agent.rounds = []
+    agent.current_round = {
+        "seq": 1, "user_input": {"original": "q", "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open", "org_state": "",
+    }
+    agent.messages = []
+    for i in range(60):
+        event = truncate.make_event(
+            f"R1-E{i:02d}", "tool_result",
+            {"role": "tool", "tool_call_id": f"c{i}", "content": f"内容标记{i}" * 30},
+            tool_name="read_file",
+        )
+        agent.current_round["events"].append(event)
+        agent.messages.append(event["message"])
+
+    msgs = agent._assemble_messages()
+    joined = json.dumps(msgs, ensure_ascii=False)
+    assert "内容标记0" in joined and "内容标记59" in joined  # 首尾都在
+    assert "已折叠" not in joined
+
+
+def test_file_map_lists_files_from_demoted_rounds():
+    """文件地图：降档轮次里写/读过的文件以清单形式注入装配。"""
+    from wovra import truncate
+
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content="ok"))]]),
+        tools=[], max_recent_rounds=1,
+    )
+    write_call = {
+        "role": "assistant", "content": "",
+        "tool_calls": [{
+            "id": "c1", "type": "function",
+            "function": {
+                "name": "write_file",
+                "arguments": json.dumps({"path": "docs/a.md", "content": "x"}),
+            },
+        }],
+    }
+    agent.rounds = [
+        {
+            "seq": 1, "user_input": {"original": "写文档", "normalized": ""},
+            "events": [truncate.make_event("R1-E01", "tool_call", write_call)],
+            "refined_index": {}, "end_state": "completed", "org_state": "done",
+        },
+        {
+            "seq": 2, "user_input": {"original": "继续", "normalized": ""},
+            "events": [truncate.make_event(
+                "R2-E01", "final_answer", {"role": "assistant", "content": "好"}
+            )],
+            "refined_index": {}, "end_state": "completed", "org_state": "done",
+        },
+    ]
+    agent.current_round = None
+    agent.messages = []
+
+    msgs = agent._assemble_messages()
+    joined = json.dumps(msgs, ensure_ascii=False)
+    assert "docs/a.md" in joined
+    assert "写于 R1" in joined

@@ -149,13 +149,14 @@ def status_line(text: str) -> str:
 _CACHE_RATE = 30  # 缓存价 = 未命中的 1/30（与 agent/truncate 口径一致）
 
 
-def usage_line(stats: dict) -> str:
+def usage_line(stats: dict, maint: dict | None = None) -> str:
     """一次 run 的成本核算行：轮次/步数/工具调用 + tokens 用量与构成。
 
     所有占比保留 1 位小数；输入构成来自本地估算的相对占比，按
     服务端返回的真实 prompt_tokens 等比校准——各分项之和等于输入
     总量。缓存命中依赖服务端的 prompt_tokens_details，漏报的调用
-    按 0 命中计入未命中（口径见 Agent）。
+    按 0 命中计入未命中（口径见 Agent）。maint 是维护账本快照
+    （整理/压缩成本，异步跨轮次，由 Agent 记账时取走）。
     """
     parts = [
         f"耗时 {stats['seconds']:.1f}s",
@@ -182,9 +183,9 @@ def usage_line(stats: dict) -> str:
     else:
         parts.append("tokens：服务端未返回 usage")
 
-    purpose = stats.get("purpose") or {}
-    org = purpose.get("organization", {}).get("total", 0)
-    comp = purpose.get("compaction", {}).get("total", 0)
+    maint = maint or {}
+    org = (maint.get("organization") or {}).get("total", 0)
+    comp = (maint.get("compaction") or {}).get("total", 0)
     if org:
         parts.append(f"整理 {org:,} tok")
     if comp:

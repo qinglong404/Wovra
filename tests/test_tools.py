@@ -259,3 +259,15 @@ def test_schema_description_carries_first_paragraph():
     description = _schema_of(run_command)["function"]["description"]
     assert "常驻服务" in description
     assert "60 秒" in description
+
+
+def test_schema_description_carries_first_paragraph():
+    """工具描述取 docstring 首段：关键使用约束必须完整送达模型。"""
+    from wovra.agent import _schema_of
+
+    description = _schema_of(run_command)["function"]["description"]
+    assert "常驻服务" in description
+    assert "60 秒" in description
+
+    read_desc = _schema_of(read_file)["function"]["description"]
+    assert "num_lines=400" in read_desc  # 通读引导：避免零碎小段反复读

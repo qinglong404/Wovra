@@ -176,6 +176,11 @@ class Task:
         state = TaskState(**(self.task_state or {}))
         state.apply_patch(patch)
         self.task_state = asdict(state)
+        # is_done 与粗粒度状态机打通：整理判定完成 → status=done，
+        # 避免 report 里"任务已完成"与 list 里"进行中"两本账打架
+        if patch.get("is_done") is True and self.status != "done":
+            self.status = "done"
+            self.updated_at = datetime.now().isoformat(timespec="seconds")
 
     def get_state(self) -> TaskState:
         """以 TaskState 对象的形式读取当前任务状态。"""

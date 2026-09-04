@@ -128,3 +128,14 @@ def test_empty_task_state_renders_nothing():
     assert TaskState().render() == ""
     # 有一点内容才出现标题
     assert "[任务状态]" in TaskState(goal="有目标").render()
+
+
+def test_state_patch_done_syncs_task_status():
+    """整理判定 is_done=true → Task.status 同步为 done，两本账不打架。"""
+    task = Task.create(goal="g")
+    assert task.status == "in_progress"
+
+    task.apply_state_patch({"is_done": True})
+
+    assert task.get_state().is_done is True
+    assert task.status == "done"

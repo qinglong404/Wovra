@@ -105,7 +105,8 @@ def list_files(directory: str = ".") -> list[str]:
 
 
 def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
-    """按行读取项目内一个文本文件的内容片段。
+    """按行读取项目内一个文本文件的内容片段。需要通读整个文件时，
+    按 num_lines=400 连续分段读取，不要零碎小段反复读。
 
     大文件请配合 search_files 先定位，再用 start_line/num_lines
     分段读取——单次最多 400 行，返回值会标明文件总行数和

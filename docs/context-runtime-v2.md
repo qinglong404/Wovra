@@ -382,7 +382,8 @@ latency（本轮墙钟、整理耗时）
 | `WOVRA_MAX_RECENT_ROUNDS` | 3 | **Recent Full-Resolution Window**（经验参数，非理论最优） |
 | `WOVRA_CONTEXT_LIMIT` | 1,000,000 | 模型窗口大小 |
 | `WOVRA_COMPRESS_THRESHOLD` | 0.8 | baseline 压缩触发阈值 |
-| `WOVRA_OPEN_ROUND_EVENT_LIMIT` | 50 | 开放 Round 的软限制（见 4.6） |
+
+> `WOVRA_OPEN_ROUND_EVENT_LIMIT` 已随 9.1 的软限制一起废除（2026-09-05）。
 
 ### 代码常量
 
@@ -397,12 +398,20 @@ latency（本轮墙钟、整理耗时）
 
 ## 9. 其他实现守则
 
-### 9.1 开放 Round 的规模软限制 **[修订]**
+### 9.1 开放 Round 的轮内赦免 **[废除原软限制]**
 
-开放 Round 是"当前 Round"，全量加载——但反复中断可能积累大量事件。
-软限制：开放 Round 事件数超过 `WOVRA_OPEN_ROUND_EVENT_LIMIT`（50）时，
-加载时只保留**最近 30 条**全量，更早的事件以 Truncated 行占位
-（Full 不变，可展开）。防止一个跨会话的开放 Round 让所有预算失效。
+~~开放 Round 事件数超过 `WOVRA_OPEN_ROUND_EVENT_LIMIT`（50）时，
+加载时只保留最近 30 条全量~~——**此机制已废除**。
+
+实测（2026-09-04 会话 fbd3e6 R11）：折叠把模型**同一轮里刚读到的
+文件内容**也折成了一行索引，诱发"读 → 折叠 → 失忆 → 重读"的死循环
+——40 步上限内 39 次 read_file 重读同一文件，只完成 3 个 edit。
+这与"轮内赦免"的设计初衷直接冲突。现行规则：
+
+* 开放 Round 事件**全量**进入上下文，不折叠；
+* 单条事件的成本由 Event 级安全截断（`SAFE_RESULT_LIMIT`）兜底；
+* 降档历史的文件内容靠"文件地图"（`_file_map_lines`：路径 +
+  写/读轮次）指引精准定位，而不是盲目分片重爬。
 
 ### 9.2 工具截断模板的质量 **[新增]**
 
@@ -428,7 +437,7 @@ RefinedIndex 的质量上限由 Truncated 决定。每种工具的截断规则
 4. baseline 80% × 窗口阈值压缩
 5. 指标落地：usage 事件记录三分账（working/organization/expansion）、
    CHR、effective tokens
-6. 会话锁文件、开放轮软限制、截断模板测试
+6. 会话锁文件、截断模板测试（开放轮软限制已废除，见 9.1）
 7. 保留不变：审计、破坏性防护、展示层行纪律、prompt_toolkit 输入
 
 ---

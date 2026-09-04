@@ -450,14 +450,14 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         print(ui.error(str(error)))
         print(ui.info("本轮保持开放，直接继续对话即可接着干。"))
         _drain_status(agent)
-        print(ui.usage_line(agent.last_stats))
+        print(ui.usage_line(agent.last_stats, maint=agent.last_maint))
         return ""
     except Exception:
         agent.finalize_round("open")  # 其他异常同理；失败尝试并入本轮
         raise
     _break_line()
     _drain_status(agent)  # 后台整理/压缩的完成消息，排在成本行之前
-    print(ui.usage_line(agent.last_stats))
+    print(ui.usage_line(agent.last_stats, maint=agent.last_maint))
     return answer
 
 
@@ -545,9 +545,17 @@ def cmd_chat(args: argparse.Namespace) -> None:
         if not agent.flush_organization(timeout=10.0):
             print(ui.info("仍有整理任务在后台未完成，将在下次打开会话时补跑。"))
 
-        # 退出前等待后台整理收尾（最多 10 秒），未完成的轮次标记 pending
-        if not agent.flush_organization(timeout=10.0):
-            print(ui.info("仍有整理任务在后台未完成，将在下次打开会话时补跑。"))
+        # 收尾期完成的整理/压缩成本补记：最后一次 usage 记账发生在
+        # 最终回答时刻，之后的异步整理不补记就会漏掉
+        leftover = agent.drain_maintenance_usage()
+        if leftover["organization"]["total"] or leftover["compaction"]["total"]:
+            task.record(
+                "usage",
+                f"[{agent.context_mode}] org={leftover['organization']['total']:,} "
+                f"compaction={leftover['compaction']['total']:,}"
+                "（会话退出收尾补记）",
+            )
+            task.save()
     finally:
         _release_session_lock(task)
 

@@ -47,9 +47,8 @@ _DEFAULT_HISTORY_BUDGET_RATIO = float(os.environ.get("WOVRA_HISTORY_BUDGET_RATIO
 _DEFAULT_MAX_RECENT_ROUNDS = int(os.environ.get("WOVRA_MAX_RECENT_ROUNDS", "3"))
 _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 
-# 开放 Round 的规模软限制：事件数超限后，加载时只保留最近若干条全量
-_OPEN_ROUND_EVENT_LIMIT = int(os.environ.get("WOVRA_OPEN_ROUND_EVENT_LIMIT", "50"))
-_OPEN_ROUND_KEEP_FULL = 30
+# 维护性用途：异步执行、可能跨越轮次边界，成本单独记账（不混入 last_stats）
+_MAINTENANCE_PURPOSES = ("organization", "compaction")
 
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
@@ -139,6 +138,14 @@ class Agent:
         self._org_queue: queue.Queue = queue.Queue()
         self._org_thread: Optional[threading.Thread] = None
         self._save_lock = threading.Lock()
+        # 维护账本：整理/压缩的用量单独累计（异步、跨轮次边界），
+        # 由每次 usage 记账时统一取走；last_maint 存最近一次快照供展示
+        self._maint_usage = {
+            "organization": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
+            "compaction": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
+        }
+        self._maint_lock = threading.Lock()
+        self.last_maint: dict = {}
         # 端点不支持整理参数的降级提示：每次会话只提示一次，避免每轮刷屏
         self._degrade_warned = False
 
@@ -253,10 +260,15 @@ class Agent:
             self._enqueue_organization(self.rounds[-1])
 
     def finalize_round(self, end_state: str = "open") -> None:
-        """CLI 异常/中断路径：Round 保持开放（不闭合、不整理），仅持久化。"""
+        """CLI 异常/中断路径：Round 保持开放（不闭合、不整理），仅持久化。
+
+        中断/超限轮的成本照记（带"轮未闭合"标记）——失败尝试花的
+        也是真金白银，而且正是上下文管理最该优化的对象。
+        """
         if self.current_round is None:
             return
         self.current_round["end_state"] = "open"
+        self._usage_record_and_drain(closed=False)
         self._persist_rounds()
         self.current_round = None
 
@@ -322,17 +334,7 @@ class Agent:
                 self.task.record("final_answer", answer)
             self.close_round()
             if self.task is not None:
-                if self.context_mode == MODE_BASELINE:
-                    self._baseline_accounting()
-                self.task.record(
-                    "usage",
-                    f"[{self.context_mode}] working={self.last_stats['purpose']['working']['total']} "
-                    f"org={self.last_stats['purpose']['organization']['total']} "
-                    f"compaction={self.last_stats['purpose']['compaction']['total']} "
-                    f"prompt={self.last_stats['prompt_tokens']} "
-                    f"completion={self.last_stats['completion_tokens']} "
-                    f"total={self.last_stats['total_tokens']}（思考 {self.last_stats['reasoning_tokens']}）",
-                )
+                self._usage_record_and_drain(closed=True)
                 self._persist_rounds()
             return answer
 
@@ -454,18 +456,87 @@ class Agent:
                     acc["arguments"] += fragment.function.arguments
 
         elapsed = time.monotonic() - start
-        self.last_stats["seconds"] += elapsed
-        bucket = self.last_stats["purpose"].setdefault(
-            purpose, {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0}
-        )
         if usage is not None:
             self._accumulate_usage(usage, purpose)
-        bucket["seconds"] += elapsed
+        if purpose in _MAINTENANCE_PURPOSES:
+            # 维护性开销异步执行、可能跨越轮次边界，混进 last_stats 会
+            # 漏记（会话结束丢失）或错记进下一轮（实测教训）
+            with self._maint_lock:
+                self._maint_usage[purpose]["seconds"] += elapsed
+        else:
+            self.last_stats["seconds"] += elapsed
+            self.last_stats["purpose"].setdefault(
+                purpose, {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0}
+            )["seconds"] += elapsed
         ordered = [tool_calls_acc[i] for i in sorted(tool_calls_acc)]
         return "".join(content_parts), ordered, usage
 
+    def drain_maintenance_usage(self) -> dict:
+        """取走并清零维护账本（整理/压缩的累计用量），线程安全。
+
+        快照交给调用方记账；同时存入 last_maint 供展示层（usage_line）。
+        """
+        with self._maint_lock:
+            snapshot = {k: dict(v) for k, v in self._maint_usage.items()}
+            for v in self._maint_usage.values():
+                for key in v:
+                    v[key] = 0
+        self.last_maint = snapshot
+        return snapshot
+
+    def _usage_record_and_drain(self, closed: bool) -> None:
+        """把本轮成本写入任务历史并清空维护账本。
+
+        开放轮（超限/中断）同样记账——失败尝试的成本恰恰是上下文
+        管理最该优化的对象，不能因为轮没闭合就在账本上隐身。
+        """
+        if self.task is None:
+            return
+        if self.context_mode == MODE_BASELINE:
+            self._baseline_accounting()
+        maint = self.drain_maintenance_usage()
+        stats = self.last_stats
+        prompt = stats["prompt_tokens"]
+        cached = stats["cached_tokens"]
+        miss = stats["cache_miss_tokens"]
+        cache_info = ""
+        if prompt:
+            cache_info = (
+                f" 缓存命中 {cached:,} tok（{cached / prompt:.1%}）"
+                f" 未命中 {miss:,} tok（{miss / prompt:.1%}）"
+                f" 等效输入 {miss + cached / _CACHE_RATE:,.0f} tok"
+            )
+        suffix = "" if closed else "（轮未闭合：超限/中断，成本照记）"
+        self.task.record(
+            "usage",
+            f"[{self.context_mode}] working={stats['purpose']['working']['total']:,} "
+            f"org={maint['organization']['total']:,} "
+            f"compaction={maint['compaction']['total']:,} "
+            f"prompt={prompt:,} completion={stats['completion_tokens']:,} "
+            f"total={stats['total_tokens']:,}（思考 {stats['reasoning_tokens']:,}）"
+            f"{cache_info}{suffix}",
+        )
+
     def _accumulate_usage(self, usage, purpose: str) -> None:
-        """把一次调用的 usage 累加进总账与用途分账。"""
+        """把一次调用的 usage 记进账本。
+
+        working 记入本轮 last_stats（最终回答即记账）；整理/压缩是
+        维护性开销且可能异步跨越轮次边界，记入独立维护账本，由
+        _usage_record_and_drain 在记账时统一取走，不与干活的成本混账。
+        """
+        details = getattr(usage, "completion_tokens_details", None)
+        reasoning_tokens = getattr(details, "reasoning_tokens", None)
+        prompt_details = getattr(usage, "prompt_tokens_details", None)
+        cached = getattr(prompt_details, "cached_tokens", None) or 0
+
+        if purpose in _MAINTENANCE_PURPOSES:
+            with self._maint_lock:
+                bucket = self._maint_usage[purpose]
+                bucket["prompt"] += usage.prompt_tokens or 0
+                bucket["completion"] += usage.completion_tokens or 0
+                bucket["total"] += usage.total_tokens or 0
+            return
+
         self.last_stats["prompt_tokens"] += usage.prompt_tokens or 0
         self.last_stats["completion_tokens"] += usage.completion_tokens or 0
         self.last_stats["total_tokens"] += usage.total_tokens or 0
@@ -476,13 +547,8 @@ class Agent:
         bucket["completion"] += usage.completion_tokens or 0
         bucket["total"] += usage.total_tokens or 0
 
-        details = getattr(usage, "completion_tokens_details", None)
-        reasoning_tokens = getattr(details, "reasoning_tokens", None)
         if reasoning_tokens:
             self.last_stats["reasoning_tokens"] += reasoning_tokens
-
-        prompt_details = getattr(usage, "prompt_tokens_details", None)
-        cached = getattr(prompt_details, "cached_tokens", None) or 0
         self.last_stats["cached_tokens"] += cached
         self.last_stats["cache_miss_tokens"] += max(
             0, (usage.prompt_tokens or 0) - cached
@@ -495,8 +561,8 @@ class Agent:
 
         [1] system 人设（静态）
         [2] 历史轮次视图（少变：闭合时成形，之后不可变）
-        [3] Task State + 降档轮次的一行索引（每轮变——放尾部）
-        [4] 当前 Round 事件（追加式；超长开放轮做软限制）
+        [3] Task State + 降档轮次的一行索引 + 文件地图（每轮变——放尾部）
+        [4] 当前 Round 事件（追加式全量，轮内赦免）
         """
         past = [r for r in self.rounds if r is not self.current_round]
 
@@ -568,6 +634,13 @@ class Agent:
         if tier3_lines:
             block.append("[历史索引]（已降档轮次，可用 expand_history 展开）")
             block += tier3_lines
+        file_map = self._file_map_lines(older)
+        if file_map:
+            block.append(
+                "[历史涉及文件]（内容已随轮次降档，修改前先 read_file 获取现状，"
+                "通读时按 num_lines=400 连续分段）"
+            )
+            block += file_map
         if block:
             view_msgs.append({"role": "user", "content": "\n\n".join(block)})
 
@@ -576,20 +649,14 @@ class Agent:
         return msgs
 
     def _current_round_messages(self) -> list[dict]:
-        """当前 Round 的消息；开放轮超长时做软限制（最近若干条全量）。"""
-        if self.current_round is None:
-            return list(self.messages)
-        events = self.current_round["events"]
-        if len(events) <= _OPEN_ROUND_EVENT_LIMIT:
-            return list(self.messages)
-        keep = _OPEN_ROUND_KEEP_FULL
-        older = events[:-keep]
-        lines = [truncate.event_index_line(e) for e in older]
-        block = {"role": "user", "content": (
-            f"[本轮早期事件（共 {len(older)} 条，已折叠；"
-            f"可用 expand_history 展开）]\n" + "\n".join(lines)
-        )}
-        return [block] + list(self.messages[-keep:])
+        """当前 Round 的消息全量进入上下文（轮内赦免）。
+
+        曾经的"超 50 事件折叠早期事件"软限制已废除：实测它把模型
+        同一轮刚读到的文件内容也折叠掉，诱发反复重读同一文件的
+        死循环（39 次 read_file 烧穿 40 步上限仍未完成任务）。
+        轮内工作集的成本由 Event 级安全截断（SAFE_RESULT_LIMIT）兜底。
+        """
+        return list(self.messages)
 
     def _render_tier1(self, r: dict) -> str:
         """档 1：用户原文 + 意图 + 精修事件索引（预算内的高保真浓缩视图）。"""
@@ -624,6 +691,45 @@ class Agent:
             status = f"[{e['status']}] " if e.get("status") else ""
             out.append(f"[{e['id']}] {status}{line}")
         return out
+
+    def _file_map_lines(self, rounds: list[dict]) -> list[str]:
+        """把降档历史里出现过的文件整理成一张"文件地图"。
+
+        文件内容随轮次降档后，模型曾经只能盲目分片重爬（实测一个
+        轮里 39 次 read_file 重读同一文件）。地图只给"哪些文件、
+        在哪些轮被写过/读过"，指引精准定位，不携带内容成本。
+        """
+        touched: dict[str, dict[str, list[int]]] = {}
+        for r in rounds:
+            for e in r.get("events", []):
+                if e["type"] != "tool_call":
+                    continue
+                for tc in e["message"].get("tool_calls", []) or []:
+                    fn = tc.get("function", {})
+                    if fn.get("name") not in ("write_file", "edit_file", "read_file"):
+                        continue
+                    try:
+                        path = json.loads(fn.get("arguments") or "{}").get("path")
+                    except ValueError:
+                        continue
+                    if not path:
+                        continue
+                    info = touched.setdefault(path, {"w": [], "r": []})
+                    if fn["name"] == "read_file":
+                        info["r"].append(r["seq"])
+                    else:
+                        info["w"].append(r["seq"])
+        lines = []
+        for path, info in touched.items():
+            parts = []
+            if info["w"]:
+                wrote = "R" + ",R".join(dict.fromkeys(map(str, info["w"])))
+                parts.append(f"写于 {wrote}")
+            if info["r"]:
+                read = "R" + ",R".join(dict.fromkeys(map(str, info["r"])))
+                parts.append(f"读于 {read}")
+            lines.append(f"- {path}（{'；'.join(parts)}）")
+        return lines
 
     @staticmethod
     def _head_text(text: str, limit: int) -> str:
