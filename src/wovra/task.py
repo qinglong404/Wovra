@@ -88,8 +88,12 @@ class TaskState:
             del merged[: max(0, len(merged) - STATE_LIST_CAP)]
 
     def render(self, budget: int | None = None) -> str:
-        """渲染成给模型看的文本块（注入 system context）。"""
-        lines = ["[任务状态]"]
+        """渲染成给模型看的文本块。
+
+        空状态返回空串——新会话不给模型一个空的任务状态头
+        （否则模型会困惑"任务状态是空的"）。
+        """
+        lines = []
         if self.goal:
             lines.append(f"目标：{self.goal}")
         if self.current_status:
@@ -106,6 +110,9 @@ class TaskState:
             items = getattr(self, name)
             if items:
                 lines.append(f"{label}：" + "；".join(items))
+        if not lines:
+            return ""
+        lines.insert(0, "[任务状态]")
         text = "\n".join(lines)
         if budget and len(text) > budget:
             text = text[:budget] + "\n(任务状态过长已截断)"

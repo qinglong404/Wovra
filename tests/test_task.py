@@ -119,3 +119,12 @@ def test_context_includes_goal_summary_and_recent_history(monkeypatch, tmp_path)
     assert "给模型看的目标" in context
     assert "模型该知道的进展" in context
     assert "tool_call" in context
+
+
+def test_empty_task_state_renders_nothing():
+    """新会话的空状态渲染为空串——不给模型一个空的 [任务状态] 头。"""
+    from wovra.task import TaskState
+
+    assert TaskState().render() == ""
+    # 有一点内容才出现标题
+    assert "[任务状态]" in TaskState(goal="有目标").render()

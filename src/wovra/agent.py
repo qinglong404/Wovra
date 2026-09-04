@@ -397,7 +397,10 @@ class Agent:
         purpose ∈ working / organization / compaction：成本按用途分账，
         实验才能回答"管理机制自身贵不贵"。
         """
-        self.last_stats["llm_calls"] += 1
+        # "步数"只统计干活的步（agent 循环）；整理/压缩是维护开销，
+        # 在用途分账与"整理 X tok"里单独体现，不混进步数
+        if purpose == "working":
+            self.last_stats["llm_calls"] += 1
         start = time.monotonic()
         try:
             stream = self.llm.chat(messages, tools=tools, stream=True, extra_body=extra_body)

@@ -593,3 +593,25 @@ def test_agent_records_events_into_task(monkeypatch, tmp_path):
 def test_read_file_blocks_escape_from_project_root():
     with pytest.raises(ValueError, match="路径越界"):
         read_file("../../etc/passwd")
+
+
+def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
+    """步数只统计干活的步；整理调用在用途分账里单独体现。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_json = json.dumps({
+        "normalized_user_input": "意图",
+        "refined_index": [],
+        "state_patch": {"completed": ["完成"]},
+    }, ensure_ascii=False)
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+        [_chunk(_delta(content=org_json))],  # 整理调用（managed 同步）
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    agent.run("问")
+
+    assert agent.last_stats["llm_calls"] == 1  # 只有干活的 1 步
+    org = agent.last_stats["purpose"]["organization"]
+    assert org["total"] > 0  # 整理的成本单独记账
