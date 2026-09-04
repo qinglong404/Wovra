@@ -54,6 +54,20 @@ _OPEN_ROUND_KEEP_FULL = 30
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
 _CACHE_RATE = 30  # 缓存价 = 未命中的 1/30
+# 单轮工具循环的默认步数上限：真实任务步数轻松上两位数，10 步远远不够
+_DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "40"))
+
+# 工具名 → 进度提示的动作词（"正在<动作>…"）
+_ACTION_WORDS = {
+    "write_file": "写入文件",
+    "edit_file": "修改文件",
+    "run_command": "运行命令",
+    "read_file": "读取文件",
+    "search_files": "搜索内容",
+    "list_files": "查看目录",
+    "get_current_time": "获取当前时间",
+    "expand_history": "展开历史",
+}
 
 # 相关性筛选在 V2 中不实现（预算充足时所有浓缩视图直接加载），
 # 保留函数体注释占位：V3 方向见设计文档第 11 节
@@ -76,7 +90,7 @@ class Agent:
         llm: Optional[LLM] = None,
         system_prompt: str = "",
         tools: tuple = (),
-        max_turns: int = 10,
+        max_turns: Optional[int] = None,
         task: Optional[Task] = None,
         context_mode: str = MODE_MANAGED,
         context_limit: Optional[int] = None,
@@ -85,9 +99,12 @@ class Agent:
         async_organization: bool = False,
         on_tool_call: Optional[Callable[[str, str], None]] = None,
         on_tool_result: Optional[Callable[[str, str], None]] = None,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.llm = llm or LLM()
-        self.max_turns = max_turns
+        self.max_turns = max_turns or _DEFAULT_MAX_TURNS
+        # 同步实时进度回调（主线程执行）：等待模型、工具动作的即时提示
+        self.on_progress = on_progress
         self.task = task
         self.context_mode = context_mode
         self.context_limit = context_limit or _DEFAULT_CONTEXT_LIMIT
@@ -262,6 +279,8 @@ class Agent:
             self._persist_rounds()
 
         for _ in range(self.max_turns):
+            if self.on_progress:
+                self.on_progress("等待模型响应…")
             messages = self._assemble_messages()
             content, ordered, _usage = self._stream_call(
                 messages,
@@ -269,6 +288,7 @@ class Agent:
                 purpose="working",
                 on_thinking=on_thinking,
                 on_answer_delta=on_answer_delta,
+                on_progress=self.on_progress,
             )
 
             if ordered:
@@ -320,7 +340,8 @@ class Agent:
         # 由调用方决定后续（重试/人工介入）。
         self._persist_rounds()
         raise RuntimeError(
-            f"agent 超过最大循环次数（{self.max_turns} 轮）仍未给出最终回答"
+            f"本轮已连续工作 {self.max_turns} 步仍未给出最终回答（Round 保持开放，"
+            f"继续对话即可接着干）"
         )
 
     def _execute(self, call_id: str, name: str, arguments: str) -> None:
@@ -369,6 +390,7 @@ class Agent:
         extra_body: Optional[dict] = None,
         on_thinking: Optional[Callable[[str], None]] = None,
         on_answer_delta: Optional[Callable[[str], None]] = None,
+        on_progress: Optional[Callable[[str], None]] = None,
     ) -> tuple[str, list[dict], Any]:
         """发一次流式补全，聚合分片，返回 (内容, 工具调用列表, usage)。
 
@@ -414,13 +436,17 @@ class Agent:
 
             for fragment in delta.tool_calls or []:
                 index = fragment.index or 0
-                acc = tool_calls_acc.setdefault(
-                    index, {"id": "", "name": "", "arguments": ""}
-                )
+                if index not in tool_calls_acc:
+                    tool_calls_acc[index] = {"id": "", "name": "", "arguments": ""}
+                acc = tool_calls_acc[index]
                 if fragment.id:
                     acc["id"] = fragment.id
                 if fragment.function and fragment.function.name:
                     acc["name"] = fragment.function.name
+                    # 名字一分片到达就提示"正在<动作>…"——用户要的是
+                    # 等待时刻的即时反馈，而不是等参数全部输完
+                    if on_progress:
+                        on_progress(f"正在{_action_word(acc['name'])}…")
                 if fragment.function and fragment.function.arguments:
                     acc["arguments"] += fragment.function.arguments
 
@@ -900,6 +926,11 @@ class Agent:
         )
         if self.task is not None:
             self.task.baseline_prompt_used = self._baseline_prompt_used
+
+
+def _action_word(name: str) -> str:
+    """工具名 → 进度提示的动作词（未知工具退回"调用 xxx"）。"""
+    return _ACTION_WORDS.get(name, f"调用 {name}")
 
 
 def _schema_of(fn: Callable) -> dict:

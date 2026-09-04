@@ -136,6 +136,11 @@ def thinking_delta(text: str) -> str:
     return paint(text, "magenta")
 
 
+def wait_hint(text: str) -> str:
+    """等待提示（模型响应中、工具执行中）。"""
+    return paint(f"  ⏳ {text}", "cyan")
+
+
 def status_line(text: str) -> str:
     """系统后台动作的状态行（如"正在整理本轮对话"）。"""
     return paint(f"  … {text}", "cyan")

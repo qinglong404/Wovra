@@ -306,8 +306,17 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         phase = ""
         print(ui.tool_result(result), flush=True)
 
+    def on_progress(text: str) -> None:
+        # 同步回调（主线程执行）：模型响应等待中、工具动作进行中的即时提示。
+        # "正在写入文件中…"在模型刚报出工具名时就显示，不等参数输完
+        nonlocal line_open, phase
+        _break_line()
+        phase = ""
+        print(ui.wait_hint(text), flush=True)
+
     agent.on_tool_call = on_tool_call
     agent.on_tool_result = on_tool_result
+    agent.on_progress = on_progress
 
     try:
         answer = agent.run(
@@ -316,8 +325,18 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     except KeyboardInterrupt:
         agent.finalize_round("open")  # 中断不闭合轮次，事件并入开放轮
         raise
+    except RuntimeError as error:
+        # 步数超限：不是故障，是"本轮干了很多活还没干完"——
+        # 轮次保持开放，用户继续对话即可接着干
+        agent.finalize_round("open")
+        _break_line()
+        print(ui.error(str(error)))
+        print(ui.info("本轮保持开放，直接继续对话即可接着干。"))
+        _drain_status(agent)
+        print(ui.usage_line(agent.last_stats))
+        return ""
     except Exception:
-        agent.finalize_round("open")  # 异常同理；失败尝试并入本轮，不产生整理成本
+        agent.finalize_round("open")  # 其他异常同理；失败尝试并入本轮
         raise
     _break_line()
     _drain_status(agent)  # 后台整理/压缩的完成消息，排在成本行之前
