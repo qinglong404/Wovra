@@ -1,7 +1,6 @@
-"""Runtime 截断器的测试：零 LLM 成本的 Event 生成规则。"""
+"""Runtime 索引行生成器的测试：零 LLM 成本的 Event 生成规则。"""
 
 from wovra.truncate import (
-    SAFE_RESULT_LIMIT,
     make_event,
     render_round_events,
 )
@@ -10,7 +9,7 @@ from wovra.truncate import (
 def test_user_event_truncates_long_input():
     event = make_event("R1-E01", "user", {"role": "user", "content": "好" * 300})
     assert len(event["truncated"]) <= 121  # 120 字 + 省略号
-    assert event["message"]["content"] == "好" * 300  # Full 原样保留
+    assert event["message"]["content"] == "好" * 300  # message 原样保留
 
 
 def test_tool_result_failure_status_is_detected():
@@ -34,16 +33,17 @@ def test_run_command_truncator_extracts_error_lines():
     assert "FileNotFoundError" in event["truncated"]
 
 
-def test_safety_limit_keeps_full_and_marks_reference():
-    big = "日志" * 3000  # 6000 字符 > SAFE_RESULT_LIMIT
+def test_tool_result_content_is_never_truncated():
+    """轮内赦免：大结果原样进上下文（截断曾诱发"读→失忆→重读"死循环）。"""
+    big = "日志" * 3000  # 6000 字符
     event = make_event(
         "R2-E05", "tool_result",
         {"role": "tool", "tool_call_id": "c3", "content": big},
         tool_name="read_file",
     )
-    assert event["full"] == big  # 原文完整保存
-    assert len(event["message"]["content"]) < SAFE_RESULT_LIMIT + 100  # 上下文只放安全范围
-    assert "expand_history" in event["message"]["content"]  # 指回 Full 的引用
+    assert event["message"]["content"] == big  # 原样，不截断
+    assert "full" not in event  # 不再需要分离的原文层（message 即全文）
+    assert "日志" in event["truncated"][:100]  # 索引行照常生成（供整理/降档用）
 
 
 def test_render_round_events_lists_ids():

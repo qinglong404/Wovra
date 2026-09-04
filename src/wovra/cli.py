@@ -537,7 +537,15 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 _chat_help()
                 continue
 
-            answer = _run_turn(agent, user_input)
+            try:
+                answer = _run_turn(agent, user_input)
+            except KeyboardInterrupt:
+                # Ctrl+C 中断本轮：轮已保持开放并记账，回到输入行继续。
+                # 打断的是"这一步"，不是整个会话；再次 Ctrl+C 走正常退出
+                print(
+                    f"\n{ui.info('本轮已中断，进度已保存（轮未闭合）。继续输入可接着干，再次 Ctrl+C 退出。')}"
+                )
+                continue
             if answer:
                 print()
 

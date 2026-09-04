@@ -3,8 +3,9 @@
 设计文档：docs/context-runtime-v2.md（定稿）。核心内容：
 
 * Round/Event：Round 只在 AI 产出最终回答时闭合（开放轮会合并
-  中断/无回复期间的多条用户输入，跨会话持久化）；Event 同时保存
-  Full（原始协议消息）与 Truncated（Runtime 截断，零 LLM 成本）
+  中断/无回复期间的多条用户输入，跨会话持久化）；Event 的 message
+  原样保存（执行期不截断内容），Truncated 是零 LLM 成本的一行索引
+  （供降档索引与整理输入）
 * Organization：轮闭合后进入后台 FIFO 队列异步执行（不阻塞对话），
   输入 = 用户输入们 + 事件截断索引 + 最终回答全文；
   输出 = Normalized 用户意图 + 精修事件索引 + Task State 补丁
@@ -217,16 +218,13 @@ class Agent:
         self.messages = []
 
     def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
-        """把一条协议消息登记为 Event（生成 ID 与 Truncated）。"""
+        """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。"""
         if self.current_round is None:
             self.messages.append(message)
             return {"id": "", "message": message}
         seq = len(self.current_round["events"]) + 1
         event_id = f"R{self.current_round['seq']}-E{seq:02d}"
         event = truncate.make_event(event_id, type, message, tool_name=tool_name)
-        if self.context_mode != MODE_MANAGED and "full" in event:
-            # baseline：不做安全截断，保持"正常现状"的行为
-            event["message"] = {**message}
         self.current_round["events"].append(event)
         self.messages.append(event["message"])
         return event
@@ -649,14 +647,53 @@ class Agent:
         return msgs
 
     def _current_round_messages(self) -> list[dict]:
-        """当前 Round 的消息全量进入上下文（轮内赦免）。
+        """轮内赦免：当前 Round 事件全量进入上下文，不做任何内容截断。
 
-        曾经的"超 50 事件折叠早期事件"软限制已废除：实测它把模型
-        同一轮刚读到的文件内容也折叠掉，诱发反复重读同一文件的
-        死循环（39 次 read_file 烧穿 40 步上限仍未完成任务）。
-        轮内工作集的成本由 Event 级安全截断（SAFE_RESULT_LIMIT）兜底。
+        执行期截断曾两次被实测证明适得其反：折叠诱发"读 → 失忆 →
+        重读"死循环（39 次 read_file 烧穿 40 步上限）；2000 字符
+        安全截断把模型刚读到的文件内容挡在上下文外。唯一的例外是
+        模型窗口本身：估算超过 context_limit 时，把最老的事件折叠
+        为索引行直到回线——最后手段，正常任务永远碰不到。
         """
-        return list(self.messages)
+        msgs = list(self.messages)
+        if self.current_round is None:
+            return msgs
+        events = self.current_round["events"]
+        if len(events) != len(msgs):
+            return msgs  # 结构对不上时不动手（宁超限，不坏数据）
+        budget = int(self.context_limit * 0.9)  # 给最终回答留余量
+        # 廉价预检：最坏 1 字 ≈ 1 tok（CJK），字符数不超预算必在窗内
+        total_chars = sum(len(str(m.get("content") or "")) for m in msgs)
+        if total_chars <= budget:
+            return msgs
+        sizes = [self._estimate_messages([m]) for m in msgs]
+        total = sum(sizes)
+        if total <= budget:
+            return msgs
+        # 每条索引行按 150 tok 保守计价（120 字符 CJK 的上界），宁多折不少折
+        fold, kept = 0, total
+        while fold < len(events) - 1 and kept + fold * 150 + 200 > budget:
+            kept -= sizes[fold]
+            fold += 1
+        lines = [truncate.event_index_line(e) for e in events[:fold]]
+        block = {"role": "user", "content": (
+            f"[紧急折叠：当前轮上下文估算已超模型窗口（{self.context_limit:,} tok），"
+            f"最老 {fold} 条事件折叠为索引；需要细节可用 expand_history 按事件 ID 展开]\n"
+            + "\n".join(lines)
+        )}
+        return [block] + list(msgs[fold:])
+
+    @staticmethod
+    def _estimate_messages(msgs: list[dict]) -> int:
+        """估算一组协议消息的 token 数（正文 + 工具调用参数）。"""
+        total = 0
+        for m in msgs:
+            total += tokens.estimate(str(m.get("content") or ""))
+            for call in m.get("tool_calls") or []:
+                total += tokens.estimate(
+                    (call.get("function") or {}).get("arguments") or ""
+                )
+        return total
 
     def _render_tier1(self, r: dict) -> str:
         """档 1：用户原文 + 意图 + 精修事件索引（预算内的高保真浓缩视图）。"""
@@ -897,6 +934,11 @@ class Agent:
         return [_schema_of(read_full)]
 
     def _read_full_event(self, event_id: str) -> str:
+        """按事件 ID 返回完整原文，不做内容截断。
+
+        旧会话数据可能带分离的 full 字段（旧版安全截断的产物），
+        一并返回保证可读；新数据 message 即全文。
+        """
         for r in self.rounds:
             for e in r["events"]:
                 if e["id"] == event_id:
@@ -904,11 +946,12 @@ class Agent:
                     parts = [f"[{event_id}] {e['type']}"]
                     if message.get("tool_calls"):
                         parts.append(
-                            "调用: " + json.dumps(message["tool_calls"], ensure_ascii=False)[:2000]
+                            "调用: "
+                            + json.dumps(message["tool_calls"], ensure_ascii=False)
                         )
-                    parts.append((message.get("content") or "")[:4000])
+                    parts.append(message.get("content") or "")
                     if e.get("full"):
-                        parts.append("[完整原文]\n" + e["full"][:4000])
+                        parts.append("[完整原文]\n" + e["full"])
                     return "\n".join(parts)
         return f"未找到事件: {event_id}"
 
@@ -982,7 +1025,7 @@ class Agent:
                     continue
                 parts.append(
                     f"--- {e['id']} ({e['type']}) ---\n"
-                    + (e.get("full") or e["message"].get("content") or "")[:2000]
+                    + (e.get("full") or e["message"].get("content") or "")
                 )
             return "\n".join(parts)
         return f"未找到轮次: {round_id}"

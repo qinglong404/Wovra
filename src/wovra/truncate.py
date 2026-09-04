@@ -1,23 +1,21 @@
-"""Event 的 Runtime 截断器：零 LLM 成本的信息概览。
+"""Event 的索引行生成器：零 LLM 成本的信息概览。
 
-职责边界（设计稿第 3/4/14 节）：
+职责边界（2026-09-05 修订——执行期不再截断内容）：
 
-* Event 的 Full = 原始协议消息，永不修改，是事实来源；
-* Truncated = 本模块**用代码**生成的低概览，不调用 LLM——
-  它回答"这里发生过什么"，不试图理解复杂语义；
-* 超大 Event 触发 Context Safety Limit：Full 完整保存，
-  上下文只放"输出过大 + 事件 ID"，细节靠 expand_history 找回。
+* Event 的 message = 原始协议消息，原样保存、原样进上下文。
+  执行期不做任何内容截断：截断曾把模型正在使用的文件内容挡在
+  上下文外，诱发"读 → 失忆 → 重读"死循环（实测 39 次 read_file
+  烧穿 40 步上限）。唯一的天花板是模型窗口本身，由
+  Agent._current_round_messages 在估算超窗时紧急折叠最老事件。
+* Truncated = 本模块**用代码**生成的一行索引（约 120 字符），
+  只服务于两处：降档轮次的索引行、Organization 阶段的输入——
+  压缩发生在整理侧，不发生在执行侧。
 
-截断优先保留：事件类型、动作、对象、结果、状态、关键错误。
+索引行优先保留：事件类型、动作、对象、结果、状态、关键错误。
 """
 
 from datetime import datetime
 from typing import Any
-
-# 单条工具结果进入上下文的安全阈值（字符）：超过则 Full 只存事件、
-# 上下文放"输出过大 + 事件 ID"。这是 Safety Limit，不是压缩——
-# 正常长度的结果不受影响
-SAFE_RESULT_LIMIT = 2000
 
 # Truncated 视图里单条事件预览的默认长度（与报告时间线口径一致）
 TRUNCATED_LIMIT = 120
@@ -75,10 +73,9 @@ def make_event(
 ) -> dict:
     """Event 工厂：从协议消息生成完整的事件记录。
 
-    * message：OpenAI 协议消息 dict，原样保存为 Full（事实来源）
-    * truncated：Runtime 规则生成，零 LLM 成本
-    * 超大消息触发 Safety Limit：message.content 被替换为
-      "输出过大 + 事件 ID"，完整原文只存在于返回值的 full 字段
+    * message：OpenAI 协议消息 dict，原样保存、原样进上下文
+      （执行期不做内容截断，见模块 docstring）
+    * truncated：Runtime 规则生成的一行索引，零 LLM 成本
     """
     content = message.get("content") or ""
 
@@ -101,7 +98,7 @@ def make_event(
         truncated = _head(content)
         status = ""
 
-    event = {
+    return {
         "id": event_id,
         "type": type,
         "timestamp": datetime.now().isoformat(timespec="seconds"),
@@ -109,18 +106,6 @@ def make_event(
         "truncated": truncated,
         "message": message,
     }
-
-    # Context Safety Limit：超大内容不直接进上下文，
-    # 协议消息里只留安全范围 + 指回 Full 的引用
-    if type == "tool_result" and len(content) > SAFE_RESULT_LIMIT:
-        event["full"] = content
-        safe = (
-            content[:SAFE_RESULT_LIMIT]
-            + f"\n[输出过大（{len(content)} 字符）已截断。完整结果：{event_id}，"
-            f"可用 expand_history(level=\"full\") 查看]"
-        )
-        event["message"] = {**message, "content": safe}
-    return event
 
 
 def event_index_line(event: dict) -> str:

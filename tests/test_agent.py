@@ -728,3 +728,54 @@ def test_file_map_lists_files_from_demoted_rounds():
     joined = json.dumps(msgs, ensure_ascii=False)
     assert "docs/a.md" in joined
     assert "写于 R1" in joined
+
+
+def test_current_round_folds_only_when_over_model_window():
+    """唯一的天花板是模型窗口：估算超限才紧急折叠最老事件，正常任务碰不到。"""
+    from wovra import truncate
+
+    agent = _agent_with([])
+    agent.rounds = []
+    agent.current_round = {
+        "seq": 1, "user_input": {"original": "q", "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open", "org_state": "",
+    }
+    agent.messages = []
+    for i in range(6):
+        # 每条 ~300 个 CJK 字 ≈ 300+ tok，6 条远超下面设置的窗口
+        content = "数据" * 100 + f"标记{i}"
+        event = truncate.make_event(
+            f"R1-E{i:02d}", "tool_result",
+            {"role": "tool", "tool_call_id": f"c{i}", "content": content},
+            tool_name="read_file",
+        )
+        agent.current_round["events"].append(event)
+        agent.messages.append(event["message"])
+    agent.context_limit = 300  # 预算 = 90% = 270
+
+    msgs = agent._assemble_messages()
+    joined = json.dumps(msgs, ensure_ascii=False)
+    assert "紧急折叠" in joined
+    assert "标记5" in joined  # 最近的事件保留全量
+    assert "标记0" not in joined  # 最老的折叠为索引行（索引行只有前 120 字）
+
+
+def test_expand_history_full_returns_complete_content():
+    """expand_history 不再截断："完整原文"的承诺必须兑现。"""
+    from wovra.truncate import make_event
+
+    big = "结果" * 5000  # 10000 字符
+    agent = _agent_with([])
+    agent.rounds = [{
+        "seq": 1, "user_input": {"original": "q", "normalized": ""},
+        "events": [make_event(
+            "R1-E02", "tool_result",
+            {"role": "tool", "tool_call_id": "c1", "content": big},
+            tool_name="read_file",
+        )],
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }]
+
+    out = agent._read_full_event("R1-E02")
+
+    assert big in out  # 全文返回，无 4KB 上限

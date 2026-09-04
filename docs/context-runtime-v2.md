@@ -157,8 +157,7 @@ Round 闭合后任务进入**后台单线程 FIFO 队列**，主对话立即继�
 ```text
 输入：本 Round 的用户输入原文们
     + 全部事件的 Truncated 索引
-    + Final Answer 的完整内容（结论、已尝试方案、遗留问题的主要来源，
-      截断上限 2000 字符）
+    + Final Answer 的完整内容（结论、已尝试方案、遗留问题的主要来源）
 输出 JSON：
 {
   "normalized_user_input": "合并澄清后的用户意图（可扩写）",
@@ -252,7 +251,7 @@ Final Answer（完整）：误差根源是变换矩阵初值估计不准确，
 对每一轮历史，按以下优先级决定加载档位：
 
 ```text
-近 3 轮        → 档 0：全部消息原文（单条超长走安全阈值 2000 字符）
+近 3 轮        → 档 0：全部消息原文（执行期不截断，见 9.1 轮内赦免）
 其余轮次       → 档 1：用户原文 + Normalized 意图 + RefinedIndex
 预算不够       → 档 2：用户原文 + Normalized 意图（去掉事件索引）
 再不够         → 档 3：一行话题行（[R12] ICP误差调试（已完成））
@@ -380,7 +379,7 @@ latency（本轮墙钟、整理耗时）
 |---|---|---|
 | `WOVRA_HISTORY_BUDGET_RATIO` | 0.3 | 历史加载预算 = 窗口 × 此比例 |
 | `WOVRA_MAX_RECENT_ROUNDS` | 3 | **Recent Full-Resolution Window**（经验参数，非理论最优） |
-| `WOVRA_CONTEXT_LIMIT` | 1,000,000 | 模型窗口大小 |
+| `WOVRA_CONTEXT_LIMIT` | 1,000,000 | 模型窗口大小（也是轮内唯一的截断触发线：估算 > 90% 时紧急折叠） |
 | `WOVRA_COMPRESS_THRESHOLD` | 0.8 | baseline 压缩触发阈值 |
 
 > `WOVRA_OPEN_ROUND_EVENT_LIMIT` 已随 9.1 的软限制一起废除（2026-09-05）。
@@ -390,7 +389,6 @@ latency（本轮墙钟、整理耗时）
 | 常量 | 默认 | 作用 |
 |---|---|---|
 | `TRUNCATED_LIMIT` | 120 字符 | Runtime 截断行长度 |
-| `SAFE_RESULT_LIMIT` | 2000 字符 | 单条消息安全阈值 |
 | `STATE_LIST_CAP` | 200 条 | TaskState 每类列表容量 |
 | `_ORGANIZE_MAX_READS` | 3 | 整理时展开原文次数上限（后门，默认路径不用） |
 
@@ -408,8 +406,11 @@ latency（本轮墙钟、整理耗时）
 ——40 步上限内 39 次 read_file 重读同一文件，只完成 3 个 edit。
 这与"轮内赦免"的设计初衷直接冲突。现行规则：
 
-* 开放 Round 事件**全量**进入上下文，不折叠；
-* 单条事件的成本由 Event 级安全截断（`SAFE_RESULT_LIMIT`）兜底；
+* 开放 Round 事件**全量**进入上下文，内容零截断（2026-09-05 二次修订：
+  2000 字符安全截断也废除了——实测它把模型刚读到的 19KB 文件内容挡在
+  上下文外，只剩前 2KB，同样诱发反复重读）；
+* 唯一的天花板是模型窗口：估算超过 `WOVRA_CONTEXT_LIMIT` × 90% 时，
+  最老的事件紧急折叠为索引行直到回线（正常任务碰不到）；
 * 降档历史的文件内容靠"文件地图"（`_file_map_lines`：路径 +
   写/读轮次）指引精准定位，而不是盲目分片重爬。
 
