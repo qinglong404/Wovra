@@ -1,7 +1,7 @@
-"""汇总受控实验：逐轮指标表 + 两模式中位数对比。
+"""汇总多轮受控实验：会话级对比 + 逐轮明细。
 
-读取 experiments/runs/*/meta.json、对应会话的 task.json 与静态验收
-结果。用法：uv run python experiments/collect.py
+读取 experiments/runs/*/meta.json、对应会话的 task.json、
+acceptance-R*.json 验收快照。用法：uv run python experiments/collect.py
 """
 
 import json
@@ -13,7 +13,6 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from check_acceptance import check  # noqa: E402
 from wovra.task import Task  # noqa: E402
 
 RUNS = HERE / "runs"
@@ -24,23 +23,24 @@ def _int(pattern: str, text: str) -> int:
     return int(m.group(1).replace(",", "")) if m else 0
 
 
-def run_metrics(run_dir: Path) -> dict | None:
+def session_metrics(run_dir: Path) -> dict | None:
     meta_path = run_dir / "meta.json"
     if not meta_path.is_file():
         return None
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     task = Task.load(run_dir.name)
 
-    total = prompt = completion = effective = steps = 0
+    # 逐轮：usage 行（steps/total/等效输入，按记录顺序即轮次顺序）
+    per_round = []
     for e in task.history:
         if e["kind"] != "usage":
             continue
         detail = e["detail"]
-        total += _int(r"total=([\d,]+)", detail)
-        prompt += _int(r"prompt=([\d,]+)", detail)
-        completion += _int(r"completion=([\d,]+)", detail)
-        steps += _int(r"steps=([\d,]+)", detail)
-        effective += _int(r"等效输入 ([\d,]+) tok", detail)
+        per_round.append({
+            "steps": _int(r"steps=([\d,]+)", detail),
+            "total": _int(r"total=([\d,]+)", detail),
+            "effective": _int(r"等效输入 ([\d,]+) tok", detail),
+        })
 
     # 行为计数：read_file 明细（同路径同区间重复 = 重读）、expand_history
     reads: dict[tuple, int] = {}
@@ -60,65 +60,79 @@ def run_metrics(run_dir: Path) -> dict | None:
                         pass
                 elif fn.get("name") == "expand_history":
                     expand_calls += 1
-    re_reads = sum(c - 1 for c in reads.values() if c > 1)
 
-    # 静态验收：运行目录里最新的 html（起始文件之外的就是产出）
-    produced = [
-        p for p in sorted(run_dir.rglob("*.html"))
-        if p.name != "chat.html" or (run_dir / "chat.html").stat().st_size
-        != (HERE / "fixtures" / "chat-page.html").stat().st_size
-    ]
-    html_path = produced[-1] if produced else run_dir / "chat.html"
-    results = check(html_path.read_text(encoding="utf-8", errors="replace"))
-    passed = sum(results.values())
-    criteria_total = len(results)
+    # 验收快照：每轮闭合后的累计通过
+    snapshots = {}
+    for p in sorted(run_dir.glob("acceptance-R*.json")):
+        snap = json.loads(p.read_text(encoding="utf-8"))
+        if snap.get("round") is not None:
+            snapshots[snap["round"]] = snap["passed"]
+    final_snap = run_dir / "acceptance-final.json"
+    final_passed = (json.loads(final_snap.read_text(encoding="utf-8"))["passed"]
+                    if final_snap.is_file() else max(snapshots.values(), default=0))
+    regressions = sum(
+        1 for a, b in zip(sorted(snapshots), sorted(snapshots)[1:])
+        if snapshots[b] < snapshots[a]
+    )
 
     return {
         "task_id": run_dir.name,
         "mode": meta["mode"],
         "index": meta["index"],
-        "steps": steps,
+        "rounds": len(task.rounds),
+        "per_round": per_round,
+        "steps": sum(p["steps"] for p in per_round),
+        "total": sum(p["total"] for p in per_round),
+        "effective": sum(p["effective"] for p in per_round),
         "reads": sum(reads.values()),
-        "re_reads": re_reads,
+        "re_reads": sum(c - 1 for c in reads.values() if c > 1),
         "expand_calls": expand_calls,
-        "total": total,
-        "effective": effective,
-        "passed": passed,
-        "criteria_total": criteria_total,
-        "cost_per_passed": (effective / passed) if passed else None,
+        "snapshots": snapshots,
+        "final_passed": final_passed,
+        "criteria_total": len(task.acceptance_criteria),
+        "regressions": regressions,
+        "cost_per_feature": (sum(p["effective"] for p in per_round) / final_passed
+                             if final_passed else None),
     }
 
 
 def main() -> None:
     run_dirs = sorted(p for p in RUNS.iterdir() if p.is_dir()) if RUNS.is_dir() else []
-    rows = [m for d in run_dirs if (m := run_metrics(d)) is not None]
-    if not rows:
-        print("experiments/runs/ 下还没有运行记录。先用 new_run.py 建轮。")
+    sessions = [m for d in run_dirs if (m := session_metrics(d)) is not None]
+    if not sessions:
+        print("experiments/runs/ 下还没有运行记录。先用 new_run.py 建会话。")
         return
 
-    header = (f"{'运行':<24} {'模式':<9} {'步数':>4} {'read':>5} {'重读':>4} "
-              f"{'expand':>6} {'名义total':>10} {'等效输入':>10} {'验收':>5} {'等效/条':>9}")
-    print(header)
-    for row in sorted(rows, key=lambda r: (r["mode"], r["index"])):
-        cpp = f"{row['cost_per_passed']:,.0f}" if row["cost_per_passed"] else "∞"
-        print(f"{row['task_id']:<24} {row['mode']:<9} {row['steps']:>4} {row['reads']:>5} "
-              f"{row['re_reads']:>4} {row['expand_calls']:>6} {row['total']:>10,} "
-              f"{row['effective']:>10,} {row['passed']}/{row['criteria_total']:>3} {cpp:>9}")
+    for s in sorted(sessions, key=lambda x: (x["mode"], x["index"])):
+        label = f"{s['mode']}-{s['index']}"
+        print(f"\n=== 会话 {label}（{s['task_id']}，{s['rounds']} 轮）===")
+        print(f"{'轮':>3} {'步数':>4} {'名义total':>10} {'等效输入':>10} {'累计通过':>6}")
+        cum = 0
+        for i, pr in enumerate(s["per_round"], 1):
+            cum = s["snapshots"].get(i, cum)
+            print(f"R{i:<2} {pr['steps']:>4} {pr['total']:>10,} "
+                  f"{pr['effective']:>10,} {cum:>4}/{s['criteria_total']}")
+        print(f"  步数合计 {s['steps']:,} | 名义合计 {s['total']:,} | "
+              f"等效合计 {s['effective']:,} | 重读 {s['re_reads']} | "
+              f"expand {s['expand_calls']} | 回归 {s['regressions']} 次 | "
+              f"最终通过 {s['final_passed']}/{s['criteria_total']}")
 
+    print("\n=== 模式汇总（会话中位数）===")
     for mode in ("managed", "baseline"):
-        group = [r for r in rows if r["mode"] == mode]
+        group = [s for s in sessions if s["mode"] == mode]
         if not group:
             continue
         med = statistics.median
-        print(f"\n[{mode}] n={len(group)} 中位数："
-              f"步数 {med(r['steps'] for r in group):.0f} | "
-              f"重读 {med(r['re_reads'] for r in group):.0f} | "
-              f"等效输入 {med(r['effective'] for r in group):,.0f} | "
-              f"验收通过 {med(r['passed'] for r in group):.0f}")
-        valid = [r for r in group if r["cost_per_passed"]]
+        print(f"[{mode}] n={len(group)} 条会话 | "
+              f"等效合计 {med(s['effective'] for s in group):,.0f} | "
+              f"步数 {med(s['steps'] for s in group):.0f} | "
+              f"重读 {med(s['re_reads'] for s in group):.0f} | "
+              f"回归 {med(s['regressions'] for s in group):.0f} | "
+              f"最终通过 {med(s['final_passed'] for s in group):.0f}")
+        valid = [s for s in group if s["cost_per_feature"]]
         if valid:
-            print(f"  主指标（等效输入/通过条数）中位数："
-                  f"{med(r['cost_per_passed'] for r in valid):,.0f} tok")
+            print(f"  主指标（累计等效输入/通过功能数）中位数："
+                  f"{med(s['cost_per_feature'] for s in valid):,.0f} tok/功能")
 
 
 if __name__ == "__main__":
