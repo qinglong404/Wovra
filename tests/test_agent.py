@@ -882,3 +882,22 @@ def test_schema_unwraps_optional_annotation():
 
     schema = _schema_of(demo)["function"]["parameters"]["properties"]
     assert schema["timeout"] == {"type": "integer"}
+
+
+def test_turn_count_is_session_bound_across_restarts(monkeypatch, tmp_path):
+    """轮次与会话绑定：退出重开（Agent 重建）后接着上一轮计数，不归零。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.save()
+
+    # 第一次进程：R1 完成后退出
+    agent1 = Agent(llm=_StubLLM([[_chunk(_delta(content="答1"))]]),
+                   tools=[], task=task, context_mode="baseline")
+    agent1.run("问1")
+    assert agent1.last_stats["turn"] == 1
+
+    # 第二次进程（模拟退出重开）：从磁盘恢复会话
+    agent2 = Agent(llm=_StubLLM([[_chunk(_delta(content="答2"))]]),
+                   tools=[], task=Task.load(task.id), context_mode="baseline")
+    agent2.run("问2")
+    assert agent2.last_stats["turn"] == 2  # 修复前：进程内计数归零显示 1

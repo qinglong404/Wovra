@@ -305,10 +305,11 @@ class Agent:
         on_answer_delta: Optional[Callable[[str], None]] = None,
     ) -> str:
         """处理一条用户输入（开启/续上 Round 并完成工作），返回最终回答。"""
-        self.turn_count += 1
-        self.last_stats = self._fresh_stats()
-
         self._open_or_reuse_round(user_input)
+        # 轮次与会话绑定（rounds 的 seq 随会话持久化）——进程内计数会在
+        # 退出重开后归零，长会话的"第 N 轮"就错了（实测教训）
+        self.turn_count = self.current_round["seq"]
+        self.last_stats = self._fresh_stats()
         self._record_event("user", {"role": "user", "content": user_input})
         if self.task is not None:
             self.task.record("user_input", user_input)
