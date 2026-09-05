@@ -391,7 +391,7 @@ def ask_user(question: str, choices: str = "") -> str:
     _user_input_pending = True
     try:
         answer = input(prompt)
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         answer = ""
     finally:
         _user_input_pending = False
@@ -406,7 +406,9 @@ def list_background() -> str:
     for tid, entry in _BACKGROUND_TASKS.items():
         running = entry["proc"].poll() is None
         state = "运行中" if running else f"已退出（exit_code={entry['proc'].returncode}）"
-        lines.append(f"{tid}  {state}  {entry['command'][:80]}")
+        owner = entry.get("session") or "无主"
+        alive = " [常驻]" if entry.get("keep_alive") else ""
+        lines.append(f"{tid}  [{owner}] {state}{alive}  {entry['command'][:60]}")
     return "后台任务：\n" + "\n".join(lines)
 
 
@@ -460,10 +462,11 @@ def _ask_yes_no(question: str) -> bool:
     _user_input_pending = True
     try:
         answer = input(f"{question} [y/N] ").strip().lower()
-    except (EOFError, KeyboardInterrupt):
+    except EOFError:
         answer = ""
     finally:
         _user_input_pending = False
+    # Ctrl+C 不吞：向上传播 = 打断本轮（统一的中断语义）
     return answer in ("y", "yes")
 
 
@@ -716,16 +719,23 @@ def run_command(command: str, timeout: int | None = None) -> str:
 
 _BACKGROUND_TASKS: dict[str, dict] = {}
 _BACKGROUND_SEQ = itertools.count(1)
+_CURRENT_SESSION: str | None = None
+
+
+def set_current_session(task_id: str | None) -> None:
+    """标记当前会话：后台任务按会话归属，防止跨会话误管。"""
+    global _CURRENT_SESSION
+    _CURRENT_SESSION = task_id
 _BACKGROUND_LOG_DIR = PROJECT_ROOT / ".wovra-background"
 
 
-def run_background(command: str) -> str:
+def run_background(command: str, keep_alive: bool = False) -> str:
     """后台启动一条 shell 命令（服务器、监听、长安装等），立即返回任务 ID。
 
     输出写入日志文件；用 check_background 查看增量输出，
     stop_background 停止（整树强杀）。黑名单与 run_command 相同。
-    注意：Wovra 退出后进程仍在运行，但控制句柄失效——日志保留在
-    .wovra-background/ 下，可手动查看。
+    任务归属启动它的会话：会话退出时默认一并关闭——需要跨会话存活的
+    常驻进程（如长期开发服务器）设 keep_alive=True。
     """
     _audit(f"[run_background] {command}")
     for pattern in _DENIED_PATTERNS:
@@ -758,9 +768,11 @@ def run_background(command: str) -> str:
         )
     _BACKGROUND_TASKS[task_id] = {
         "proc": proc, "log": log_path, "pos": 0, "command": command,
+        "session": _CURRENT_SESSION, "keep_alive": keep_alive,
     }
+    tag = "（常驻，会话退出后继续运行）" if keep_alive else ""
     return (
-        f"后台任务 {task_id} 已启动（PID {proc.pid}）：{command[:120]}\n"
+        f"后台任务 {task_id} 已启动（PID {proc.pid}）{tag}：{command[:120]}\n"
         f'查看输出: check_background(task_id="{task_id}") | '
         f'停止: stop_background(task_id="{task_id}")'
     )
@@ -771,6 +783,8 @@ def check_background(task_id: str) -> str:
     entry = _BACKGROUND_TASKS.get(task_id)
     if entry is None:
         return f"未找到后台任务: {task_id}（控制句柄仅在本会话内有效）。"
+    if (error := _ownership_error(task_id, entry)):
+        return error
     proc = entry["proc"]
     running = proc.poll() is None
     new_text = ""
@@ -785,11 +799,38 @@ def check_background(task_id: str) -> str:
     return f"[{task_id}] {status}\n{body[-2000:]}"
 
 
+def _ownership_error(task_id: str, entry: dict) -> str | None:
+    """跨会话管理防护：任务只归启动它的会话管。"""
+    owner = entry.get("session")
+    if owner and owner != _CURRENT_SESSION:
+        return f"后台任务 {task_id} 由会话 {owner} 启动，请在那个会话中管理。"
+    return None
+
+
+def stop_session_backgrounds() -> int:
+    """会话退出时停止当前会话启动的所有后台任务（keep_alive 除外）。
+
+    返回停止的数量。进程崩溃时这些子进程会成为孤儿——日志仍在
+    .wovra-background/ 下，可手动查看与清理。"""
+    stopped = 0
+    for tid, entry in list(_BACKGROUND_TASKS.items()):
+        if entry.get("session") != _CURRENT_SESSION or entry.get("keep_alive"):
+            continue
+        proc = entry["proc"]
+        if proc.poll() is None:
+            _kill_process_tree(proc.pid)
+        _BACKGROUND_TASKS.pop(tid, None)
+        stopped += 1
+    return stopped
+
+
 def stop_background(task_id: str) -> str:
     """停止后台任务（整树强杀），返回退出状态。"""
     entry = _BACKGROUND_TASKS.get(task_id)
     if entry is None:
         return f"未找到后台任务: {task_id}（控制句柄仅在本会话内有效）。"
+    if (error := _ownership_error(task_id, entry)):
+        return error
     proc = entry["proc"]
     if proc.poll() is None:
         _kill_process_tree(proc.pid)

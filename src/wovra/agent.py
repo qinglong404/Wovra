@@ -147,6 +147,8 @@ class Agent:
         tools_module.set_audit_recorder(
             lambda detail: task.record("file_change", detail) if task else None
         )
+        # 后台任务按会话归属：启动/查看/停止都限定在本会话内
+        tools_module.set_current_session(task.id if task else None)
 
         self.tools: dict[str, Callable] = {}
         self._schemas: list[dict] = []

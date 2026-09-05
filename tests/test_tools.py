@@ -628,3 +628,72 @@ def test_edit_file_success_reports_line_number(monkeypatch, tmp_path):
     write_file("app.py", "第一行\n第二行\n第三行")
     result = edit_file("app.py", "第二行", "第二行（改）")
     assert "位于第 2 行" in result
+
+
+def test_background_ownership_prevents_cross_session_management():
+    """后台任务归属会话：跨会话查看/停止都被拒，并列出归属。"""
+    from wovra import tools as tools_module
+
+    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.set_current_session("session-A")
+    started = run_background("echo owned-by-A")
+    task_id = _re_search_id(started)
+
+    tools_module.set_current_session("session-B")
+    assert f"由会话 session-A 启动" in check_background(task_id)
+    assert f"由会话 session-A 启动" in stop_background(task_id)
+    assert f"[session-A]" in list_background()
+
+    # 回到启动会话 → 可以管理
+    tools_module.set_current_session("session-A")
+    assert "已退出" in check_background(task_id) or "运行中" in check_background(task_id)
+    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.set_current_session(None)
+
+
+def test_stop_session_backgrounds_kills_owned_but_spares_keep_alive(monkeypatch):
+    """会话退出：本会话的后台任务全部关闭；keep_alive 常驻任务除外。"""
+    import os as _os
+    import time as _time
+
+    from wovra import tools as tools_module
+
+    tools_module.set_current_session("session-A")
+    tools_module._BACKGROUND_TASKS.clear()
+    sleeper = "ping -n 30 127.0.0.1" if _os.name == "nt" else "sleep 30"
+    normal = run_background(sleeper)
+    resident = run_background(sleeper, keep_alive=True)
+    id_normal = _re_search_id(normal)
+    id_resident = _re_search_id(resident)
+    _time.sleep(0.3)  # 等子进程起来
+
+    stopped = tools_module.stop_session_backgrounds()
+
+    assert stopped == 1
+    # 普通任务：已停止并从注册表移除；常驻任务：继续运行
+    assert "未找到后台任务" in check_background(id_normal)
+    assert "运行中" in check_background(id_resident)
+    # 清理测试残留
+    tools_module.set_current_session("session-A")
+    stop_background(id_resident)
+    tools_module._BACKGROUND_TASKS.clear()
+
+
+def test_confirm_ctrl_c_interrupts_instead_of_refusing(monkeypatch):
+    """确认提示处按 Ctrl+C = 打断本轮（向上传播），而不是吞成'拒绝'。"""
+    import builtins
+    import sys as _sys
+    from types import SimpleNamespace as _NS
+
+    import pytest
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+
+    def fake_input(prompt):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    with pytest.raises(KeyboardInterrupt):
+        _ask_yes_no("确认？")

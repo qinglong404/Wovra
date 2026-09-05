@@ -52,7 +52,7 @@ from .agent import (
 )
 from .llm import LLMConfigError
 from .task import Task
-from .tools import PROJECT_ROOT, user_input_pending
+from .tools import PROJECT_ROOT, stop_session_backgrounds, user_input_pending
 
 
 def _session_lock_path(task: Task):
@@ -553,6 +553,8 @@ def cmd_run(args: argparse.Namespace) -> None:
         )
         _run_turn(agent, instruction)
     finally:
+        # 一次性进程：会话结束，其后台任务一并收掉
+        stop_session_backgrounds()
         _release_session_lock(task)
 
 
@@ -641,6 +643,10 @@ def cmd_chat(args: argparse.Namespace) -> None:
             )
             task.save()
     finally:
+        # 会话退出：该会话启动的后台进程一并关闭（keep_alive 常驻任务除外）
+        stopped = stop_session_backgrounds()
+        if stopped:
+            print(ui.info(f"已停止本会话启动的 {stopped} 个后台任务。"))
         _release_session_lock(task)
 
 
