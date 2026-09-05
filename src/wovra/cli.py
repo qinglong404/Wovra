@@ -52,6 +52,7 @@ from .agent import (
 )
 from .llm import LLMConfigError
 from .task import Task
+from .tools import PROJECT_ROOT
 
 
 def _session_lock_path(task: Task):
@@ -213,13 +214,18 @@ def _system_prompt(mode: str) -> str:
         env = "当前环境：Linux，shell 是 POSIX sh。"
 
     common = (
-        "你是 Wovra 的执行助手。会话持久化在磁盘上：每轮结束自动保存，"
-        "用户可随时退出、下次接着做。需要时使用工具获取真实信息或完成任务："
-        "找内容用 search_files，读大文件用 read_file 的 start_line 分段；"
-        "可以创建、修改项目内的文件，运行安全的 shell 命令。回答保持简洁。"
+        f"你是 Wovra 的执行助手。工作区：{PROJECT_ROOT}——所有文件工具与"
+        "命令都限定并执行于此目录内。会话持久化在磁盘上：每轮结束自动"
+        "保存，用户可随时退出、下次接着做。需要时使用工具获取真实信息或"
+        "完成任务：找内容用 search_files，按文件名找文件用 glob_files，"
+        "读大文件用 read_file 的 start_line 分段；可以创建、修改项目内的"
+        "文件，运行安全的 shell 命令。查技术资料用 web_search，抓取已知"
+        "网页用 web_fetch；需求或细节有分歧时用 ask_user 向用户确认。"
+        "回答保持简洁。"
         "环境配置可直接用 uv / pip / conda 等命令（如 uv sync、pip install）；"
-        "耗时长的安装或服务器进程用 run_background 后台执行，"
-        "check_background 查看输出。"
+        "敏感操作（安装、提交、删除等）会先请求用户确认——被拒绝时换一种"
+        "做法，不要重试原命令；耗时长的安装或服务器进程用 run_background "
+        "后台执行，check_background 查看输出。"
     )
     if mode == MODE_MANAGED:
         extra = (

@@ -10,6 +10,7 @@ from wovra.agent import Agent
 from wovra.task import Task
 from wovra.tools import (
     FAILURE_MARKERS,
+    _confirm_reason,
     ask_user,
     check_background,
     edit_file,
@@ -410,3 +411,66 @@ def _re_search_id(started: str) -> str:
     import re as _re
 
     return _re.search(r"bg-\d+", started).group(0)
+
+
+def test_confirm_pattern_matching():
+    """敏感操作匹配：安装/提交/删除/移动命中；普通命令不命中。"""
+    assert _confirm_reason("git commit -m x")
+    assert _confirm_reason("pip install requests")
+    assert _confirm_reason("uv add fastapi")
+    assert _confirm_reason("rm old.txt")
+    assert _confirm_reason("del old.txt")
+    assert _confirm_reason("conda install numpy")
+    assert _confirm_reason("echo hello") is None
+    assert _confirm_reason("git status") is None
+    assert _confirm_reason("python main.py") is None
+
+
+def test_run_command_confirm_rejected_by_user(monkeypatch, tmp_path):
+    """交互确认：用户拒绝 → 不执行，返回拒绝提示。"""
+    import builtins
+    import sys as _sys
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.setattr(builtins, "input", lambda prompt: "n")
+
+    result = run_command("git commit -m 'x'")
+    assert "用户拒绝" in result
+
+
+def test_run_command_confirm_allowed_by_user(monkeypatch, tmp_path):
+    """用户允许 → 命令实际执行（tmp 工作区里 git 无仓库而失败，证明已执行）。"""
+    import builtins
+    import sys as _sys
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.setattr(builtins, "input", lambda prompt: "y")
+
+    result = run_command("git commit -m 'x'")
+    assert "命令执行失败" in result  # 已执行（tmp 目录无 git 仓库，git 报错）
+
+
+def test_workspace_env_var(tmp_path):
+    """WOVRA_WORKSPACE 指向任意目录：子进程导入时生效并自动创建。"""
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    ws = tmp_path / "ws"
+    env = {k: v for k, v in _os.environ.items() if k != "WOVRA_WORKSPACE"}
+    env["WOVRA_WORKSPACE"] = str(ws)
+    env["PYTHONIOENCODING"] = "utf-8"
+    out = _subprocess.run(
+        [_sys.executable, "-c", "from wovra.tools import PROJECT_ROOT; print(PROJECT_ROOT)"],
+        capture_output=True, env=env, text=True,
+    )
+    assert out.stdout.strip() == str(ws.resolve())
+    assert ws.exists()  # 自动创建

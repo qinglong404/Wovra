@@ -24,8 +24,13 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-# 项目根目录（本文件位于 src/wovra/，向上三级）
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+# 项目根目录（工作区）：所有文件与命令都限定在这里。
+# 默认 = 仓库根目录；用环境变量 WOVRA_WORKSPACE（shell 或 .env）可指向
+# 任意项目目录——给别的项目写代码时不用把 Wovra 仓库搬过去。
+_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
+PROJECT_ROOT = Path(os.environ.get("WOVRA_WORKSPACE") or _REPO_ROOT).resolve()
+if PROJECT_ROOT != _REPO_ROOT:
+    PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # 搜索时跳过的噪声目录（依赖、缓存、运行时数据——搜索它们只有噪音）
 _IGNORED_DIRS = {
@@ -332,6 +337,47 @@ def list_background() -> str:
     return "后台任务：\n" + "\n".join(lines)
 
 
+    return "\n".join(lines) + more
+
+
+# ---- 敏感操作确认 -------------------------------------------------------------
+# 黑名单拦"绝对不做"的；确认层拦"有实际副作用但合法"的（安装依赖、
+# 版本提交、删除/移动/权限变更）。交互环境 y/N 询问（默认拒绝）；
+# 非交互环境自动放行并留审计标记——实验与脚本不被阻塞，代价记录在案。
+
+_CONFIRM_PATTERNS = (
+    r"\bgit\s+(commit|tag|merge|rebase|remote\s+add)\b",
+    r"\b(pip|pip3)\s+install\b", r"\buv\s+(pip\s+)?(add|install|sync)\b",
+    r"\bconda\s+(install|create|remove)\b",
+    r"\bnpm\s+(install|i)\b", r"\bpnpm\s+(add|install)\b", r"\byarn\s+add\b",
+    r"\b(rm|del|erase|rmdir)\b", r"\b(mv|move)\b",
+    r"\b(chmod|chown|icacls)\b", r"\b(taskkill|kill)\b",
+    r"\b(docker|podman)\s+(rm|rmi|system\s+prune)\b",
+)
+
+
+def _confirm_reason(command: str) -> str | None:
+    """命令命中敏感操作 → 返回命中的模式；否则 None。"""
+    for pattern in _CONFIRM_PATTERNS:
+        if re.search(pattern, command):
+            return pattern
+    return None
+
+
+def _ask_yes_no(question: str) -> bool:
+    """交互环境 y/N 询问（默认拒绝）；非交互环境自动放行并留审计。"""
+    import sys
+
+    if not sys.stdin.isatty():
+        _audit("[确认] 非交互环境，自动放行")
+        return True
+    try:
+        answer = input(f"{question} [y/N] ").strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        answer = ""
+    return answer in ("y", "yes")
+
+
 def get_current_time() -> str:
     """获取当前本地时间（ISO 格式）。"""
     from datetime import datetime
@@ -480,6 +526,15 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    reason = _confirm_reason(command)
+    if reason and not _ask_yes_no(
+        f"命令包含敏感操作（命中 `{reason}`），是否允许执行？\n  {command[:200]}"
+    ):
+        _audit(f"[run_command][用户拒绝] {command}")
+        return (
+            "用户拒绝了该命令的执行。请换一种无副作用的做法，"
+            "或向用户说明为什么需要它。"
+        )
     wait = _COMMAND_TIMEOUT if timeout is None else max(1, min(int(timeout), 600))
 
     # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
@@ -551,6 +606,15 @@ def run_background(command: str) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    reason = _confirm_reason(command)
+    if reason and not _ask_yes_no(
+        f"后台命令包含敏感操作（命中 `{reason}`），是否允许启动？\n  {command[:200]}"
+    ):
+        _audit(f"[run_background][用户拒绝] {command}")
+        return (
+            "用户拒绝了该命令的启动。请换一种无副作用的做法，"
+            "或向用户说明为什么需要它。"
+        )
     _BACKGROUND_LOG_DIR.mkdir(parents=True, exist_ok=True)
     task_id = f"bg-{next(_BACKGROUND_SEQ)}"
     log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
