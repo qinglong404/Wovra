@@ -511,3 +511,87 @@ def test_ask_yes_no_marks_user_input_pending(monkeypatch):
     assert _ask_yes_no("确认？") is True
     assert seen["pending_during"] is True
     assert user_input_pending() is False
+
+
+class _FakeUrllib:
+    """替换 tools.urllib.request.urlopen 的最小桩：返回罐头 HTML。"""
+
+    def __init__(self, html: str):
+        self._html = html
+
+    class _Resp:
+        def __init__(self, html: str):
+            self._html = html
+            self.headers = {"Content-Type": "text/html"}
+
+        def read(self, n=-1):
+            return self._html.encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def request(self, url, **kwargs):
+        return None
+
+    def __getattr__(self, name):
+        raise AttributeError(name)
+
+
+def test_assert_public_url_fake_ip_is_proxy_artifact(monkeypatch):
+    """clash Fake-IP 段（198.18.0.0/15）是代理劫持伪影，不按内网拦截；
+    字面内网 IP 与真实内网解析结果仍然拒绝。"""
+    import socket as _socket
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
+    # Fake-IP：字面地址与解析结果都放行
+    assert tools_module._assert_public_url("http://198.18.0.1/") is None
+    monkeypatch.setattr(
+        _socket, "getaddrinfo",
+        lambda host, port, **kw: [(None, None, None, "", ("198.18.5.5", 0))])
+    assert tools_module._assert_public_url("https://example.com/doc") is None
+    # 真实内网解析仍然拒绝
+    monkeypatch.setattr(
+        _socket, "getaddrinfo",
+        lambda host, port, **kw: [(None, None, None, "", ("10.0.0.5", 0))])
+    assert "拒绝访问内网" in tools_module._assert_public_url("https://example.com/doc")
+    assert "拒绝访问内网" in tools_module._assert_public_url("http://192.168.1.1/")
+    assert "拒绝访问内网" in tools_module._assert_public_url("http://169.254.169.254/meta")
+
+
+def test_search_engines_parse_canned_html(monkeypatch):
+    """两个搜索引擎的解析器：对罐头 HTML 提取标题/链接/摘要。"""
+    import sys as _sys
+
+    from wovra import tools as tools_module
+
+    ddg = ('<div><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com">'
+           'Docs <b>Home</b></a><a class="result__snippet">All about docs</a></div>')
+    monkeypatch.setattr(tools_module.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeUrllib._Resp(ddg))
+    result = tools_module._search_ddg("docs", 5)
+    assert "https://docs.example.com" in result and "Docs Home" in result
+
+    bing = ('<li class="b_algo"><h2><a href="https://bing.example.com/x">Bing Result</a></h2>'
+            '<p>Bing snippet</p></li>')
+    monkeypatch.setattr(tools_module.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeUrllib._Resp(bing))
+    result = tools_module._search_bing("x", 5)
+    assert "Bing Result" in result and "Bing snippet" in result
+
+
+def test_web_search_falls_back_to_second_engine(monkeypatch):
+    """DDG 失败自动换 Bing；全失败时回传各引擎原因。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
+    monkeypatch.setattr(tools_module, "_search_bing", lambda q, n: "搜索 'q' 的结果：\n1. 命中")
+    assert "命中" in tools_module.web_search("q")
+
+    monkeypatch.setattr(tools_module, "_search_bing", lambda q, n: "bing 失败: 限流")
+    result = tools_module.web_search("q")
+    assert "所有搜索通道都失败了" in result and "bing 失败" in result
