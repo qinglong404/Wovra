@@ -152,3 +152,23 @@ def test_save_sanitizes_lone_surrogates(monkeypatch, tmp_path):
     loaded = Task.load(task.id)
     assert "\ud83d" not in loaded.history[-1]["detail"]
     assert "\ufffd" in loaded.history[-1]["detail"]
+
+
+def test_task_binds_and_restores_workspace(monkeypatch, tmp_path):
+    """会话绑定工作区：创建时记录，加载时恢复——从任何目录恢复都回原地。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", ws)
+
+    task = Task.create(goal="g")
+    assert task.workspace == str(ws)
+    task.save()
+
+    # 模拟从别处启动：PROJECT_ROOT 已变，但加载旧会话会恢复其绑定的工作区
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    loaded = Task.load(task.id)
+    assert loaded.workspace == str(ws)
+    assert str(tools_module.PROJECT_ROOT) == str(ws)

@@ -25,11 +25,21 @@ import urllib.request
 from pathlib import Path
 
 # 项目根目录（工作区）：所有文件与命令都限定在这里。
-# 默认 = 仓库根目录；用环境变量 WOVRA_WORKSPACE（shell 或 .env）可指向
-# 任意项目目录——给别的项目写代码时不用把 Wovra 仓库搬过去。
+# 解析顺序：
+#   1. 环境变量 WOVRA_WORKSPACE（显式指定，脚本/自动化用）
+#   2. 启动目录（Claude Code 惯例：在哪启动，工作区就在哪；
+#      在 Wovra 仓库内启动时自动回退到仓库根，避免子目录 Surprise）
+#   3. Wovra 仓库根目录（兜底）
+# 注意：会话会绑定其工作区（见 task.py）——恢复旧会话时以会话记录为准。
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-PROJECT_ROOT = Path(os.environ.get("WOVRA_WORKSPACE") or _REPO_ROOT).resolve()
-if PROJECT_ROOT != _REPO_ROOT:
+_cwd = Path.cwd().resolve()
+if _cwd == _REPO_ROOT or _REPO_ROOT in _cwd.parents:
+    PROJECT_ROOT = _REPO_ROOT
+else:
+    PROJECT_ROOT = _cwd
+_env_ws = os.environ.get("WOVRA_WORKSPACE")
+if _env_ws:
+    PROJECT_ROOT = Path(_env_ws).resolve()
     PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
 
 # 搜索时跳过的噪声目录（依赖、缓存、运行时数据——搜索它们只有噪音）

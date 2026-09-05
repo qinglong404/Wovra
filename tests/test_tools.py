@@ -474,3 +474,17 @@ def test_workspace_env_var(tmp_path):
     )
     assert out.stdout.strip() == str(ws.resolve())
     assert ws.exists()  # 自动创建
+
+
+def test_workspace_resolves_to_launch_directory(tmp_path):
+    """启动路径即工作区（Claude Code 惯例）：子进程在非仓库目录运行时生效。"""
+    import os as _os
+    import subprocess as _subprocess
+    import sys as _sys
+
+    env = {k: v for k, v in _os.environ.items() if k != "WOVRA_WORKSPACE"}
+    out = _subprocess.run(
+        [_sys.executable, "-c", "from wovra.tools import PROJECT_ROOT; print(PROJECT_ROOT)"],
+        capture_output=True, text=True, env=env, cwd=str(tmp_path),
+    )
+    assert out.stdout.strip() == str(tmp_path)

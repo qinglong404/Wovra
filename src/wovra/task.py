@@ -29,6 +29,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from . import tools as tools_module
 from .tools import FAILURE_MARKERS
 
 # 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
@@ -178,6 +179,9 @@ class Task:
     # baseline 记账：累计输入 token（用于 80% 阈值压缩触发）与压缩摘要
     baseline_prompt_used: int = 0
     baseline_summary: str = ""
+    # 会话绑定的工作区（创建时的 PROJECT_ROOT）。恢复会话时以此为准——
+    # 无论从哪个目录启动 wovra，都回到该会话原本的文件世界
+    workspace: str = ""
     created_at: str = ""
     updated_at: str = ""
 
@@ -215,16 +219,27 @@ class Task:
             goal=goal,
             requirements=list(requirements or []),
             acceptance_criteria=list(acceptance_criteria or []),
+            workspace=str(tools_module.PROJECT_ROOT),
             created_at=now.isoformat(timespec="seconds"),
             updated_at=now.isoformat(timespec="seconds"),
         )
 
     @classmethod
     def load(cls, task_id: str) -> "Task":
-        """从磁盘加载任务。task.json 是唯一的事实来源（source of truth）。"""
+        """从磁盘加载任务。task.json 是唯一的事实来源（source of truth）。
+
+        会话绑定的工作区随加载恢复：无论从哪个目录启动 wovra，
+        该会话的文件世界都回到它创建时的位置。"""
+        from . import tools as tools_module
+
         path = TASKS_ROOT / task_id / "task.json"
         data = json.loads(path.read_text(encoding="utf-8"))
-        return cls(**data)
+        task = cls(**data)
+        if task.workspace:
+            workspace = Path(task.workspace)
+            if workspace.is_dir():
+                tools_module.PROJECT_ROOT = workspace
+        return task
 
     @classmethod
     def load_or_create(
