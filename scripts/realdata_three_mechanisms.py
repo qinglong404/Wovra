@@ -39,6 +39,7 @@ def main() -> None:
     def simulate(mode: str):
         rows = []
         cum_input = cum_eff = cum_yuan = 0.0
+        tot_hit = tot_miss = 0.0
         fresh = 0.0
         org_events = 0
         prev_ctx = 0.0
@@ -60,6 +61,8 @@ def main() -> None:
             cum_input += billing
             hit_tok = billing * hit_share
             miss_tok = billing * (1 - hit_share)
+            tot_hit += hit_tok
+            tot_miss += miss_tok
             eff = miss_tok + hit_tok * (0.115 / 0.4)
             cum_eff += eff
             cum_yuan += (hit_tok * HIT + miss_tok * MISS) / 1e6
@@ -79,8 +82,9 @@ def main() -> None:
                     cum_yuan += org / 1e6 * MISS  # 整理调用按未命中价计
                     cum_eff += org
                     cum_input += org
+                    tot_miss += org
             rows.append((k + 1, s, delta, ctx, cum_input, cum_eff, cum_yuan))
-        return rows, cum_input, cum_eff, cum_yuan, org_events
+        return rows, cum_input, cum_eff, cum_yuan, org_events, tot_hit, tot_miss
 
     results = {m: simulate(m) for m in ("baseline", "cur", "v3")}
 
@@ -94,15 +98,31 @@ def main() -> None:
               f"{c_row[3]/1000:>8.0f} {v_row[3]/1000:>8.0f} | "
               f"{c_row[6]:>7.2f} {v_row[6]:>7.2f}")
     print()
-    print("=== 29 轮总账（GLM 半价）===")
-    for m, label in (("baseline", "baseline 对照"), ("cur", "managed 现行"), ("v3", "managed V3水位")):
-        _, ci, ce, cy, oe = results[m]
-        print(f"  {label:<16} 输入计费 {ci/1e6:>7.1f}M | 等效 {ce/1e6:>6.2f}M | "
-              f"现金 {cy:>6.2f} 元 | 整理触发 {oe if m == 'v3' else (n if m == 'cur' else 0)} 次")
-    b_total = results["baseline"][2]
-    print()
-    print(f"等效成本 对照/实验 = {results['baseline'][2] / results['cur'][2]:.2f}x（现行）"
-          f" / {results['baseline'][2] / results['v3'][2]:.2f}x（V3 水位）")
+    # 两套价位同账本：命中/未命中 split 逐轮落账后按各家价目表结算
+    price_books = (
+        ("GLM 半价", 0.115, 0.4),
+        ("DeepSeek 空闲", 0.05, 1.5),
+    )
+
+    def cash_of(res, ph, pm):
+        return res[5] / 1e6 * ph + res[6] / 1e6 * pm
+
+    for plabel, ph, pm in price_books:
+        print(f"=== 29 轮总账 · {plabel}（命中 {ph} / 未命中 {pm} 元/M）===")
+        for m, label in (("baseline", "baseline 对照"), ("cur", "managed 现行"), ("v3", "managed V3水位")):
+            res = results[m]
+            _, ci, ce, cy, oe = res[:5]
+            eff = res[6] + res[5] * (ph / pm)
+            print(f"  {label:<16} 输入计费 {ci/1e6:>7.1f}M | 等效 {eff/1e6:>6.2f}M | "
+                  f"现金 {cash_of(res, ph, pm):>6.2f} 元 | 整理触发 {oe if m == 'v3' else (n if m == 'cur' else 0)} 次")
+        b_cash = cash_of(results["baseline"], ph, pm)
+        c_cash = cash_of(results["cur"], ph, pm)
+        v_cash = cash_of(results["v3"], ph, pm)
+        print(f"  现金成本 baseline/managed = {b_cash / c_cash:.2f}x（现行）"
+              f" / {b_cash / v_cash:.2f}x（V3 水位）")
+        print()
+    print("（等效成本与现金倍数均为 GLM 半价口径；managed 命中率为模型假设，")
+    print("  实测受控实验整体命中率 85.8%，脚本逐轮模型 80.7% 偏保守。）")
 
 
 if __name__ == "__main__":
