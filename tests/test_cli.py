@@ -309,3 +309,41 @@ def test_assistant_markdown_label_uses_rich_style(capsys):
     out = capsys.readouterr().out
     assert "助手>" in out
     assert "92m[1m助手" not in out
+
+
+def test_replay_history_pairs_tool_call_and_result(capsys):
+    """回放：调用与结果配对成一行，工具名完整、失败只留首行原因。"""
+    import re as _re
+
+    from wovra.cli import _replay_history
+
+    task = Task.create(goal="g")
+    task.history = [
+        {"time": "t", "kind": "user_input", "detail": "跑一下"},
+        {"time": "t", "kind": "tool_call", "detail": "run_command({'command': 'x'})"},
+        {"time": "t", "kind": "tool_result",
+         "detail": "run_command -> 命令执行失败（exit_code=1）\nstdout: 详细输出若干"},
+        {"time": "t", "kind": "final_answer", "detail": "完成了"},
+    ]
+
+    _replay_history(task, last_n=12)
+
+    out = capsys.readouterr().out
+    assert "[调用] run_command → 失败：命令执行失败（exit_code=1）" in out
+    assert not _re.search(r"\[调用\] .\n", out)  # 修复前：工具名被截成首字母
+    assert "stdout: 详细输出若干" not in out  # 失败不漏整段输出
+    assert "助手>" in out and "92m[1m" not in out  # Markdown 标签不漏裸码
+
+
+def test_answer_live_degrades_to_plain_stream_without_tty(capsys):
+    """非 TTY（管道/测试）下 Live 退化为纯文本流，输出顺序保持。"""
+    from wovra import ui
+
+    ui.answer_live_start()
+    ui.answer_live_append("片段1")
+    ui.answer_live_append("片段2")
+    ui.answer_live_stop()
+    out = capsys.readouterr().out
+    assert "片段1片段2" in out
+    ui.answer_live_start()
+    ui.answer_live_stop()

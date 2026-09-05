@@ -352,17 +352,29 @@ def _replay_history(task: Task, last_n: int = 12) -> None:
         return
 
     print(ui.rule("之前的会话记录"))
-    for event in dialogue[-last_n:]:
-        if event["kind"] == "user_input":
+    events = dialogue[-last_n:]
+    i = 0
+    while i < len(events):
+        event = events[i]
+        kind = event["kind"]
+        if kind == "user_input":
             print(ui.user(event["detail"]))
-        elif event["kind"] == "final_answer":
+        elif kind == "final_answer":
             ui.assistant_markdown(event["detail"])
-        elif event["kind"] == "tool_call":
-            # 工具活动只回放一行极简摘要，参数/结果细节在 task.json
-            name = _split_call(event["detail"])[0]
+        elif kind == "tool_call":
+            # 与相邻结果配对成一行：调用了什么、成没成。失败只留
+            # 首行原因，不漏 stdout 原文（细节在 task.json 可查）
+            name = _split_call(event["detail"])
+            nxt = events[i + 1] if i + 1 < len(events) else None
+            if nxt is not None and nxt["kind"] == "tool_result":
+                result_detail = nxt["detail"].partition(" -> ")[2]
+                print(ui.tool_pair(name, result_detail))
+                i += 2
+                continue
             print(ui.tool_call(name))
-        else:  # tool_result
-            print(ui.tool_result(event["detail"]))
+        else:  # 孤立的 tool_result（配对窗口切在中间）
+            print(ui.tool_result(event["detail"].partition(" -> ")[2]))
+        i += 1
     if len(dialogue) > last_n:
         print(ui.info(f"（仅显示最近 {last_n} 条，完整记录见 report.md）"))
     print(ui.rule())
@@ -415,13 +427,15 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         line_open = True
 
     def on_answer_delta(text: str) -> None:
-        nonlocal line_open, phase
+        nonlocal phase
         if phase != "answer":
             _break_line()
             print(ui.rule("回答"), flush=True)
+            ui.answer_live_start()
             phase = "answer"
-        print(text, end="", flush=True)
-        line_open = True
+        # TTY 下进 rich Live 实时渲染 Markdown（与回放观感一致）；
+        # 非 TTY 自动退化为纯文本流
+        ui.answer_live_append(text)
 
     # 工具执行看门狗：超过一步工具的等待里终端完全静默，用户分不清
     # "在干活"和"卡死"。执行窗口内主线程阻塞在工具里、流式输出和
@@ -454,6 +468,7 @@ def _run_turn(agent: Agent, instruction: str) -> str:
 
     def on_tool_call(name: str, arguments: str) -> None:
         nonlocal line_open, phase
+        ui.answer_live_stop()  # 停掉回答渲染，交出终端输出权
         _break_line()
         phase = ""
         print(ui.tool_call(name), flush=True)
@@ -470,6 +485,7 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         # 同步回调（主线程执行）：模型响应等待中、工具动作进行中的即时提示。
         # "正在写入文件中…"在模型刚报出工具名时就显示，不等参数输完
         nonlocal line_open, phase
+        ui.answer_live_stop()
         _break_line()
         phase = ""
         print(ui.wait_hint(text), flush=True)
@@ -483,15 +499,18 @@ def _run_turn(agent: Agent, instruction: str) -> str:
             instruction, on_thinking=on_thinking, on_answer_delta=on_answer_delta
         )
     except KeyboardInterrupt:
+        ui.answer_live_stop()
         agent.finalize_round("open")  # 中断不闭合轮次，事件并入开放轮
         raise
     except LLMConfigError:
+        ui.answer_live_stop()
         # 配置错误（端点/模型/密钥）在会话内修不了：收尾轮次后原样上抛，
         # 由 main 统一打印提示并退出。绝不能落进下面的 RuntimeError 分支——
         # 那会把"配置错了"误报成"步数超限，继续对话即可"
         agent.finalize_round("open")
         raise
     except RuntimeError as error:
+        ui.answer_live_stop()
         # 步数超限：不是故障，是"本轮干了很多活还没干完"——
         # 轮次保持开放，用户继续对话即可接着干
         agent.finalize_round("open")
@@ -504,8 +523,10 @@ def _run_turn(agent: Agent, instruction: str) -> str:
                             window=agent.context_limit))
         return ""
     except Exception:
+        ui.answer_live_stop()
         agent.finalize_round("open")  # 其他异常同理；失败尝试并入本轮
         raise
+    ui.answer_live_stop()  # 正常结束：收掉 Live 渲染（异常路径在各分支已收）
     _break_line()
     _drain_status(agent)  # 后台整理/压缩的完成消息，排在成本行之前
     print(ui.usage_line(agent.last_stats, maint=agent.last_maint,

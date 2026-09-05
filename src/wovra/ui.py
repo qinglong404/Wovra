@@ -16,6 +16,7 @@ import sys
 import unicodedata
 
 from rich.console import Console
+from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
 
@@ -107,6 +108,56 @@ def assistant_markdown(text: str) -> None:
     _console.print(Text("助手>", style="green bold"))
     _console.print(Markdown(text))
     _console.print()
+
+
+# ---- 流式回答的 Markdown 实时渲染 ---------------------------------------------
+# TTY 下用 rich Live 边流边渲染（与回放的观感一致）；非 TTY 退化为
+# 纯文本流。工具调用会打断段落——每段独立渲染，段间不重复。
+
+_answer_live: Live | None = None
+_answer_buffer: list[str] = []
+
+
+def answer_live_start() -> None:
+    """进入回答阶段：重置缓冲；Live 在首个增量到达时惰性启动。"""
+    global _answer_buffer, _answer_live
+    _answer_buffer = []
+    _answer_live = None
+
+
+def answer_live_append(text: str) -> None:
+    """追加回答增量：Live 模式更新渲染，非 TTY 直接输出纯文本。"""
+    global _answer_buffer, _answer_live
+    _answer_buffer.append(text)
+    if _answer_live is None and _ENABLED:
+        _answer_live = Live(Markdown(""), refresh_per_second=4,
+                            vertical_overflow="visible")
+        _answer_live.start()
+    if _answer_live is not None:
+        _answer_live.update(Markdown("".join(_answer_buffer)))
+    else:
+        print(text, end="", flush=True)
+
+
+def answer_live_stop() -> None:
+    """结束当前流式段：最后一帧留在屏上，即该段的最终 Markdown 渲染。"""
+    global _answer_live, _answer_buffer
+    if _answer_live is not None:
+        _answer_live.stop()
+        _answer_live = None
+        print()
+    _answer_buffer = []
+
+
+def tool_pair(name: str, result_detail: str, limit: int = 100) -> str:
+    """回放用的配对行：一行说清"调用了什么、成没成"。失败只取首行
+    原因，不再漏出整段 stdout（实测反馈）。"""
+    failed = any(tag in result_detail for tag in FAILURE_MARKERS)
+    if failed:
+        first_line = (result_detail.splitlines() or [""])[0]
+        reason = " ".join(first_line.split())[:limit]
+        return paint(f"  [调用] {name} → 失败：{reason}", "red")
+    return paint(f"  [调用] {name} → 成功", "green")
 
 
 def tool_call(name: str) -> str:
