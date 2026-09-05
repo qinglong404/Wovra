@@ -22,6 +22,7 @@ import queue
 import re
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 from . import tokens
@@ -30,12 +31,15 @@ from . import truncate
 from .llm import LLM, reasoning_of
 from .task import Task, sanitize_surrogates
 from .tools import (
+    check_background,
     edit_file,
     get_current_time,
     list_files,
     read_file,
+    run_background,
     run_command,
     search_files,
+    stop_background,
     write_file,
 )
 
@@ -50,6 +54,11 @@ _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 
 # 维护性用途：异步执行、可能跨越轮次边界，成本单独记账（不混入 last_stats）
 _MAINTENANCE_PURPOSES = ("organization", "compaction")
+
+# 纯只读工具：互不依赖，可在同一批工具调用里并发执行、按序记录
+_READ_ONLY_TOOLS = frozenset(
+    {"read_file", "search_files", "list_files", "get_current_time"}
+)
 
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
@@ -67,6 +76,9 @@ _ACTION_WORDS = {
     "list_files": "查看目录",
     "get_current_time": "获取当前时间",
     "expand_history": "展开历史",
+    "run_background": "后台启动命令",
+    "check_background": "查看后台输出",
+    "stop_background": "停止后台任务",
 }
 
 # 相关性筛选在 V2 中不实现（预算充足时所有浓缩视图直接加载），
@@ -323,8 +335,7 @@ class Agent:
                     },
                 )
                 self.last_stats["tool_calls"] += len(ordered)
-                for tc in ordered:
-                    self._execute(call_id=tc["id"], name=tc["name"], arguments=tc["arguments"])
+                self._run_tool_batch(ordered)
                 continue
 
             # 模型不再请求工具 → 产出最终回答 → Round 闭合。
@@ -346,32 +357,36 @@ class Agent:
             f"继续对话即可接着干）"
         )
 
+    def _invoke_tool(self, name: str, arguments: str) -> str:
+        """解析参数并执行工具，返回结果文本（不含展示与落盘）。"""
+        try:
+            parsed = json.loads(arguments or "{}")
+        except json.JSONDecodeError as error:
+            return f"工具参数不是合法 JSON: {error}"
+        # 模型偶发把 emoji 拆成不成对 \uD83D 转义：解析合法但无法
+        # 编码落盘——进工具与进历史前一律清洗（实测崩溃教训）
+        parsed = _sanitize_json_strings(parsed)
+        fn = self.tools.get(name)
+        if fn is None:
+            return f"未知工具: {name}，可用工具: {list(self.tools)}"
+        try:
+            result = fn(**parsed)
+        except Exception as error:  # noqa: BLE001——错误回传给模型而不是中断循环
+            return f"工具执行出错: {error!r}"
+        if not isinstance(result, str):
+            result = json.dumps(result, ensure_ascii=False, default=str)
+        return sanitize_surrogates(result)
+
     def _execute(self, call_id: str, name: str, arguments: str) -> None:
         """执行单个工具调用，并把结果作为 tool 消息追加到当前 Round。"""
         if self.on_tool_call:
             self.on_tool_call(name, arguments)
+        self._finish_tool_result(
+            call_id, name, arguments, self._invoke_tool(name, arguments)
+        )
 
-        try:
-            parsed = json.loads(arguments or "{}")
-        except json.JSONDecodeError as error:
-            result = f"工具参数不是合法 JSON: {error}"
-        else:
-            # 模型偶发把 emoji 拆成不成对 \uD83D 转义：解析合法但无法
-            # 编码落盘——进工具与进历史前一律清洗（实测崩溃教训）
-            parsed = _sanitize_json_strings(parsed)
-            fn = self.tools.get(name)
-            if fn is None:
-                result = f"未知工具: {name}，可用工具: {list(self.tools)}"
-            else:
-                try:
-                    result = fn(**parsed)
-                except Exception as error:  # noqa: BLE001——错误回传给模型而不是中断循环
-                    result = f"工具执行出错: {error!r}"
-
-        if not isinstance(result, str):
-            result = json.dumps(result, ensure_ascii=False, default=str)
-        result = sanitize_surrogates(result)
-
+    def _finish_tool_result(self, call_id: str, name: str,
+                            arguments: str, result: str) -> None:
         if self.on_tool_result:
             self.on_tool_result(name, result)
 
@@ -385,6 +400,25 @@ class Agent:
             self.task.record("tool_call", f"{name}({arguments})")
             self.task.record("tool_result", f"{name} -> {result_for_context[:500]}")
             self._persist_rounds()
+
+    def _run_tool_batch(self, ordered: list[dict]) -> None:
+        """执行一批工具调用。
+
+        纯只读批次（互不依赖）并发执行、按序记录——独立读取串行只是
+        白等；含变更类调用时保持顺序执行（写与写之间存在顺序依赖，
+        并行写同一文件是竞态）。"""
+        if len(ordered) > 1 and all(tc["name"] in _READ_ONLY_TOOLS for tc in ordered):
+            if self.on_tool_call:
+                for tc in ordered:
+                    self.on_tool_call(tc["name"], tc["arguments"])
+            with ThreadPoolExecutor(max_workers=min(4, len(ordered))) as pool:
+                results = list(pool.map(
+                    lambda tc: self._invoke_tool(tc["name"], tc["arguments"]), ordered))
+            for tc, result in zip(ordered, results):
+                self._finish_tool_result(tc["id"], tc["name"], tc["arguments"], result)
+            return
+        for tc in ordered:
+            self._execute(tc["id"], tc["name"], tc["arguments"])
 
     # ---- 流式调用（所有 LLM 交互的唯一通道，按用途分账） ------------------------
 
@@ -1134,6 +1168,12 @@ def _schema_of(fn: Callable) -> dict:
     properties = {}
     for name, param in inspect.signature(fn).parameters.items():
         annotation = param.annotation
+        # Optional[X]（X | None）取 X 的类型，避免退化为 string
+        args_ = getattr(annotation, "__args__", None)
+        if args_ and type(None) in args_:
+            non_none = [a for a in args_ if a is not type(None)]
+            if len(non_none) == 1:
+                annotation = non_none[0]
         json_type = _JSON_TYPES.get(annotation, "string")
         properties[name] = {"type": json_type}
 

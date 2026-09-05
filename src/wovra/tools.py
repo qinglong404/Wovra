@@ -12,6 +12,7 @@
 防止模型读写项目之外的任何东西。
 """
 
+import itertools
 import json
 import locale
 import os
@@ -117,6 +118,7 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
         text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
         return f"{path} 不是 UTF-8 文本文件（可能是二进制文件），无法按文本读取"
+    _observe_file(target)  # 记录观察时的状态，供 edit/write 的过期保护比对
     lines = text.splitlines()
     total = len(lines)
     if total == 0:
@@ -176,6 +178,41 @@ def get_current_time() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
+# ---- 文件观察注册表（过期保护） ---------------------------------------------
+# 本进程读/写过的文件 → (mtime_ns, size)。edit_file/write_file 前核对：
+# 文件在观察后被外部（用户、其他会话、其他进程）改动 → 拒绝执行并要求
+# 重新 read_file，防止模型按过期的上下文内容覆盖用户的新修改。
+# 本进程从未观察过的文件无从判断，保持原行为（write_file 有完整留底）。
+
+_file_registry: dict[Path, tuple[int, int]] = {}
+
+
+def _observe_file(path: Path) -> None:
+    try:
+        st = path.stat()
+        _file_registry[path] = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        _file_registry.pop(path, None)
+
+
+def _stale_error(path: Path) -> str | None:
+    """文件在观察后被外部修改 → 返回拒绝原因；否则 None。"""
+    observed = _file_registry.get(path)
+    if observed is None:
+        return None
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    if (st.st_mtime_ns, st.st_size) != observed:
+        return (
+            f"文件在你上次读取后已被外部修改（用户或其他进程）：{path}。"
+            f"上下文里的内容可能已过期。请先 read_file 重新确认最新内容，"
+            f"再决定如何修改。"
+        )
+    return None
+
+
 # ---- 变更类工具（AUDITED_TOOLS，Agent 会做完整审计记录） --------------------
 
 
@@ -184,9 +221,13 @@ def write_file(path: str, content: str) -> str:
 
     覆盖是全量的——只改一部分请用 edit_file，它要求唯一定位，
     误伤面小得多。覆盖时旧内容会通过审计挂钩完整留底，
-    出问题可以对照还原。
+    出问题可以对照还原。若文件在你上次读取后被外部修改过，
+    会拒绝执行并要求重新确认。
     """
     target = _safe_path(path)
+    stale = _stale_error(target)
+    if stale:
+        return stale
     existed = target.exists()
     old = None
     if existed:
@@ -197,6 +238,7 @@ def write_file(path: str, content: str) -> str:
     # 允许写到尚不存在的子目录（模型经常给出 "reports/xx.md" 这类路径）
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
+    _observe_file(target)
     action = "覆盖" if existed else "创建"
     if old is not None:
         # 旧内容完整留底（审计原则：能还原）；超大文件截断到 20000 字符
@@ -210,8 +252,12 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
 
     强制唯一定位：找不到或出现多次都直接报错，让模型补充更多
     上下文再试。这是防止"替换了不想替换的地方"的关键约束。
+    若文件在你上次读取后被外部修改过，会拒绝执行并要求重新确认。
     """
     target = _safe_path(path)
+    stale = _stale_error(target)
+    if stale:
+        return stale
     text = target.read_text(encoding="utf-8")
     count = text.count(old_text)
     if count == 0:
@@ -221,6 +267,7 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
             f"{path} 中待替换文本出现 {count} 次，请补充前后文使其唯一定位"
         )
     target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+    _observe_file(target)
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
     _audit(f"[edit_file] {path}\n定位片段:\n{old_text}\n替换为:\n{new_text}")
     return f"已修改 {path}（{len(old_text)} 字符 → {len(new_text)} 字符）"
@@ -252,16 +299,17 @@ def _kill_process_tree(pid: int) -> None:
             pass
 
 
-def run_command(command: str) -> str:
-    """在项目根目录运行一条 shell 命令，返回退出码与输出。超时 60 秒整树
-    强杀；不要运行前台常驻服务（http.server 之类永不退出的命令只会白等
-    60 秒）——预览网页用系统方式打开文件（Windows: start 文件名），确需
-    服务时用非阻塞方式后台启动。
+def run_command(command: str, timeout: int | None = None) -> str:
+    """在项目根目录运行一条 shell 命令，返回退出码与输出。默认 60 秒
+    超时整树强杀（timeout 可调，1-600 秒）；不要运行前台常驻服务
+    （http.server 之类永不退出的命令只会白等到超时）——预览网页用
+    系统方式打开文件（Windows: start 文件名），长驻服务用
+    run_background 后台启动。
 
     防护：
         * 黑名单匹配到破坏性模式时直接拒绝，不执行；
           拒绝文本会回传给模型（它能看到原因并换方案）
-        * 60 秒超时强制终止整棵进程树，防止长命令卡死整个任务
+        * 超时强制终止整棵进程树，防止长命令卡死整个任务
         * 输出各截断 1500 字符，防止超长输出撑爆上下文
     """
     _audit(f"[run_command] {command}")  # 无论执行与否，命令原文都进审计
@@ -271,7 +319,11 @@ def run_command(command: str) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    wait = _COMMAND_TIMEOUT if timeout is None else max(1, min(int(timeout), 600))
 
+    # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
+    # 的问题（http.server 这类孤儿进程曾把管道清理阶段永久挂死），
+    # 也没有 PIPE 缓冲写满导致的子进程阻塞，超时后的清理必然可返回
     # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
     # 的问题（http.server 这类孤儿进程曾把管道清理阶段永久挂死），
     # 也没有 PIPE 缓冲写满导致的子进程阻塞，超时后的清理必然可返回
@@ -286,14 +338,14 @@ def run_command(command: str) -> str:
             start_new_session=os.name != "nt",
         )
         try:
-            proc.wait(timeout=_COMMAND_TIMEOUT)
+            proc.wait(timeout=wait)
         except subprocess.TimeoutExpired:
             _kill_process_tree(proc.pid)
             try:
                 proc.wait(timeout=5)  # 整树已灭，这只是兜底限时
             except subprocess.TimeoutExpired:
                 pass
-            return f"命令执行失败（超时 {_COMMAND_TIMEOUT} 秒被强制终止）：{command[:200]}"
+            return f"命令执行失败（超时 {wait} 秒被强制终止）：{command[:200]}"
 
         out_f.seek(0)
         err_f.seek(0)
@@ -311,3 +363,84 @@ def run_command(command: str) -> str:
         f"stdout:\n{stdout[:1500]}\n"
         f"stderr:\n{stderr[:1500]}"
     )
+
+
+# ---- 后台任务 ----------------------------------------------------------------
+# 长驻进程（开发服务器、watcher、长安装）的后台运行与控制：启动即返回，
+# 输出落日志文件，增量查看，整树强杀。控制句柄仅存活于本进程——
+# Wovra 退出后进程仍在运行，日志保留在 .wovra-background/ 下。
+
+_BACKGROUND_TASKS: dict[str, dict] = {}
+_BACKGROUND_SEQ = itertools.count(1)
+_BACKGROUND_LOG_DIR = PROJECT_ROOT / ".wovra-background"
+
+
+def run_background(command: str) -> str:
+    """后台启动一条 shell 命令（服务器、监听、长安装等），立即返回任务 ID。
+
+    输出写入日志文件；用 check_background 查看增量输出，
+    stop_background 停止（整树强杀）。黑名单与 run_command 相同。
+    注意：Wovra 退出后进程仍在运行，但控制句柄失效——日志保留在
+    .wovra-background/ 下，可手动查看。
+    """
+    _audit(f"[run_background] {command}")
+    for pattern in _DENIED_PATTERNS:
+        if pattern in command:
+            return (
+                f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
+                f"如需完成类似效果，请使用更安全的替代方案。"
+            )
+    _BACKGROUND_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    task_id = f"bg-{next(_BACKGROUND_SEQ)}"
+    log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
+    with open(log_path, "wb") as log_file:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            start_new_session=os.name != "nt",  # 与 run_command 同一套树杀约定
+        )
+    _BACKGROUND_TASKS[task_id] = {
+        "proc": proc, "log": log_path, "pos": 0, "command": command,
+    }
+    return (
+        f"后台任务 {task_id} 已启动（PID {proc.pid}）：{command[:120]}\n"
+        f'查看输出: check_background(task_id="{task_id}") | '
+        f'停止: stop_background(task_id="{task_id}")'
+    )
+
+
+def check_background(task_id: str) -> str:
+    """查看后台任务的运行状态与增量输出（自上次查看以来的新增部分）。"""
+    entry = _BACKGROUND_TASKS.get(task_id)
+    if entry is None:
+        return f"未找到后台任务: {task_id}（控制句柄仅在本会话内有效）。"
+    proc = entry["proc"]
+    running = proc.poll() is None
+    new_text = ""
+    if entry["log"].exists():
+        with open(entry["log"], "rb") as f:
+            f.seek(entry["pos"])
+            data = f.read()
+        entry["pos"] += len(data)
+        new_text = data.decode(locale.getpreferredencoding(False), errors="replace")
+    status = "运行中" if running else f"已退出（exit_code={proc.returncode}）"
+    body = new_text.strip() or "（无新输出）"
+    return f"[{task_id}] {status}\n{body[-2000:]}"
+
+
+def stop_background(task_id: str) -> str:
+    """停止后台任务（整树强杀），返回退出状态。"""
+    entry = _BACKGROUND_TASKS.get(task_id)
+    if entry is None:
+        return f"未找到后台任务: {task_id}（控制句柄仅在本会话内有效）。"
+    proc = entry["proc"]
+    if proc.poll() is None:
+        _kill_process_tree(proc.pid)
+    try:
+        code = proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return f"后台任务 {task_id} 已发送终止信号但未退出，请稍后用 check_background 确认。"
+    return f"后台任务 {task_id} 已停止（exit_code={code}）。"

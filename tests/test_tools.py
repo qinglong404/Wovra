@@ -10,9 +10,12 @@ from wovra.agent import Agent
 from wovra.task import Task
 from wovra.tools import (
     FAILURE_MARKERS,
+    check_background,
     edit_file,
     read_file,
+    run_background,
     run_command,
+    stop_background,
     write_file,
 )
 
@@ -271,3 +274,73 @@ def test_schema_description_carries_first_paragraph():
 
     read_desc = _schema_of(read_file)["function"]["description"]
     assert "num_lines=400" in read_desc  # 通读引导：避免零碎小段反复读
+
+
+def test_edit_file_rejects_externally_modified_file(monkeypatch, tmp_path):
+    """过期保护：文件在观察后被外部改动 → 拒绝编辑并要求重读。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("note.md", "v1")
+    (tmp_path / "note.md").write_text("用户改过的 v2", encoding="utf-8")  # 外部修改
+
+    result = edit_file("note.md", "v1", "v3")
+
+    assert "已被外部修改" in result
+    assert "read_file" in result
+    # 重新观察后 → 编辑放行
+    read_file("note.md")
+    result = edit_file("note.md", "用户改过的 v2", "v3")
+    assert "已修改" in result
+
+
+def test_write_file_rejects_stale_overwrite(monkeypatch, tmp_path):
+    """整体覆盖同样受过期保护：外部改过的文件不能被盲写覆盖。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("note.md", "v1")
+    (tmp_path / "note.md").write_text("用户改过的 v2", encoding="utf-8")
+
+    result = write_file("note.md", "v3")
+
+    assert "已被外部修改" in result
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "用户改过的 v2"
+
+
+def test_run_command_respects_custom_timeout(monkeypatch):
+    """timeout 参数生效：1-600 秒可调，超时消息带实际秒数。"""
+    import os as _os
+
+    sleeper = "ping -n 11 127.0.0.1" if _os.name == "nt" else "sleep 10"
+    result = run_command(sleeper, timeout=1)
+    assert "超时 1 秒被强制终止" in result
+
+
+def test_background_lifecycle():
+    """后台任务：启动即返回 → 增量输出可见 → 停止/未知 ID 报错。"""
+    import re as _re
+    import time as _time
+
+    started = run_background("echo bg-marker-424242")
+    assert "已启动" in started
+    task_id = _re.search(r"bg-\d+", started).group(0)
+
+    out = ""
+    for _ in range(30):  # 子进程写日志需要一点时间，轮询等待
+        out = check_background(task_id)
+        if "bg-marker-424242" in out:
+            break
+        _time.sleep(0.1)
+    assert "bg-marker-424242" in out
+
+    stop = stop_background(task_id)
+    assert "已停止" in stop
+    # 幂等：对已退出的任务再次停止，仍返回停止状态而非报错
+    assert "已停止" in stop_background(task_id)
+    assert "未找到后台任务" in stop_background("bg-999999")
+    assert "未找到后台任务" in check_background("bg-999999")
+
+
+def test_background_rejects_dangerous_patterns():
+    assert "已拒绝执行危险命令" in run_background("rm -r something")

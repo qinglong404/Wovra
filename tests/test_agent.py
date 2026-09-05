@@ -842,3 +842,43 @@ def test_usage_record_includes_context_estimate(monkeypatch, tmp_path):
     assert agent.last_context_estimate > 0
     detail = [e for e in task.history if e["kind"] == "usage"][-1]["detail"]
     assert "context=" in detail
+
+
+def test_readonly_batch_runs_in_order(monkeypatch, tmp_path):
+    """纯只读批次并发执行，结果仍按调用顺序记录（顺序是正确性契约）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    for name, text in (("a.txt", "内容A"), ("b.txt", "内容B"), ("c.txt", "内容C")):
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    calls = [
+        _fragment(i, id=f"c{i}", name="read_file",
+                  arguments=json.dumps({"path": f"{name}.txt"}))
+        for i, name in enumerate("abc")
+    ]
+    responses = [
+        [_chunk(_delta(tool_calls=calls)), _chunk(usage=_usage(10, 5, 15))],
+        [_chunk(_delta(content="ok"))],
+    ]
+    from wovra.tools import read_file
+
+    # baseline：不触发整理调用，stub 响应序列刚好够用
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(responses), tools=[read_file], task=task,
+                  context_mode="baseline")
+
+    agent.run("读三个文件")
+
+    results = [e["detail"] for e in task.history if e["kind"] == "tool_result"]
+    assert len(results) == 3
+    assert "内容A" in results[0] and "内容B" in results[1] and "内容C" in results[2]
+
+
+def test_schema_unwraps_optional_annotation():
+    """Optional[int] 参数在 schema 里应为 integer，而不是退化为 string。"""
+
+    def demo(timeout: int | None = None):
+        """带可选整数的工具。"""
+
+    schema = _schema_of(demo)["function"]["parameters"]["properties"]
+    assert schema["timeout"] == {"type": "integer"}

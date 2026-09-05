@@ -34,12 +34,15 @@ from .agent import (
     MODE_BASELINE,
     MODE_MANAGED,
     Agent,
+    check_background,
     edit_file,
     get_current_time,
     list_files,
     read_file,
+    run_background,
     run_command,
     search_files,
+    stop_background,
     write_file,
 )
 from .llm import LLMConfigError
@@ -209,6 +212,9 @@ def _system_prompt(mode: str) -> str:
         "用户可随时退出、下次接着做。需要时使用工具获取真实信息或完成任务："
         "找内容用 search_files，读大文件用 read_file 的 start_line 分段；"
         "可以创建、修改项目内的文件，运行安全的 shell 命令。回答保持简洁。"
+        "环境配置可直接用 uv / pip / conda 等命令（如 uv sync、pip install）；"
+        "耗时长的安装或服务器进程用 run_background 后台执行，"
+        "check_background 查看输出。"
     )
     if mode == MODE_MANAGED:
         extra = (
@@ -244,6 +250,9 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
             write_file,
             edit_file,
             run_command,
+            run_background,
+            check_background,
+            stop_background,
         ],
         task=task,
         context_mode=mode,
