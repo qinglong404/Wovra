@@ -319,19 +319,24 @@ def ask_user(question: str, choices: str = "") -> str:
 
     choices 可选：用 | 分隔的候选项（如 "是|否|继续"）。非交互环境
     （重定向/管道）自动降级：建议模型基于已有信息继续。
+    等待回答期间置 user_input_pending 标记（不计执行时长，同确认）。
     """
     import sys
 
+    global _user_input_pending
     prompt = f"\n[模型提问] {question}"
     if choices:
         prompt += f"\n可选: {choices}"
     prompt += "\n你的回答> "
     if not sys.stdin.isatty():
         return "（非交互环境，无法获取用户输入。请基于已有信息继续，或在最终回答中说明假设。）"
+    _user_input_pending = True
     try:
         answer = input(prompt)
     except (EOFError, KeyboardInterrupt):
-        return "（用户未回答。请基于已有信息继续，或在最终回答中说明假设。）"
+        answer = ""
+    finally:
+        _user_input_pending = False
     return f"用户的回答: {answer or '（空）'}"
 
 
@@ -355,6 +360,15 @@ def list_background() -> str:
 # 版本提交、删除/移动/权限变更）。交互环境 y/N 询问（默认拒绝）；
 # 非交互环境自动放行并留审计标记——实验与脚本不被阻塞，代价记录在案。
 
+# 工具是否正在等待用户输入（确认/提问）：等待期不算执行时长，
+# 终端看门狗静默——用户的思考时间不是工具的时间，也不设超时。
+_user_input_pending = False
+
+
+def user_input_pending() -> bool:
+    return _user_input_pending
+
+
 _CONFIRM_PATTERNS = (
     r"\bgit\s+(commit|tag|merge|rebase|remote\s+add)\b",
     r"\b(pip|pip3)\s+install\b", r"\buv\s+(pip\s+)?(add|install|sync)\b",
@@ -375,16 +389,23 @@ def _confirm_reason(command: str) -> str | None:
 
 
 def _ask_yes_no(question: str) -> bool:
-    """交互环境 y/N 询问（默认拒绝）；非交互环境自动放行并留审计。"""
+    """交互环境 y/N 询问（默认拒绝）；非交互环境自动放行并留审计。
+
+    等待用户回答期间置 user_input_pending 标记：用户思考多久都行
+    （不设超时），但终端看门狗不计这段时间的执行时长。"""
     import sys
 
+    global _user_input_pending
     if not sys.stdin.isatty():
         _audit("[确认] 非交互环境，自动放行")
         return True
+    _user_input_pending = True
     try:
         answer = input(f"{question} [y/N] ").strip().lower()
     except (EOFError, KeyboardInterrupt):
         answer = ""
+    finally:
+        _user_input_pending = False
     return answer in ("y", "yes")
 
 

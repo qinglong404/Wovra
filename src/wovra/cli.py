@@ -52,7 +52,7 @@ from .agent import (
 )
 from .llm import LLMConfigError
 from .task import Task
-from .tools import PROJECT_ROOT
+from .tools import PROJECT_ROOT, user_input_pending
 
 
 def _session_lock_path(task: Task):
@@ -417,6 +417,10 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         def _tick() -> None:
             waited = 0
             while not tool_watch_stop.wait(step):
+                # 工具在等用户确认/回答：思考时间不算执行时长，
+                # 也不打印——否则会追尾在确认提示行上
+                if user_input_pending():
+                    continue
                 waited += step
                 print(ui.wait_hint(f"{name} 已执行 {waited} 秒…"), flush=True)
 

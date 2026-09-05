@@ -10,8 +10,10 @@ from wovra.agent import Agent
 from wovra.task import Task
 from wovra.tools import (
     FAILURE_MARKERS,
+    _ask_yes_no,
     _confirm_reason,
     ask_user,
+    user_input_pending,
     check_background,
     edit_file,
     glob_files,
@@ -488,3 +490,24 @@ def test_workspace_resolves_to_launch_directory(tmp_path):
         capture_output=True, text=True, env=env, cwd=str(tmp_path),
     )
     assert out.stdout.strip() == str(tmp_path)
+
+
+def test_ask_yes_no_marks_user_input_pending(monkeypatch):
+    """等待用户回答期间置 pending 标记（看门狗据此静默且不计秒）。"""
+    import builtins
+    import sys as _sys
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    seen = {}
+
+    def fake_input(prompt):
+        seen["pending_during"] = tools_module.user_input_pending()
+        return "y"
+
+    monkeypatch.setattr(builtins, "input", fake_input)
+    assert _ask_yes_no("确认？") is True
+    assert seen["pending_during"] is True
+    assert user_input_pending() is False
