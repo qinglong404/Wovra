@@ -543,30 +543,66 @@ def write_file(path: str, content: str) -> str:
     return f"已{action} {path}（{len(content)} 字符）"
 
 
+def _closest_anchor_hint(text: str, old_text: str,
+                          threshold: float = 0.6) -> tuple[int, str] | None:
+    """edit_file 锚点未命中时，找与 old_text 最接近的文件区域。
+
+    返回 (行号, 该窗口首行)，供模型一次修正锚点，不必整文件重读。
+    相似度用 SequenceMatcher 对等长行窗口逐一比对，阈值以下的
+    完全不相关内容不产生提示。"""
+    from difflib import SequenceMatcher
+
+    lines = text.splitlines()
+    if not lines or not old_text.strip():
+        return None
+    window = max(1, len(old_text.splitlines()))
+    best_ratio, best = 0.0, None
+    for start in range(0, max(1, len(lines) - window + 1)):
+        chunk = "\n".join(lines[start:start + window])
+        ratio = SequenceMatcher(None, chunk, old_text).ratio()
+        if ratio > best_ratio:
+            best_ratio, best = ratio, (start + 1, lines[start])
+    if best is None or best_ratio < threshold:
+        return None
+    return best
+
+
 def edit_file(path: str, old_text: str, new_text: str) -> str:
     """把文件中「恰好出现一次」的 old_text 替换为 new_text。
 
     强制唯一定位：找不到或出现多次都直接报错，让模型补充更多
     上下文再试。这是防止"替换了不想替换的地方"的关键约束。
+    锚点未命中时会给出最接近内容的位置，帮助一次修正。
     若文件在你上次读取后被外部修改过，会拒绝执行并要求重新确认。
     """
     target = _safe_path(path)
     stale = _stale_error(target)
     if stale:
         return stale
+    if not target.exists():
+        return (
+            f"文件不存在: {path}（解析为 {target}）。"
+            f"先用 glob_files 确认文件的实际位置——注意 path 参数应只含路径本身。"
+        )
     text = target.read_text(encoding="utf-8")
     count = text.count(old_text)
     if count == 0:
-        raise ValueError(f"{path} 中未找到待替换文本（前 80 字符: {old_text[:80]!r}）")
+        message = f"{path} 中未找到待替换文本（前 80 字符: {old_text[:80]!r}）"
+        hint = _closest_anchor_hint(text, old_text)
+        if hint:
+            message += f"。最接近的内容在第 {hint[0]} 行附近：{hint[1][:80]!r}"
+        raise ValueError(message)
     if count > 1:
         raise ValueError(
             f"{path} 中待替换文本出现 {count} 次，请补充前后文使其唯一定位"
         )
+    line_no = text.count("\n", 0, text.find(old_text)) + 1
     target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
     _observe_file(target)
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
     _audit(f"[edit_file] {path}\n定位片段:\n{old_text}\n替换为:\n{new_text}")
-    return f"已修改 {path}（{len(old_text)} 字符 → {len(new_text)} 字符）"
+    return (f"已修改 {path}（{len(old_text)} 字符 → {len(new_text)} 字符，"
+            f"位于第 {line_no} 行附近）")
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -632,6 +668,9 @@ def run_command(command: str, timeout: int | None = None) -> str:
     # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
     # 的问题（http.server 这类孤儿进程曾把管道清理阶段永久挂死），
     # 也没有 PIPE 缓冲写满导致的子进程阻塞，超时后的清理必然可返回
+    # 子进程强制 UTF-8 输出：否则中文输出按各自主观编码（gbk/utf-8）
+    # 混流，父进程解码必出乱码（实测 py_compile 输出花屏）
+    child_env = dict(os.environ, PYTHONUTF8="1")
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         proc = subprocess.Popen(
             command,
@@ -639,6 +678,7 @@ def run_command(command: str, timeout: int | None = None) -> str:
             stdout=out_f,
             stderr=err_f,
             cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            env=child_env,
             # POSIX：让子进程自成进程组，超时后 killpg 整组杀掉而不伤自身
             start_new_session=os.name != "nt",
         )
@@ -654,9 +694,8 @@ def run_command(command: str, timeout: int | None = None) -> str:
 
         out_f.seek(0)
         err_f.seek(0)
-        encoding = locale.getpreferredencoding(False)  # 与原 text=True 口径一致
-        stdout = out_f.read().decode(encoding, errors="replace").strip() or "(无输出)"
-        stderr = err_f.read().decode(encoding, errors="replace").strip() or "(无输出)"
+        stdout = out_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
+        stderr = err_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
 
     header = (
         f"命令执行失败（exit_code={proc.returncode}）"
@@ -714,6 +753,7 @@ def run_background(command: str) -> str:
             stdout=log_file,
             stderr=subprocess.STDOUT,
             cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            env=dict(os.environ, PYTHONUTF8="1"),  # 子进程统一 UTF-8 输出
             start_new_session=os.name != "nt",  # 与 run_command 同一套树杀约定
         )
     _BACKGROUND_TASKS[task_id] = {
@@ -739,7 +779,7 @@ def check_background(task_id: str) -> str:
             f.seek(entry["pos"])
             data = f.read()
         entry["pos"] += len(data)
-        new_text = data.decode(locale.getpreferredencoding(False), errors="replace")
+        new_text = data.decode("utf-8", errors="replace")
     status = "运行中" if running else f"已退出（exit_code={proc.returncode}）"
     body = new_text.strip() or "（无新输出）"
     return f"[{task_id}] {status}\n{body[-2000:]}"

@@ -595,3 +595,36 @@ def test_web_search_falls_back_to_second_engine(monkeypatch):
     monkeypatch.setattr(tools_module, "_search_bing", lambda q, n: "bing 失败: 限流")
     result = tools_module.web_search("q")
     assert "所有搜索通道都失败了" in result and "bing 失败" in result
+
+
+def test_edit_file_reports_missing_path_friendly(monkeypatch, tmp_path):
+    """文件不存在 → 友好消息带解析路径（参数装填错误一眼可见）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    result = edit_file("edit_file", "a", "b")
+    assert "文件不存在" in result and "glob_files" in result
+
+
+def test_edit_file_anchor_miss_gives_closest_hint(monkeypatch, tmp_path):
+    """锚点未命中 → 给出最接近内容的行号，模型一次修正。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    body = "第一行\n" + "\n".join(f"def func_{i}(x): return x + {i}" for i in range(20)) + "\n尾行"
+    write_file("app.py", body)
+
+    with pytest.raises(ValueError) as excinfo:
+        edit_file("app.py", "def func_7(x): return x + 999\n多出来的一行", "替换")
+    message = str(excinfo.value)
+    assert "最接近的内容在第" in message
+    assert "func_7" in message  # 提示指向最接近的锚点
+
+
+def test_edit_file_success_reports_line_number(monkeypatch, tmp_path):
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "第一行\n第二行\n第三行")
+    result = edit_file("app.py", "第二行", "第二行（改）")
+    assert "位于第 2 行" in result
