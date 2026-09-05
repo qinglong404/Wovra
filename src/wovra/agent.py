@@ -69,7 +69,6 @@ _READ_ONLY_TOOLS = frozenset(
 
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
-_CACHE_RATE = 30  # 缓存价 = 未命中的 1/30
 # 单轮工具循环的默认步数上限：真实任务步数轻松上两位数，10 步远远不够
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "40"))
 
@@ -560,7 +559,7 @@ class Agent:
             cache_info = (
                 f" 缓存命中 {cached:,} tok（{cached / prompt:.1%}）"
                 f" 未命中 {miss:,} tok（{miss / prompt:.1%}）"
-                f" 等效输入 {miss + cached / _CACHE_RATE:,.0f} tok"
+                f" 等效输入 {miss + cached / tokens.CACHE_RATE:,.0f} tok"
             )
         suffix = "" if closed else "（轮未闭合：超限/中断，成本照记）"
         self.task.record(

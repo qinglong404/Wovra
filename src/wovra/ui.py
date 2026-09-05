@@ -212,7 +212,6 @@ def status_line(text: str) -> str:
     return paint(f"  … {text}", "cyan")
 
 
-_CACHE_RATE = 30  # 缓存价 = 未命中的 1/30（与 agent/truncate 口径一致）
 
 
 def _fmt_window(window: int) -> str:
@@ -257,7 +256,7 @@ def usage_line(stats: dict, maint: dict | None = None,
         if prompt:
             parts.append(f"缓存命中 {cached:,} tok（{cached / prompt:.1%}）")
             parts.append(f"未命中 {miss:,} tok（{miss / prompt:.1%}）")
-            parts.append(f"等效输入 {miss + cached / _CACHE_RATE:,.0f} tok")
+            parts.append(f"等效输入 {miss + cached / tokens_module.CACHE_RATE:,.0f} tok")
     else:
         parts.append("tokens：服务端未返回 usage")
 
