@@ -38,6 +38,7 @@ def session_metrics(run_dir: Path) -> dict | None:
         detail = e["detail"]
         per_round.append({
             "steps": _int(r"steps=([\d,]+)", detail),
+            "context": _int(r"context=([\d,]+)", detail),
             "total": _int(r"total=([\d,]+)", detail),
             "effective": _int(r"等效输入 ([\d,]+) tok", detail),
         })
@@ -84,6 +85,7 @@ def session_metrics(run_dir: Path) -> dict | None:
         "steps": sum(p["steps"] for p in per_round),
         "total": sum(p["total"] for p in per_round),
         "effective": sum(p["effective"] for p in per_round),
+        "context_peak": max((p["context"] for p in per_round), default=0),
         "reads": sum(reads.values()),
         "re_reads": sum(c - 1 for c in reads.values() if c > 1),
         "expand_calls": expand_calls,
@@ -106,15 +108,15 @@ def main() -> None:
     for s in sorted(sessions, key=lambda x: (x["mode"], x["index"])):
         label = f"{s['mode']}-{s['index']}"
         print(f"\n=== 会话 {label}（{s['task_id']}，{s['rounds']} 轮）===")
-        print(f"{'轮':>3} {'步数':>4} {'名义total':>10} {'等效输入':>10} {'累计通过':>6}")
+        print(f"{'轮':>3} {'步数':>4} {'上下文':>10} {'名义total':>10} {'等效输入':>10} {'累计通过':>6}")
         cum = 0
         for i, pr in enumerate(s["per_round"], 1):
             cum = s["snapshots"].get(i, cum)
-            print(f"R{i:<2} {pr['steps']:>4} {pr['total']:>10,} "
+            print(f"R{i:<2} {pr['steps']:>4} {pr['context']:>10,} {pr['total']:>10,} "
                   f"{pr['effective']:>10,} {cum:>4}/{s['criteria_total']}")
         print(f"  步数合计 {s['steps']:,} | 名义合计 {s['total']:,} | "
-              f"等效合计 {s['effective']:,} | 重读 {s['re_reads']} | "
-              f"expand {s['expand_calls']} | 回归 {s['regressions']} 次 | "
+              f"等效合计 {s['effective']:,} | 上下文峰值 {s['context_peak']:,} | "
+              f"重读 {s['re_reads']} | expand {s['expand_calls']} | 回归 {s['regressions']} 次 | "
               f"最终通过 {s['final_passed']}/{s['criteria_total']}")
 
     print("\n=== 模式汇总（会话中位数）===")

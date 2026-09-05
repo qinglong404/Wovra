@@ -261,3 +261,13 @@ def test_run_turn_propagates_config_error_not_turn_limit():
     with pytest.raises(LLMConfigError):
         _run_turn(agent, "hi")
     assert finalized == ["open"]  # 轮次已收尾为开放，异常原样上抛
+
+
+def test_usage_line_shows_context_window():
+    """usage 行显示上下文占用与窗口大小（常见工具的上下文余量显示）。"""
+    from wovra import ui
+
+    stats = {"seconds": 0, "total_tokens": 100, "prompt_tokens": 80,
+             "completion_tokens": 20, "cached_tokens": 0, "cache_miss_tokens": 80}
+    line = ui.usage_line(stats, maint={}, context=12_000, window=1_000_000)
+    assert "上下文 12,000 tok（1.2%，窗口 1M）" in line

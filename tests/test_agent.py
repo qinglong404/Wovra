@@ -828,3 +828,17 @@ def test_tool_args_with_unpaired_surrogates_are_sanitized(monkeypatch, tmp_path)
     assert "\ud83d" not in str(seen)
     assert "\ufffd" in seen["new_text"]
     task.save()  # 含该工具调用事件的会话照常落盘
+
+
+def test_usage_record_includes_context_estimate(monkeypatch, tmp_path):
+    """usage 落盘带 context=：上下文增长曲线可从 task.json 直接查得。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    responses = [[_chunk(_delta(content="ok")), _chunk(usage=_usage(10, 2, 12))]]
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, context_mode="baseline")
+
+    agent.run("问")
+
+    assert agent.last_context_estimate > 0
+    detail = [e for e in task.history if e["kind"] == "usage"][-1]["detail"]
+    assert "context=" in detail

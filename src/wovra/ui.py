@@ -149,7 +149,17 @@ def status_line(text: str) -> str:
 _CACHE_RATE = 30  # 缓存价 = 未命中的 1/30（与 agent/truncate 口径一致）
 
 
-def usage_line(stats: dict, maint: dict | None = None) -> str:
+def _fmt_window(window: int) -> str:
+    """窗口大小的人性化显示：1,000,000 → 1M。"""
+    if window % 1_000_000 == 0:
+        return f"{window // 1_000_000}M"
+    if window % 1_000 == 0:
+        return f"{window // 1_000}K"
+    return f"{window:,}"
+
+
+def usage_line(stats: dict, maint: dict | None = None,
+               context: int | None = None, window: int | None = None) -> str:
     """一次 run 的成本核算行：轮次/步数/工具调用 + tokens 用量与构成。
 
     所有占比保留 1 位小数；输入构成来自本地估算的相对占比，按
@@ -157,6 +167,8 @@ def usage_line(stats: dict, maint: dict | None = None) -> str:
     总量。缓存命中依赖服务端的 prompt_tokens_details，漏报的调用
     按 0 命中计入未命中（口径见 Agent）。maint 是维护账本快照
     （整理/压缩成本，异步跨轮次，由 Agent 记账时取走）。
+    context/window：本轮最后一次请求的上下文体量估算与窗口大小
+    （占用比例 = 常见工具的"上下文窗口占用"显示，口径见 Agent）。
     """
     parts = [
         f"耗时 {stats['seconds']:.1f}s",
@@ -182,6 +194,11 @@ def usage_line(stats: dict, maint: dict | None = None) -> str:
             parts.append(f"等效输入 {miss + cached / _CACHE_RATE:,.0f} tok")
     else:
         parts.append("tokens：服务端未返回 usage")
+
+    if context and window:
+        parts.append(
+            f"上下文 {context:,} tok（{context / window:.1%}，窗口 {_fmt_window(window)}）"
+        )
 
     maint = maint or {}
     org = (maint.get("organization") or {}).get("total", 0)

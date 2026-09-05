@@ -450,14 +450,18 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         print(ui.error(str(error)))
         print(ui.info("本轮保持开放，直接继续对话即可接着干。"))
         _drain_status(agent)
-        print(ui.usage_line(agent.last_stats, maint=agent.last_maint))
+        print(ui.usage_line(agent.last_stats, maint=agent.last_maint,
+                            context=agent.last_context_estimate,
+                            window=agent.context_limit))
         return ""
     except Exception:
         agent.finalize_round("open")  # 其他异常同理；失败尝试并入本轮
         raise
     _break_line()
     _drain_status(agent)  # 后台整理/压缩的完成消息，排在成本行之前
-    print(ui.usage_line(agent.last_stats, maint=agent.last_maint))
+    print(ui.usage_line(agent.last_stats, maint=agent.last_maint,
+                        context=agent.last_context_estimate,
+                        window=agent.context_limit))
     return answer
 
 

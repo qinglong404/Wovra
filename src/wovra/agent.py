@@ -147,6 +147,8 @@ class Agent:
         }
         self._maint_lock = threading.Lock()
         self.last_maint: dict = {}
+        # 最近一次装配的上下文体量估算（每步更新；轮结束时即该轮峰值）
+        self.last_context_estimate = 0
         # 端点不支持整理参数的降级提示：每次会话只提示一次，避免每轮刷屏
         self._degrade_warned = False
 
@@ -515,6 +517,7 @@ class Agent:
         self.task.record(
             "usage",
             f"[{self.context_mode}] steps={stats['llm_calls']:,} "
+            f"context={self.last_context_estimate:,} "
             f"working={stats['purpose']['working']['total']:,} "
             f"org={maint['organization']['total']:,} "
             f"compaction={maint['compaction']['total']:,} "
@@ -563,6 +566,12 @@ class Agent:
     # ---- Context Assembly（设计文档第 4 节） ------------------------------------
 
     def _assemble_messages(self) -> list[dict]:
+        """装配本轮请求的上下文，并记录体量估算（终端展示与窗口保底同口径）。"""
+        msgs = self._assemble_messages_impl()
+        self.last_context_estimate = self._estimate_messages(msgs)
+        return msgs
+
+    def _assemble_messages_impl(self) -> list[dict]:
         """按变化频率排序装配上下文（缓存友好布局）。
 
         [1] system 人设（静态）
