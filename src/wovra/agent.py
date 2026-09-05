@@ -507,7 +507,8 @@ class Agent:
         suffix = "" if closed else "（轮未闭合：超限/中断，成本照记）"
         self.task.record(
             "usage",
-            f"[{self.context_mode}] working={stats['purpose']['working']['total']:,} "
+            f"[{self.context_mode}] steps={stats['llm_calls']:,} "
+            f"working={stats['purpose']['working']['total']:,} "
             f"org={maint['organization']['total']:,} "
             f"compaction={maint['compaction']['total']:,} "
             f"prompt={prompt:,} completion={stats['completion_tokens']:,} "

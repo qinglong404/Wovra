@@ -1,0 +1,457 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Wovra Chat · 模型对话</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --panel: #161a23;
+    --panel-2: #1c2130;
+    --border: #2a3040;
+    --text: #e6e9f0;
+    --text-dim: #8b93a7;
+    --accent: #6c7bff;
+    --accent-2: #9a5cff;
+    --user-bubble: linear-gradient(135deg, #5a6cff, #8b5cf6);
+    --code-bg: #11141c;
+    --radius: 14px;
+  }
+  [data-theme="light"] {
+    --bg: #f5f6fa;
+    --panel: #ffffff;
+    --panel-2: #eef0f6;
+    --border: #e2e5ee;
+    --text: #1c2230;
+    --text-dim: #6b7285;
+    --code-bg: #eceef5;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; overflow: hidden;
+  }
+
+  /* ---------- 侧边栏 ---------- */
+  .sidebar {
+    width: 264px; flex-shrink: 0;
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    transition: margin .25s ease;
+  }
+  .sidebar.collapsed { margin-left: -264px; }
+  .side-head {
+    padding: 16px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center; font-weight: 700; color: #fff;
+  }
+  .side-head b { font-size: 15px; }
+  .side-head small { color: var(--text-dim); font-size: 11px; display: block; }
+  .new-chat-btn {
+    margin: 14px 14px 8px; padding: 10px; border: none; border-radius: 10px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff; font-size: 14px; cursor: pointer; font-weight: 600;
+    transition: opacity .15s;
+  }
+  .new-chat-btn:hover { opacity: .85; }
+  .conv-list { flex: 1; overflow-y: auto; padding: 6px 10px 10px; }
+  .conv-item {
+    padding: 10px 12px; border-radius: 10px; cursor: pointer;
+    font-size: 13px; color: var(--text-dim); margin-bottom: 4px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: flex; justify-content: space-between; align-items: center; gap: 8px;
+  }
+  .conv-item:hover { background: var(--panel-2); }
+  .conv-item.active { background: var(--panel-2); color: var(--text); }
+  .conv-item .del {
+    opacity: 0; border: none; background: none; color: var(--text-dim);
+    cursor: pointer; font-size: 14px; flex-shrink: 0;
+  }
+  .conv-item:hover .del { opacity: 1; }
+  .conv-item .del:hover { color: #ff5c6c; }
+  .side-foot { padding: 12px 16px; border-top: 1px solid var(--border); font-size: 11px; color: var(--text-dim); }
+
+  /* ---------- 主区域 ---------- */
+  .main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  .topbar {
+    height: 56px; flex-shrink: 0; display: flex; align-items: center; gap: 12px;
+    padding: 0 16px; border-bottom: 1px solid var(--border); background: var(--panel);
+  }
+  .icon-btn {
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    width: 34px; height: 34px; border-radius: 9px; cursor: pointer; font-size: 15px;
+    display: grid; place-items: center; transition: background .15s;
+  }
+  .icon-btn:hover { background: var(--border); }
+  select.model-select {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 9px; padding: 7px 10px; font-size: 13px; cursor: pointer; outline: none;
+  }
+  .topbar .spacer { flex: 1; }
+  .status-dot {
+    width: 8px; height: 8px; border-radius: 50%; background: #3ddc84;
+    box-shadow: 0 0 8px #3ddc84aa;
+  }
+  .status-text { font-size: 12px; color: var(--text-dim); }
+
+  /* ---------- 消息区 ---------- */
+  .messages { flex: 1; overflow-y: auto; padding: 24px 16px; }
+  .inner { max-width: 780px; margin: 0 auto; }
+  .msg { display: flex; gap: 12px; margin-bottom: 22px; animation: fadeUp .25s ease; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; } }
+  .msg.user { flex-direction: row-reverse; }
+  .avatar {
+    width: 34px; height: 34px; border-radius: 10px; flex-shrink: 0;
+    display: grid; place-items: center; font-size: 13px; font-weight: 700; color: #fff;
+  }
+  .msg.assistant .avatar { background: linear-gradient(135deg, var(--accent), var(--accent-2)); }
+  .msg.user .avatar { background: linear-gradient(135deg, #2bb673, #1a9e8f); }
+  .bubble {
+    max-width: 78%; padding: 12px 16px; border-radius: var(--radius);
+    font-size: 14.5px; line-height: 1.7; word-break: break-word;
+  }
+  .msg.user .bubble { background: var(--user-bubble); color: #fff; border-top-right-radius: 4px; }
+  .msg.assistant .bubble {
+    background: var(--panel-2); border: 1px solid var(--border); border-top-left-radius: 4px;
+  }
+  .bubble p { margin: 0 0 8px; } .bubble p:last-child { margin-bottom: 0; }
+  .bubble ul, .bubble ol { margin: 4px 0 8px 20px; }
+  .bubble code.inline {
+    background: var(--code-bg); border: 1px solid var(--border);
+    padding: 1px 6px; border-radius: 6px; font-size: 13px;
+    font-family: Consolas, Monaco, monospace;
+  }
+  .code-block { margin: 8px 0; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+  .code-block .cb-head {
+    display: flex; justify-content: space-between; align-items: center;
+    background: var(--code-bg); padding: 6px 12px; font-size: 11px; color: var(--text-dim);
+  }
+  .cb-copy { border: none; background: none; color: var(--text-dim); cursor: pointer; font-size: 11px; }
+  .cb-copy:hover { color: var(--text); }
+  .code-block pre {
+    background: var(--code-bg); padding: 12px 14px; overflow-x: auto;
+    font-family: Consolas, Monaco, monospace; font-size: 13px; line-height: 1.6;
+    margin: 0; color: var(--text);
+  }
+  .typing { display: inline-flex; gap: 5px; padding: 4px 2px; }
+  .typing i {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--text-dim);
+    animation: blink 1.2s infinite;
+  }
+  .typing i:nth-child(2) { animation-delay: .2s; }
+  .typing i:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 60%, 100% { opacity: .25; } 30% { opacity: 1; } }
+
+  .welcome { text-align: center; margin-top: 12vh; animation: fadeUp .4s ease; }
+  .welcome .big-logo {
+    width: 64px; height: 64px; border-radius: 18px; margin: 0 auto 16px;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    display: grid; place-items: center; font-size: 28px; font-weight: 700; color: #fff;
+    box-shadow: 0 8px 30px #6c7bff44;
+  }
+  .welcome h2 { font-size: 22px; margin-bottom: 8px; }
+  .welcome p { color: var(--text-dim); font-size: 14px; }
+  .suggests { display: flex; gap: 10px; justify-content: center; margin-top: 26px; flex-wrap: wrap; }
+  .suggest {
+    border: 1px solid var(--border); background: var(--panel); color: var(--text);
+    padding: 10px 16px; border-radius: 12px; font-size: 13px; cursor: pointer;
+    transition: border-color .15s, transform .15s;
+  }
+  .suggest:hover { border-color: var(--accent); transform: translateY(-2px); }
+
+  /* ---------- 输入区 ---------- */
+  .input-area { padding: 12px 16px 18px; flex-shrink: 0; }
+  .input-box {
+    max-width: 780px; margin: 0 auto; background: var(--panel-2);
+    border: 1px solid var(--border); border-radius: 16px; padding: 10px 12px;
+    display: flex; align-items: flex-end; gap: 10px; transition: border-color .15s;
+  }
+  .input-box:focus-within { border-color: var(--accent); }
+  textarea#input {
+    flex: 1; background: none; border: none; outline: none; resize: none;
+    color: var(--text); font-size: 14.5px; font-family: inherit;
+    line-height: 1.6; max-height: 160px; padding: 6px 4px;
+  }
+  .send-btn {
+    border: none; border-radius: 11px; width: 38px; height: 38px; flex-shrink: 0;
+    background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    color: #fff; font-size: 16px; cursor: pointer; display: grid; place-items: center;
+    transition: opacity .15s;
+  }
+  .send-btn:hover { opacity: .85; }
+  .send-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .send-btn.stop { background: #ff5c6c; }
+  .input-hint { max-width: 780px; margin: 8px auto 0; text-align: center; font-size: 11px; color: var(--text-dim); }
+
+  /* ---------- 响应式 ---------- */
+  @media (max-width: 640px) {
+    .sidebar { position: fixed; z-index: 10; height: 100%; }
+    .sidebar.collapsed { margin-left: -264px; }
+    .bubble { max-width: 88%; }
+  }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+</style>
+</head>
+<body>
+
+<!-- 侧边栏 -->
+<aside class="sidebar" id="sidebar">
+  <div class="side-head">
+    <div class="logo">W</div>
+    <div><b>Wovra Chat</b><small>纯前端 · 本地演示</small></div>
+  </div>
+  <button class="new-chat-btn" id="newChatBtn">＋ 新建对话</button>
+  <div class="conv-list" id="convList"></div>
+  <div class="side-foot">会话保存在浏览器 localStorage</div>
+</aside>
+
+<!-- 主区域 -->
+<main class="main">
+  <div class="topbar">
+    <button class="icon-btn" id="toggleSide" title="收起/展开侧栏">☰</button>
+    <select class="model-select" id="modelSelect">
+      <option>Wovra-Lite (本地模拟)</option>
+      <option>Wovra-Pro (本地模拟)</option>
+      <option>Wovra-Max (本地模拟)</option>
+    </select>
+    <div class="spacer"></div>
+    <span class="status-dot"></span><span class="status-text" id="statusText">就绪</span>
+    <button class="icon-btn" id="themeBtn" title="切换主题">🌙</button>
+    <button class="icon-btn" id="clearBtn" title="清空当前对话">🗑</button>
+  </div>
+
+  <div class="messages" id="messages">
+    <div class="inner" id="msgInner">
+      <div class="welcome" id="welcome">
+        <div class="big-logo">W</div>
+        <h2>你好，我是 Wovra</h2>
+        <p>这是一个纯前端的对话演示页面，模型为本地模拟 · 试试下面的问题</p>
+        <div class="suggests">
+          <button class="suggest">👋 用一句话介绍你自己</button>
+          <button class="suggest">🐍 写一段快速排序代码</button>
+          <button class="suggest">📋 列出学习 Python 的建议</button>
+          <button class="suggest">🌟 给我讲个冷笑话</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="input-area">
+    <div class="input-box">
+      <textarea id="input" rows="1" placeholder="输入消息，Enter 发送，Shift+Enter 换行…"></textarea>
+      <button class="send-btn" id="sendBtn" title="发送">➤</button>
+    </div>
+    <div class="input-hint">内容由本地模拟模型生成，仅供前端演示</div>
+  </div>
+</main>
+
+<script>
+/* ================= 状态 ================= */
+const LS_KEY = "wovra-chat-history";
+let conversations = JSON.parse(localStorage.getItem(LS_KEY) || "[]");
+let currentId = null;
+let generating = false;
+let stopFlag = false;
+
+const $ = id => document.getElementById(id);
+const msgInner = $("msgInner"), messages = $("messages"), input = $("input"),
+      sendBtn = $("sendBtn"), convList = $("convList");
+
+/* ================= 模拟模型 ================= */
+function mockReply(text) {
+  const t = text.toLowerCase();
+  if (/介绍|你是谁|hello|hi|你好/.test(t))
+    return "你好！我是 **Wovra**，一个由纯前端页面驱动的模拟助手 🤖\n\n我的所有回复都生成于你的浏览器本地，不经过任何服务器——这个页面正是用来演示对话界面的交互效果，包括：\n\n- 流式逐字输出\n- Markdown 渲染（粗体、`行内代码`、代码块）\n- 多会话管理与本地存储";
+  if (/排序|sort|代码|code/.test(t))
+    return "这是一段 Python 快速排序：\n\n```python\ndef quick_sort(arr):\n    if len(arr) <= 1:\n        return arr\n    pivot = arr[len(arr) // 2]\n    left  = [x for x in arr if x < pivot]\n    mid   = [x for x in arr if x == pivot]\n    right = [x for x in arr if x > pivot]\n    return quick_sort(left) + mid + quick_sort(right)\n\nprint(quick_sort([3, 6, 1, 8, 2, 9, 4]))\n# [1, 2, 3, 4, 6, 8, 9]\n```\n\n平均时间复杂度 **O(n log n)**，空间复杂度 O(n)（因使用了列表推导式）。";
+  if (/python|学习|建议|列表|list/.test(t))
+    return "给你几条学习 Python 的建议：\n\n1. **打好基础**：变量、控制流、函数、面向对象\n2. **动手实践**：每学一个概念就写小程序验证\n3. **做项目**：爬虫 → 数据分析 → Web 后端，循序渐进\n4. **读源码**：阅读优秀开源项目（如 requests）的代码风格\n5. **善用工具**：`venv` 管理环境，`pytest` 写测试\n\n坚持三个月，你会看到明显进步 💪";
+  if (/笑话|joke|冷/.test(t))
+    return "给你一个程序员冷笑话：\n\n> 为什么程序员总是分不清万圣节和圣诞节？\n> 因为 **Oct 31 == Dec 25** 🎃🎄\n\n（八进制的 31 等于十进制的 25）";
+  const m = text.length > 60 ? text.slice(0, 60) + "…" : text;
+  return `收到你的消息：「${m}」\n\n我是本地模拟模型，不会真正理解语义 😄 但可以演示这些能力：\n\n- 试试问我「写一段代码」\n- 或说「列几个建议」\n- 或说「讲个笑话」\n\n想接入真实模型？只需在 \`sendMessage()\` 里把 \`mockReply()\` 换成 \`fetch()\` 调用即可。`;
+}
+
+/* ================= 渲染 ================= */
+function escapeHtml(s) {
+  return s.replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+function renderMarkdown(src) {
+  // 代码块
+  const blocks = [];
+  src = src.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+    blocks.push({ lang: lang || "text", code: code.replace(/\n$/, "") });
+    return `\u0000CB${blocks.length - 1}\u0000`;
+  });
+  let html = escapeHtml(src)
+    .replace(/`([^`\n]+)`/g, '<code class="inline">$1</code>')
+    .replace(/\*\*([^*\n]+)\*\*/g, "<b>$1</b>")
+    .replace(/\*([^*\n]+)\*/g, "<i>$1</i>");
+  // 简单列表
+  html = html.replace(/(^\s*[-•] .*(\n|$))+/gm, m =>
+    "<ul>" + m.trim().split(/\n/).map(l => `<li>${l.replace(/^\s*[-•] /, "")}</li>`).join("") + "</ul>");
+  html = html.replace(/(^\s*\d+\. .*(\n|$))+/gm, m =>
+    "<ol>" + m.trim().split(/\n/).map(l => `<li>${l.replace(/^\s*\d+\. /, "")}</li>`).join("") + "</ol>");
+  // 段落
+  html = html.split(/\n{2,}/).map(p =>
+    /^\s*<(ul|ol)/.test(p) ? p : `<p>${p.replace(/\n/g, "<br>")}</p>`).join("");
+  // 还原代码块
+  html = html.replace(/\u0000CB(\d+)\u0000/g, (_, i) => {
+    const b = blocks[+i];
+    return `<div class="code-block"><div class="cb-head"><span>${b.lang}</span>` +
+      `<button class="cb-copy" onclick="copyCode(this)">复制</button></div>` +
+      `<pre>${escapeHtml(b.code)}</pre></div>`;
+  });
+  return html;
+}
+function copyCode(btn) {
+  const code = btn.closest(".code-block").querySelector("pre").innerText;
+  navigator.clipboard.writeText(code).then(() => {
+    btn.textContent = "已复制 ✓";
+    setTimeout(() => btn.textContent = "复制", 1500);
+  });
+}
+function bubbleEl(role, content) {
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.innerHTML = `<div class="avatar">${role === "user" ? "我" : "W"}</div>` +
+                  `<div class="bubble"></div>`;
+  div.querySelector(".bubble").innerHTML = renderMarkdown(content);
+  return div;
+}
+function refreshConvList() {
+  convList.innerHTML = "";
+  conversations.forEach(c => {
+    const item = document.createElement("div");
+    item.className = "conv-item" + (c.id === currentId ? " active" : "");
+    const span = document.createElement("span");
+    span.textContent = c.title;
+    span.style.overflow = "hidden";
+    span.style.textOverflow = "ellipsis";
+    const del = document.createElement("button");
+    del.className = "del"; del.textContent = "✕"; del.title = "删除";
+    del.onclick = e => { e.stopPropagation(); conversations = conversations.filter(x => x.id !== c.id);
+      if (currentId === c.id) currentId = conversations[0]?.id || null;
+      save(); render(); };
+    item.append(span, del);
+    item.onclick = () => { currentId = c.id; render(); };
+    convList.appendChild(item);
+  });
+}
+function render() {
+  refreshConvList();
+  msgInner.innerHTML = "";
+  const conv = conversations.find(c => c.id === currentId);
+  if (!conv || conv.messages.length === 0) { renderWelcome(); return; }
+  conv.messages.forEach(m => msgInner.appendChild(bubbleEl(m.role, m.content)));
+  scrollToBottom();
+}
+function renderWelcome() {
+  const w = $("welcome");
+  msgInner.appendChild(w.cloneNode(true));
+  msgInner.querySelectorAll(".suggest").forEach(b =>
+    b.onclick = () => { input.value = b.textContent.trim().slice(2); send(); });
+}
+function scrollToBottom() { messages.scrollTop = messages.scrollHeight; }
+function save() { localStorage.setItem(LS_KEY, JSON.stringify(conversations)); }
+
+/* ================= 发送流程 ================= */
+function getOrCreateConv() {
+  let conv = conversations.find(c => c.id === currentId);
+  if (!conv) {
+    conv = { id: Date.now().toString(36), title: "新对话", messages: [] };
+    conversations.unshift(conv); currentId = conv.id;
+  }
+  return conv;
+}
+function send() {
+  const text = input.value.trim();
+  if (!text || generating) return;
+  input.value = ""; input.style.height = "auto";
+  const conv = getOrCreateConv();
+  if (conv.title === "新对话") conv.title = text.slice(0, 18);
+
+  conv.messages.push({ role: "user", content: text });
+  const userEl = bubbleEl("user", text);
+  $("welcome") && msgInner.querySelector(".welcome")?.remove();
+  msgInner.appendChild(userEl);
+  scrollToBottom(); save(); refreshConvList();
+
+  // 打字中指示器
+  const typingEl = document.createElement("div");
+  typingEl.className = "msg assistant";
+  typingEl.innerHTML = `<div class="avatar">W</div><div class="bubble"><span class="typing"><i></i><i></i><i></i></span></div>`;
+  msgInner.appendChild(typingEl);
+  scrollToBottom();
+  setStatus("生成中…"); generating = true; stopFlag = false;
+  sendBtn.textContent = "■"; sendBtn.classList.add("stop"); sendBtn.title = "停止生成";
+
+  const reply = mockReply(text);
+  const delay = 350 + Math.random() * 500;
+  setTimeout(() => {
+    const bubble = typingEl.querySelector(".bubble");
+    let i = 0;
+    const timer = setInterval(() => {
+      if (stopFlag) {
+        clearInterval(timer);
+        finish(conv, reply.slice(0, i) + "\n\n*[已停止生成]*");
+        return;
+      }
+      i = Math.min(i + 2 + Math.floor(Math.random() * 3), reply.length);
+      bubble.innerHTML = renderMarkdown(reply.slice(0, i)) +
+        (i < reply.length ? '<span class="typing" style="padding:0"><i style="width:4px;height:14px;border-radius:2px"></i></span>' : "");
+      scrollToBottom();
+      if (i >= reply.length) { clearInterval(timer); finish(conv, reply); }
+    }, 24);
+  }, delay);
+}
+function finish(conv, content) {
+  conv.messages.push({ role: "assistant", content });
+  save();
+  generating = false;
+  sendBtn.textContent = "➤"; sendBtn.classList.remove("stop"); sendBtn.title = "发送";
+  setStatus("就绪");
+  render();
+}
+function setStatus(s) { $("statusText").textContent = s; }
+
+/* ================= 事件 ================= */
+sendBtn.onclick = () => { generating ? (stopFlag = true) : send(); };
+input.addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); send(); }
+});
+input.addEventListener("input", () => {
+  input.style.height = "auto";
+  input.style.height = Math.min(input.scrollHeight, 160) + "px";
+});
+$("newChatBtn").onclick = () => {
+  const c = { id: Date.now().toString(36), title: "新对话", messages: [] };
+  conversations.unshift(c); currentId = c.id; save(); render(); input.focus();
+};
+$("clearBtn").onclick = () => {
+  const conv = conversations.find(c => c.id === currentId);
+  if (conv) { conv.messages = []; conv.title = "新对话"; save(); render(); }
+};
+$("themeBtn").onclick = () => {
+  const html = document.documentElement;
+  const light = html.dataset.theme === "light";
+  html.dataset.theme = light ? "" : "light";
+  $("themeBtn").textContent = light ? "🌙" : "☀️";
+};
+$("toggleSide").onclick = () => $("sidebar").classList.toggle("collapsed");
+
+/* ================= 初始化 ================= */
+if (conversations.length === 0) getOrCreateConv();
+else if (!conversations.find(c => c.id === currentId)) currentId = conversations[0].id;
+save(); render(); input.focus();
+</script>
+</body>
+</html>
