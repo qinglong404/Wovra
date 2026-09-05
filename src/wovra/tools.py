@@ -12,6 +12,7 @@
 防止模型读写项目之外的任何东西。
 """
 
+import ipaddress
 import itertools
 import json
 import locale
@@ -19,6 +20,8 @@ import os
 import re
 import subprocess
 import tempfile
+import urllib.parse
+import urllib.request
 from pathlib import Path
 
 # 项目根目录（本文件位于 src/wovra/，向上三级）
@@ -169,6 +172,164 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*") -> str:
     if not matches:
         return f"无匹配：pattern={pattern!r}, directory={directory!r}, glob={glob!r}"
     return "\n".join(matches)
+
+
+def glob_files(pattern: str, directory: str = ".") -> str:
+    """按文件名通配模式查找文件（如 *.py、docs/**/*.md），返回相对路径。
+
+    模式递归匹配所有子目录（*.py 等价于 **/*.py）；与 search_files
+    （搜内容）互补：找"有哪些文件"用本工具，找"哪些文件里有什么
+    内容"用 search_files。自动跳过 .git/.venv 等噪声目录，最多
+    返回 200 条。
+    """
+    root = _safe_path(directory)
+    filtered = [
+        p for p in root.rglob(pattern) if p.is_file()
+        and not any(part in _IGNORED_DIRS for part in p.relative_to(PROJECT_ROOT).parts)
+    ]
+    filtered.sort(key=lambda p: p.as_posix())
+    if not filtered:
+        return f"无匹配文件: {pattern}（directory={directory}）"
+    lines = [p.relative_to(PROJECT_ROOT).as_posix() for p in filtered[:200]]
+    more = f"\n…(共 {len(filtered)} 个，已显示前 200)" if len(filtered) > 200 else ""
+    return "\n".join(lines) + more
+
+
+# ---- 网络与用户交互 ----------------------------------------------------------
+
+_WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) Wovra/0.1"
+
+
+def _assert_public_url(url: str) -> str | None:
+    """URL 安全校验：仅 http/https，且主机不得解析到内网/回环/保留地址。"""
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        return f"仅支持 http/https URL: {url}"
+    host = parsed.hostname or ""
+    if not host:
+        return f"URL 缺少主机名: {url}"
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(host, None)
+    except OSError as error:
+        return f"无法解析主机 {host}: {error}"
+    for info in infos:
+        try:
+            ip = ipaddress.ip_address(info[4][0])
+        except ValueError:
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local:
+            return f"拒绝访问内网/保留地址（{host} → {ip}）。"
+    return None
+
+
+def _html_to_text(raw: bytes) -> str:
+    from html import unescape
+
+    text = raw.decode("utf-8", errors="replace")
+    text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", text)
+    text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)[^>]*>", "\n", text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    text = unescape(text)
+    return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def web_fetch(url: str, max_chars: int = 8000) -> str:
+    """抓取一个 http(s) 网页，去除 HTML 标签后返回正文文本。
+
+    适合查 API 文档、技术资料。仅 http/https，拒绝内网地址（防 SSRF），
+    30 秒超时，正文最多返回 max_chars 字符。找资料的入口用 web_search。
+    """
+    _audit(f"[web_fetch] {url}")
+    blocked = _assert_public_url(url)
+    if blocked:
+        return blocked
+    max_chars = max(200, min(int(max_chars), 50_000))
+    request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            raw = resp.read(2_000_000)
+    except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
+        return f"抓取失败: {error!r}"
+    text = _html_to_text(raw) if ("html" in ctype or not ctype) else raw.decode("utf-8", errors="replace")
+    if not text.strip():
+        return f"URL 无文本内容（Content-Type: {ctype}）。"
+    head = f"[{url}] Content-Type: {ctype or '未知'}，抓取 {len(raw)} 字节\n\n"
+    tail = "\n…(正文已截断)" if len(text) > max_chars else ""
+    return head + text[:max_chars] + tail
+
+
+def web_search(query: str, max_results: int = 8) -> str:
+    """网页搜索（DuckDuckGo，无需 API Key），返回标题、链接与摘要。
+
+    用于查技术文档与解决方案。结果不足或被限流时，可稍后重试，
+    或用 web_fetch 直接抓取已知网址。
+    """
+    _audit(f"[web_search] {query}")
+    max_results = max(1, min(int(max_results), 20))
+    url = "https://html.duckduckgo.com/html/?q=" + urllib.parse.quote_plus(query)
+    request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
+    try:
+        with urllib.request.urlopen(request, timeout=30) as resp:
+            html = resp.read(1_000_000).decode("utf-8", errors="replace")
+    except Exception as error:  # noqa: BLE001
+        return f"搜索失败: {error!r}（可稍后重试，或用 web_fetch 直接抓取已知网址）"
+    items = re.findall(
+        r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>',
+        html, re.S | re.I,
+    )
+    snippets = re.findall(r'class="result__snippet"[^>]*>(.*?)</a>', html, re.S | re.I)
+    if not items:
+        return f"搜索无结果或被限流: {query!r}。可稍后重试，或用 web_fetch 直接抓取已知网址。"
+    from html import unescape
+
+    lines = []
+    for i, (href, title) in enumerate(items[:max_results], start=1):
+        title = " ".join(unescape(re.sub(r"<[^>]+>", "", title)).split())
+        link = href
+        m = re.search(r"[?&]uddg=([^&]+)", href)
+        if m:
+            link = urllib.parse.unquote(m.group(1))
+        snippet = ""
+        if i <= len(snippets):
+            snippet = " ".join(unescape(re.sub(r"<[^>]+>", "", snippets[i - 1])).split())[:200]
+        lines.append(f"{i}. {title}\n   {link}" + (f"\n   {snippet}" if snippet else ""))
+    return f"搜索 {query!r} 的结果（前 {len(lines)} 条）：\n\n" + "\n\n".join(lines)
+
+
+def ask_user(question: str, choices: str = "") -> str:
+    """就需求或编码细节向用户提问，等待用户在终端输入答案。
+
+    choices 可选：用 | 分隔的候选项（如 "是|否|继续"）。非交互环境
+    （重定向/管道）自动降级：建议模型基于已有信息继续。
+    """
+    import sys
+
+    prompt = f"\n[模型提问] {question}"
+    if choices:
+        prompt += f"\n可选: {choices}"
+    prompt += "\n你的回答> "
+    if not sys.stdin.isatty():
+        return "（非交互环境，无法获取用户输入。请基于已有信息继续，或在最终回答中说明假设。）"
+    try:
+        answer = input(prompt)
+    except (EOFError, KeyboardInterrupt):
+        return "（用户未回答。请基于已有信息继续，或在最终回答中说明假设。）"
+    return f"用户的回答: {answer or '（空）'}"
+
+
+def list_background() -> str:
+    """列出本会话启动的所有后台任务及其状态。"""
+    if not _BACKGROUND_TASKS:
+        return "当前没有后台任务。"
+    lines = []
+    for tid, entry in _BACKGROUND_TASKS.items():
+        running = entry["proc"].poll() is None
+        state = "运行中" if running else f"已退出（exit_code={entry['proc'].returncode}）"
+        lines.append(f"{tid}  {state}  {entry['command'][:80]}")
+    return "后台任务：\n" + "\n".join(lines)
 
 
 def get_current_time() -> str:

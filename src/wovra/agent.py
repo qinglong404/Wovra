@@ -31,15 +31,20 @@ from . import truncate
 from .llm import LLM, reasoning_of
 from .task import Task, sanitize_surrogates
 from .tools import (
+    ask_user,
     check_background,
     edit_file,
     get_current_time,
+    glob_files,
+    list_background,
     list_files,
     read_file,
     run_background,
     run_command,
     search_files,
     stop_background,
+    web_fetch,
+    web_search,
     write_file,
 )
 
@@ -56,8 +61,10 @@ _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 _MAINTENANCE_PURPOSES = ("organization", "compaction")
 
 # 纯只读工具：互不依赖，可在同一批工具调用里并发执行、按序记录
+# （ask_user 会阻塞等用户输入，不参与并行）
 _READ_ONLY_TOOLS = frozenset(
-    {"read_file", "search_files", "list_files", "get_current_time"}
+    {"read_file", "search_files", "list_files", "get_current_time",
+     "glob_files", "web_fetch", "web_search", "list_background"}
 )
 
 _ORGANIZE_MAX_CALLS = 4
@@ -79,6 +86,11 @@ _ACTION_WORDS = {
     "run_background": "后台启动命令",
     "check_background": "查看后台输出",
     "stop_background": "停止后台任务",
+    "glob_files": "按模式找文件",
+    "web_fetch": "抓取网页",
+    "web_search": "网页搜索",
+    "ask_user": "询问用户",
+    "list_background": "列出后台任务",
 }
 
 # 相关性筛选在 V2 中不实现（预算充足时所有浓缩视图直接加载），

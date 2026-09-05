@@ -10,12 +10,16 @@ from wovra.agent import Agent
 from wovra.task import Task
 from wovra.tools import (
     FAILURE_MARKERS,
+    ask_user,
     check_background,
     edit_file,
+    glob_files,
+    list_background,
     read_file,
     run_background,
     run_command,
     stop_background,
+    web_fetch,
     write_file,
 )
 
@@ -344,3 +348,65 @@ def test_background_lifecycle():
 
 def test_background_rejects_dangerous_patterns():
     assert "已拒绝执行危险命令" in run_background("rm -r something")
+
+
+def test_glob_files_matches_and_filters_noise(monkeypatch, tmp_path):
+    """glob 按文件名模式查找，跳过噪声目录，忽略目录过滤。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
+    sub = tmp_path / "docs"
+    sub.mkdir()
+    (sub / "b.py").write_text("y = 2", encoding="utf-8")
+    noise = tmp_path / ".venv"
+    noise.mkdir()
+    (noise / "c.py").write_text("z = 3", encoding="utf-8")
+
+    result = glob_files("*.py")
+
+    assert "a.py" in result and "docs/b.py" in result
+    assert ".venv" not in result
+    assert "无匹配文件" in glob_files("*.rs")
+
+
+def test_web_fetch_rejects_non_http_and_internal_hosts(monkeypatch):
+    """SSRF 防护：非 http/https 与内网/回环地址一律拒绝（不发真实请求）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
+    assert "仅支持 http/https" in web_fetch("ftp://example.com/file")
+    assert "拒绝访问内网" in web_fetch("http://127.0.0.1:8000/secret")
+    assert "拒绝访问内网" in web_fetch("http://192.168.1.1/admin")
+
+
+def test_ask_user_degrades_in_non_interactive_environment():
+    """非交互环境（管道/测试捕获）下 ask_user 降级，不阻塞等待输入。"""
+    result = ask_user("用哪个方案？", choices="A|B")
+    assert "非交互环境" in result
+
+
+def test_list_background_reports_empty_or_tasks():
+    """list_background：无任务时报告为空；有任务时列出状态。"""
+    import time
+
+    from wovra import tools as tools_module
+
+    tools_module._BACKGROUND_TASKS.clear()
+    assert "当前没有后台任务" in list_background()
+    started = run_background("echo bg-list-marker")
+    task_id = _re_search_id(started)
+    listing = ""
+    for _ in range(30):  # 等子进程退出后再断言状态
+        listing = list_background()
+        if "已退出" in listing:
+            break
+        time.sleep(0.1)
+    assert task_id in listing and "已退出" in listing
+    tools_module._BACKGROUND_TASKS.clear()
+
+
+def _re_search_id(started: str) -> str:
+    import re as _re
+
+    return _re.search(r"bg-\d+", started).group(0)
