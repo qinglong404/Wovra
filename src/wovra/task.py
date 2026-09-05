@@ -182,6 +182,8 @@ class Task:
     # 会话绑定的工作区（创建时的 PROJECT_ROOT）。恢复会话时以此为准——
     # 无论从哪个目录启动 wovra，都回到该会话原本的文件世界
     workspace: str = ""
+    # 会话的上下文模式（managed/baseline）：恢复时沿用，防止实验数据串味
+    mode: str = ""
     created_at: str = ""
     updated_at: str = ""
 

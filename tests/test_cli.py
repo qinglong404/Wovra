@@ -271,3 +271,41 @@ def test_usage_line_shows_context_window():
              "completion_tokens": 20, "cached_tokens": 0, "cache_miss_tokens": 80}
     line = ui.usage_line(stats, maint={}, context=12_000, window=1_000_000)
     assert "上下文 12,000 tok（1.2%，窗口 1M）" in line
+
+
+def test_resolve_mode_defaults_and_persistence(monkeypatch, tmp_path):
+    """模式解析：显式 --mode > 会话记录 > 默认 managed；切换写回会话。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    from wovra.cli import _resolve_mode
+
+    task = Task.create(goal="g")
+    task.save()
+    assert _resolve_mode(None, task) == "managed"
+    assert task.mode == "managed"
+
+    task.mode = "baseline"
+    task.save()
+    assert _resolve_mode(None, task) == "baseline"  # 恢复时沿用会话记录
+    assert _resolve_mode("managed", task) == "managed"  # 显式指定优先
+    assert task.mode == "managed"  # 切换已写回
+
+
+def test_resume_command_carries_baseline_mode():
+    """续用命令：baseline 会话带 --mode；managed 是默认值可省略。"""
+    from wovra.cli import _resume_command
+
+    task = Task.create(goal="g")
+    task.mode = "baseline"
+    assert _resume_command(task) == f"wovra chat {task.id} --mode baseline"
+    task.mode = "managed"
+    assert _resume_command(task) == f"wovra chat {task.id}"
+
+
+def test_assistant_markdown_label_uses_rich_style(capsys):
+    """恢复回放的标签行经 rich 上色：手工 ANSI 不再显示成裸码。"""
+    from wovra import ui
+
+    ui.assistant_markdown("你好")
+    out = capsys.readouterr().out
+    assert "助手>" in out
+    assert "92m[1m助手" not in out

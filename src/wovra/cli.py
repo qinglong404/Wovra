@@ -319,6 +319,26 @@ def _load_task(ref: str) -> Task:
     return Task.load(task_id)
 
 
+def _resolve_mode(args_mode: str | None, task: Task) -> str:
+    """模式解析：显式 --mode > 会话记录的 > 默认 managed。
+
+    结果写回会话——baseline 会话恢复时自动沿用 baseline，实验数据
+    不会因忘记带 --mode 而串味。"""
+    mode = args_mode or task.mode or MODE_MANAGED
+    if task.mode != mode:
+        task.mode = mode
+        task.save()
+    return mode
+
+
+def _resume_command(task: Task) -> str:
+    """续用命令：baseline 会话带上 --mode，避免恢复时静默切回 managed。"""
+    command = f"wovra chat {task.id}"
+    if task.mode and task.mode != MODE_MANAGED:
+        command += f" --mode {task.mode}"
+    return command
+
+
 def _replay_history(task: Task, last_n: int = 12) -> None:
     """进入 chat 时回放之前的会话记录，让"继续对话"有上下文感。
 
@@ -504,7 +524,8 @@ def cmd_run(args: argparse.Namespace) -> None:
     _acquire_session_lock(task)
     try:
         # 一次性进程：整理同步执行，退出前结果必须落盘
-        agent = _build_agent(task, mode=args.mode, async_organization=False)
+        mode = _resolve_mode(args.mode, task)
+        agent = _build_agent(task, mode=mode, async_organization=False)
         instruction = args.instruction or (
             "请根据任务状态和最近事件，自主决定下一步并继续推进。"
             "如果任务已无法推进，说明原因。"
@@ -540,11 +561,12 @@ def cmd_chat(args: argparse.Namespace) -> None:
     _acquire_session_lock(task)
     try:
         # 交互模式：整理异步后台执行，不阻塞对话；退出时限时等待收尾
-        agent = _build_agent(task, mode=args.mode, async_organization=True)
+        mode = _resolve_mode(args.mode, task)
+        agent = _build_agent(task, mode=mode, async_organization=True)
 
         print(ui.rule("Wovra 会话"))
         print(f"{ui.paint('任务', 'bold')}  {task.id}")
-        print(f"{ui.paint('模式', 'bold')}  {args.mode}")
+        print(f"{ui.paint('模式', 'bold')}  {mode}")
         print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
         print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
         print(ui.rule())
@@ -559,12 +581,12 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 user_input = _read_input().strip()
             except (EOFError, KeyboardInterrupt):
                 # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
-                print(f"\n{ui.success(f'会话已保存。下次继续: wovra chat {task.id}')}")
+                print(f"\n{ui.success(f'会话已保存。下次继续: {_resume_command(task)}')}")
                 break
             if not user_input:
                 continue
             if user_input.lower() in ("exit", "quit", "退出"):
-                print(ui.success(f"会话已保存。下次继续: wovra chat {task.id}"))
+                print(ui.success(f"会话已保存。下次继续: {_resume_command(task)}"))
                 break
             if user_input.lower() in ("help", "帮助"):
                 _chat_help()
@@ -711,14 +733,14 @@ def main(argv: list[str] | None = None) -> None:
     p_run = sub.add_parser("run", help="对任务执行一轮")
     p_run.add_argument("task_id", help="任务编号或完整任务 id")
     p_run.add_argument("instruction", nargs="?", help="本轮指令；省略则由 AI 自主继续")
-    p_run.add_argument("--mode", choices=[MODE_MANAGED, MODE_BASELINE], default=MODE_MANAGED,
-                       help="上下文策略：managed=分层上下文（默认），baseline=全量对照组")
+    p_run.add_argument("--mode", choices=[MODE_MANAGED, MODE_BASELINE], default=None,
+                       help="上下文策略：省略则沿用会话记录（无记录则 managed）")
     p_run.set_defaults(func=cmd_run)
 
     p_chat = sub.add_parser("chat", help="交互式多轮对话（不带 id 则新建会话）")
     p_chat.add_argument("task_id", nargs="?", default="", help="任务编号或完整任务 id；省略则新建")
-    p_chat.add_argument("--mode", choices=[MODE_MANAGED, MODE_BASELINE], default=MODE_MANAGED,
-                        help="上下文策略：managed=分层上下文（默认），baseline=全量对照组")
+    p_chat.add_argument("--mode", choices=[MODE_MANAGED, MODE_BASELINE], default=None,
+                        help="上下文策略：省略则沿用会话记录（无记录则 managed）")
     p_chat.set_defaults(func=cmd_chat)
 
     p_list = sub.add_parser("list", help="列出所有任务（带编号）")

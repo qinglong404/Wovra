@@ -49,6 +49,7 @@ def main() -> None:
         goal="受控实验：在 chat.html 上按清单逐轮实现 10 个功能",
         acceptance_criteria=list(CRITERIA),
     )
+    task.mode = args.mode  # 会话记忆模式：恢复时自动沿用
     task.save()
 
     run_dir = HERE / "runs" / task.id
@@ -68,7 +69,8 @@ def main() -> None:
     )
 
     print(f"运行目录: {work_file}")
-    print(f"启动会话: uv run wovra chat {task.id}")
+    mode_flag = f" --mode {args.mode}" if args.mode == "baseline" else ""
+    print(f"启动会话: uv run wovra chat {task.id}{mode_flag}")
     print("按 experiments/README.md 的功能清单逐轮输入（每轮一个功能）。")
     print("--- 第 1 轮输入（原样粘贴，后续轮次见 README）---")
     print(f"请在 {work_file.resolve().as_posix()} 上实现功能 1：语音朗读——AI 回复"

@@ -17,6 +17,7 @@ import unicodedata
 
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.text import Text
 
 from . import tokens as tokens_module
 from .tools import FAILURE_MARKERS
@@ -100,10 +101,10 @@ def assistant(text: str) -> str:
 def assistant_markdown(text: str) -> None:
     """AI 回答的正式输出：标签行 + Markdown 渲染。
 
-    rich 会按终端宽度折行、给标题/列表/代码块加结构和颜色；
-    非 TTY 环境下自动退化为无样式的纯文本排版。
+    标签行用 rich 自己的样式上色——paint() 的手工 ANSI 交给 rich
+    会被转义成裸码（rich 不解释控制字符，实测教训）。
     """
-    _console.print(paint("助手>", "green", "bold"))
+    _console.print(Text("助手>", style="green bold"))
     _console.print(Markdown(text))
     _console.print()
 
