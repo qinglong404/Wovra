@@ -307,22 +307,56 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 
 ## 当前状态
 
-> **早期实验阶段。**
+> **机制基线阶段（V3）。** 上下文管理机制经过真实多轮任务对照实验
+> 验证并封版（见 [docs/context-management-v3.md](docs/context-management-v3.md)），
+> 下一阶段沿地图探索职责划分与 Runtime 治理。
 
-最初的实现侧重于验证核心概念，而不是构建一个生产级的平台。
-
-当前的优先事项包括：
-
-* [x] 最小智能体运行时
-* [x] 任务表示
-* [x] 持久任务状态
-* [ ] 上下文管理
-* [ ] 报告生成
-* [ ] 上下文折叠与检索
-* [ ] 基于职责的智能体隔离
-* [ ] 人工干预
+* [x] 最小智能体运行时（15 个工具：文件 / 命令 / 后台任务 / 网络检索 / 交互确认）
+* [x] 任务表示与持久任务状态（Task / TaskState / report.md / 会话绑定工作区）
+* [x] 上下文管理 V3：执行期零截断、窗口保底、文件地图、锚点自愈
+* [x] 水位触发的批量合并整理（设计定稿，管线待实现）
+* [x] 安全机制（黑名单 + 敏感确认 + 过期保护 + 审计 + 原子落盘）
+* [x] 成本核算（三分账 / 等效输入 / 上下文占用 / 缓存命中，逐轮落盘）
+* [x] 对照实验两轮（managed vs baseline，见下方实测结果）
+* [ ] 重度场景验证（合成长轨迹回放 + 真实长任务）
+* [ ] 基于职责的智能体隔离（下一阶段）
 * [ ] 独立任务评估
-* [ ] 执行历史与恢复
+
+## 实测结果
+
+两个受控对照会话（同一 Gradio 项目、同一冻结起始文件、同一任务书
+"逐轮实现 10 个功能"，A = managed 14 轮 / B = baseline 15 轮）：
+
+| | A managed | B baseline | B/A |
+|---|---:|---:|---:|
+| 名义 token | 2,255,448 | 4,966,437 | 2.20× |
+| 等效输入（缓存折算） | 377,668 | 475,686 | 1.26× |
+| 含管理开销 | ≈475,779 | ≈475,686 | ≈1.00× |
+| 步数 | 112 | 153 | 1.37× |
+
+三个关键结论（细节见 [docs/context-management-v3.md](docs/context-management-v3.md)）：
+
+1. **执行期截断是反优化**：三代机制实测——轮内折叠 39 次重读、2KB
+   锁孔 11 次沉没读取，零截断后同量级任务 3 次读取完成；
+2. **缓存命中率是折扣，基座才是税基**：baseline 命中率 99.3% 仍会在
+   臃肿基座上付出高昂代价，管理机制的目标是基座而非命中率；
+3. **每轮必整理是过早优化**：14 轮整理 98K tok（约 7K/轮，轻轮整理
+   费超过干活费）——V3 改为水位触发的批量合并整理。
+
+完整数据与推导：[docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) ·
+[docs/round11-context-experiment.md](docs/round11-context-experiment.md) ·
+[docs/context-management-v3.md](docs/context-management-v3.md)
+
+## 文档
+
+| 文档 | 内容 |
+|---|---|
+| [docs/context-management-v3.md](docs/context-management-v3.md) | 机制定稿 V3（实验修正版，当前基线） |
+| [docs/context-management-explained.md](docs/context-management-explained.md) | 机制通俗详解 |
+| [docs/context-runtime-v2.md](docs/context-runtime-v2.md) | V2 设计定稿（历史，含修订记录） |
+| [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | 观察性对照数据 |
+| [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | 三代机制对照实验 |
+| [experiments/README.md](experiments/README.md) | 受控实验协议与工具 |
 
 架构将随着实际使用和实验而演进。
 

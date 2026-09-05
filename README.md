@@ -307,22 +307,64 @@ This makes it possible to experiment with different underlying agents without ch
 
 ## Current Status
 
-> **Early experimental stage.**
+> **Mechanism baseline stage (V3).** The context management mechanism
+> has been validated by controlled multi-session experiments and frozen
+> (see [docs/context-management-v3.md](docs/context-management-v3.md)).
+> Next: responsibility-based agent organization and runtime governance.
 
-The initial implementation focuses on validating the core concepts rather than building a production-ready platform.
-
-Current priorities include:
-
-* [x] Minimal agent runtime
-* [x] Task representation
-* [x] Persistent task state
-* [ ] Context management
-* [ ] Report generation
-* [ ] Context folding and retrieval
-* [ ] Responsibility-based agent isolation
-* [ ] Human intervention
+* [x] Minimal agent runtime (15 tools: files / commands / background tasks / web / interactive confirmation)
+* [x] Task representation and persistent task state (Task / TaskState / report.md / workspace-bound sessions)
+* [x] Context management V3: zero truncation during execution, window guard, file map, anchor self-healing
+* [x] Watermark-triggered batch organization (design finalized, pipeline pending)
+* [x] Safety (deny-list + sensitive-command confirmation + staleness guard + audit + atomic persistence)
+* [x] Cost accounting (purpose-split / effective input / context occupancy / cache hits, persisted per round)
+* [x] Two controlled comparison experiments (managed vs baseline, see results below)
+* [ ] Heavy-load validation (synthetic long-trajectory replay + real long tasks)
+* [ ] Responsibility-based agent isolation (next stage)
 * [ ] Independent task evaluation
-* [ ] Execution history and recovery
+
+## Experiment Results
+
+Two controlled comparison sessions (same Gradio project, same frozen
+starting file, same task book "implement 10 features round by round",
+A = managed 14 rounds / B = baseline 15 rounds):
+
+| | A managed | B baseline | B/A |
+|---|---:|---:|---:|
+| Nominal tokens | 2,255,448 | 4,966,437 | 2.20× |
+| Effective input (cache-adjusted) | 377,668 | 475,686 | 1.26× |
+| Including management overhead | ≈475,779 | ≈475,686 | ≈1.00× |
+| Steps | 112 | 153 | 1.37× |
+
+Three key conclusions (details in
+[docs/context-management-v3.md](docs/context-management-v3.md)):
+
+1. **Execution-time truncation is counter-productive**: three mechanism
+   generations measured — in-round folding caused 39 re-reads, the 2KB
+   keyhole sank 11 reads; with zero truncation the same workload
+   finished in 3 reads;
+2. **Cache hit rate is a discount, the base is the tax base**:
+   baseline hit 99.3% and still paid dearly on a bloated base — the
+   target of context management is the base, not the hit rate;
+3. **Organizing every round is premature optimization**: 14 rounds of
+   organization cost 98K tokens (~7K/round, exceeding some rounds' own
+   work cost) — V3 defers to watermark-triggered batch organization.
+
+Full data and derivation:
+[docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) ·
+[docs/round11-context-experiment.md](docs/round11-context-experiment.md) ·
+[docs/context-management-v3.md](docs/context-management-v3.md)
+
+## Docs
+
+| Doc | Content |
+|---|---|
+| [docs/context-management-v3.md](docs/context-management-v3.md) | Mechanism baseline V3 (experiment-corrected, current) |
+| [docs/context-management-explained.md](docs/context-management-explained.md) | Mechanisms explained (plain-language) |
+| [docs/context-runtime-v2.md](docs/context-runtime-v2.md) | V2 design spec (historical, with revisions) |
+| [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | Observational comparison data |
+| [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | Three-generation mechanism experiment |
+| [experiments/README.md](experiments/README.md) | Controlled experiment protocol and tooling |
 
 The architecture will evolve through actual usage and experiments.
 
