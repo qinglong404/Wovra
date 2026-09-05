@@ -111,11 +111,21 @@ def assistant_markdown(text: str) -> None:
 
 
 # ---- 流式回答的 Markdown 实时渲染 ---------------------------------------------
-# TTY 下用 rich Live 边流边渲染（与回放的观感一致）；非 TTY 退化为
-# 纯文本流。工具调用会打断段落——每段独立渲染，段间不重复。
+# 能力判定：rich Live 只在"可交互且非 legacy 控制台"的原位刷新模式下启用。
+# 此前用 vertical_overflow="visible" 想让完整内容留在屏上——内容一旦高过
+# 屏幕，Live 退化为每次刷新整页重打，实测就是"开头重复 N 遍、越来越长"
+# 的刷屏 bug。现行方案：流式期间只刷新可见尾部（裁剪、transient），
+# 段落结束时擦掉实时帧、把整段 Markdown 静态渲染一次（与回放观感一致）；
+# 非 TTY 或 legacy 终端退化为纯文本流（不重复输出）。
 
 _answer_live: Live | None = None
 _answer_buffer: list[str] = []
+
+
+def _live_capable() -> bool:
+    return _ENABLED and _console.is_interactive and not getattr(
+        _console, "legacy_windows", False
+    )
 
 
 def answer_live_start() -> None:
@@ -126,12 +136,12 @@ def answer_live_start() -> None:
 
 
 def answer_live_append(text: str) -> None:
-    """追加回答增量：Live 模式更新渲染，非 TTY 直接输出纯文本。"""
+    """追加回答增量：支持原位刷新的终端里更新 Live（只看尾部），
+    否则直接输出纯文本增量。"""
     global _answer_buffer, _answer_live
     _answer_buffer.append(text)
-    if _answer_live is None and _ENABLED:
-        _answer_live = Live(Markdown(""), refresh_per_second=4,
-                            vertical_overflow="visible")
+    if _answer_live is None and _live_capable():
+        _answer_live = Live(Markdown(""), refresh_per_second=4, transient=True)
         _answer_live.start()
     if _answer_live is not None:
         _answer_live.update(Markdown("".join(_answer_buffer)))
@@ -140,12 +150,16 @@ def answer_live_append(text: str) -> None:
 
 
 def answer_live_stop() -> None:
-    """结束当前流式段：最后一帧留在屏上，即该段的最终 Markdown 渲染。"""
+    """段落结束：擦掉实时帧，把整段 Markdown 静态渲染一次
+    （与回放观感一致）；无 Live 能力时纯文本已流过，不重复输出。"""
     global _answer_live, _answer_buffer
+    buffer_text = "".join(_answer_buffer)
     if _answer_live is not None:
-        _answer_live.stop()
+        _answer_live.stop()  # transient：擦掉实时帧
         _answer_live = None
-        print()
+        if buffer_text.strip():
+            _console.print(Markdown(buffer_text))
+            print()
     _answer_buffer = []
 
 

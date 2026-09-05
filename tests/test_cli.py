@@ -347,3 +347,29 @@ def test_answer_live_degrades_to_plain_stream_without_tty(capsys):
     assert "片段1片段2" in out
     ui.answer_live_start()
     ui.answer_live_stop()
+
+
+def test_answer_live_renders_once_on_capable_terminal(monkeypatch):
+    """支持原位刷新的终端：流式期间 Live 原位更新（transient），
+    段落结束时整段 Markdown 静态渲染一次——不再整页重打刷屏。"""
+    import io
+
+    from rich.console import Console
+
+    from wovra import ui
+
+    file = io.StringIO()
+    console = Console(file=file, force_terminal=True, width=80, legacy_windows=False)
+    monkeypatch.setattr(ui, "_console", console)
+    monkeypatch.setattr(ui, "_ENABLED", True)
+
+    ui.answer_live_start()
+    ui.answer_live_append("# 标题\n\n第一段")
+    assert ui._answer_live is not None  # Live 已启用
+    ui.answer_live_append("\n\n第二段")
+    ui.answer_live_stop()
+
+    out = file.getvalue()
+    assert "\x1b[" in out  # Live 确实走了原位刷新（有控制序列）
+    assert "第一段" in out and "第二段" in out
+    assert ui._answer_live is None
