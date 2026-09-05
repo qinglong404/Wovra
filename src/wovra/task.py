@@ -44,6 +44,16 @@ STATE_LIST_CAP = 200
 _PATCH_LIST_FIELDS = ("constraints", "decisions", "completed", "known_issues", "open_questions")
 
 
+def sanitize_surrogates(text: str) -> str:
+    """把字符串里的未配对代理项替换为 U+FFFD（�），其余字节不变。
+
+    模型的工具参数偶发把 emoji 拆成不成对的 \\uD83D 转义，json 解析后
+    成为无法 UTF-8 编码的代理字符——不清洗会让落盘（json.dumps →
+    write_text）和目标文件写入当场崩掉（实测 2026-09-05）。
+    """
+    return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
+
+
 @dataclass
 class TaskState:
     """任务当前状态的增量可变视图（History 之外的另一本账）。
@@ -272,14 +282,22 @@ class Task:
     # ---- 持久化 ---------------------------------------------------------
 
     def save(self) -> None:
-        """把当前状态写到磁盘：task.json + report.md。"""
+        """把当前状态写到磁盘：task.json + report.md。
+
+        task.json 用临时文件 + 原子替换落盘：write_text 先清空再写，
+        写一半崩掉会把整个会话历史截断成空文件（实测 2026-09-05）。
+        """
         directory = TASKS_ROOT / self.id
         directory.mkdir(parents=True, exist_ok=True)
-        (directory / "task.json").write_text(
-            json.dumps(asdict(self), ensure_ascii=False, indent=2),
-            encoding="utf-8",
+        # 兜底清洗：任何环节漏掉代理字符，落盘前最后一道闸
+        data = sanitize_surrogates(
+            json.dumps(asdict(self), ensure_ascii=False, indent=2)
         )
-        (directory / "report.md").write_text(self._render_report(), encoding="utf-8")
+        tmp = directory / "task.json.tmp"
+        tmp.write_text(data, encoding="utf-8")
+        tmp.replace(directory / "task.json")
+        report = sanitize_surrogates(self._render_report())
+        (directory / "report.md").write_text(report, encoding="utf-8")
 
     # ---- 给模型和报告用的视图 --------------------------------------------
 

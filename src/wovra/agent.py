@@ -28,7 +28,7 @@ from . import tokens
 from . import tools as tools_module
 from . import truncate
 from .llm import LLM, reasoning_of
-from .task import Task
+from .task import Task, sanitize_surrogates
 from .tools import (
     edit_file,
     get_current_time,
@@ -354,6 +354,9 @@ class Agent:
         except json.JSONDecodeError as error:
             result = f"工具参数不是合法 JSON: {error}"
         else:
+            # 模型偶发把 emoji 拆成不成对 \uD83D 转义：解析合法但无法
+            # 编码落盘——进工具与进历史前一律清洗（实测崩溃教训）
+            parsed = _sanitize_json_strings(parsed)
             fn = self.tools.get(name)
             if fn is None:
                 result = f"未知工具: {name}，可用工具: {list(self.tools)}"
@@ -365,6 +368,7 @@ class Agent:
 
         if not isinstance(result, str):
             result = json.dumps(result, ensure_ascii=False, default=str)
+        result = sanitize_surrogates(result)
 
         if self.on_tool_result:
             self.on_tool_result(name, result)
@@ -429,13 +433,16 @@ class Agent:
                 continue
 
             thinking = reasoning_of(delta)
-            if thinking and on_thinking:
-                on_thinking(thinking)
+            if thinking:
+                thinking = sanitize_surrogates(thinking)
+                if on_thinking:
+                    on_thinking(thinking)
 
             if delta.content:
-                content_parts.append(delta.content)
+                text = sanitize_surrogates(delta.content)
+                content_parts.append(text)
                 if on_answer_delta:
-                    on_answer_delta(delta.content)
+                    on_answer_delta(text)
 
             for fragment in delta.tool_calls or []:
                 index = fragment.index or 0
@@ -1095,6 +1102,17 @@ class Agent:
             )
         for r in older:
             r["compacted"] = True
+
+
+def _sanitize_json_strings(obj):
+    """递归清洗结构里的未配对代理项（见 task.sanitize_surrogates）。"""
+    if isinstance(obj, str):
+        return sanitize_surrogates(obj)
+    if isinstance(obj, list):
+        return [_sanitize_json_strings(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _sanitize_json_strings(v) for k, v in obj.items()}
+    return obj
 
 
 def _action_word(name: str) -> str:

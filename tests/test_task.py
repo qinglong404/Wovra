@@ -139,3 +139,16 @@ def test_state_patch_done_syncs_task_status():
 
     assert task.get_state().is_done is True
     assert task.status == "done"
+
+
+def test_save_sanitizes_lone_surrogates(monkeypatch, tmp_path):
+    """模型偶发的不成对代理转义不能让落盘当场崩掉（实测 2026-09-05）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.history.append({"time": "t", "kind": "tool_result", "detail": "x\ud83d"})
+
+    task.save()  # 修复前：UnicodeEncodeError 直接崩
+
+    loaded = Task.load(task.id)
+    assert "\ud83d" not in loaded.history[-1]["detail"]
+    assert "\ufffd" in loaded.history[-1]["detail"]

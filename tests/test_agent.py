@@ -805,3 +805,26 @@ def test_expand_history_full_returns_complete_content():
     out = agent._read_full_event("R1-E02")
 
     assert big in out  # 全文返回，无 4KB 上限
+
+
+def test_tool_args_with_unpaired_surrogates_are_sanitized(monkeypatch, tmp_path):
+    """回归（实测 2026-09-05）：模型把 emoji 拆成不成对 \\uD83D 转义时，
+    参数清洗保证工具执行与落盘都不崩。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    seen = {}
+
+    def edit_file(**kwargs):
+        seen.update(kwargs)
+        return "已修改"
+
+    responses = [[_chunk(_delta(content="ok"))]]
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(responses), tools=[edit_file], task=task)
+    raw = json.dumps({"path": "a.md", "old_text": "x", "new_text": "y"})
+    raw = raw[:-2] + '\ud83d"}'  # 注入不成对代理转义（json.loads 合法、UTF-8 编码非法）
+
+    agent._execute("c1", "edit_file", raw)
+
+    assert "\ud83d" not in str(seen)
+    assert "\ufffd" in seen["new_text"]
+    task.save()  # 含该工具调用事件的会话照常落盘
