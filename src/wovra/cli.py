@@ -27,6 +27,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 
 from . import task as task_module
 from . import ui
@@ -458,11 +459,16 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     # 输入行都不活跃，这个看门狗线程是唯一安全的打印者
     tool_watch_stop = threading.Event()
     tool_watch_thread: threading.Thread | None = None
+    # 最近一次进展行的时间（on_progress 与看门狗线程共享；float 赋值
+    # 在 GIL 下原子）。子任务有进展行时它本身就是心跳，秒表闭嘴
+    last_progress_at = [0.0]
 
     def _start_tool_watch(name: str) -> None:
         nonlocal tool_watch_thread
         tool_watch_stop.clear()
-        step = 10
+        # 子任务派发往往要跑几分钟：10 秒一格的秒表是刷屏噪音——
+        # 拉长到 30 秒一格，且只在真正静默（无任何进展行）时报时
+        step = 30 if name == "run_subtask" else 10
 
         def _tick() -> None:
             waited = 0
@@ -472,7 +478,14 @@ def _run_turn(agent: Agent, instruction: str) -> str:
                 if user_input_pending():
                     continue
                 waited += step
-                print(ui.wait_hint(f"{name} 已执行 {waited} 秒…"), flush=True)
+                if name == "run_subtask":
+                    if time.monotonic() - last_progress_at[0] < step - 5:
+                        continue
+                    print(
+                        ui.wait_hint(f"子任务运行中（累计 {waited} 秒）…"), flush=True
+                    )
+                else:
+                    print(ui.wait_hint(f"{name} 已执行 {waited} 秒…"), flush=True)
 
         tool_watch_thread = threading.Thread(target=_tick, daemon=True)
         tool_watch_thread.start()
@@ -501,6 +514,7 @@ def _run_turn(agent: Agent, instruction: str) -> str:
         # 同步回调（主线程执行）：模型响应等待中、工具动作进行中的即时提示。
         # "正在写入文件中…"在模型刚报出工具名时就显示，不等参数输完
         nonlocal line_open, phase
+        last_progress_at[0] = time.monotonic()
         ui.answer_live_stop()
         _break_line()
         phase = ""
@@ -594,6 +608,29 @@ def cmd_run(args: argparse.Namespace) -> None:
         _release_session_lock(task)
 
 
+def _child_summaries(parent_id: str) -> list[dict]:
+    """扫描任务目录，返回 parent_id 匹配的子任务摘要列表。"""
+    children: list[dict] = []
+    root = task_module.TASKS_ROOT
+    if not root.exists():
+        return children
+    for directory in sorted(root.iterdir()):
+        path = directory / "task.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("parent_id") == parent_id:
+            children.append({
+                "id": data.get("id", directory.name),
+                "status": data.get("status", ""),
+                "goal": data.get("goal", ""),
+            })
+    return children
+
+
 def cmd_report(args: argparse.Namespace) -> None:
     """wovra report：人机协同报告（组织运行时 V1）。
 
@@ -601,24 +638,74 @@ def cmd_report(args: argparse.Namespace) -> None:
     细节对主 agent 说"展开 R{k}-E{nn}"按事件 ID 剥开。
     """
     task = _load_task(args.task_id)
-    children = []
-    root = task_module.TASKS_ROOT
-    if root.exists():
-        for directory in sorted(root.iterdir()):
-            path = directory / "task.json"
-            if not path.exists():
-                continue
+    print(ui.report_view(task, _child_summaries(task.id)))
+
+
+_LOCAL_HELP = """\
+本地命令（\\ 前缀，纯本地执行：零模型成本、不用等轮次结束）：
+  \\bg                 后台进程列表
+  \\bg <任务id>         查看某后台进程的增量输出
+  \\bg stop <任务id>    强制停止后台进程
+  \\sub                子任务列表
+  \\sub <任务id>        进入子任务页面（状态账本 + 里程碑线）
+  \\help               本帮助
+Ctrl+C：页面内 = 返回对话；输入行 = 退出会话。
+任务 id 可只写末尾一段短串（如 3b7fd3）。"""
+
+
+def _local_command(command: str, task: Task) -> None:
+    """聊天输入行的本地命令（\\ 前缀）：纯本地查看与操作，零模型成本。
+
+    这是人机协同"随时剥开"的入口——看后台、看子任务不必等主 agent
+    转达，也不花一分钱。\ 前缀保留给终端本身，永远不会作为消息发给
+    模型。页面内 Ctrl+C 等于返回，不退出会话。
+    """
+    parts = command[1:].strip().split()
+    try:
+        if not parts:
+            print(_LOCAL_HELP)
+            return
+        cmd = parts[0].lower()
+        if cmd in ("help", "h", "?", "帮助"):
+            print(_LOCAL_HELP)
+        elif cmd in ("bg", "后台"):
+            if len(parts) >= 3 and parts[1].lower() == "stop":
+                print(stop_background(parts[2]))
+            elif len(parts) == 2:
+                print(check_background(parts[1]))
+            else:
+                print(list_background())
+        elif cmd in ("sub", "subs", "子任务"):
+            children = _child_summaries(task.id)
+            if len(parts) == 1:
+                if not children:
+                    print("（无子任务）")
+                    return
+                for c in children:
+                    print(f"- {c['id']}（{c['status']}）：{c['goal']}")
+                print(ui.info("用 \\sub <任务id> 进入某个子任务的页面"))
+                return
+            target = parts[1]
+            child = next(
+                (c for c in children if c["id"] == target or c["id"].endswith(target)),
+                None,
+            )
+            if child is None:
+                print(f"找不到子任务 {target}（\\sub 查看列表）")
+                return
+            full = Task.load(child["id"])
+            print(ui.report_view(full, _child_summaries(child["id"])))
             try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-            except (json.JSONDecodeError, OSError):
-                continue
-            if data.get("parent_id") == task.id:
-                children.append({
-                    "id": data.get("id", directory.name),
-                    "status": data.get("status", ""),
-                    "goal": data.get("goal", ""),
-                })
-    print(ui.report_view(task, children))
+                input("（回车返回对话）")
+            except (KeyboardInterrupt, EOFError, OSError):
+                # Ctrl+C / 管道环境无 stdin：都视为"返回对话"
+                print()
+        else:
+            print(f"未知本地命令：\\{parts[0]}")
+            print(_LOCAL_HELP)
+    except KeyboardInterrupt:
+        # 页面内 Ctrl+C：返回对话，不退出会话
+        print()
 
 
 def _chat_help() -> None:
@@ -626,6 +713,7 @@ def _chat_help() -> None:
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
+    print(f"  {ui.paint('\\help', 'bold')}           本地命令（看后台/子任务，零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
     print(ui.rule())
@@ -667,7 +755,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
         print(ui.rule())
 
         _replay_history(task)
-        print(ui.info("输入指令开始对话，help 查看帮助，exit 退出。\n"))
+        print(ui.info("输入指令开始对话；\\help 看本地命令，help 查看帮助，exit 退出。\n"))
 
         while True:
             try:
@@ -679,6 +767,10 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 print(f"\n{ui.success(f'会话已保存。下次继续: {_resume_command(task)}')}")
                 break
             if not user_input:
+                continue
+            if user_input.startswith("\\"):
+                # 本地命令：\ 前缀保留给终端本身——不进模型、零模型成本
+                _local_command(user_input, task)
                 continue
             if user_input.lower() in ("exit", "quit", "退出"):
                 print(ui.success(f"会话已保存。下次继续: {_resume_command(task)}"))

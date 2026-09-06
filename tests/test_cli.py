@@ -427,3 +427,58 @@ def test_report_command_renders_task(monkeypatch, tmp_path, capsys):
     assert "报告命令冒烟" in out
     assert "里程碑线" in out
     assert "子任务" in out
+
+
+# ---- 本地命令（\ 前缀，组织运行时 V1） ---------------------------------------
+
+
+def test_local_command_sub_list_and_page(monkeypatch, tmp_path, capsys):
+    """\sub：列表与页面，纯本地零模型成本；短 id 串也能定位。"""
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="父任务")
+    task.save()
+    child = Task.create(goal="渲染模块")
+    child.parent_id = task.id
+    child.apply_state_patch({
+        "escalations": ["端口被占用"],
+        "experiments": ["打开页面验证行走"],
+    })
+    child.save()
+
+    _local_command("\sub", task)
+    out = capsys.readouterr().out
+    assert child.id in out
+    assert "渲染模块" in out
+
+    _local_command(f"\sub {child.id[-6:]}", task)
+    out = capsys.readouterr().out
+    assert "决策升级（等你拍板）" in out
+    assert "端口被占用" in out
+    assert "待办实验（需要你验证）" in out
+
+
+def test_local_command_help_and_unknown(monkeypatch, tmp_path, capsys):
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+
+    _local_command("\help", task)
+    assert "本地命令" in capsys.readouterr().out
+
+    _local_command("\what", task)
+    assert "未知本地命令" in capsys.readouterr().out
+
+
+def test_local_command_bg_list_smoke(monkeypatch, tmp_path, capsys):
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+
+    _local_command("\bg", task)  # 无后台任务也不抛异常
+    assert capsys.readouterr().out
