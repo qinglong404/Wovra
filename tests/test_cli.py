@@ -5,9 +5,12 @@ chat / run 会发起真实模型调用，不属于单元测试范围——它们
 """
 
 import json
+import threading
+from types import SimpleNamespace
 
 import pytest
 
+from wovra import cli as cli_module
 from wovra import task as task_module
 from wovra.cli import main as cli_main
 from wovra.task import Task
@@ -573,3 +576,82 @@ def test_poll_finished_dispatches_notifies_once(monkeypatch, tmp_path):
         assert _poll_finished_dispatches(task.id) == []
     finally:
         tools_module._BACKGROUND_TASKS.clear()
+
+
+def test_auto_wake_once_fires_on_child_exit(monkeypatch, tmp_path, capsys):
+    """事件唤醒：子进程退出即驱动主 agent 接手（不依赖用户输入）。"""
+    import threading
+
+    from wovra import tools as tools_module
+    from wovra.cli import _auto_wake_once, _poll_finished_dispatches
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="父")
+    task.save()
+    child = Task.create(goal="块 A")
+    child.parent_id = task.id
+    child.save()
+
+    class Proc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    tools_module._BACKGROUND_TASKS["bg-1"] = {
+        "proc": Proc(), "log": tmp_path / "bg-1.log", "pos": 0, "command": "",
+        "label": f"子任务 {child.id}", "session": task.id, "keep_alive": False,
+    }
+    turns = []
+    monkeypatch.setattr(cli_module, "_run_turn", lambda a, t: turns.append(t) or "汇报")
+
+    ws = SimpleNamespace(auto_wake=0, turn_active=False,
+                         lock=threading.RLock(), stop=threading.Event())
+    assert _auto_wake_once(None, task, ws) is True
+    out = capsys.readouterr().out
+    assert "自动接手" in out
+    assert len(turns) == 1 and "系统通知" in turns[0] and "bg-1" in turns[0]
+    assert ws.auto_wake == 1
+    assert _poll_finished_dispatches(task.id) == []  # 已消费，不重复唤醒
+
+    ws.turn_active = True  # 回合进行中：防重入
+    assert _auto_wake_once(None, task, ws) is False
+    ws.turn_active = False
+
+    ws.auto_wake = 3  # 连续 3 次后暂停
+    assert _auto_wake_once(None, task, ws) is False
+    tools_module._BACKGROUND_TASKS.clear()
+
+
+def test_auto_wake_turn_failure_does_not_kill_session(monkeypatch, tmp_path, capsys):
+    """自动接手里的异常被吞掉（会话存活），计数照走。"""
+    import threading
+
+    from wovra import tools as tools_module
+    from wovra.cli import _auto_wake_once
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="父")
+    task.save()
+
+    class Proc:
+        returncode = 1
+
+        def poll(self):
+            return 1
+
+    tools_module._BACKGROUND_TASKS["bg-2"] = {
+        "proc": Proc(), "log": tmp_path / "bg-2.log", "pos": 0, "command": "",
+        "label": "子任务 c", "session": task.id, "keep_alive": False,
+    }
+
+    def boom(a, t):
+        raise ValueError("模型炸了")
+
+    monkeypatch.setattr(cli_module, "_run_turn", boom)
+    ws = SimpleNamespace(auto_wake=0, turn_active=False,
+                         lock=threading.RLock(), stop=threading.Event())
+    assert _auto_wake_once(None, task, ws) is True
+    assert "自动接手失败" in capsys.readouterr().out
+    assert ws.auto_wake == 1
+    tools_module._BACKGROUND_TASKS.clear()

@@ -28,6 +28,7 @@ import shutil
 import sys
 import threading
 import time
+from types import SimpleNamespace
 
 from . import task as task_module
 from . import tools as tools_module
@@ -190,8 +191,12 @@ def _read_input() -> str:
     try:
         from prompt_toolkit import prompt
         from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.patch_stdout import patch_stdout
 
-        return prompt(HTML("<ansibrightcyan><b>你&gt; </b></ansibrightcyan>"))
+        # patch_stdout：唤醒线程的输出（自动接手横幅/回合内容）在用户
+        # 半行输入的下方干净重绘，不打碎输入行
+        with patch_stdout():
+            return prompt(HTML("<ansibrightcyan><b>你&gt; </b></ansibrightcyan>"))
     except KeyboardInterrupt:
         raise
     except Exception:  # noqa: BLE001——prompt_toolkit 不可用时退回 input()
@@ -747,6 +752,53 @@ def _local_command(command: str, task: Task, agent=None) -> None:
         print()
 
 
+def _auto_wake_once(agent, task: Task, wake_state) -> bool:
+    """子任务结束 → 主 agent 自动接手一次（事件唤醒的核心）。
+
+    独立唤醒线程反复调用本函数：派发的子进程一退出，就驱动主 agent
+    接手（父驱动循环的心跳）——不依赖用户输入。连续 3 次自动接手后
+    暂停（防"派发即崩"循环烧钱），用户输入重置计数。返回是否触发。
+    """
+    if wake_state.turn_active or wake_state.auto_wake >= 3:
+        return False
+    finished = _poll_finished_dispatches(task.id)
+    if not finished:
+        return False
+    with wake_state.lock:
+        if wake_state.turn_active:
+            return False
+        wake_state.turn_active = True
+    try:
+        for bg_id, *_ in finished:
+            _consume_dispatch(bg_id)
+        note = "；".join(
+            f"{bg} → {cid[-6:]}（{_fmt_exit_code(code)}）"
+            for bg, cid, code in finished
+        )
+        print(ui.info(f"检测到子任务结束：{note}——主 agent 自动接手。"))
+        try:
+            answer = _run_turn(agent, (
+                "（系统通知，非用户发言）后台子任务已结束："
+                f"{note}。请查看[子任务派发板]与各子任务账本："
+                "未完成的用 dispatch_subtask 派发下一轮（已完成的部分"
+                "不要重做），完成的 merge_subtask 清算，有决策升级"
+                "（escalations）的把选项转达用户拍板，然后简要汇报。"
+            ))
+        except KeyboardInterrupt:
+            print(ui.info("自动接手已中断。"))
+        except Exception as error:  # noqa: BLE001——自动接手失败不拖垮会话
+            print(ui.error(f"自动接手失败：{error!r}"))
+        else:
+            if answer:
+                print()
+        wake_state.auto_wake += 1
+        if wake_state.auto_wake == 3:
+            print(ui.info("已连续自动接手 3 次，暂停自动唤醒——输入任意消息恢复。"))
+        return True
+    finally:
+        wake_state.turn_active = False
+
+
 def _chat_help() -> None:
     """chat 模式内的帮助。"""
     print(ui.rule("chat 模式帮助"))
@@ -796,43 +848,32 @@ def cmd_chat(args: argparse.Namespace) -> None:
         _replay_history(task)
         print(ui.info("输入指令开始对话；\\help 看本地命令，help 查看帮助，exit 退出。\n"))
 
-        auto_wake = 0  # 连续自动接手计数：防"派发即崩"的循环烧钱
+        # 事件唤醒线程：子任务进程退出 → 立即驱动主 agent 接手（独立
+        # 线程，不依赖用户输入——wake-on-event，不是 wake-on-iteration）
+        wake_state = SimpleNamespace(
+            auto_wake=0, turn_active=False,
+            lock=threading.RLock(), stop=threading.Event(),
+        )
+
+        def _watch_dispatches() -> None:
+            while not wake_state.stop.wait(2.0):
+                try:
+                    _auto_wake_once(agent, task, wake_state)
+                except Exception:  # noqa: BLE001——唤醒线程绝不带垮会话
+                    continue
+
+        threading.Thread(target=_watch_dispatches, name="wovra-wake", daemon=True).start()
+
         while True:
             try:
                 _drain_status(agent)  # 后台整理的状态行（出现在输入行上方）
                 _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
-                # 子任务结束 → 主 agent 自动接手（父驱动循环的心跳）；
-                # 连续 3 次后暂停，防"派发即崩"无限循环
-                finished = _poll_finished_dispatches(task.id)
-                if finished and auto_wake < 3:
-                    auto_wake += 1
-                    for bg_id, _cid, _code in finished:
-                        _consume_dispatch(bg_id)
-                    note = "；".join(
-                        f"{bg} → {cid[-6:]}（{_fmt_exit_code(code)}）"
-                        for bg, cid, code in finished
-                    )
-                    print(ui.info(f"检测到子任务结束：{note}——主 agent 自动接手。"))
-                    try:
-                        answer = _run_turn(agent, (
-                            "（系统通知，非用户发言）后台子任务已结束："
-                            f"{note}。请查看[子任务派发板]与各子任务账本："
-                            "未完成的用 dispatch_subtask 派发下一轮（已完成的部分"
-                            "不要重做），完成的 merge_subtask 清算，有决策升级"
-                            "（escalations）的把选项转达用户拍板，然后简要汇报。"
-                        ))
-                    except KeyboardInterrupt:
-                        print(ui.info("自动接手已中断，回到输入行。"))
-                        continue
-                    if answer:
-                        print()
-                    continue
                 user_input = _read_input().strip()
             except (EOFError, KeyboardInterrupt):
                 # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
                 print(f"\n{ui.success(f'会话已保存。下次继续: {_resume_command(task)}')}")
                 break
-            auto_wake = 0  # 用户真实输入：重置自动接手计数
+            wake_state.auto_wake = 0  # 用户真实输入：重置自动接手计数
             if not user_input:
                 continue
             if user_input[:1] in ("\\", "/"):
@@ -846,6 +887,8 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 _chat_help()
                 continue
 
+            with wake_state.lock:
+                wake_state.turn_active = True
             try:
                 answer = _run_turn(agent, user_input)
             except KeyboardInterrupt:
@@ -855,9 +898,12 @@ def cmd_chat(args: argparse.Namespace) -> None:
                     f"\n{ui.info('本轮已中断，进度已保存（轮未闭合）。继续输入可接着干，再次 Ctrl+C 退出。')}"
                 )
                 continue
+            finally:
+                wake_state.turn_active = False
             if answer:
                 print()
 
+        wake_state.stop.set()  # 停掉事件唤醒线程
         # 退出前等待后台整理收尾（最多 10 秒）；没赶上的轮次留在
         # 整理水位里，下次触发时批量整理（V3 水位机制，不逐轮补跑）
         if not agent.flush_organization(timeout=10.0):
