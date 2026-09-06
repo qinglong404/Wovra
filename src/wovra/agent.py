@@ -6,7 +6,9 @@
   中断/无回复期间的多条用户输入，跨会话持久化）；Event 的 message
   原样保存（执行期不截断内容），Truncated 是零 LLM 成本的一行索引
   （供降档索引与整理输入）
-* Organization：轮闭合后进入后台 FIFO 队列异步执行（不阻塞对话），
+* Organization（V3 水位批量整理）：轮闭合不再逐轮整理——未整理轮的
+  原始内容体量进入"整理水位"，达阈值才触发一次批量整理（调用次数
+  N→1 摊薄、State Patch 跨轮去重），异步 FIFO 执行不阻塞对话；
   输入 = 用户输入们 + 事件截断索引 + 最终回答全文；
   输出 = Normalized 用户意图 + 精修事件索引 + Task State 补丁
 * Context Assembly：近 K 轮全量（Recent Full-Resolution Window），
@@ -69,6 +71,13 @@ _READ_ONLY_TOOLS = frozenset(
 
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
+# V3 水位批量整理（docs/context-management-v3.md §4）：轮闭合不再逐轮
+# 整理——实测轻轮的整理费（3,118）可以比轮本身的干活成本（2,816）还高；
+# 未整理轮的原始内容体量累计到水位才触发一次批量整理。小会话可能
+# 全程不触发——整理成本归零，早期不再有负优化。参数刻意保守（宁可
+# 少整理），后期按实践修正：
+_ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
+_ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
 # 单轮工具循环的默认步数上限：真实任务步数轻松上两位数，10 步远远不够
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "40"))
 
@@ -120,6 +129,8 @@ class Agent:
         history_budget: Optional[int] = None,
         max_recent_rounds: Optional[int] = None,
         async_organization: bool = False,
+        org_watermark: Optional[int] = None,
+        org_batch_max: Optional[int] = None,
         on_tool_call: Optional[Callable[[str, str], None]] = None,
         on_tool_result: Optional[Callable[[str, str], None]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
@@ -136,6 +147,17 @@ class Agent:
         self.max_recent_rounds = max_recent_rounds or _DEFAULT_MAX_RECENT_ROUNDS
         # 整理是否异步执行：chat 模式开（不阻塞对话），run/测试用同步（确定性）
         self.async_organization = async_organization
+        # V3 水位批量整理参数（水位 = 未整理轮原始内容体量阈值；批量上限
+        # = 单次整理调用最多处理的轮数，防止整理提示词自身失控）
+        self._org_watermark = (
+            _ORG_WATERMARK_DEFAULT if org_watermark is None else org_watermark
+        )
+        self._org_batch_max = (
+            _ORG_BATCH_MAX_DEFAULT if org_batch_max is None else org_batch_max
+        )
+        # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
+        # 避免批量整理排队期间被下一次触发重复收编
+        self._org_inflight: set[int] = set()
         self.on_tool_call = on_tool_call
         self.on_tool_result = on_tool_result
         # 后台动作（如 Round 整理）耗时较长，状态消息进入 feed，
@@ -184,11 +206,9 @@ class Agent:
 
         if self.context_mode == MODE_MANAGED:
             self.register(self.expand_history)
-            # 惰性补跑：上次会话退出时未完成的整理（pending），本次加载即补上
-            if self.task is not None:
-                for r in self.rounds:
-                    if r.get("org_state") == "pending" and r.get("end_state") == "completed":
-                        self._enqueue_organization(r)
+            # 水位批量整理（V3）：上次会话遗留的未整理轮（含崩溃时的
+            # pending / failed）体量天然计入水位，由下一次轮闭合触发
+            # 批量整理——加载时不立即补跑（小会话可能永远不需要整理）
 
     def _fresh_stats(self) -> dict:
         return {
@@ -275,14 +295,19 @@ class Agent:
                 self.task.save()
 
     def close_round(self) -> None:
-        """闭合当前 Round（仅最终回答路径调用），managed 模式进入整理队列。"""
+        """闭合当前 Round（仅最终回答路径调用）；managed 模式做水位检查。
+
+        V3 之前轮闭合即逐轮整理，实测轻轮的整理费比干活成本还高；
+        现在未整理轮的体量进入水位，达阈值才批量整理（可能多轮才
+        触发一次，小会话可能全程不触发）。
+        """
         if self.current_round is None:
             return
         self.current_round["end_state"] = "completed"
         self.current_round = None
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:
-            self._enqueue_organization(self.rounds[-1])
+            self._maybe_organize_batch()
 
     def finalize_round(self, end_state: str = "open") -> None:
         """CLI 异常/中断路径：Round 保持开放（不闭合、不整理），仅持久化。
@@ -838,16 +863,86 @@ class Agent:
         text = " ".join((text or "").split())
         return text if len(text) <= limit else text[:limit] + "…"
 
-    # ---- History Maintenance Pipeline（异步整理队列） ----------------------------
+    # ---- History Maintenance Pipeline（V3 水位触发的批量整理） -------------------
 
-    def _enqueue_organization(self, round_data: dict) -> None:
-        round_data["org_state"] = "pending"
+    def _round_mass(self, r: dict) -> int:
+        """一轮的原始内容体量估算（整理水位的计量口径：正文 + 工具参数）。"""
+        parts = []
+        for e in r["events"]:
+            m = e["message"]
+            parts.append(str(m.get("content") or ""))
+            for tc in m.get("tool_calls") or []:
+                parts.append(str((tc.get("function") or {}).get("arguments") or ""))
+        return tokens.estimate("\n".join(parts))
+
+    def _unorganized_rounds(self) -> list[dict]:
+        """已闭合且尚未整理完成的轮次（按时间正序）。
+
+        org_state ∈ ""（从未整理）/ "pending"（排队或上次崩溃遗留）/
+        "failed"（上次解析失败）都算未整理；整理中（inflight）的不算，
+        防止批量排队期间被下一次触发重复收编。
+        """
+        return [
+            r for r in self.rounds
+            if r.get("end_state") == "completed"
+            and r.get("org_state") != "done"
+            and r["seq"] not in self._org_inflight
+        ]
+
+    def _maybe_organize_batch(self) -> None:
+        """水位检查：未整理轮的原始内容体量达阈值时，批量入队整理。
+
+        每次轮闭合至多触发一批（上限 _org_batch_max 轮，最老的先整理）；
+        剩余未整理体量留给下次闭合继续消化，避免一次冲刺打爆整理队列。
+        """
+        unorganized = self._unorganized_rounds()
+        mass = sum(self._round_mass(r) for r in unorganized)
+        if mass < self._org_watermark:
+            return
+        batch = unorganized[: self._org_batch_max]
+        for r in batch:
+            r["org_state"] = "pending"
+            self._org_inflight.add(r["seq"])
         if self.async_organization:
-            self._org_queue.put(round_data)
+            self._org_queue.put(batch)
             self._ensure_worker()
         else:
-            # 同步模式（run 命令/测试）：立即整理，进程退出前结果必须落盘
-            self._organize_round(round_data)
+            # 同步模式（run 命令/测试）：立即整理，结果随轮次落盘
+            try:
+                self._organize_rounds(batch)
+            finally:
+                for r in batch:
+                    self._org_inflight.discard(r["seq"])
+
+    def organize_backlog(self) -> None:
+        """立即整理全部未整理轮（分批同步）——run 模式进程收尾用。
+
+        chat 模式不调用：水位设计允许小会话全程不整理（成本归零）；
+        run 是一次性任务单元，退出前补整理，TaskState 才能跟得上
+        下一次自主推进（"根据任务状态决定下一步"依赖这本账）。
+        """
+        if self.context_mode != MODE_MANAGED or self.task is None:
+            return
+        while True:
+            unorganized = self._unorganized_rounds()
+            if not unorganized:
+                return
+            batch = unorganized[: self._org_batch_max]
+            for r in batch:
+                r["org_state"] = "pending"
+                self._org_inflight.add(r["seq"])
+            try:
+                ok = self._organize_rounds(batch)
+            except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
+                for r in batch:
+                    r["org_state"] = "failed"
+                self._persist_rounds()
+                return
+            finally:
+                for r in batch:
+                    self._org_inflight.discard(r["seq"])
+            if not ok or len(batch) < self._org_batch_max:
+                return
 
     def _ensure_worker(self) -> None:
         if self._org_thread is not None and self._org_thread.is_alive():
@@ -859,14 +954,17 @@ class Agent:
 
     def _org_worker(self) -> None:
         while True:
-            round_data = self._org_queue.get()
+            batch = self._org_queue.get()
             try:
-                self._organize_round(round_data)
+                self._organize_rounds(batch)
             except Exception:  # noqa: BLE001——整理失败不影响主对话
-                round_data["org_state"] = "failed"
+                for r in batch:
+                    r["org_state"] = "failed"
                 self._persist_rounds()
             finally:
                 self._org_queue.task_done()
+                for r in batch:
+                    self._org_inflight.discard(r["seq"])
 
     def flush_organization(self, timeout: float = 10.0) -> bool:
         """等待异步整理队列清空（chat 退出限时等待；run 用同步模式无需调用）。"""
@@ -877,48 +975,63 @@ class Agent:
             time.sleep(0.1)
         return self._org_queue.unfinished_tasks == 0
 
-    def _organize_round(self, round_data: dict) -> None:
-        """整理一个闭合的 Round（维护管线的工作单元）。
+    def _organize_rounds(self, rounds: list[dict]) -> bool:
+        """批量整理已闭合的 Round 们（维护管线的工作单元，V3 §4 机制）。
 
-        输入 = 用户输入们 + 事件截断索引 + 最终回答全文（默认不读事件
-        原文；Truncated 不足以确定关键事实时可用 read_full 按上限展开）。
-        输出 = Normalized 意图 + 精修事件索引 + State Patch。
-        关闭思考（格式化任务）。解析失败重试一次，仍失败则保持
-        Runtime 视图，原始层永远不受影响。
+        一次调用处理一批（N 轮 N 次调用 → 1 次，摊薄固定开销）：跨轮
+        重复交代的决策/背景在 State Patch 里天然去重。可展开性不变——
+        事件 ID 与原始历史不受整理影响（§5：合并的是视图，不是历史）。
+        输入 = 各轮用户输入 + 事件截断索引 + 最终回答全文（默认不读
+        原文；截断行不足以确定关键事实时可用 read_full 按上限展开）。
+        输出 = 各轮 Normalized 意图 + 精修事件索引 + 合并 State Patch。
+        关闭思考（格式化任务）。解析失败重试一次，仍失败则整批保持
+        Runtime 视图（org_state=failed，回入水位等下次触发），原始层
+        永远不受影响。返回是否成功。
         """
-        self._emit_status(f"后台整理：第 {round_data['seq']} 轮归档中…（不影响继续对话）")
-        user_inputs = [
-            e["message"].get("content", "")
-            for e in round_data["events"] if e["type"] == "user"
-        ]
-        index = truncate.render_round_events(round_data)
-        final_event = next(
-            (e for e in reversed(round_data["events"]) if e["type"] == "final_answer"), None
-        )
-        final_text = (final_event["message"].get("content") or "") if final_event else ""
+        first, last = rounds[0]["seq"], rounds[-1]["seq"]
+        if first == last:
+            label = f"第 {first} 轮"
+        else:
+            label = f"R{first}-R{last} 共 {len(rounds)} 轮"
+        self._emit_status(f"后台整理：{label}批量归档中…（不影响继续对话）")
+
+        sections = []
+        for r in rounds:
+            user_inputs = [
+                e["message"].get("content", "")
+                for e in r["events"] if e["type"] == "user"
+            ]
+            final_event = next(
+                (e for e in reversed(r["events"]) if e["type"] == "final_answer"), None
+            )
+            final_text = (final_event["message"].get("content") or "") if final_event else ""
+            part = (
+                f"### Round {r['seq']}\n[用户输入]\n" + "\n---\n".join(user_inputs)
+                + "\n[事件截断索引]\n" + truncate.render_round_events(r)
+            )
+            if final_text:
+                part += f"\n[最终回答（完整）]\n{final_text[:2000]}"
+            sections.append(part)
 
         prompt = (
-            "你是任务整理器。以下是一个已完成 Round 的用户输入、"
-            "事件截断索引与最终回答。\n"
+            "你是任务整理器。以下是多个已完成 Round 的用户输入、事件截断索引"
+            "与最终回答（按时间顺序排列）。\n"
             "你的职责（最后只输出一个 JSON 对象，不要代码块围栏）：\n"
-            '1. "normalized_user_input"：合并并澄清这些用户输入的实际意图'
-            "——不是压缩，是把用户想要什么说得更清楚，可以比原文长；\n"
-            '2. "refined_index"：事件精修索引，数组元素为 {"id": "事件ID", '
-            '"line": "一行摘要"}——比截断行更短更准（保留结论：什么可行、'
-            "什么实测不行、卡在哪），id 必须取自事件流中已有的事件 ID，"
+            '1. "rounds"：数组，与输入的 Round 一一对应，每个元素为 '
+            '{"seq": 轮次号, "normalized_user_input": "该轮用户意图的澄清表述'
+            "——不是压缩，是把用户想要什么说得更清楚\", "
+            '"refined_index": [{"id": "该轮的事件ID", "line": "一行摘要"}]}——'
+            "索引行比截断行更短更准（保留结论：什么可行、什么实测不行、"
+            "卡在哪），id 必须取自对应轮次事件流中已有的事件 ID，"
             "无实质内容的事件（如寒暄）可省略；\n"
-            '3. "state_patch"：任务状态增量补丁 {"completed":[],'
-            '"decisions":[],"known_issues":[],"open_questions":[],'
+            '2. "state_patch"：全部轮次合并后的任务状态增量补丁 '
+            '{"completed":[],"decisions":[],"known_issues":[],"open_questions":[],'
             '"current_status":"...","goal":"...","is_done":bool}——'
-            "只包含需要新增或修改的条目。\n"
+            "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。\n"
             f"若截断索引不足以确定关键事实（如失败的具体原因），"
             f"可用 read_full 工具查看事件原文（最多 {_ORGANIZE_MAX_READS} 次）。\n\n"
-            "[用户输入（多条时按顺序合并理解）]\n"
-            + "\n---\n".join(user_inputs)
-            + "\n\n[事件截断索引]\n" + index + "\n"
+            + "\n\n".join(sections)
         )
-        if final_text:
-            prompt += f"\n[最终回答（完整）]\n{final_text[:2000]}\n"
 
         messages = [{"role": "user", "content": prompt}]
         content = ""
@@ -969,25 +1082,38 @@ class Agent:
             )
             state = self._parse_state_json(retry_content)
         if not isinstance(state, dict):
-            round_data["org_state"] = "failed"
+            for r in rounds:
+                r["org_state"] = "failed"
             self._persist_rounds()
-            return
-        if state.get("normalized_user_input"):
-            round_data["user_input"]["normalized"] = state["normalized_user_input"]
-        refined = state.get("refined_index")
-        if isinstance(refined, list):
-            valid_ids = {e["id"] for e in round_data["events"]}
-            for item in refined:
-                if isinstance(item, dict) and item.get("id") in valid_ids and item.get("line"):
-                    round_data["refined_index"][item["id"]] = str(item["line"])
+            return False
+
+        rounds_by_seq = {r["seq"]: r for r in rounds}
+        for item in state.get("rounds") or []:
+            if not isinstance(item, dict):
+                continue
+            r = rounds_by_seq.get(item.get("seq"))
+            if r is None:
+                continue
+            if item.get("normalized_user_input"):
+                r["user_input"]["normalized"] = str(item["normalized_user_input"])
+            valid_ids = {e["id"] for e in r["events"]}
+            for line_item in item.get("refined_index") or []:
+                if (
+                    isinstance(line_item, dict)
+                    and line_item.get("id") in valid_ids
+                    and line_item.get("line")
+                ):
+                    r["refined_index"][line_item["id"]] = str(line_item["line"])
         patch = state.get("state_patch")
         if isinstance(patch, dict):
             if state.get("is_done") is not None and "is_done" not in patch:
                 patch["is_done"] = bool(state["is_done"])
             self.task.apply_state_patch(patch)
-        round_data["org_state"] = "done"
-        self._emit_status("整理完成")
+        for r in rounds:
+            r["org_state"] = "done"
+        self._emit_status(f"整理完成（{label}）")
         self._persist_rounds()
+        return True
 
     def _organize_schemas(self) -> list[dict]:
         """Organization 阶段唯一的工具：按事件 ID 读取原文（后门，默认不用）。"""

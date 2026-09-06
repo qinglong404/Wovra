@@ -265,14 +265,17 @@ def test_run_always_uses_streaming():
 
 
 def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
-    """Round 闭合后 Organization 更新状态补丁、Normalized 意图与精修索引。"""
+    """水位触发批量整理：State Patch 合并、Normalized 意图与精修索引写回。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
-        "normalized_user_input": "用户想搞清楚项目的测试覆盖情况",
-        "refined_index": [
-            {"id": "R1-E01", "line": "询问测试覆盖"},
-            {"id": "R1-E02", "line": "给出覆盖结论"},
-        ],
+        "rounds": [{
+            "seq": 1,
+            "normalized_user_input": "用户想搞清楚项目的测试覆盖情况",
+            "refined_index": [
+                {"id": "R1-E01", "line": "询问测试覆盖"},
+                {"id": "R1-E02", "line": "给出覆盖结论"},
+            ],
+        }],
         "state_patch": {
             "completed": ["梳理测试覆盖"],
             "current_status": "测试覆盖已梳理完成",
@@ -285,7 +288,8 @@ def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="初始的模糊想法")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+    # org_watermark=0：每轮闭合即触发（等价旧逐轮行为），便于单测
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
 
     answer = agent.run("把活干完")
 
@@ -309,11 +313,12 @@ def test_organization_survives_invalid_json(monkeypatch, tmp_path):
         [_chunk(_delta(content="重试了还是 {{{ 不是"))],  # 重试仍失败
     ]
     task = Task.create(goal="初始目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
 
     agent.run("问")
 
     assert task.task_state == {}  # 原状态未被破坏
+    assert task.rounds[-1]["org_state"] == "failed"  # 整批失败，回入水位
     assert task.rounds[-1]["refined_index"] == {}
     assert task.rounds[-1]["user_input"]["normalized"] == ""
 
@@ -322,7 +327,7 @@ def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
     """state_patch 里的非法字段被忽略，合法字段照常合并。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
-        "normalized_user_input": "x",
+        "rounds": [{"seq": 1, "normalized_user_input": "x"}],
         "round_summary": "s",
         "state_patch": {"completed": "不是列表", "current_status": "进行中"},
     }, ensure_ascii=False)
@@ -331,12 +336,127 @@ def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
 
     agent.run("问")
 
     assert task.task_state.get("completed", []) == []  # 非法列表被忽略
     assert task.task_state.get("current_status") == "进行中"
+
+
+# ---- V3 水位批量整理 --------------------------------------------------------
+
+
+def _batch_org_json(rounds: list[int], goal: str = "批量目标") -> str:
+    """构造一次批量整理调用的合法输出。"""
+    return json.dumps({
+        "rounds": [
+            {"seq": seq, "normalized_user_input": f"R{seq} 意图", "refined_index": []}
+            for seq in rounds
+        ],
+        "state_patch": {"goal": goal, "completed": ["一次搞定"]},
+    }, ensure_ascii=False)
+
+
+def test_watermark_defers_organization_below_threshold(monkeypatch, tmp_path):
+    """未整理体量未达水位 → 不发起任何整理调用（小会话成本归零）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "甲" * 2400, "甲" * 2400)]
+    agent = Agent(
+        llm=_StubLLM(), tools=[], task=task,
+        org_watermark=5000, org_batch_max=12,
+    )
+
+    agent._maybe_organize_batch()
+
+    assert agent.llm.calls == []  # 一次整理都没发起
+    assert task.rounds[0]["org_state"] == "done"  # _round 助手自带 done，未被动过
+
+
+def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
+    """体量达水位 → 所有未整理轮一次批量调用整理（N 次 → 1 次）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    task.rounds = [
+        _round(1, "甲" * 2400, "甲" * 2400),
+        _round(2, "乙" * 2400, "乙" * 2400),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1, 2])))]]),
+        tools=[], task=task, org_watermark=2000, org_batch_max=12,
+    )
+
+    # 两轮各 ~1200 tok，合计 2400 ≥ 2000 → 触发
+    agent._maybe_organize_batch()
+
+    assert len(agent.llm.calls) == 1  # 两轮只花一次调用
+    prompt = agent.llm.calls[0]["messages"][0]["content"]
+    assert "Round 1" in prompt and "Round 2" in prompt
+    # 各轮产物写回各自的 Round
+    assert task.rounds[0]["user_input"]["normalized"] == "R1 意图"
+    assert task.rounds[1]["user_input"]["normalized"] == "R2 意图"
+    assert all(r["org_state"] == "done" for r in task.rounds)
+    # 合并 State Patch 只应用一次
+    assert task.task_state["goal"] == "批量目标"
+
+
+def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
+    """超过批量上限：每次触发只收编最老的一批，剩余回入水位。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    task.rounds = [
+        _round(1, "甲" * 2400, "甲" * 2400),
+        _round(2, "乙" * 2400, "乙" * 2400),
+        _round(3, "丙" * 2400, "丙" * 2400),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([
+            [_chunk(_delta(content=_batch_org_json([1, 2])))],
+            [_chunk(_delta(content=_batch_org_json([3])))],
+        ]),
+        tools=[], task=task, org_watermark=2000, org_batch_max=2,
+    )
+
+    agent._maybe_organize_batch()
+
+    assert task.rounds[0]["org_state"] == "done"
+    assert task.rounds[1]["org_state"] == "done"
+    assert task.rounds[2]["org_state"] == ""  # 第三轮留在水位里
+    prompt = agent.llm.calls[0]["messages"][0]["content"]
+    assert "Round 3" not in prompt
+
+    # 收尾补整理（run 模式退出路径）：不问水位，把剩余轮消化掉
+    agent.organize_backlog()
+    assert task.rounds[2]["org_state"] == "done"
+    assert len(agent.llm.calls) == 2
+
+
+def test_pending_backlog_counts_toward_watermark(monkeypatch, tmp_path):
+    """上次会话崩溃遗留的 pending 轮计入水位，下次触发一并整理。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    pending = _round(1, "甲" * 2400, "甲" * 2400)
+    pending["org_state"] = "pending"  # 崩溃遗留：从未整理完成
+    task.rounds = [pending]
+    # 单轮 mass 恰为 1200：pending 若不计入水位就永远凑不齐这个阈值
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
+        tools=[], task=task, org_watermark=1200, org_batch_max=12,
+    )
+
+    agent._maybe_organize_batch()
+
+    assert len(agent.llm.calls) == 1
+    assert task.rounds[0]["org_state"] == "done"
 
 
 # ---- V1 Context Runtime：加载视图 / 展开 / baseline 对照 ---------------------
@@ -517,8 +637,11 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     """整理输出非法 JSON 时重试一次，重试成功则正常应用。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
-        "normalized_user_input": "澄清的意图",
-        "refined_index": [{"id": "R1-E02", "line": "给出结论"}],
+        "rounds": [{
+            "seq": 1,
+            "normalized_user_input": "澄清的意图",
+            "refined_index": [{"id": "R1-E02", "line": "给出结论"}],
+        }],
         "state_patch": {"completed": ["完成项"]},
     }, ensure_ascii=False)
     responses = [
@@ -527,7 +650,7 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],                     # 重试：合法 JSON
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
 
     agent.run("问")
 
@@ -568,8 +691,11 @@ def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):
     """轮闭合规则：中断/异常不闭合 Round，多条用户输入并入同一开放轮。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
-        "normalized_user_input": "用户想把 ICP 调试完（合并了两条输入的意图）",
-        "refined_index": [],
+        "rounds": [{
+            "seq": 1,
+            "normalized_user_input": "用户想把 ICP 调试完（合并了两条输入的意图）",
+            "refined_index": [],
+        }],
         "state_patch": {},
     }, ensure_ascii=False)
     responses = [
@@ -577,7 +703,7 @@ def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="ICP 调试")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
 
     # 第一次 run 模拟被中断：不闭合（仅持久化，轮保持开放）
     agent._open_or_reuse_round("开始调试 ICP")
@@ -625,17 +751,16 @@ def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
     """步数只统计干活的步；整理成本走维护账本，随 usage 行落盘不漏记。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
-        "normalized_user_input": "意图",
-        "refined_index": [],
+        "rounds": [{"seq": 1, "normalized_user_input": "意图", "refined_index": []}],
         "state_patch": {"completed": ["完成"]},
     }, ensure_ascii=False)
     responses = [
         [_chunk(_delta(content="干完了"))],
-        # 整理调用（managed 同步闭合时执行），带 usage 验证分账
+        # 整理调用（水位触发时同步执行），带 usage 验证分账
         [_chunk(_delta(content=org_json)), _chunk(usage=_usage(60, 30, 90))],
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
 
     agent.run("问")
 

@@ -535,6 +535,22 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     return answer
 
 
+def _record_leftover_maintenance(agent, task, note: str) -> None:
+    """收尾期完成的整理/压缩成本补记。
+
+    最后一次 usage 记账发生在最终回答时刻，之后的维护调用（异步整理、
+    收尾补整理）不补记就会漏掉——管理机制自身也要被完整审计。
+    """
+    leftover = agent.drain_maintenance_usage()
+    if leftover["organization"]["total"] or leftover["compaction"]["total"]:
+        task.record(
+            "usage",
+            f"[{agent.context_mode}] org={leftover['organization']['total']:,} "
+            f"compaction={leftover['compaction']['total']:,}（{note}）",
+        )
+        task.save()
+
+
 def cmd_run(args: argparse.Namespace) -> None:
     """wovra run：对既有任务执行一轮。
 
@@ -552,6 +568,10 @@ def cmd_run(args: argparse.Namespace) -> None:
             "如果任务已无法推进，说明原因。"
         )
         _run_turn(agent, instruction)
+        # 一次性进程收尾：水位未触发的剩余未整理轮补一批整理——
+        # TaskState 跟上进度，下一次自主推进才有准确的"任务状态"
+        agent.organize_backlog()
+        _record_leftover_maintenance(agent, task, "收尾补整理记账")
     finally:
         # 一次性进程：会话结束，其后台任务一并收掉
         stop_session_backgrounds()
@@ -627,21 +647,13 @@ def cmd_chat(args: argparse.Namespace) -> None:
             if answer:
                 print()
 
-        # 退出前等待后台整理收尾（最多 10 秒），未完成的轮次标记 pending
+        # 退出前等待后台整理收尾（最多 10 秒）；没赶上的轮次留在
+        # 整理水位里，下次触发时批量整理（V3 水位机制，不逐轮补跑）
         if not agent.flush_organization(timeout=10.0):
-            print(ui.info("仍有整理任务在后台未完成，将在下次打开会话时补跑。"))
+            print(ui.info("仍有批量整理未完成；相关轮次已计入整理水位，下次触发时一并整理。"))
 
-        # 收尾期完成的整理/压缩成本补记：最后一次 usage 记账发生在
-        # 最终回答时刻，之后的异步整理不补记就会漏掉
-        leftover = agent.drain_maintenance_usage()
-        if leftover["organization"]["total"] or leftover["compaction"]["total"]:
-            task.record(
-                "usage",
-                f"[{agent.context_mode}] org={leftover['organization']['total']:,} "
-                f"compaction={leftover['compaction']['total']:,}"
-                "（会话退出收尾补记）",
-            )
-            task.save()
+        # 收尾期完成的整理/压缩成本补记（共用 helper）
+        _record_leftover_maintenance(agent, task, "会话退出收尾补记")
     finally:
         # 会话退出：该会话启动的后台进程一并关闭（keep_alive 常驻任务除外）
         stopped = stop_session_backgrounds()
