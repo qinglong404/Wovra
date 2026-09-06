@@ -226,12 +226,21 @@ def _system_prompt(mode: str) -> str:
         "敏感操作（安装、提交、删除等）会先请求用户确认——被拒绝时换一种"
         "做法，不要重试原命令；耗时长的安装或服务器进程用 run_background "
         "后台执行，check_background 查看输出。"
-        "大型多块任务（如\"复刻一个游戏/应用\"这类含多个独立部分、预计"
-        "几十步以上的工作）不要自己逐步实现——作为主 agent 用 spawn_subtask "
-        "把任务拆成职责块（写清 ownership 文件边界），run_subtask 派发执行、"
-        "check_subtask 查看现状、merge_subtask 清算合并；你保持对话、汇总与"
-        "方案，不把实现细节拉进自己的上下文。子任务实测与预期不符且影响方向"
-        "时让它写决策升级（escalations），由你转达用户拍板。小任务直接做即可。"
+    )
+    # 组织层引导：与组织工具同生同灭（WOVRA_SOLO=1 时整层不存在）——
+    # 实验对照的控制变量必须由运行时持有，不能靠提示词恳求
+    solo = os.environ.get("WOVRA_SOLO", "").strip().lower() in ("1", "true", "yes")
+    org = (
+        ""
+        if solo
+        else (
+            "大型多块任务（如\"复刻一个游戏/应用\"这类含多个独立部分、预计"
+            "几十步以上的工作）不要自己逐步实现——作为主 agent 用 spawn_subtask "
+            "把任务拆成职责块（写清 ownership 文件边界），run_subtask 派发执行、"
+            "check_subtask 查看现状、merge_subtask 清算合并；你保持对话、汇总与"
+            "方案，不把实现细节拉进自己的上下文。子任务实测与预期不符且影响方向"
+            "时让它写决策升级（escalations），由你转达用户拍板。小任务直接做即可。"
+        )
     )
     if mode == MODE_MANAGED:
         extra = (
@@ -244,7 +253,7 @@ def _system_prompt(mode: str) -> str:
             "上下文为全量回放，接近窗口上限时较早轮次会自动压缩成摘要"
             "（baseline 对照模式，行为与常见 Agent 一致）。"
         )
-    return f"{common}{extra}{env}"
+    return f"{common}{org}{extra}{env}"
 
 
 def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool = False) -> Agent:

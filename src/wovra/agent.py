@@ -74,6 +74,15 @@ _READ_ONLY_TOOLS = frozenset(
 # 防失控生长的安全栏，不是机制
 _ORG_MAX_DEPTH = 3
 
+
+def _org_enabled() -> bool:
+    """组织层开关：WOVRA_SOLO=1 时整层禁用（工具不注册、引导不注入）。
+
+    存在的意义是实验对照——"单 agent"必须是运行时结构性保证（模型
+    连工具都看不见，想拆也没有手），不能靠提示词恳求。
+    """
+    return os.environ.get("WOVRA_SOLO", "").strip().lower() not in ("1", "true", "yes")
+
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
 # V3 水位批量整理（docs/context-management-v3.md §4）：轮闭合不再逐轮
@@ -218,7 +227,7 @@ class Agent:
             # 水位批量整理（V3）：上次会话遗留的未整理轮（含崩溃时的
             # pending / failed）体量天然计入水位，由下一次轮闭合触发
             # 批量整理——加载时不立即补跑（小会话可能永远不需要整理）
-        if self.task is not None:
+        if self.task is not None and _org_enabled():
             # 组织运行时 V1（docs/organization-runtime-v1.md）：分形节点的
             # 组织工具——任何节点对上是子、对下是主，同一套行为规则
             self.register(self.spawn_subtask)

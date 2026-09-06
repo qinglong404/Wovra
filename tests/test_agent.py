@@ -1186,3 +1186,20 @@ def test_ttft_recorded_in_stats_and_usage_line(monkeypatch, tmp_path):
     assert agent.last_stats["ttft_max"] > 0
     line = ui.usage_line(agent.last_stats)
     assert "首字" in line and "合计" in line
+
+
+def test_solo_mode_hides_org_tools_and_guidance(monkeypatch, tmp_path):
+    """实验对照的结构性保证：WOVRA_SOLO=1 时组织层整体不存在——
+    工具不注册、提示词无引导，单 agent 对照组由运行时锁定。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setenv("WOVRA_SOLO", "1")
+    from wovra import cli as cli_module
+
+    task = Task.create(goal="x")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    names = [s["function"]["name"] for s in agent._schemas]
+    assert "spawn_subtask" not in names
+    assert "merge_subtask" not in names
+
+    prompt = cli_module._system_prompt("managed")
+    assert "spawn_subtask" not in prompt
