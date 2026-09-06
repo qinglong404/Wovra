@@ -241,6 +241,10 @@ def usage_line(stats: dict, maint: dict | None = None,
         f"步数 {stats.get('llm_calls', 0)}",
         f"工具调用 {stats.get('tool_calls', 0)} 次",
     ]
+    if stats.get("ttft_max"):
+        parts.append(
+            f"首字 {stats['ttft_max']:.1f}s（合计 {stats['ttft_seconds']:.1f}s）"
+        )
     total = stats.get("total_tokens", 0)
     if total:
         prompt = stats.get("prompt_tokens", 0)

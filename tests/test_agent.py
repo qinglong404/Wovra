@@ -1172,3 +1172,17 @@ def test_turn_count_is_session_bound_across_restarts(monkeypatch, tmp_path):
                    tools=[], task=Task.load(task.id), context_mode="baseline")
     agent2.run("问2")
     assert agent2.last_stats["turn"] == 2  # 修复前：进程内计数归零显示 1
+
+
+def test_ttft_recorded_in_stats_and_usage_line(monkeypatch, tmp_path):
+    """时间仪器：每步首字延迟进 stats（合计 + 峰值），终端账单行可见。"""
+    from wovra import ui
+
+    responses = [[_chunk(_delta(content="hi")), _chunk(usage=_usage(10, 2, 12, cached=4))]]
+    agent = _agent_with([], responses)
+    agent.run("问")
+
+    assert agent.last_stats["ttft_seconds"] > 0
+    assert agent.last_stats["ttft_max"] > 0
+    line = ui.usage_line(agent.last_stats)
+    assert "首字" in line and "合计" in line

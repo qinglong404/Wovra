@@ -226,6 +226,12 @@ def _system_prompt(mode: str) -> str:
         "敏感操作（安装、提交、删除等）会先请求用户确认——被拒绝时换一种"
         "做法，不要重试原命令；耗时长的安装或服务器进程用 run_background "
         "后台执行，check_background 查看输出。"
+        "大型多块任务（如\"复刻一个游戏/应用\"这类含多个独立部分、预计"
+        "几十步以上的工作）不要自己逐步实现——作为主 agent 用 spawn_subtask "
+        "把任务拆成职责块（写清 ownership 文件边界），run_subtask 派发执行、"
+        "check_subtask 查看现状、merge_subtask 清算合并；你保持对话、汇总与"
+        "方案，不把实现细节拉进自己的上下文。子任务实测与预期不符且影响方向"
+        "时让它写决策升级（escalations），由你转达用户拍板。小任务直接做即可。"
     )
     if mode == MODE_MANAGED:
         extra = (

@@ -250,6 +250,10 @@ class Agent:
             "total_tokens": 0,
             "cached_tokens": 0,
             "cache_miss_tokens": 0,
+            # 首 token 延迟（TTFT）：基座的第二张面孔（延迟乘数）的仪器。
+            # seconds = 本轮各步 TTFT 之和（用户感知的等待），max = 最卡的一步
+            "ttft_seconds": 0.0,
+            "ttft_max": 0.0,
             "mode": self.context_mode,
             "purpose": {
                 "working": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
@@ -526,6 +530,7 @@ class Agent:
         content_parts: list[str] = []
         tool_calls_acc: dict[int, dict] = {}
         usage = None
+        first_token_at: Optional[float] = None
         for chunk in stream:
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
@@ -563,7 +568,15 @@ class Agent:
                 if fragment.function and fragment.function.arguments:
                     acc["arguments"] += fragment.function.arguments
 
+            if first_token_at is None and (
+                thinking or delta.content or (delta.tool_calls or [])
+            ):
+                # 首 token 延迟（TTFT）：prefill + 排队时间，基座的第二张
+                # 面孔（延迟乘数）靠它测量——与总耗时分开记
+                first_token_at = time.monotonic()
+
         elapsed = time.monotonic() - start
+        ttft = (first_token_at - start) if first_token_at is not None else elapsed
         if usage is not None:
             self._accumulate_usage(usage, purpose)
         if purpose in _MAINTENANCE_PURPOSES:
@@ -573,6 +586,8 @@ class Agent:
                 self._maint_usage[purpose]["seconds"] += elapsed
         else:
             self.last_stats["seconds"] += elapsed
+            self.last_stats["ttft_seconds"] += ttft
+            self.last_stats["ttft_max"] = max(self.last_stats["ttft_max"], ttft)
             self.last_stats["purpose"].setdefault(
                 purpose, {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0}
             )["seconds"] += elapsed
@@ -615,6 +630,9 @@ class Agent:
                 f" 等效输入 {miss + cached / tokens.CACHE_RATE:,.0f} tok"
             )
         suffix = "" if closed else "（轮未闭合：超限/中断，成本照记）"
+        ttft_info = ""
+        if stats.get("ttft_max"):
+            ttft_info = f" ttft={stats['ttft_seconds']:.1f}s（峰值 {stats['ttft_max']:.1f}s）"
         self.task.record(
             "usage",
             f"[{self.context_mode}] steps={stats['llm_calls']:,} "
@@ -624,7 +642,7 @@ class Agent:
             f"compaction={maint['compaction']['total']:,} "
             f"prompt={prompt:,} completion={stats['completion_tokens']:,} "
             f"total={stats['total_tokens']:,}（思考 {stats['reasoning_tokens']:,}）"
-            f"{cache_info}{suffix}",
+            f"{cache_info}{ttft_info}{suffix}",
         )
 
     def _accumulate_usage(self, usage, purpose: str) -> None:
