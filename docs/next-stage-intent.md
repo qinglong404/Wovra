@@ -284,8 +284,8 @@ todo 列表。
 
 ### 7.7 待定与第一现场
 
-* **现场证据第一步（多 agent 的入场券）**：复刻类任务先在现行
-  单 agent Wovra 上跑一次，看它淹死在哪里；顺手是时间仪器（TTFT
-  落盘）的第一次真实负载。
+* **首战已跑（2026-09-06/07）**：Minecraft 复刻 A/B，报告与结论见
+  `org-experiment-minecraft.md`；组织层冻结于 V1.2，编制制 V2 蓝本
+  见 `organization-runtime-v1.md` §13。
 * 升级模板字段、待办实验指引的形态、跨任务 expand_history 的粒度
   ——全部从第一现场长，纸上不定。
