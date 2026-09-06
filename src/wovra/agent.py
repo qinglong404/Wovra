@@ -66,8 +66,13 @@ _MAINTENANCE_PURPOSES = ("organization", "compaction")
 # （ask_user 会阻塞等用户输入，不参与并行）
 _READ_ONLY_TOOLS = frozenset(
     {"read_file", "search_files", "list_files", "get_current_time",
-     "glob_files", "web_fetch", "web_search", "list_background"}
+     "glob_files", "web_fetch", "web_search", "list_background",
+     "check_subtask"}
 )
+
+# 组织树最多 _ORG_MAX_DEPTH 层节点（根为第 1 层）：根 → 子 → 孙。
+# 防失控生长的安全栏，不是机制
+_ORG_MAX_DEPTH = 3
 
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
@@ -99,6 +104,10 @@ _ACTION_WORDS = {
     "web_search": "网页搜索",
     "ask_user": "询问用户",
     "list_background": "列出后台任务",
+    "spawn_subtask": "创建子任务",
+    "run_subtask": "派发子任务",
+    "check_subtask": "查看子任务",
+    "merge_subtask": "清算子任务",
 }
 
 # 相关性筛选在 V2 中不实现（预算充足时所有浓缩视图直接加载），
@@ -165,13 +174,13 @@ class Agent:
         # print：会打碎输入行，且 patch_stdout 会吞掉 ANSI 颜色码（踩过的坑）
         self._status_feed: list[str] = []
 
-        tools_module.set_audit_recorder(
-            lambda detail: task.record("file_change", detail) if task else None
-        )
-        # 后台任务按会话归属：启动/查看/停止都限定在本会话内
-        tools_module.set_current_session(task.id if task else None)
+        self._bind_globals()
 
         self.tools: dict[str, Callable] = {}
+        # 传给子 agent 的工具集（纯模块函数）。expand_history 与组织工具
+        # 由各 Agent 自己注册、绑定各自的 Task——不能从父级继承，否则
+        # 子 agent 的 expand_history 会读到父任务的历史
+        self._tool_fns = tuple(tools)
         self._schemas: list[dict] = []
         for fn in tools:
             self.register(fn)
@@ -209,6 +218,25 @@ class Agent:
             # 水位批量整理（V3）：上次会话遗留的未整理轮（含崩溃时的
             # pending / failed）体量天然计入水位，由下一次轮闭合触发
             # 批量整理——加载时不立即补跑（小会话可能永远不需要整理）
+        if self.task is not None:
+            # 组织运行时 V1（docs/organization-runtime-v1.md）：分形节点的
+            # 组织工具——任何节点对上是子、对下是主，同一套行为规则
+            self.register(self.spawn_subtask)
+            self.register(self.run_subtask)
+            self.register(self.check_subtask)
+            self.register(self.merge_subtask)
+
+    def _bind_globals(self) -> None:
+        """把进程级全局绑定对准本会话（审计记录器、后台任务归属）。
+
+        子任务在同进程内运行会重绑这些全局；子任务返回后由 run_subtask
+        调本方法把绑定交还父会话。
+        """
+        tools_module.set_audit_recorder(
+            lambda detail: self.task.record("file_change", detail) if self.task else None
+        )
+        # 后台任务按会话归属：启动/查看/停止都限定在本会话内
+        tools_module.set_current_session(self.task.id if self.task else None)
 
     def _fresh_stats(self) -> dict:
         return {
@@ -1026,7 +1054,12 @@ class Agent:
             "无实质内容的事件（如寒暄）可省略；\n"
             '2. "state_patch"：全部轮次合并后的任务状态增量补丁 '
             '{"completed":[],"decisions":[],"known_issues":[],"open_questions":[],'
+            '"escalations":[],"experiments":[],'
             '"current_status":"...","goal":"...","is_done":bool}——'
+            "escalations 是决策升级：实测与预期不符、影响方向、需要上级或"
+            "人拍板的事项（写明预期、现实、选项），不要擅自改方向；"
+            "experiments 是待办实验：机器无法自行验证、需要人当传感器的事项"
+            "（写明做什么、看什么、什么算对）。"
             "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。\n"
             f"若截断索引不足以确定关键事实（如失败的具体原因），"
             f"可用 read_full 工具查看事件原文（最多 {_ORGANIZE_MAX_READS} 次）。\n\n"
@@ -1162,6 +1195,215 @@ class Agent:
         except json.JSONDecodeError:
             return None
         return state if isinstance(state, dict) else None
+
+    # ---- 组织运行时 V1（docs/organization-runtime-v1.md） -----------------------
+    #
+    # 分形节点：任何节点对上是子、对下是主。四条不变量在本节落地——
+    # 原始需求逐字下传（org_context 只追加不转述）、目标下传事实上传
+    # 方法不进传递（子任务状态账本就是报告）、信息不切开职责才切开
+    # （所有权边界防写冲突）。细节设计见设计文档 §3。
+
+    def _org_depth(self) -> int:
+        """本节点在组织树里的深度（根为 0）。"""
+        depth, task = 0, self.task
+        while task is not None and task.parent_id and depth < _ORG_MAX_DEPTH + 1:
+            try:
+                task = Task.load(task.parent_id)
+            except Exception:  # noqa: BLE001——父任务丢失按根处理
+                break
+            depth += 1
+        return depth
+
+    def spawn_subtask(self, goal: str, requirements: str = "", ownership: str = "") -> str:
+        """创建子任务并挂到本任务之下，返回子任务 id。
+
+        goal：这个职责块要实现什么；requirements：本块的约束与要求
+        （多行）；ownership：本块的文件/模块所有权边界（防止与其他
+        子任务写冲突）。全局需求会逐字下传给子任务，不需要复述全局
+        背景。创建后用 run_subtask 派发执行。
+        """
+        if self.task is None:
+            return "本会话未绑定任务，无法创建子任务。"
+        goal = (goal or "").strip()
+        if not goal:
+            return "goal 不能为空：子任务必须有自己的职责块目标。"
+        # 本节点层数 = _org_depth()+1，子节点层数还要 +1——超层拒绝
+        if self._org_depth() + 2 > _ORG_MAX_DEPTH:
+            return (
+                f"已达组织深度上限（{_ORG_MAX_DEPTH} 层）。请在本层完成工作，"
+                "或先 merge_subtask 清算已完成的子任务。"
+            )
+        child = Task.create(
+            goal=goal,
+            requirements=[r.strip() for r in (requirements or "").splitlines() if r.strip()],
+        )
+        child.parent_id = self.task.id
+        child.mode = self.context_mode
+        child.workspace = self.task.workspace or str(tools_module.PROJECT_ROOT)
+        # 意图快照逐字下传（不变量 1）：父目标原文 + 全局需求原文 +
+        # 本层追加的拆解与所有权边界。不转述、不改写——追加不是复述
+        snapshot = [f"[全局目标]\n{self.task.goal}"]
+        if self.task.requirements:
+            snapshot.append(
+                "[全局需求]\n" + "\n".join(f"- {r}" for r in self.task.requirements)
+            )
+        state = self.task.get_state()
+        if state.current_status:
+            snapshot.append("[全局当前状态]\n" + state.current_status)
+        if (ownership or "").strip():
+            snapshot.append("[本块所有权边界]\n" + ownership.strip())
+        child.org_context = "\n\n".join(snapshot)
+        child.save()
+        self.task.record("subtask", f"创建子任务 {child.id}：{goal}")
+        self.task.save()
+        return (
+            f"子任务已创建：{child.id}\n"
+            f"全局目标与需求已逐字下传。用 run_subtask 派发执行，"
+            f"check_subtask 查看现状，merge_subtask 清算合并。"
+        )
+
+    def run_subtask(self, task_id: str, instruction: str = "") -> str:
+        """派发子任务一轮（同步执行）：子 agent 在自己的上下文里干活。
+
+        返回它的状态账本与本轮回答摘要。子任务的实现细节不会进入
+        你的上下文——这正是职责划分的意义；要看细节用 check_subtask
+        按需钻取，不要凭好奇整段拉回来。
+        """
+        if self.task is None:
+            return "本会话未绑定任务。"
+        try:
+            child = Task.load(task_id)
+        except Exception as error:  # noqa: BLE001——加载失败原样报告
+            return f"子任务加载失败：{error!r}"
+        if child.parent_id != self.task.id:
+            return f"{task_id} 不是本任务的子任务，拒绝操作。"
+        if not instruction.strip():
+            instruction = (
+                "按你的职责块开始工作，完成后给出最终回答。"
+                if not child.rounds
+                else "继续推进你的职责块；已完成的部分不要重做。"
+            )
+        child_agent = Agent(
+            llm=self.llm,
+            system_prompt=self._subtask_system_prompt(child),
+            tools=self._tool_fns,
+            task=child,
+            context_mode=child.mode or MODE_MANAGED,
+            async_organization=False,  # 同步：返回前状态账本必须新鲜
+            on_progress=(
+                (lambda msg, _tail=child.id[-6:]: self.on_progress(f"[子{_tail}] {msg}"))
+                if self.on_progress
+                else None
+            ),
+        )
+        try:
+            answer = child_agent.run(instruction)
+            # 状态账本要在父任务读取之前是新鲜的：水位未触发的轮次
+            # 补一批整理（子任务自身的记账照常落盘）
+            child_agent.organize_backlog()
+        finally:
+            # 子任务重绑过进程级全局（审计、后台归属）——交还父会话
+            self._bind_globals()
+        child = Task.load(task_id)  # 组织补丁落盘后的最新状态
+        state = child.get_state()
+        sections = [f"[子任务 {child.id}] 状态：{child.status}"]
+        sections.append(state.render() or "（状态账本为空）")
+        if state.escalations:
+            sections.append(
+                "[注意] 子任务提出了决策升级，需要上级处理（见状态账本），"
+                "不要擅自替它改方向。"
+            )
+        if answer:
+            sections.append(f"[本轮回答摘要]\n{answer[:600]}")
+        self.task.record(
+            "subtask", f"子任务 {child.id} 完成一轮：{' '.join(answer.split())[:120]}"
+        )
+        self.task.save()
+        return "\n\n".join(sections)
+
+    def check_subtask(self, task_id: str, level: str = "summary") -> str:
+        """查看子任务现状（不运行它）：summary = 状态账本；
+        detail = 账本 + 各轮一行 + 最近一轮事件索引。"""
+        if self.task is None:
+            return "本会话未绑定任务。"
+        try:
+            child = Task.load(task_id)
+        except Exception as error:  # noqa: BLE001
+            return f"子任务加载失败：{error!r}"
+        if child.parent_id != self.task.id:
+            return f"{task_id} 不是本任务的子任务。"
+        state = child.get_state()
+        if level == "detail":
+            parts = [f"[子任务 {child.id}] 状态：{child.status}"]
+            if state.render():
+                parts.append(state.render())
+            for r in child.rounds:
+                head = r["user_input"].get("normalized") or r["user_input"]["original"]
+                mark = "✓" if r.get("end_state") == "completed" else "…"
+                parts.append(f"R{r['seq']}{mark} {' '.join(head.split())[:80]}")
+            if child.rounds:
+                parts.append(
+                    "[最近一轮事件索引]\n"
+                    + truncate.render_round_events(child.rounds[-1])
+                )
+            return "\n\n".join(parts)
+        return (
+            f"[子任务 {child.id}] 状态：{child.status}\n"
+            + (state.render() or "（状态账本为空）")
+        )
+
+    def merge_subtask(self, task_id: str) -> str:
+        """清算子任务：把它的状态账本合并进本任务（解散≠删除，
+        子任务的历史原样保留，可随时翻阅）。"""
+        if self.task is None:
+            return "本会话未绑定任务。"
+        try:
+            child = Task.load(task_id)
+        except Exception as error:  # noqa: BLE001
+            return f"子任务加载失败：{error!r}"
+        if child.parent_id != self.task.id:
+            return f"{task_id} 不是本任务的子任务，拒绝清算。"
+        if child.status == "merged":
+            return "该子任务已清算过。"
+        state = child.get_state()
+        patch = {
+            name: list(getattr(state, name))
+            for name in ("completed", "decisions", "known_issues",
+                         "open_questions", "escalations", "experiments")
+            if getattr(state, name)
+        }
+        self.task.apply_state_patch(patch)
+        child.status = "merged"
+        child.record("subtask", f"已被父任务 {self.task.id} 清算合并（状态账本并入，历史保留）")
+        child.save()
+        counts = "；".join(f"{k} {len(v)} 条" for k, v in patch.items()) or "无条目"
+        self.task.record("subtask", f"清算子任务 {child.id}：{counts}")
+        self.task.save()
+        return f"子任务 {child.id} 已清算：{counts}。其历史原样保留，可继续查阅。"
+
+    def _subtask_system_prompt(self, child: Task) -> str:
+        """子任务 agent 的系统提示词：逐字下传的全局快照 + 职责块纪律。"""
+        parts = [
+            "你是 Wovra 子任务执行者：组织架构中负责一个职责块的节点。"
+            "带全局视野，只做本块。",
+        ]
+        if child.org_context:
+            parts.append(
+                child.org_context
+                + "\n（以上全局上下文逐字来自父任务，只读参考——"
+                "它帮你理解全局，不许拿它当自己职责块之外的工作清单。）"
+            )
+        parts.append(f"[你的职责块]\n{child.goal}")
+        if child.requirements:
+            parts.append("[本块要求]\n" + "\n".join(f"- {r}" for r in child.requirements))
+        parts.append(f"[工作区]\n{child.workspace or str(tools_module.PROJECT_ROOT)}")
+        parts.append(
+            "纪律：每一步的产物都要自证可用；实测与预期不符且影响方向时，"
+            "不要擅自改方向——作为决策升级写进状态账本（escalations），"
+            "由上级决定。需要人验证的事项写进 experiments（写明做什么、"
+            "看什么、什么算对）。"
+        )
+        return "\n\n".join(parts)
 
     # ---- expand_history（设计文档第 12 节） --------------------------------------
 

@@ -5,13 +5,14 @@
 """
 
 import json
+import re
 from types import SimpleNamespace
 
 import pytest
 
 from wovra import task as task_module
 from wovra.agent import Agent, _schema_of, read_file
-from wovra.task import Task
+from wovra.task import Task, TaskState
 
 
 class _StubLLM:
@@ -457,6 +458,151 @@ def test_pending_backlog_counts_toward_watermark(monkeypatch, tmp_path):
 
     assert len(agent.llm.calls) == 1
     assert task.rounds[0]["org_state"] == "done"
+
+
+# ---- 组织运行时 V1 ----------------------------------------------------------
+
+_ORG_TASK_ID = re.compile(r"\d{8}-\d{6}-[0-9a-f]{6}")
+
+
+def test_spawn_subtask_passes_intent_verbatim(monkeypatch, tmp_path):
+    """不变量 1：原始需求逐字下传——org_context 含父目标原文，只追加不转述。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="复刻一个贪吃蛇网页游戏", requirements=["零依赖", "能玩"])
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    out = agent.spawn_subtask(
+        goal="实现游戏核心循环", requirements="画布 480x480\n30 帧", ownership="game.js"
+    )
+
+    child_id = _ORG_TASK_ID.search(out).group(0)
+    child = Task.load(child_id)
+    assert child.parent_id == task.id
+    assert "复刻一个贪吃蛇网页游戏" in child.org_context  # 逐字，不转述
+    assert "- 零依赖" in child.org_context
+    assert "[本块所有权边界]\ngame.js" in child.org_context
+    assert child.requirements == ["画布 480x480", "30 帧"]
+    assert child.mode == agent.context_mode
+
+
+def test_spawn_subtask_enforces_depth_limit(monkeypatch, tmp_path):
+    """安全栏：组织深度最多三层（根→子→孙），防失控生长。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="根")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    out = agent.spawn_subtask(goal="第一层")
+    child_id = _ORG_TASK_ID.search(out).group(0)
+    child = Task.load(child_id)
+
+    child_agent = Agent(llm=_StubLLM(), tools=[], task=child)
+    grand_out = child_agent.spawn_subtask(goal="第二层")
+    grand_id = _ORG_TASK_ID.search(grand_out).group(0)
+    grandchild = Task.load(grand_id)
+
+    grand_agent = Agent(llm=_StubLLM(), tools=[], task=grandchild)
+    assert "已达组织深度上限" in grand_agent.spawn_subtask(goal="第三层以外")
+
+
+def test_run_subtask_returns_state_ledger_and_rebinds_globals(monkeypatch, tmp_path):
+    """机器视图：子任务的状态账本就是报告；子 agent 干完活全局绑定归还父会话。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    from wovra import tools as tools_module
+
+    task = Task.create(goal="父目标")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    child_id = _ORG_TASK_ID.search(agent.spawn_subtask(goal="做块 A")).group(0)
+    org_json = json.dumps({
+        "rounds": [{"seq": 1, "normalized_user_input": "块 A 意图", "refined_index": []}],
+        "state_patch": {"completed": ["核心循环完成"], "current_status": "块 A 可用"},
+    }, ensure_ascii=False)
+    agent.llm.responses = [
+        [_chunk(_delta(content="块 A 干完了"))],
+        [_chunk(_delta(content=org_json))],  # 子任务收尾补整理
+    ]
+
+    report = agent.run_subtask(child_id)
+
+    assert "核心循环完成" in report
+    assert "块 A 干完了" in report
+    assert "状态：in_progress" in report
+    child = Task.load(child_id)
+    assert child.rounds and child.rounds[0]["org_state"] == "done"
+    assert tools_module._CURRENT_SESSION == task.id  # 绑定已归还父会话
+
+
+def test_run_subtask_refuses_foreign_task(monkeypatch, tmp_path):
+    """越权防护：只能操作自己名下的子任务。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="父")
+    other = Task.create(goal="别家任务")
+    other.save()
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    assert "不是本任务的子任务" in agent.run_subtask(other.id)
+    assert "不是本任务的子任务" in agent.check_subtask(other.id)
+    assert "拒绝清算" in agent.merge_subtask(other.id)
+
+
+def test_check_subtask_detail_shows_rounds(monkeypatch, tmp_path):
+    """钻取：detail 层带状态账本 + 各轮一行 + 最近一轮事件索引。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="父")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    child_id = _ORG_TASK_ID.search(agent.spawn_subtask(goal="块 C")).group(0)
+    child = Task.load(child_id)
+    child.rounds = [_round(1, "第一轮输入", "第一轮回答")]
+    child.save()
+
+    detail = agent.check_subtask(child_id, level="detail")
+
+    assert "R1✓" in detail
+    assert "事件索引" in detail
+    assert "R1-E01" in detail
+
+
+def test_merge_subtask_merges_ledger_and_marks_merged(monkeypatch, tmp_path):
+    """清算：状态账本并入父任务，历史保留（解散≠删除）；幂等。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="父目标")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    child_id = _ORG_TASK_ID.search(agent.spawn_subtask(goal="块 B")).group(0)
+    child = Task.load(child_id)
+    child.apply_state_patch({
+        "completed": ["B 完成"], "decisions": ["B 决策"],
+        "escalations": ["实测不通：材质加载失败"],
+        "experiments": ["请打开页面确认行走流畅"],
+    })
+    child.save()
+
+    report = agent.merge_subtask(child_id)
+
+    assert "已清算" in report
+    parent = Task.load(task.id)
+    state = parent.get_state()
+    assert "B 完成" in state.completed
+    assert "B 决策" in state.decisions
+    assert state.escalations == ["实测不通：材质加载失败"]
+    assert state.experiments == ["请打开页面确认行走流畅"]
+    assert Task.load(child_id).status == "merged"
+    assert "已清算过" in agent.merge_subtask(child_id)
+
+
+def test_state_patch_maintains_escalations_and_experiments(monkeypatch, tmp_path):
+    """决策升级与待办实验是状态账本一等公民（机制五），落盘可重载。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="x")
+    task.apply_state_patch({
+        "escalations": ["预期 60s 内可玩，实测走路失效"],
+        "experiments": ["打开 index.html，确认方向键能移动"],
+    })
+    task.save()
+
+    state = Task.load(task.id).get_state()
+    assert state.escalations == ["预期 60s 内可玩，实测走路失效"]
+    assert state.experiments == ["打开 index.html，确认方向键能移动"]
+    assert "决策升级" in state.render()
+    assert "待办实验" in state.render()
+    assert isinstance(TaskState().escalations, list)
 
 
 # ---- V1 Context Runtime：加载视图 / 展开 / baseline 对照 ---------------------

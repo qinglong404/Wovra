@@ -578,6 +578,33 @@ def cmd_run(args: argparse.Namespace) -> None:
         _release_session_lock(task)
 
 
+def cmd_report(args: argparse.Namespace) -> None:
+    """wovra report：人机协同报告（组织运行时 V1）。
+
+    机械渲染 TaskState 与轮次——零模型成本，随时可看。大局默认，
+    细节对主 agent 说"展开 R{k}-E{nn}"按事件 ID 剥开。
+    """
+    task = _load_task(args.task_id)
+    children = []
+    root = task_module.TASKS_ROOT
+    if root.exists():
+        for directory in sorted(root.iterdir()):
+            path = directory / "task.json"
+            if not path.exists():
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, OSError):
+                continue
+            if data.get("parent_id") == task.id:
+                children.append({
+                    "id": data.get("id", directory.name),
+                    "status": data.get("status", ""),
+                    "goal": data.get("goal", ""),
+                })
+    print(ui.report_view(task, children))
+
+
 def _chat_help() -> None:
     """chat 模式内的帮助。"""
     print(ui.rule("chat 模式帮助"))
@@ -791,6 +818,10 @@ def main(argv: list[str] | None = None) -> None:
         "-f", "--force", action="store_true", help="跳过确认提示（脚本化使用）"
     )
     p_delete.set_defaults(func=cmd_delete)
+
+    p_report = sub.add_parser("report", help="人机协同报告（机械渲染，零模型成本）")
+    p_report.add_argument("task_id", help="任务 id 或列表编号")
+    p_report.set_defaults(func=cmd_report)
 
     sub.add_parser("help", help="显示帮助")
 

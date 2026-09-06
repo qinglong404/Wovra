@@ -373,3 +373,57 @@ def test_answer_live_renders_once_on_capable_terminal(monkeypatch):
     assert "\x1b[" in out  # Live 确实走了原位刷新（有控制序列）
     assert "第一段" in out and "第二段" in out
     assert ui._answer_live is None
+
+
+# ---- 人机协同报告（组织运行时 V1） -------------------------------------------
+
+
+def test_report_view_renders_four_columns(monkeypatch, tmp_path):
+    """人视图：机械渲染四栏目 + 子任务列表，零模型成本。"""
+    from wovra import ui
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="复刻小游戏")
+    task.apply_state_patch({
+        "completed": ["核心循环"], "current_status": "骨架可跑",
+        "escalations": ["端口被占用：换端口还是杀进程？"],
+        "experiments": ["打开页面验证行走"],
+    })
+    task.rounds = [{
+        "seq": 1,
+        "user_input": {"original": "开始", "normalized": "开始做骨架"},
+        "events": [], "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }]
+    child = Task.create(goal="渲染模块")
+    child.parent_id = task.id
+    child.save()
+    task.save()
+
+    out = ui.report_view(
+        task, children=[{"id": child.id, "status": "in_progress", "goal": child.goal}]
+    )
+
+    assert "决策升级（等你拍板）" in out
+    assert "端口被占用" in out
+    assert "待办实验（需要你验证）" in out
+    assert "打开页面验证行走" in out
+    assert "R1✓ 开始做骨架" in out
+    assert child.id in out
+
+
+def test_report_command_renders_task(monkeypatch, tmp_path, capsys):
+    """wovra report 命令：加载任务 + 扫描子任务 + 机械渲染。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import cmd_report
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="报告命令冒烟")
+    task.save()
+
+    cmd_report(SimpleNamespace(task_id=task.id))
+
+    out = capsys.readouterr().out
+    assert "报告命令冒烟" in out
+    assert "里程碑线" in out
+    assert "子任务" in out

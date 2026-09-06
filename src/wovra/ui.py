@@ -307,3 +307,60 @@ def status(status_value: str, width: int | None = None) -> str:
     if width is not None:
         label = pad(label, width)
     return paint(label, color)
+
+
+# ---- 人机协同报告（组织运行时 V1）：机械渲染，零模型成本 ---------------------
+
+
+def report_view(task, children: list[dict] | None = None) -> str:
+    """人机协同报告：大局默认，细节按事件 ID 剥开（机制四）。
+
+    全部内容来自 TaskState 与 rounds 的机械渲染——零 LLM 成本，随时
+    可看。决策升级与待办实验单列成栏（一等公民）。children 是子任务
+    摘要列表 [{"id","status","goal"}]，由 CLI 扫描 parent_id 得出。
+    """
+    state = task.get_state()
+    lines = [f"# 任务报告：{task.id}", ""]
+    head = f"目标：{task.goal}　状态：{task.status}"
+    if task.parent_id:
+        head += f"　父任务：{task.parent_id}"
+    lines.append(head)
+    if state.current_status:
+        lines.append(f"当前状态：{state.current_status}")
+
+    lines += ["", "## 已完成"]
+    lines += [f"- {x}" for x in state.completed] or ["-（暂无）"]
+    lines += ["", "## 已决策"]
+    lines += [f"- {x}" for x in state.decisions] or ["-（暂无）"]
+    if state.known_issues:
+        lines += ["", "## 已知问题"]
+        lines += [f"- {x}" for x in state.known_issues]
+    if state.open_questions:
+        lines += ["", "## 待解决问题"]
+        lines += [f"- {x}" for x in state.open_questions]
+    lines += ["", "## 决策升级（等你拍板）"]
+    lines += [f"- {x}" for x in state.escalations] or ["-（无）"]
+    lines += ["", "## 待办实验（需要你验证）"]
+    lines += [f"- {x}" for x in state.experiments] or ["-（无）"]
+
+    lines += ["", "## 里程碑线"]
+    milestones = []
+    for r in task.rounds:
+        user_input = r.get("user_input") or {}
+        head_text = user_input.get("normalized") or user_input.get("original") or ""
+        head_text = " ".join(head_text.split())[:60]
+        mark = "✓" if r.get("end_state") == "completed" else "…"
+        milestones.append(f"- R{r.get('seq')}{mark} {head_text}")
+    lines += milestones or ["-（暂无轮次）"]
+
+    lines += ["", "## 子任务"]
+    if children:
+        lines += [f"- {c['id']}（{c['status']}）：{c['goal']}" for c in children]
+    else:
+        lines.append("-（无）")
+    lines += [
+        "",
+        "> 细节按需剥开：对主 agent 说\"展开 R3-E02\"即可取回任意事件原文；",
+        "> 未截断的记录见同目录 task.json。",
+    ]
+    return "\n".join(lines) + "\n"

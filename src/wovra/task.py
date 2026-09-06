@@ -42,7 +42,10 @@ TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
 STATE_LIST_CAP = 200
 
 # state_patch 里允许的列表类字段与 TaskState 字段的对应关系
-_PATCH_LIST_FIELDS = ("constraints", "decisions", "completed", "known_issues", "open_questions")
+_PATCH_LIST_FIELDS = (
+    "constraints", "decisions", "completed", "known_issues",
+    "open_questions", "escalations", "experiments",
+)
 
 
 def sanitize_surrogates(text: str) -> str:
@@ -70,6 +73,11 @@ class TaskState:
     completed: list[str] = field(default_factory=list)
     known_issues: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
+    # 组织运行时（organization-runtime-v1.md）：
+    # escalations = 决策升级（实测与预期不符、影响方向、需人拍板的事项）
+    # experiments = 待办实验（机器无法闭环验证、需要人当传感器的事项）
+    escalations: list[str] = field(default_factory=list)
+    experiments: list[str] = field(default_factory=list)
     current_status: str = ""
     is_done: bool = False
 
@@ -116,6 +124,8 @@ class TaskState:
             ("已决策", "decisions"),
             ("已知问题", "known_issues"),
             ("待解决问题", "open_questions"),
+            ("决策升级", "escalations"),
+            ("待办实验", "experiments"),
             ("约束", "constraints"),
         ):
             items = getattr(self, name)
@@ -160,6 +170,7 @@ class Task:
         in_progress -- 正在进行
         blocked     -- 被阻塞（等待人类输入或外部资源）
         done        -- 已完成
+        merged      -- 子任务已被父任务清算合并（历史原样保留，解散≠删除）
     """
 
     id: str
@@ -184,6 +195,11 @@ class Task:
     workspace: str = ""
     # 会话的上下文模式（managed/baseline）：恢复时沿用，防止实验数据串味
     mode: str = ""
+    # 组织运行时（organization-runtime-v1.md）：
+    # parent_id = 父任务 id（根任务为空）；org_context = 逐字下传的
+    # 意图快照（父目标原文 + 拆解上下文 + 本块所有权边界），每层只追加
+    parent_id: str = ""
+    org_context: str = ""
     created_at: str = ""
     updated_at: str = ""
 
