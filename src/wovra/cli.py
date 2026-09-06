@@ -238,10 +238,13 @@ def _system_prompt(mode: str) -> str:
         else (
             "大型多块任务（如\"复刻一个游戏/应用\"这类含多个独立部分、预计"
             "几十步以上的工作）不要自己逐步实现——作为主 agent 用 spawn_subtask "
-            "把任务拆成职责块（写清 ownership 文件边界），run_subtask 派发执行、"
-            "check_subtask 查看现状、merge_subtask 清算合并；你保持对话、汇总与"
-            "方案，不把实现细节拉进自己的上下文。子任务实测与预期不符且影响方向"
-            "时让它写决策升级（escalations），由你转达用户拍板。小任务直接做即可。"
+            "把任务拆成职责块（写清 ownership 文件边界），dispatch_subtask 派发"
+            "到后台进程（非阻塞、立即返回）。派发后不要等待：可继续派发其他块"
+            "或结束回合向用户汇报；每轮上下文里的[子任务派发板]显示各块进展，"
+            "check_subtask 查看账本，merge_subtask 清算（未完成不要清算）。"
+            "子任务在后台无法提问——它会把需要人拍板的事写进决策升级"
+            "（escalations），看到升级就把选项转达用户，拍板结果用 "
+            "dispatch_subtask 的 instruction 带回。小任务直接做即可。"
         )
     )
     if mode == MODE_MANAGED:
@@ -590,13 +593,18 @@ def cmd_run(args: argparse.Namespace) -> None:
     task = _load_task(args.task_id)
     _acquire_session_lock(task)
     try:
-        # 一次性进程：整理同步执行，退出前结果必须落盘
+        # 一次性进程：整理同步执行，退出前结果必须落盘。
+        # 指令优先级：命令行 > 父任务派发时写入的 pending_instruction
+        #（子任务异步派发的决策回传通道）> 自主推进
         mode = _resolve_mode(args.mode, task)
         agent = _build_agent(task, mode=mode, async_organization=False)
-        instruction = args.instruction or (
+        instruction = args.instruction or task.pending_instruction.strip() or (
             "请根据任务状态和最近事件，自主决定下一步并继续推进。"
             "如果任务已无法推进，说明原因。"
         )
+        if task.pending_instruction:
+            task.pending_instruction = ""
+            task.save()
         _run_turn(agent, instruction)
         # 一次性进程收尾：水位未触发的剩余未整理轮补一批整理——
         # TaskState 跟上进度，下一次自主推进才有准确的"任务状态"
@@ -609,26 +617,8 @@ def cmd_run(args: argparse.Namespace) -> None:
 
 
 def _child_summaries(parent_id: str) -> list[dict]:
-    """扫描任务目录，返回 parent_id 匹配的子任务摘要列表。"""
-    children: list[dict] = []
-    root = task_module.TASKS_ROOT
-    if not root.exists():
-        return children
-    for directory in sorted(root.iterdir()):
-        path = directory / "task.json"
-        if not path.exists():
-            continue
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError):
-            continue
-        if data.get("parent_id") == parent_id:
-            children.append({
-                "id": data.get("id", directory.name),
-                "status": data.get("status", ""),
-                "goal": data.get("goal", ""),
-            })
-    return children
+    """子任务摘要（委托给 task.find_children，供 report/\\sub 共用）。"""
+    return task_module.find_children(parent_id)
 
 
 def cmd_report(args: argparse.Namespace) -> None:

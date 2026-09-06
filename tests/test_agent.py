@@ -6,6 +6,7 @@
 
 import json
 import re
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -503,44 +504,84 @@ def test_spawn_subtask_enforces_depth_limit(monkeypatch, tmp_path):
     assert "已达组织深度上限" in grand_agent.spawn_subtask(goal="第三层以外")
 
 
-def test_run_subtask_returns_state_ledger_and_rebinds_globals(monkeypatch, tmp_path):
-    """机器视图：子任务的状态账本就是报告；子 agent 干完活全局绑定归还父会话。"""
+def test_dispatch_subtask_launches_background_process(monkeypatch, tmp_path):
+    """异步派发：argv 后台启动、指令走磁盘（pending_instruction）、非阻塞。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     from wovra import tools as tools_module
 
     task = Task.create(goal="父目标")
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
     child_id = _ORG_TASK_ID.search(agent.spawn_subtask(goal="做块 A")).group(0)
-    org_json = json.dumps({
-        "rounds": [{"seq": 1, "normalized_user_input": "块 A 意图", "refined_index": []}],
-        "state_patch": {"completed": ["核心循环完成"], "current_status": "块 A 可用"},
-    }, ensure_ascii=False)
-    agent.llm.responses = [
-        [_chunk(_delta(content="块 A 干完了"))],
-        [_chunk(_delta(content=org_json))],  # 子任务收尾补整理
-    ]
 
-    report = agent.run_subtask(child_id)
+    captured = {}
 
-    assert "核心循环完成" in report
-    assert "块 A 干完了" in report
-    assert "状态：in_progress" in report
+    def fake_start(argv, label="", keep_alive=False):
+        captured["argv"] = list(argv)
+        captured["label"] = label
+        return "bg-7"
+
+    monkeypatch.setattr(tools_module, "start_background_argv", fake_start)
+
+    report = agent.dispatch_subtask(child_id, instruction="用户选了方案 A")
+
+    assert "bg-7" in report and "非阻塞" in report
+    assert captured["argv"] == [sys.executable, "-m", "wovra", "run", child_id]
+    assert captured["label"] == f"子任务 {child_id}"
     child = Task.load(child_id)
-    assert child.rounds and child.rounds[0]["org_state"] == "done"
-    assert tools_module._CURRENT_SESSION == task.id  # 绑定已归还父会话
+    assert child.pending_instruction == "用户选了方案 A"  # 决策回传走磁盘
+    # 派发板已刷新，进程未纳入真实注册表（fake 启动）→ 显示未运行
+    assert any("做块 A" in line for line in agent._subtask_board)
 
 
-def test_run_subtask_refuses_foreign_task(monkeypatch, tmp_path):
-    """越权防护：只能操作自己名下的子任务。"""
+def test_dispatch_subtask_refuses_duplicate_and_foreign(monkeypatch, tmp_path):
+    """防重复派发（后台仍在运行）+ 越权防护。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    from wovra import tools as tools_module
+
     task = Task.create(goal="父")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    child_id = _ORG_TASK_ID.search(agent.spawn_subtask(goal="做块 B")).group(0)
+
+    class FakeProc:
+        def poll(self):
+            return None
+
+    tools_module._BACKGROUND_TASKS["bg-x"] = {
+        "proc": FakeProc(), "log": tmp_path / "x.log", "pos": 0,
+        "command": "", "label": f"子任务 {child_id}",
+        "session": task.id, "keep_alive": False,
+    }
+    try:
+        assert "勿重复派发" in agent.dispatch_subtask(child_id)
+    finally:
+        del tools_module._BACKGROUND_TASKS["bg-x"]
+
     other = Task.create(goal="别家任务")
     other.save()
-    agent = Agent(llm=_StubLLM(), tools=[], task=task)
-
-    assert "不是本任务的子任务" in agent.run_subtask(other.id)
+    assert "拒绝派发" in agent.dispatch_subtask(other.id)
     assert "不是本任务的子任务" in agent.check_subtask(other.id)
     assert "拒绝清算" in agent.merge_subtask(other.id)
+
+
+def test_dispatch_board_appears_in_assembly_and_solo_hides_it(monkeypatch, tmp_path):
+    """派发板每轮进装配（主 agent 看得见子任务进展）；solo 下整层不存在。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="父目标")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.spawn_subtask(goal="渲染模块块")
+
+    agent._refresh_board()
+    msgs = agent._assemble_messages()
+    body = "\n".join(str(m.get("content") or "") for m in msgs)
+    assert "[子任务派发板]" in body
+    assert "渲染模块块" in body
+
+    monkeypatch.setenv("WOVRA_SOLO", "1")
+    solo = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="solo"))
+    solo._refresh_board()
+    assert solo._subtask_board == []
+    names = [s["function"]["name"] for s in solo._schemas]
+    assert "dispatch_subtask" not in names
 
 
 def test_check_subtask_detail_shows_rounds(monkeypatch, tmp_path):

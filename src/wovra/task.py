@@ -58,6 +58,31 @@ def sanitize_surrogates(text: str) -> str:
     return text.encode("utf-8", errors="surrogatepass").decode("utf-8", errors="replace")
 
 
+def find_children(parent_id: str) -> list[dict]:
+    """扫描任务目录，返回 parent_id 匹配的子任务摘要（id/status/goal）。
+
+    组织运行时的派发板、report 命令、\\sub 页面共用这一个扫描。
+    """
+    children: list[dict] = []
+    if not TASKS_ROOT.exists():
+        return children
+    for directory in sorted(TASKS_ROOT.iterdir()):
+        path = directory / "task.json"
+        if not path.exists():
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+        if data.get("parent_id") == parent_id:
+            children.append({
+                "id": data.get("id", directory.name),
+                "status": data.get("status", ""),
+                "goal": data.get("goal", ""),
+            })
+    return children
+
+
 @dataclass
 class TaskState:
     """任务当前状态的增量可变视图（History 之外的另一本账）。
@@ -197,9 +222,13 @@ class Task:
     mode: str = ""
     # 组织运行时（organization-runtime-v1.md）：
     # parent_id = 父任务 id（根任务为空）；org_context = 逐字下传的
-    # 意图快照（父目标原文 + 拆解上下文 + 本块所有权边界），每层只追加
+    # 意图快照（父目标原文 + 拆解上下文 + 本块所有权边界），每层只追加；
+    # pending_instruction = 父任务派发时带给子任务下一轮的指令
+    # （如用户拍板的决策），由 `wovra run` 读取并清空——指令走磁盘
+    # 而不走命令行参数，绕开 Windows 的引号转义地狱
     parent_id: str = ""
     org_context: str = ""
+    pending_instruction: str = ""
     created_at: str = ""
     updated_at: str = ""
 

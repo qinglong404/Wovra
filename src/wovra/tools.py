@@ -753,29 +753,65 @@ def run_background(command: str, keep_alive: bool = False) -> str:
             "用户拒绝了该命令的启动。请换一种无副作用的做法，"
             "或向用户说明为什么需要它。"
         )
-    _BACKGROUND_LOG_DIR.mkdir(parents=True, exist_ok=True)
-    task_id = f"bg-{next(_BACKGROUND_SEQ)}"
-    log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
-    with open(log_path, "wb") as log_file:
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            stdout=log_file,
-            stderr=subprocess.STDOUT,
-            cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
-            env=dict(os.environ, PYTHONUTF8="1"),  # 子进程统一 UTF-8 输出
-            start_new_session=os.name != "nt",  # 与 run_command 同一套树杀约定
-        )
-    _BACKGROUND_TASKS[task_id] = {
-        "proc": proc, "log": log_path, "pos": 0, "command": command,
-        "session": _CURRENT_SESSION, "keep_alive": keep_alive,
-    }
+    task_id, proc = _launch_background(command, label="", keep_alive=keep_alive, shell=True)
     tag = "（常驻，会话退出后继续运行）" if keep_alive else ""
     return (
         f"后台任务 {task_id} 已启动（PID {proc.pid}）{tag}：{command[:120]}\n"
         f'查看输出: check_background(task_id="{task_id}") | '
         f'停止: stop_background(task_id="{task_id}")'
     )
+
+
+def _launch_background(command, label: str, keep_alive: bool,
+                       shell: bool = False) -> tuple[str, subprocess.Popen]:
+    """后台启动进程并登记（run_background 与子任务派发共用的引擎）。
+
+    command：shell=True 时为命令字符串；否则为 argv 列表。
+    """
+    _BACKGROUND_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    task_id = f"bg-{next(_BACKGROUND_SEQ)}"
+    log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
+    env = dict(os.environ, PYTHONUTF8="1")
+    env.pop("WOVRA_SOLO", None)  # 实验对照开关只作用于启动它的那一层
+    with open(log_path, "wb") as log_file:
+        proc = subprocess.Popen(
+            command,
+            shell=shell,
+            stdout=log_file,
+            stderr=subprocess.STDOUT,
+            cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            env=env,
+            start_new_session=os.name != "nt",  # 与 run_command 同一套树杀约定
+        )
+    _BACKGROUND_TASKS[task_id] = {
+        "proc": proc, "log": log_path, "pos": 0,
+        "command": label or (command if isinstance(command, str) else " ".join(command)),
+        "label": label, "session": _CURRENT_SESSION, "keep_alive": keep_alive,
+    }
+    return task_id, proc
+
+
+def start_background_argv(argv: list, label: str = "", keep_alive: bool = False) -> str:
+    """以 argv 列表后台启动一个进程（免 shell、免确认）。
+
+    调用方是运行时自身（如子任务派发）而非模型，因此不经过危险命令
+    清单与用户确认。输出写日志文件，归属当前会话（退出时一并清理）。
+    """
+    _audit(f"[start_background_argv] {label or ' '.join(argv)}")
+    task_id, proc = _launch_background([str(a) for a in argv], label, keep_alive)
+    return (
+        f"后台任务 {task_id} 已启动（PID {proc.pid}）\n"
+        f'查看输出: check_background(task_id="{task_id}")'
+    )
+
+
+def background_find(fragment: str) -> dict | None:
+    """按标签或命令片段查找仍存活的后台任务条目（无则 None）。"""
+    for entry in _BACKGROUND_TASKS.values():
+        if fragment in (entry.get("label") or "") or fragment in (entry.get("command") or ""):
+            if entry["proc"].poll() is None:
+                return entry
+    return None
 
 
 def check_background(task_id: str) -> str:
