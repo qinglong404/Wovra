@@ -34,6 +34,7 @@ from .agent import (
     MODE_BASELINE,
     MODE_MANAGED,
     Agent,
+    _org_enabled,
     ask_user,
     check_background,
     edit_file,
@@ -652,6 +653,15 @@ def cmd_chat(args: argparse.Namespace) -> None:
         print(ui.rule("Wovra 会话"))
         print(f"{ui.paint('任务', 'bold')}  {task.id}")
         print(f"{ui.paint('模式', 'bold')}  {mode}")
+        # 组织层状态当场自报——环境变量这类"看不见的开关"必须可见，
+        # 否则实验对照的口径只能靠猜（实测教训：set 了但进程没收到）
+        org_on = _org_enabled()
+        print(
+            f"{ui.paint('组织', 'bold')}  "
+            + ("启用（主 agent 可拆分子任务）" if org_on else "禁用（WOVRA_SOLO 单机对照）")
+        )
+        task.record("session", f"启动（mode={mode}，组织层={'启用' if org_on else '禁用'}）")
+        task.save()
         print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
         print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
         print(ui.rule())
