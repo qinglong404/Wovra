@@ -684,6 +684,11 @@ def run_command(command: str, timeout: int | None = None) -> str:
             env=child_env,
             # POSIX：让子进程自成进程组，超时后 killpg 整组杀掉而不伤自身
             start_new_session=os.name != "nt",
+            # Windows：新进程组默认免疫 Ctrl+C——用户中断对话不能带走
+            # 正在运行的服务器/安装进程（同控制台进程会收到 CTRL_C）
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
         )
         try:
             proc.wait(timeout=wait)
@@ -782,6 +787,11 @@ def _launch_background(command, label: str, keep_alive: bool,
             cwd=PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
             env=env,
             start_new_session=os.name != "nt",  # 与 run_command 同一套树杀约定
+            # Windows：新进程组免疫 Ctrl+C——用户中断主会话不能带走
+            # 后台子任务（实测 0xC000013A 全军覆没的教训）
+            creationflags=(
+                subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+            ),
         )
     _BACKGROUND_TASKS[task_id] = {
         "proc": proc, "log": log_path, "pos": 0,

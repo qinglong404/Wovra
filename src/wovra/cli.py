@@ -30,6 +30,7 @@ import threading
 import time
 
 from . import task as task_module
+from . import tools as tools_module
 from . import ui
 from .agent import (
     MODE_BASELINE,
@@ -632,23 +633,57 @@ def cmd_report(args: argparse.Namespace) -> None:
 
 
 _LOCAL_HELP = """\
-本地命令（\\ 前缀，纯本地执行：零模型成本、不用等轮次结束）：
-  \\bg                 后台进程列表
-  \\bg <任务id>         查看某后台进程的增量输出
-  \\bg stop <任务id>    强制停止后台进程
-  \\sub                子任务列表
-  \\sub <任务id>        进入子任务页面（状态账本 + 里程碑线）
-  \\help               本帮助
-Ctrl+C：页面内 = 返回对话；输入行 = 退出会话。
-任务 id 可只写末尾一段短串（如 3b7fd3）。"""
+本地命令（\\ 或 / 前缀，纯本地执行：零模型成本、不用等轮次结束）：
+  bg                  后台进程列表
+  bg <任务id>          查看某后台进程的增量输出
+  bg stop <任务id>     强制停止后台进程
+  sub                 子任务列表
+  sub <任务id>         进入子任务页面（状态账本 + 里程碑线）
+  undo                撤销最近一条开放轮（打错字/误发送的后悔药）
+  help                本帮助
+任务 id 可只写末尾短串或 bg 编号（如 bg 1）。
+Ctrl+C：页面内 = 返回对话；输入行 = 退出会话。"""
 
 
-def _local_command(command: str, task: Task) -> None:
-    """聊天输入行的本地命令（\\ 前缀）：纯本地查看与操作，零模型成本。
+def _poll_finished_dispatches(task_id: str) -> list[tuple[str, str, int]]:
+    """扫描后台注册表：本会话派发的子任务中已退出且未上报的。
+
+    返回 [(bg_id, 子任务id, exit_code)]。不消费——调用方处理时写
+    entry["notified"]，同一退出只上报一次。
+    """
+    out: list[tuple[str, str, int]] = []
+    for bg_id, entry in tools_module._BACKGROUND_TASKS.items():
+        label = entry.get("label") or ""
+        if not label.startswith("子任务 "):
+            continue
+        if entry.get("session") != task_id or entry.get("notified"):
+            continue
+        code = entry["proc"].poll()
+        if code is not None:
+            out.append((bg_id, label[len("子任务 "):], code))
+    return out
+
+
+def _consume_dispatch(bg_id: str) -> None:
+    entry = tools_module._BACKGROUND_TASKS.get(bg_id)
+    if entry is not None:
+        entry["notified"] = True
+
+
+def _fmt_exit_code(code: int) -> str:
+    if code == 3221225786:  # 0xC000013A STATUS_CONTROL_C_EXIT
+        return "0xC000013A（被 Ctrl+C 终止）"
+    if code < 0:
+        return f"信号 {-code}"
+    return str(code)
+
+
+def _local_command(command: str, task: Task, agent=None) -> None:
+    """聊天输入行的本地命令（\\ 或 / 前缀）：纯本地查看与操作，零模型成本。
 
     这是人机协同"随时剥开"的入口——看后台、看子任务不必等主 agent
-    转达，也不花一分钱。\ 前缀保留给终端本身，永远不会作为消息发给
-    模型。页面内 Ctrl+C 等于返回，不退出会话。
+    转达，也不花一分钱。前缀消息永远不会作为对话发给模型。页面内
+    Ctrl+C 等于返回，不退出会话。
     """
     parts = command[1:].strip().split()
     try:
@@ -659,10 +694,13 @@ def _local_command(command: str, task: Task) -> None:
         if cmd in ("help", "h", "?", "帮助"):
             print(_LOCAL_HELP)
         elif cmd in ("bg", "后台"):
-            if len(parts) >= 3 and parts[1].lower() == "stop":
-                print(stop_background(parts[2]))
-            elif len(parts) == 2:
-                print(check_background(parts[1]))
+            args_ = parts[1:]
+            if args_ and args_[0].isdigit():
+                args_[0] = f"bg-{args_[0]}"  # bg 1 == bg bg-1
+            if len(args_) >= 2 and args_[0].lower() == "stop":
+                print(stop_background(args_[1]))
+            elif len(args_) == 1:
+                print(check_background(args_[0]))
             else:
                 print(list_background())
         elif cmd in ("sub", "subs", "子任务"):
@@ -673,7 +711,7 @@ def _local_command(command: str, task: Task) -> None:
                     return
                 for c in children:
                     print(f"- {c['id']}（{c['status']}）：{c['goal']}")
-                print(ui.info("用 \\sub <任务id> 进入某个子任务的页面"))
+                print(ui.info("用 sub <任务id> 进入某个子任务的页面"))
                 return
             target = parts[1]
             child = next(
@@ -681,7 +719,7 @@ def _local_command(command: str, task: Task) -> None:
                 None,
             )
             if child is None:
-                print(f"找不到子任务 {target}（\\sub 查看列表）")
+                print(f"找不到子任务 {target}（sub 查看列表）")
                 return
             full = Task.load(child["id"])
             print(ui.report_view(full, _child_summaries(child["id"])))
@@ -690,9 +728,20 @@ def _local_command(command: str, task: Task) -> None:
             except (KeyboardInterrupt, EOFError, OSError):
                 # Ctrl+C / 管道环境无 stdin：都视为"返回对话"
                 print()
+        elif cmd in ("undo", "撤销"):
+            if agent is None or not agent.rounds:
+                print("（没有可撤销的轮次）")
+                return
+            last = agent.rounds[-1]
+            if last.get("end_state") != "open":
+                print("最后一轮已闭合（有最终回答）——只撤销开放中的轮次。")
+                return
+            n = len(last.get("events") or [])
+            agent.rounds.pop()
+            agent._persist_rounds()
+            print(ui.info(f"已撤销最近一条开放轮（含 {n} 条事件；成本记录保留）。"))
         else:
-            print(f"未知本地命令：\\{parts[0]}")
-            print(_LOCAL_HELP)
+            print(f"未知本地命令：{parts[0]}（help 查看全部）")
     except KeyboardInterrupt:
         # 页面内 Ctrl+C：返回对话，不退出会话
         print()
@@ -703,7 +752,7 @@ def _chat_help() -> None:
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
-    print(f"  {ui.paint('\\help', 'bold')}           本地命令（看后台/子任务，零模型成本）")
+    print(f"  {ui.paint('bg / sub / undo', 'bold')}  本地命令（\\help 看全部；零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
     print(ui.rule())
@@ -747,20 +796,48 @@ def cmd_chat(args: argparse.Namespace) -> None:
         _replay_history(task)
         print(ui.info("输入指令开始对话；\\help 看本地命令，help 查看帮助，exit 退出。\n"))
 
+        auto_wake = 0  # 连续自动接手计数：防"派发即崩"的循环烧钱
         while True:
             try:
                 _drain_status(agent)  # 后台整理的状态行（出现在输入行上方）
                 _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
+                # 子任务结束 → 主 agent 自动接手（父驱动循环的心跳）；
+                # 连续 3 次后暂停，防"派发即崩"无限循环
+                finished = _poll_finished_dispatches(task.id)
+                if finished and auto_wake < 3:
+                    auto_wake += 1
+                    for bg_id, _cid, _code in finished:
+                        _consume_dispatch(bg_id)
+                    note = "；".join(
+                        f"{bg} → {cid[-6:]}（{_fmt_exit_code(code)}）"
+                        for bg, cid, code in finished
+                    )
+                    print(ui.info(f"检测到子任务结束：{note}——主 agent 自动接手。"))
+                    try:
+                        answer = _run_turn(agent, (
+                            "（系统通知，非用户发言）后台子任务已结束："
+                            f"{note}。请查看[子任务派发板]与各子任务账本："
+                            "未完成的用 dispatch_subtask 派发下一轮（已完成的部分"
+                            "不要重做），完成的 merge_subtask 清算，有决策升级"
+                            "（escalations）的把选项转达用户拍板，然后简要汇报。"
+                        ))
+                    except KeyboardInterrupt:
+                        print(ui.info("自动接手已中断，回到输入行。"))
+                        continue
+                    if answer:
+                        print()
+                    continue
                 user_input = _read_input().strip()
             except (EOFError, KeyboardInterrupt):
                 # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
                 print(f"\n{ui.success(f'会话已保存。下次继续: {_resume_command(task)}')}")
                 break
+            auto_wake = 0  # 用户真实输入：重置自动接手计数
             if not user_input:
                 continue
-            if user_input.startswith("\\"):
-                # 本地命令：\ 前缀保留给终端本身——不进模型、零模型成本
-                _local_command(user_input, task)
+            if user_input[:1] in ("\\", "/"):
+                # 本地命令：前缀保留给终端本身——不进模型、零模型成本
+                _local_command(user_input, task, agent)
                 continue
             if user_input.lower() in ("exit", "quit", "退出"):
                 print(ui.success(f"会话已保存。下次继续: {_resume_command(task)}"))

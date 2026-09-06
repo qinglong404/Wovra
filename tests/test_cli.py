@@ -447,7 +447,7 @@ def test_local_command_sub_list_and_page(monkeypatch, tmp_path, capsys):
     })
     child.save()
 
-    _local_command("\sub", task)
+    _local_command("\\sub", task)
     out = capsys.readouterr().out
     assert child.id in out
     assert "渲染模块" in out
@@ -466,10 +466,10 @@ def test_local_command_help_and_unknown(monkeypatch, tmp_path, capsys):
     task = Task.create(goal="x")
     task.save()
 
-    _local_command("\help", task)
+    _local_command("\\help", task)
     assert "本地命令" in capsys.readouterr().out
 
-    _local_command("\what", task)
+    _local_command("\\what", task)
     assert "未知本地命令" in capsys.readouterr().out
 
 
@@ -480,5 +480,96 @@ def test_local_command_bg_list_smoke(monkeypatch, tmp_path, capsys):
     task = Task.create(goal="x")
     task.save()
 
-    _local_command("\bg", task)  # 无后台任务也不抛异常
+    _local_command("\\bg", task)  # 无后台任务也不抛异常
     assert capsys.readouterr().out
+
+
+def test_local_command_undo_and_slash_prefix(monkeypatch, tmp_path, capsys):
+    """undo 撤销开放轮（成本记录保留）；斜杠前缀等价；闭合轮拒撤。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    persisted = {}
+    agent = SimpleNamespace(
+        rounds=[
+            {"seq": 1, "end_state": "completed", "events": [1, 2]},
+            {"seq": 2, "end_state": "open", "events": [1, 2, 3, 4]},
+        ],
+        _persist_rounds=lambda: persisted.update(n=len(agent.rounds)),
+    )
+    task = Task.create(goal="x")
+    task.save()
+
+    _local_command("/undo", task, agent)  # / 与 \ 等价
+    out = capsys.readouterr().out
+    assert "已撤销" in out and "4 条事件" in out
+    assert persisted["n"] == 1
+    assert agent.rounds[-1]["end_state"] == "completed"
+
+    _local_command("/undo", task, agent)  # 闭合轮拒撤
+    assert "只撤销开放中的轮次" in capsys.readouterr().out
+
+
+def test_local_command_bg_numeric_id(monkeypatch, tmp_path, capsys):
+    """bg 1 == bg bg-1：编号短写也能看后台输出。"""
+    from wovra.cli import _local_command
+    from wovra import tools as tools_module
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+    log = tmp_path / "bg-1.log"
+    log.write_text("子任务进展：引擎层完成 40%", encoding="utf-8")
+
+    class FakeProc:
+        returncode = 0
+
+        def poll(self):
+            return 0
+
+    from wovra import tools as tools_module
+
+    tools_module.set_current_session(task.id)
+    tools_module._BACKGROUND_TASKS["bg-1"] = {
+        "proc": FakeProc(), "log": log, "pos": 0, "command": "",
+        "label": "子任务 x", "session": task.id, "keep_alive": False,
+    }
+    try:
+        _local_command("\\bg 1", task, None)
+        out = capsys.readouterr().out
+        assert "引擎层完成" in out
+    finally:
+        tools_module._BACKGROUND_TASKS.clear()
+
+
+def test_poll_finished_dispatches_notifies_once(monkeypatch, tmp_path):
+    """结束上报只发生一次；运行中/他人会话的派发不上报。"""
+    from wovra.cli import _consume_dispatch, _poll_finished_dispatches
+    from wovra import tools as tools_module
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+
+    class Proc:
+        def __init__(self, code):
+            self._code = code
+
+        def poll(self):
+            return self._code
+
+    tools_module._BACKGROUND_TASKS.clear()
+    tools_module._BACKGROUND_TASKS.update({
+        "bg-1": {"proc": Proc(0), "label": "子任务 a", "session": task.id},
+        "bg-2": {"proc": Proc(None), "label": "子任务 b", "session": task.id},
+        "bg-3": {"proc": Proc(0), "label": "子任务 c", "session": "别的会话"},
+    })
+    try:
+        finished = _poll_finished_dispatches(task.id)
+        assert [(b, c) for b, c, _ in finished] == [("bg-1", "a")]
+        _consume_dispatch("bg-1")
+        assert _poll_finished_dispatches(task.id) == []
+    finally:
+        tools_module._BACKGROUND_TASKS.clear()
