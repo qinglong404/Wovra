@@ -27,3 +27,10 @@ build-backend = "uv_build"
 dev = [
     "pytest>=9.1.1",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# 本机 shell 若 source 过 ROS，PYTHONPATH 会把 launch_testing_ros 的
+# pytest11 入口点带进插件自动加载——它在 venv 里 import yaml 直接炸。
+# 显式封锁（别的机器没有该插件时 no: 静默忽略，无害）。
+addopts = "-p no:launch_testing -p no:launch_ros -p no:ament_copyright -p no:ament_lint -p no:ament_pep257 -p no:ament_flake8 -p no:ament_xmllint"

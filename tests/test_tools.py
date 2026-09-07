@@ -1,6 +1,7 @@
 """变更类工具（写入/修改/执行命令）的防护与审计测试。全部离线。"""
 
 import json
+import os as _os
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from wovra.tools import (
     glob_files,
     list_background,
     read_file,
+    replace_lines,
     run_background,
     run_command,
     stop_background,
@@ -628,6 +630,80 @@ def test_edit_file_success_reports_line_number(monkeypatch, tmp_path):
     write_file("app.py", "第一行\n第二行\n第三行")
     result = edit_file("app.py", "第二行", "第二行（改）")
     assert "位于第 2 行" in result
+
+
+def test_edit_file_replace_all_replaces_every_occurrence(monkeypatch, tmp_path):
+    """count>1 默认拒绝并提示 replace_all；传 True 替换全部并在结果里报数。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "todo\n中间\ntodo\n尾部\ntodo")
+    with pytest.raises(ValueError) as excinfo:
+        edit_file("app.py", "todo", "done")
+    assert "replace_all=True" in str(excinfo.value)
+
+    result = edit_file("app.py", "todo", "done", replace_all=True)
+    assert "全部 3 处" in result
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "done\n中间\ndone\n尾部\ndone"
+
+
+def test_edit_file_zero_match_shows_provided_vs_actual_diff(monkeypatch, tmp_path):
+    """未命中 → 「你提供的 vs 文件实际」差异反馈：照着改一次就中。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "def func_7(x):\n    return x + 7")
+    with pytest.raises(ValueError) as excinfo:
+        edit_file("app.py", "def func_7(x):\n    return x + 8", "换掉")
+    message = str(excinfo.value)
+    assert "你提供的" in message and "文件实际" in message
+    assert "-    return x + 8" in message and "+    return x + 7" in message
+
+
+def test_replace_lines_replaces_range_and_reports(monkeypatch, tmp_path):
+    """行号替换：区间含两端、报告行数变化、结果正确。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "一\n二\n三\n四\n五")
+    result = replace_lines("app.py", 2, 3, "两半\n两半半")
+    assert "第 2-3 行" in result and "2 行 → 2 行" in result
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "一\n两半\n两半半\n四\n五"
+
+
+def test_replace_lines_empty_content_removes_range(monkeypatch, tmp_path):
+    """new_content 传空串 = 删除行区间（行数收缩正确）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "一\n二\n三")
+    replace_lines("app.py", 2, 2, "")
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "一\n三"
+
+
+def test_replace_lines_rejects_out_of_range_and_stale(monkeypatch, tmp_path):
+    """行号越界给出行数提示；文件被外部修改后拒绝（行号整体失效）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "一\n二\n三")
+    out = replace_lines("app.py", 2, 9, "x")
+    assert "行号越界" in out and "共 3 行" in out
+
+    (tmp_path / "app.py").write_text("一\n二\n三\n外部加的", encoding="utf-8")
+    out = replace_lines("app.py", 1, 2, "x")
+    assert "已被外部修改" in out
+
+
+def test_run_command_marks_truncated_output(monkeypatch, tmp_path):
+    """输出超 1500 字符必须带显式截断标记——静默截断曾让模型误诊白跑一轮。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("big.txt", "甲" * 3000)
+    cmd = "type big.txt" if _os.name == "nt" else "cat big.txt"
+    result = run_command(cmd)
+    assert "输出超限已截断" in result and "3,000" in result
 
 
 def test_background_ownership_prevents_cross_session_management():

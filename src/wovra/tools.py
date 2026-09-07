@@ -565,12 +565,33 @@ def _closest_anchor_hint(text: str, old_text: str,
     return best
 
 
-def edit_file(path: str, old_text: str, new_text: str) -> str:
-    """把文件中「恰好出现一次」的 old_text 替换为 new_text。
+def _mini_diff(provided: str, actual: str, max_lines: int = 24) -> str:
+    """「你提供的 vs 文件实际」的最小差异展示（edit_file 未命中时反馈）。
 
-    强制唯一定位：找不到或出现多次都直接报错，让模型补充更多
-    上下文再试。这是防止"替换了不想替换的地方"的关键约束。
-    锚点未命中时会给出最接近内容的位置，帮助一次修正。
+    模型照着差异改一次 old_text 就能命中，省一整轮重读；两段逐字符
+    相同时给出不可见空白提示（全角空格/行尾空格是实测陷阱）。
+    """
+    import difflib
+
+    diff = list(difflib.unified_diff(
+        provided.splitlines(), actual.splitlines(),
+        fromfile="你提供的", tofile="文件实际", lineterm="",
+    ))
+    if not diff:
+        return "（两者逐字符相同——请检查不可见空白：全角空格、行尾空格、\\r\\n 行尾）"
+    if len(diff) > max_lines:
+        diff = diff[:max_lines] + [f"…（差异过长，只显示前 {max_lines} 行）"]
+    return "\n".join(diff)
+
+
+def edit_file(path: str, old_text: str, new_text: str,
+              replace_all: bool = False) -> str:
+    """把文件中出现的 old_text 替换为 new_text（默认要求恰好出现一次）。
+
+    强制唯一定位是防止"替换了不想替换的地方"的关键约束；确认意图
+    就是全部替换时传 replace_all=True。锚点未命中时给出「你提供的
+    vs 文件实际」的最小差异——照着差异改一次 old_text 即可命中，
+    不必整文件重读。
     若文件在你上次读取后被外部修改过，会拒绝执行并要求重新确认。
     """
     target = _safe_path(path)
@@ -585,22 +606,73 @@ def edit_file(path: str, old_text: str, new_text: str) -> str:
     text = target.read_text(encoding="utf-8")
     count = text.count(old_text)
     if count == 0:
-        message = f"{path} 中未找到待替换文本（前 80 字符: {old_text[:80]!r}）"
+        message = f"{path} 中未找到待替换文本（你提供的前 80 字符: {old_text[:80]!r}）"
         hint = _closest_anchor_hint(text, old_text)
         if hint:
-            message += f"。最接近的内容在第 {hint[0]} 行附近：{hint[1][:80]!r}"
+            line_no, _ = hint
+            window = max(1, len(old_text.splitlines()))
+            actual = "\n".join(text.splitlines()[line_no - 1:line_no - 1 + window])
+            message += (
+                f"\n最接近的内容在第 {line_no} 行附近。"
+                f"差异（你提供的 vs 文件实际）：\n{_mini_diff(old_text, actual)}"
+            )
         raise ValueError(message)
-    if count > 1:
+    if count > 1 and not replace_all:
         raise ValueError(
-            f"{path} 中待替换文本出现 {count} 次，请补充前后文使其唯一定位"
+            f"{path} 中待替换文本出现 {count} 次。若意图是全部替换，"
+            f"加 replace_all=True；否则请补充前后文使其唯一定位"
         )
     line_no = text.count("\n", 0, text.find(old_text)) + 1
-    target.write_text(text.replace(old_text, new_text, 1), encoding="utf-8")
+    n = count if replace_all else 1
+    replaced = text.replace(old_text, new_text) if replace_all else text.replace(old_text, new_text, 1)
+    target.write_text(replaced, encoding="utf-8")
     _observe_file(target)
+    scope = f"全部 {n} 处" if replace_all else "唯一一处"
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
-    _audit(f"[edit_file] {path}\n定位片段:\n{old_text}\n替换为:\n{new_text}")
-    return (f"已修改 {path}（{len(old_text)} 字符 → {len(new_text)} 字符，"
+    _audit(f"[edit_file] {path}（替换{scope}）\n定位片段:\n{old_text}\n替换为:\n{new_text}")
+    return (f"已修改 {path}（替换{scope}，{len(old_text)} 字符 → {len(new_text)} 字符，"
             f"位于第 {line_no} 行附近）")
+
+
+def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -> str:
+    """按行号把文件的 [start_line, end_line] 行区间（含两端）替换为
+    new_content（传空串即删除该区间）。
+
+    行号来自 read_file 的回显——确定性编辑，不依赖文本匹配，适合
+    old_text 反复匹配失败的场景，也省去引用大段原文的 token。
+    纪律：行号必须以最近一次 read_file 回显为准；你中间执行过任何
+    写操作后请重新读取，否则行号已经漂移。文件被外部修改过会拒绝。
+    """
+    target = _safe_path(path)
+    stale = _stale_error(target)
+    if stale:
+        return stale
+    if not target.exists():
+        return (
+            f"文件不存在: {path}（解析为 {target}）。"
+            f"先用 glob_files 确认文件的实际位置——注意 path 参数应只含路径本身。"
+        )
+    text = target.read_text(encoding="utf-8")
+    lines = text.split("\n")
+    trailing = bool(lines) and lines[-1] == ""
+    if trailing:
+        lines = lines[:-1]  # 末尾换行产生的空元素不是真实行
+    total = len(lines)
+    if not (1 <= start_line <= end_line <= total):
+        return (
+            f"行号越界：文件 {path} 共 {total} 行，收到 {start_line}-{end_line}。"
+            f"请以最近一次 read_file 回显的行号为准"
+        )
+    old_block = "\n".join(lines[start_line - 1:end_line])
+    new_lines = new_content.split("\n") if new_content else []
+    replaced = lines[:start_line - 1] + new_lines + lines[end_line:]
+    target.write_text("\n".join(replaced) + ("\n" if trailing else ""), encoding="utf-8")
+    _observe_file(target)
+    # 旧块与新块都留底（超长截断到 5000，原则与 write_file 备份一致）
+    _audit(f"[replace_lines] {path} 第 {start_line}-{end_line} 行\n旧内容:\n"
+           f"{old_block[:5000]}\n替换为:\n{new_content[:5000]}")
+    return (f"已替换 {path} 第 {start_line}-{end_line} 行"
+            f"（{end_line - start_line + 1} 行 → {len(new_lines)} 行，现共 {len(replaced)} 行）")
 
 
 def _kill_process_tree(pid: int) -> None:
@@ -629,6 +701,9 @@ def _kill_process_tree(pid: int) -> None:
             pass
 
 
+_OUTPUT_LIMIT = 1500
+
+
 def run_command(command: str, timeout: int | None = None) -> str:
     """在项目根目录运行一条 shell 命令，返回退出码与输出。默认 60 秒
     超时整树强杀（timeout 可调，1-600 秒）；不要运行前台常驻服务
@@ -640,7 +715,7 @@ def run_command(command: str, timeout: int | None = None) -> str:
         * 黑名单匹配到破坏性模式时直接拒绝，不执行；
           拒绝文本会回传给模型（它能看到原因并换方案）
         * 超时强制终止整棵进程树，防止长命令卡死整个任务
-        * 输出各截断 1500 字符，防止超长输出撑爆上下文
+        * 输出各截断 1500 字符（带显式截断标记），防止超长输出撑爆上下文
     """
     _audit(f"[run_command] {command}")  # 无论执行与否，命令原文都进审计
     for pattern in _DENIED_PATTERNS:
@@ -702,10 +777,21 @@ def run_command(command: str, timeout: int | None = None) -> str:
         if proc.returncode != 0
         else "exit_code=0"
     )
+
+    def _clip(text: str) -> str:
+        """1500 字符上限 + 显式截断标记：静默截断曾让模型把"输出被切"
+        误诊为命令符号问题，白跑一整轮重试（2026-09-07 实测）。"""
+        if len(text) <= _OUTPUT_LIMIT:
+            return text
+        return (
+            f"{text[:_OUTPUT_LIMIT]}\n"
+            f"…（输出超限已截断：原文共 {len(text):,} 字符，这里只保留前 {_OUTPUT_LIMIT:,}）"
+        )
+
     return (
         f"{header}\n"
-        f"stdout:\n{stdout[:1500]}\n"
-        f"stderr:\n{stderr[:1500]}"
+        f"stdout:\n{_clip(stdout)}\n"
+        f"stderr:\n{_clip(stderr)}"
     )
 
 

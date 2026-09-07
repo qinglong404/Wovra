@@ -49,6 +49,7 @@ from .tools import (
     list_background,
     list_files,
     read_file,
+    replace_lines,
     run_background,
     run_command,
     search_files,
@@ -91,6 +92,7 @@ _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
 _ACTION_WORDS = {
     "write_file": "写入文件",
     "edit_file": "修改文件",
+    "replace_lines": "按行替换文件",
     "run_command": "运行命令",
     "read_file": "读取文件",
     "search_files": "搜索内容",
