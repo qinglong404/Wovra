@@ -296,6 +296,11 @@ def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
     answer = agent.run("把活干完")
 
     assert answer == "干完了"
+    # 产物先暂存（本轮装配纹丝不动）：正式字段要等下一轮开启才替换
+    assert task.rounds[-1]["pending_org"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
+    assert task.rounds[-1]["user_input"]["normalized"] == ""
+    # 模拟下一轮开启：暂存生效
+    agent._promote_org_results()
     # State Patch 增量合并进任务状态
     assert task.task_state["goal"] == "搞清测试覆盖"
     assert task.task_state["is_done"] is True
@@ -304,6 +309,7 @@ def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
     assert task.rounds[-1]["user_input"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
     assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出覆盖结论"
     assert task.rounds[-1]["org_state"] == "done"
+    assert "pending_org" not in task.rounds[-1]  # 生效后暂存区清空
 
 
 def test_organization_survives_invalid_json(monkeypatch, tmp_path):
@@ -342,6 +348,7 @@ def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
 
     agent.run("问")
 
+    agent._promote_org_results()  # 模拟下一轮开启：暂存的补丁生效
     assert task.task_state.get("completed", []) == []  # 非法列表被忽略
     assert task.task_state.get("current_status") == "进行中"
 
@@ -361,7 +368,7 @@ def _batch_org_json(rounds: list[int], goal: str = "批量目标") -> str:
 
 
 def test_watermark_defers_organization_below_threshold(monkeypatch, tmp_path):
-    """未整理体量未达水位 → 不发起任何整理调用（小会话成本归零）。"""
+    """当前上下文窗口体量未达水位 → 不发起任何整理调用（小会话成本归零）。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
     task = Task.create(goal="x")
@@ -370,6 +377,7 @@ def test_watermark_defers_organization_below_threshold(monkeypatch, tmp_path):
         llm=_StubLLM(), tools=[], task=task,
         org_watermark=5000, org_batch_max=12,
     )
+    agent.last_context_estimate = 100  # 装配峰值远低于水位
 
     agent._maybe_organize_batch()
 
@@ -378,7 +386,7 @@ def test_watermark_defers_organization_below_threshold(monkeypatch, tmp_path):
 
 
 def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
-    """体量达水位 → 所有未整理轮一次批量调用整理（N 次 → 1 次）。"""
+    """窗口体量达水位 → 所有未整理轮一次批量调用整理（N 次 → 1 次）。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
     task = Task.create(goal="x")
@@ -392,23 +400,28 @@ def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1, 2])))]]),
         tools=[], task=task, org_watermark=2000, org_batch_max=12,
     )
+    agent.last_context_estimate = 5000  # 装配峰值 ≥ 水位 → 触发
+    old_normalized = task.rounds[0]["user_input"]["normalized"]  # 助手自带的旧值
 
-    # 两轮各 ~1200 tok，合计 2400 ≥ 2000 → 触发
     agent._maybe_organize_batch()
 
     assert len(agent.llm.calls) == 1  # 两轮只花一次调用
     prompt = agent.llm.calls[0]["messages"][0]["content"]
     assert "Round 1" in prompt and "Round 2" in prompt
-    # 各轮产物写回各自的 Round
+    # 产物进暂存区，正式字段保持旧值（本轮装配保持原样）
+    assert task.rounds[0]["pending_org"]["normalized"] == "R1 意图"
+    assert task.rounds[1]["pending_org"]["normalized"] == "R2 意图"
+    assert task.rounds[0]["user_input"]["normalized"] == old_normalized
+    assert all(r["org_state"] == "done" for r in task.rounds)
+    # 下一轮开启：暂存生效——各轮产物写回各自的 Round，补丁只应用一次
+    agent._promote_org_results()
     assert task.rounds[0]["user_input"]["normalized"] == "R1 意图"
     assert task.rounds[1]["user_input"]["normalized"] == "R2 意图"
-    assert all(r["org_state"] == "done" for r in task.rounds)
-    # 合并 State Patch 只应用一次
     assert task.task_state["goal"] == "批量目标"
 
 
 def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
-    """超过批量上限：每次触发只收编最老的一批，剩余回入水位。"""
+    """超过批量上限：每次触发只收编最老的一批，剩余留给下次闭合。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
     task = Task.create(goal="x")
@@ -426,12 +439,13 @@ def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
         ]),
         tools=[], task=task, org_watermark=2000, org_batch_max=2,
     )
+    agent.last_context_estimate = 5000
 
     agent._maybe_organize_batch()
 
     assert task.rounds[0]["org_state"] == "done"
     assert task.rounds[1]["org_state"] == "done"
-    assert task.rounds[2]["org_state"] == ""  # 第三轮留在水位里
+    assert task.rounds[2]["org_state"] == ""  # 第三轮未收编
     prompt = agent.llm.calls[0]["messages"][0]["content"]
     assert "Round 3" not in prompt
 
@@ -441,19 +455,19 @@ def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
     assert len(agent.llm.calls) == 2
 
 
-def test_pending_backlog_counts_toward_watermark(monkeypatch, tmp_path):
-    """上次会话崩溃遗留的 pending 轮计入水位，下次触发一并整理。"""
+def test_pending_backlog_collected_on_trigger(monkeypatch, tmp_path):
+    """上次会话崩溃遗留的 pending 轮仍是"未整理"，下次触发一并收编。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
     task = Task.create(goal="x")
     pending = _round(1, "甲" * 2400, "甲" * 2400)
     pending["org_state"] = "pending"  # 崩溃遗留：从未整理完成
     task.rounds = [pending]
-    # 单轮 mass 恰为 1200：pending 若不计入水位就永远凑不齐这个阈值
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
         tools=[], task=task, org_watermark=1200, org_batch_max=12,
     )
+    agent.last_context_estimate = 1200  # 达到水位 → 触发
 
     agent._maybe_organize_batch()
 
@@ -841,6 +855,7 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
 
     agent.run("问")
 
+    agent._promote_org_results()  # 模拟下一轮开启：暂存产物生效
     assert task.task_state.get("completed") == ["完成项"]
     assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出结论"
 
@@ -902,7 +917,8 @@ def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):
     assert len(task.rounds) == 1  # 两条输入属于同一个 Round
     user_events = [e for e in task.rounds[0]["events"] if e["type"] == "user"]
     assert len(user_events) == 2  # 两条原始输入都保留为事件
-    # 整理产物：合并澄清后的意图覆盖整个开放轮
+    # 整理产物：合并澄清后的意图覆盖整个开放轮（暂存生效后可见）
+    agent._promote_org_results()
     assert task.rounds[0]["user_input"]["normalized"] == "用户想把 ICP 调试完（合并了两条输入的意图）"
     assert task.rounds[0]["end_state"] == "completed"
 

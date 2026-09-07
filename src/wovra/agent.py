@@ -6,9 +6,12 @@
   中断/无回复期间的多条用户输入，跨会话持久化）；Event 的 message
   原样保存（执行期不截断内容），Truncated 是零 LLM 成本的一行索引
   （供降档索引与整理输入）
-* Organization（V3 水位批量整理）：轮闭合不再逐轮整理——未整理轮的
-  原始内容体量进入"整理水位"，达阈值才触发一次批量整理（调用次数
-  N→1 摊薄、State Patch 跨轮去重），异步 FIFO 执行不阻塞对话；
+* Organization（水位批量整理）：轮闭合不再逐轮整理——实测轻轮的整理
+  费可以比干活成本还高。水位按**当前上下文窗口体量**（最近一次装配
+  的估算，轮闭合时即本轮峰值）计量：达标且轮闭合才触发一次批量整理
+  （调用次数 N→1 摊薄、State Patch 跨轮去重），后台线程执行不阻塞
+  对话；产物先暂存，**下一轮开启时才生效**——本轮装配纹丝不动
+  （连贯性 + 缓存前缀稳定），过程对用户静默；
   输入 = 用户输入们 + 事件截断索引 + 最终回答全文；
   输出 = Normalized 用户意图 + 精修事件索引 + Task State 补丁
 * Context Assembly：近 K 轮全量（Recent Full-Resolution Window），
@@ -87,11 +90,10 @@ def _org_enabled() -> bool:
 
 _ORGANIZE_MAX_CALLS = 4
 _ORGANIZE_MAX_READS = 3
-# V3 水位批量整理（docs/context-management-v3.md §4）：轮闭合不再逐轮
-# 整理——实测轻轮的整理费（3,118）可以比轮本身的干活成本（2,816）还高；
-# 未整理轮的原始内容体量累计到水位才触发一次批量整理。小会话可能
-# 全程不触发——整理成本归零，早期不再有负优化。参数刻意保守（宁可
-# 少整理），后期按实践修正：
+# 水位批量整理：水位口径 = **当前上下文窗口体量**（最近一次装配的估算，
+# 轮闭合时即本轮峰值）——2026-09-07 用户拍板，替代 V3 初版的"未整理
+# 积压量"口径。达标且轮闭合才触发一次批量整理，轮进行中永不打扰；
+# 产物暂存、下一轮开启才生效。小会话可能全程不触发——整理成本归零。
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
 # 单轮工具循环的默认步数上限：真实任务步数轻松上两位数，10 步远远不够
@@ -229,9 +231,9 @@ class Agent:
 
         if self.context_mode == MODE_MANAGED:
             self.register(self.expand_history)
-            # 水位批量整理（V3）：上次会话遗留的未整理轮（含崩溃时的
-            # pending / failed）体量天然计入水位，由下一次轮闭合触发
-            # 批量整理——加载时不立即补跑（小会话可能永远不需要整理）
+            # 水位批量整理：上次会话遗留的未整理轮（含崩溃时的 pending /
+            # failed）由下一次轮闭合触发时一并收编——加载时不立即补跑
+            # （小会话可能永远不需要整理）
         if self.task is not None and _org_enabled():
             # 组织运行时 V1（docs/organization-runtime-v1.md）：分形节点的
             # 组织工具——任何节点对上是子、对下是主，同一套行为规则
@@ -287,18 +289,20 @@ class Agent:
 
     # ---- Round 生命周期：开放 → 闭合 ----------------------------------------
 
-    def _open_or_reuse_round(self, user_input: str) -> None:
+    def _open_or_reuse_round(self, user_input: str) -> bool:
         """开启新 Round，或续上未闭合的开放 Round（V2 闭合规则）。
 
         上一轮若因中断/异常/无回复而未闭合（end_state=open），
         本轮输入并入同一个 Round——直到 AI 产出最终回答才算完整一轮。
+        返回是否开启了新 Round：开启时要把上一轮暂存的整理产物生效
+        （_promote_org_results），续轮则不动——本轮装配必须保持原样。
         """
         last = self.rounds[-1] if self.rounds else None
         if last is not None and last.get("end_state") in ("", "open"):
             self.current_round = last
             # 协议消息从事件的 Full 中重建（它们就是事实来源）
             self.messages = [e["message"] for e in last["events"]]
-            return
+            return False
         seq = len(self.rounds) + 1
         self.current_round = {
             "seq": seq,
@@ -310,6 +314,7 @@ class Agent:
         }
         self.rounds.append(self.current_round)
         self.messages = []
+        return True
 
     def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
         """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。"""
@@ -344,9 +349,9 @@ class Agent:
     def close_round(self) -> None:
         """闭合当前 Round（仅最终回答路径调用）；managed 模式做水位检查。
 
-        V3 之前轮闭合即逐轮整理，实测轻轮的整理费比干活成本还高；
-        现在未整理轮的体量进入水位，达阈值才批量整理（可能多轮才
-        触发一次，小会话可能全程不触发）。
+        水位口径 = 当前上下文窗口体量（本轮装配峰值 last_context_estimate）：
+        达标且轮已闭合才批量整理，轮进行中永不打扰；整理产物暂存到
+        下一轮开启才生效（_promote_org_results），对用户静默。
         """
         if self.current_round is None:
             return
@@ -378,7 +383,12 @@ class Agent:
         on_answer_delta: Optional[Callable[[str], None]] = None,
     ) -> str:
         """处理一条用户输入（开启/续上 Round 并完成工作），返回最终回答。"""
-        self._open_or_reuse_round(user_input)
+        new_round = self._open_or_reuse_round(user_input)
+        if new_round:
+            # 新 Round 开启才让上一轮暂存的整理产物生效（精修索引/
+            # Normalized/状态补丁）；续上开放轮则不动——本轮对话期间
+            # 装配必须保持原样（连贯性 + 缓存前缀稳定）
+            self._promote_org_results()
         # 轮次与会话绑定（rounds 的 seq 随会话持久化）——进程内计数会在
         # 退出重开后归零，长会话的"第 N 轮"就错了（实测教训）
         self.turn_count = self.current_round["seq"]
@@ -932,17 +942,7 @@ class Agent:
         text = " ".join((text or "").split())
         return text if len(text) <= limit else text[:limit] + "…"
 
-    # ---- History Maintenance Pipeline（V3 水位触发的批量整理） -------------------
-
-    def _round_mass(self, r: dict) -> int:
-        """一轮的原始内容体量估算（整理水位的计量口径：正文 + 工具参数）。"""
-        parts = []
-        for e in r["events"]:
-            m = e["message"]
-            parts.append(str(m.get("content") or ""))
-            for tc in m.get("tool_calls") or []:
-                parts.append(str((tc.get("function") or {}).get("arguments") or ""))
-        return tokens.estimate("\n".join(parts))
+    # ---- History Maintenance Pipeline（水位触发的批量整理） -------------------
 
     def _unorganized_rounds(self) -> list[dict]:
         """已闭合且尚未整理完成的轮次（按时间正序）。
@@ -959,14 +959,18 @@ class Agent:
         ]
 
     def _maybe_organize_batch(self) -> None:
-        """水位检查：未整理轮的原始内容体量达阈值时，批量入队整理。
+        """水位检查：当前上下文窗口体量达阈值且本轮已闭合时，批量入队整理。
 
-        每次轮闭合至多触发一批（上限 _org_batch_max 轮，最老的先整理）；
-        剩余未整理体量留给下次闭合继续消化，避免一次冲刺打爆整理队列。
+        水位口径 = last_context_estimate（最近一次装配的估算，轮闭合时
+        即本轮峰值）——不是未整理积压量（2026-09-07 用户拍板）。每次轮
+        闭合至多触发一批（上限 _org_batch_max 轮，最老的先整理）；剩余
+        未整理轮留给下次闭合继续消化。产物暂存不直写：本轮装配保持
+        原样，下一轮开启才生效（_promote_org_results）；过程对用户静默。
         """
+        if self.last_context_estimate < self._org_watermark:
+            return
         unorganized = self._unorganized_rounds()
-        mass = sum(self._round_mass(r) for r in unorganized)
-        if mass < self._org_watermark:
+        if not unorganized:
             return
         batch = unorganized[: self._org_batch_max]
         for r in batch:
@@ -1052,18 +1056,13 @@ class Agent:
         事件 ID 与原始历史不受整理影响（§5：合并的是视图，不是历史）。
         输入 = 各轮用户输入 + 事件截断索引 + 最终回答全文（默认不读
         原文；截断行不足以确定关键事实时可用 read_full 按上限展开）。
-        输出 = 各轮 Normalized 意图 + 精修事件索引 + 合并 State Patch。
-        关闭思考（格式化任务）。解析失败重试一次，仍失败则整批保持
-        Runtime 视图（org_state=failed，回入水位等下次触发），原始层
-        永远不受影响。返回是否成功。
+        输出 = 各轮 Normalized 意图 + 精修事件索引 + 合并 State Patch，
+        **全部写入 pending_org 暂存区**：本轮装配必须纹丝不动（连贯性
+        + 缓存前缀稳定），下一轮开启时由 _promote_org_results 生效。
+        过程对用户静默（无状态播报）。关闭思考（格式化任务）。解析
+        失败重试一次，仍失败则整批保持 Runtime 视图（org_state=failed，
+        回入水位等下次触发），原始层永远不受影响。返回是否成功。
         """
-        first, last = rounds[0]["seq"], rounds[-1]["seq"]
-        if first == last:
-            label = f"第 {first} 轮"
-        else:
-            label = f"R{first}-R{last} 共 {len(rounds)} 轮"
-        self._emit_status(f"后台整理：{label}批量归档中…（不影响继续对话）")
-
         sections = []
         for r in rounds:
             user_inputs = [
@@ -1168,8 +1167,11 @@ class Agent:
             r = rounds_by_seq.get(item.get("seq"))
             if r is None:
                 continue
+            # 暂存区：不直写正式字段——本轮对话期间的装配由这些字段
+            # 组成，动它们就是"下一步替换"，会破坏连贯性和缓存前缀
+            pending = r["pending_org"] = {}
             if item.get("normalized_user_input"):
-                r["user_input"]["normalized"] = str(item["normalized_user_input"])
+                pending["normalized"] = str(item["normalized_user_input"])
             valid_ids = {e["id"] for e in r["events"]}
             for line_item in item.get("refined_index") or []:
                 if (
@@ -1177,17 +1179,45 @@ class Agent:
                     and line_item.get("id") in valid_ids
                     and line_item.get("line")
                 ):
-                    r["refined_index"][line_item["id"]] = str(line_item["line"])
+                    pending.setdefault("refined_index", {})[line_item["id"]] = str(
+                        line_item["line"]
+                    )
         patch = state.get("state_patch")
         if isinstance(patch, dict):
             if state.get("is_done") is not None and "is_done" not in patch:
                 patch["is_done"] = bool(state["is_done"])
-            self.task.apply_state_patch(patch)
+            # 批次级补丁挂在批内第一轮上：生效时只应用一次
+            if rounds:
+                rounds[0].setdefault("pending_org", {})["state_patch"] = patch
         for r in rounds:
             r["org_state"] = "done"
-        self._emit_status(f"整理完成（{label}）")
         self._persist_rounds()
         return True
+
+    def _promote_org_results(self) -> None:
+        """把暂存的整理产物落进正式视图（仅在**新 Round 开启时**调用）。
+
+        本轮对话期间装配必须保持原样（连贯性 + 缓存前缀稳定），所以
+        整理线程只把产物写进各轮的 pending_org 暂存区；直到下一轮
+        开启，才替换精修索引/Normalized 意图、应用状态补丁并落盘。
+        崩溃安全：pending_org 随 rounds 一起持久化，重启后第一次开
+        新轮时补生效。
+        """
+        changed = False
+        for r in self.rounds:
+            pending = r.pop("pending_org", None)
+            if not pending:
+                continue
+            changed = True
+            if pending.get("normalized"):
+                r["user_input"]["normalized"] = pending["normalized"]
+            if pending.get("refined_index"):
+                r.setdefault("refined_index", {}).update(pending["refined_index"])
+            patch = pending.get("state_patch")
+            if patch and self.task is not None:
+                self.task.apply_state_patch(patch)
+        if changed:
+            self._persist_rounds()
 
     def _organize_schemas(self) -> list[dict]:
         """Organization 阶段唯一的工具：按事件 ID 读取原文（后门，默认不用）。"""
