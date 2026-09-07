@@ -554,9 +554,10 @@ def _make_open_round(agent: Agent, seq: int, user: str):
 
 
 def test_managed_assembly_condenses_organized_rounds():
-    """加载视图：近 1 轮全量；更早轮次 = 用户原文 + 意图 + 精修索引。
+    """加载视图：已整理轮次 = 用户原文 + 意图 + 精修索引。
 
-    长回答的尾部细节不进上下文，头部与精修索引进入。
+    长回答的尾部细节不进上下文，头部与精修索引进入；
+    整理是轮次从全量变紧凑的唯一途径。
     """
     long_answer = "很长的回答开头。" + "细节" * 100 + "很长的回答结尾。"
     task = Task.create(goal="x")
@@ -566,13 +567,13 @@ def test_managed_assembly_condenses_organized_rounds():
         _round(3, "第三轮闲聊", "哈哈"),
         _round(4, "第四轮 ICP 调试", "误差降低了"),
     ]
-    agent = Agent(llm=_StubLLM(), tools=[], task=task, max_recent_rounds=1)
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
     _make_open_round(agent, 5, "继续")
 
     msgs = agent._assemble_messages()
     bodies = [m.get("content", "") for m in msgs]
 
-    assert any("误差降低了" in b for b in bodies)            # 近 1 轮全量
+    assert any("误差降低了" in b for b in bodies)            # 未整理轮全量
     assert any("第一轮原始提问" in b for b in bodies)         # 用户原文全量保留
     assert any("澄清：第一轮原始提问" in b for b in bodies)   # Normalized 意图
     assert any("R1-E02" in b for b in bodies)                 # 精修事件索引
@@ -716,12 +717,9 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出结论"
 
 
-def test_tier_degradation_under_budget(monkeypatch):
-    """预算吃紧时按"最老的先降档"逐级降档：档1 → 档2 → 档3。
-
-    回归：此前轮数超过 max_recent_rounds 时选择路径炸过一次
-    （_relevance 误挂到 self 上），本测试覆盖多轮装配路径。
-    """
+def test_unorganized_rounds_stay_full_until_organized(monkeypatch):
+    """前缀纪律：未整理轮次永远全量在上下文，无论轮数多少、体量多大——
+    分辨率损失只允许来自整理，不来自装配（三档滑窗已废除）。"""
     task = Task.create(goal="分层回归")
     task.rounds = [
         _round(1, "处理 ICP 配准误差问题", "ICP 误差分析完成"),
@@ -729,20 +727,46 @@ def test_tier_degradation_under_budget(monkeypatch):
         _round(3, "调整界面布局间距", "布局调整完毕"),
         _round(4, "继续处理 ICP 配准", "ICP 参数已更新"),
     ]
-    agent = Agent(
-        llm=_StubLLM(), tools=[], task=task,
-        max_recent_rounds=1, history_budget=200,  # 极小预算，强制逐级降档
-    )
+    for r in task.rounds:
+        r["org_state"] = ""  # 全部未整理
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
     _make_open_round(agent, 5, "ICP 误差为什么还是这么大")
 
     msgs = agent._assemble_messages()
     bodies = "\n".join(m.get("content", "") for m in msgs)
 
-    # 近 1 轮（R4）全量；R3 预算内保留档 1；R1/R2 被降到档 3 一行索引
-    assert "ICP 参数已更新" in bodies
-    assert "布局调整完毕" in bodies or "调整界面布局间距" in bodies
-    assert "[R1]" in bodies and "[R2]" in bodies  # 档 3 的一行话题行
-    assert "ICP 误差分析完成" not in bodies  # 档 3 不再携带事件索引
+    # 每一轮的完整原文都在——没有一个轮被静默降档
+    for answer in ("ICP 误差分析完成", "按钮改好了", "布局调整完毕", "ICP 参数已更新"):
+        assert answer in bodies
+
+
+def test_organized_rounds_render_compact_views(monkeypatch):
+    """整理生效后：已整理轮次 = 原文+意图+精修索引的紧凑视图，
+    未整理轮次仍全量——同一装配里两种形态按轮共存。"""
+    task = Task.create(goal="分层回归")
+    task.rounds = [
+        _round(1, "处理 ICP 配准误差问题", "ICP 误差分析完成"),
+        _round(2, "修改界面按钮颜色", "按钮改好了"),
+    ]
+    task.rounds[0]["org_state"] = "done"    # R1 已整理
+    task.rounds[0]["refined_index"] = {
+        "R1-E01": "提出误差问题",
+        "R1-E02": "ICP 误差已收敛到 0.5px",
+    }
+    task.rounds[1]["org_state"] = ""        # R2 未整理
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    _make_open_round(agent, 3, "继续")
+
+    msgs = agent._assemble_messages()
+    bodies = "\n".join(m.get("content", "") for m in msgs)
+
+    # R1 已整理：紧凑视图（原文+意图+精修索引），事件原文不再全量
+    assert "处理 ICP 配准误差问题" in bodies
+    assert "澄清：处理 ICP 配准误差问题" in bodies
+    assert "R1-E02" in bodies and "0.5px" in bodies   # 精修索引在
+    assert "ICP 误差分析完成" not in bodies           # 回答原文不进上下文
+    # R2 未整理：全量原文仍在
+    assert "按钮改好了" in bodies
 
 
 def test_resume_continues_open_round_without_new_user_message(monkeypatch, tmp_path):
@@ -945,13 +969,13 @@ def test_current_round_events_not_folded():
     assert "已折叠" not in joined
 
 
-def test_file_map_lists_files_from_demoted_rounds():
-    """文件地图：降档轮次里写/读过的文件以清单形式注入装配。"""
+def test_file_map_lists_files_from_organized_rounds():
+    """文件地图：已整理轮次里写/读过的文件以清单形式注入装配。"""
     from wovra import truncate
 
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content="ok"))]]),
-        tools=[], max_recent_rounds=1,
+        tools=[],
     )
     write_call = {
         "role": "assistant", "content": "",

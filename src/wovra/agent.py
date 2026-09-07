@@ -14,9 +14,11 @@
   （连贯性 + 缓存前缀稳定），过程对用户静默；
   输入 = 用户输入们 + 事件截断索引 + 最终回答全文；
   输出 = Normalized 用户意图 + 精修事件索引 + Task State 补丁
-* Context Assembly：近 K 轮全量（Recent Full-Resolution Window），
-  更早轮次按预算三档自动降档；按变化频率排序（越易变越靠后），
-  保护前缀缓存
+* Context Assembly：未整理轮次**全量原文**在上下文（执行期零分辨率
+  损失的自然延伸），已整理轮次渲染为紧凑视图（原文+意图+精修索引）；
+  视图替换只发生在整理生效（新轮开启）那一刻——**只有整理才破坏
+  前缀**（2026-09-07 用户拍板，V2 三档滑窗废除：它每轮在装配中部
+  改写历史，实测把命中率砸到 49.9%）；窗口保底是唯一天花板
 * baseline 对照组：全量追加 + 80% × 窗口阈值压缩（市面惯例）
 """
 
@@ -61,8 +63,6 @@ MODE_BASELINE = "baseline"
 
 # 上下文预算：全部按窗口百分比设计（亿级使用规模），绝对值可覆盖
 _DEFAULT_CONTEXT_LIMIT = int(os.environ.get("WOVRA_CONTEXT_LIMIT", "1000000"))
-_DEFAULT_HISTORY_BUDGET_RATIO = float(os.environ.get("WOVRA_HISTORY_BUDGET_RATIO", "0.3"))
-_DEFAULT_MAX_RECENT_ROUNDS = int(os.environ.get("WOVRA_MAX_RECENT_ROUNDS", "3"))
 _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 
 # 维护性用途：异步执行、可能跨越轮次边界，成本单独记账（不混入 last_stats）
@@ -132,8 +132,6 @@ class Agent:
         task: Optional[Task] = None,
         context_mode: str = MODE_MANAGED,
         context_limit: Optional[int] = None,
-        history_budget: Optional[int] = None,
-        max_recent_rounds: Optional[int] = None,
         async_organization: bool = False,
         org_watermark: Optional[int] = None,
         org_batch_max: Optional[int] = None,
@@ -148,9 +146,6 @@ class Agent:
         self.task = task
         self.context_mode = context_mode
         self.context_limit = context_limit or _DEFAULT_CONTEXT_LIMIT
-        ratio = float(os.environ.get("WOVRA_HISTORY_BUDGET_RATIO", _DEFAULT_HISTORY_BUDGET_RATIO))
-        self.history_budget = history_budget or int(self.context_limit * ratio)
-        self.max_recent_rounds = max_recent_rounds or _DEFAULT_MAX_RECENT_ROUNDS
         # 整理是否异步执行：chat 模式开（不阻塞对话），run/测试用同步（确定性）
         self.async_organization = async_organization
         # V3 水位批量整理参数（水位 = 未整理轮原始内容体量阈值；批量上限
@@ -745,64 +740,40 @@ class Agent:
             msgs.extend(self._current_round_messages())
             return msgs
 
-        # ---- managed：三档分层 ----
-        recent = past[-self.max_recent_rounds:]
-        recent_ids = {id(r) for r in recent}
-        older = [r for r in past if id(r) not in recent_ids]  # 按时间正序
-
-        budget = self.history_budget
+        # ---- managed：未整理全量，已整理紧凑视图 --------------------
+        # 前缀纪律（2026-09-07 用户拍板）：**只有整理生效才破坏前缀**。
+        # 未整理轮次原文全量在上下文里；已整理轮次渲染为紧凑视图——
+        # 视图替换只发生在 promotion（新轮开启）那一刻，除此之外装配
+        # 严格追加。V2 三档滑窗废除：它每轮在装配中部改写历史，
+        # 实测把命中率从 83.7% 砸到 49.9%（R7→R8）。
         state_render = ""
         if self.task is not None:
-            state_render = self.task.get_state().render(budget=budget // 3)
-        used = tokens.estimate(state_render)
-
-        # 更早轮次：从新到旧依次尝试档 1 → 档 2 → 档 3（最老的先降档）
-        tiers: dict[int, int] = {}
-        for r in reversed(older):
-            cost1 = tokens.estimate(self._render_tier1(r))
-            if used + cost1 <= budget:
-                tiers[id(r)] = 1
-                used += cost1
-                continue
-            cost2 = tokens.estimate(self._render_tier2(r))
-            if used + cost2 <= budget:
-                tiers[id(r)] = 2
-                used += cost2
-                continue
-            tiers[id(r)] = 3
-            used += tokens.estimate(self._render_tier3(r))
+            state_render = self.task.get_state().render()
 
         msgs: list[dict] = []
         if self.system_prompt:
             msgs.append({"role": "system", "content": self.system_prompt})
 
         view_msgs: list[dict] = []
-        tier3_lines: list[str] = []
+        organized_rounds: list[dict] = []
         for r in past:
-            if r in recent:
-                view_msgs.extend(e["message"] for e in r["events"])
-                continue
-            tier = tiers.get(id(r), 3)
-            if tier == 1:
+            if r.get("org_state") == "done":
+                # 已整理：紧凑视图（原文+意图+精修索引；细节可 expand_history 取回）
+                organized_rounds.append(r)
                 view_msgs.append({"role": "user", "content": r["user_input"]["original"]})
-                view_msgs.append({"role": "assistant", "content": self._render_tier1(r)})
-            elif tier == 2:
-                view_msgs.append({"role": "user", "content": r["user_input"]["original"]})
-                view_msgs.append({"role": "assistant", "content": self._render_tier2(r)})
+                view_msgs.append({"role": "assistant", "content": self._render_compact(r)})
             else:
-                tier3_lines.append(self._render_tier3(r))
+                # 未整理：原文全量——分辨率损失只允许来自整理，不来自装配
+                view_msgs.extend(e["message"] for e in r["events"])
 
         block = []
         if state_render:
             block.append(state_render)
-        if tier3_lines:
-            block.append("[历史索引]（已降档轮次，可用 expand_history 展开）")
-            block += tier3_lines
-        file_map = self._file_map_lines(older)
+        file_map = self._file_map_lines(organized_rounds)
         if file_map:
             block.append(
-                "[历史涉及文件]（内容已随轮次降档，修改前先 read_file 获取现状，"
-                "通读时按 num_lines=400 连续分段）"
+                "[历史涉及文件]（这些轮次的原文已整理收纳，修改前先 read_file "
+                "获取现状，通读时按 num_lines=400 连续分段）"
             )
             block += file_map
         if block:
@@ -861,8 +832,12 @@ class Agent:
                 )
         return total
 
-    def _render_tier1(self, r: dict) -> str:
-        """档 1：用户原文 + 意图 + 精修事件索引（预算内的高保真浓缩视图）。"""
+    def _render_compact(self, r: dict) -> str:
+        """已整理轮次的紧凑视图：用户原文 + 意图 + 精修事件索引。
+
+        整理生效后轮次以此形态常驻上下文——它是"水位折叠"的落点，
+        细节永不丢失（expand_history 按 ID 取回原文）。
+        """
         lines = [f"[R{r['seq']}] 用户：{r['user_input']['original']}"]
         if r["user_input"].get("normalized"):
             lines.append(f"意图：{r['user_input']['normalized']}")
@@ -871,19 +846,6 @@ class Agent:
             lines.append("事件索引：")
             lines += idx
         return "\n".join(lines)
-
-    def _render_tier2(self, r: dict) -> str:
-        """档 2：用户原文 + 意图（去掉事件索引）。"""
-        lines = [f"[R{r['seq']}] 用户：{r['user_input']['original']}"]
-        if r["user_input"].get("normalized"):
-            lines.append(f"意图：{r['user_input']['normalized']}")
-        return "\n".join(lines)
-
-    def _render_tier3(self, r: dict) -> str:
-        """档 3：一行话题行（所有降档轮次的集合即历史索引/话题表）。"""
-        head = r["user_input"].get("normalized") or r["user_input"]["original"]
-        state = "（已完成）" if r.get("end_state") == "completed" else "（进行中）"
-        return f"[R{r['seq']}] {_head_text(head, 60)}{state}"
 
     def _round_index_lines(self, r: dict) -> list[str]:
         """事件的索引行：优先用精修索引，未整理的事件用 Runtime 截断行。"""
@@ -896,7 +858,7 @@ class Agent:
         return out
 
     def _file_map_lines(self, rounds: list[dict]) -> list[str]:
-        """把降档历史里出现过的文件整理成一张"文件地图"。
+        """把已整理轮次里出现过的文件整理成一张"文件地图"。
 
         文件内容随轮次降档后，模型曾经只能盲目分片重爬（实测一个
         轮里 39 次 read_file 重读同一文件）。地图只给"哪些文件、
