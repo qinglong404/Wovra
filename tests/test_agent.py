@@ -826,6 +826,39 @@ def test_resume_without_open_round_raises(monkeypatch, tmp_path):
     assert agent.llm.calls == []
 
 
+def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
+    """机制二：一次调用为全部块产出路由式摘要 + 大类归类。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    labeling = json.dumps({
+        "categories": [
+            {"id": "A", "name": "页面搭建", "description": "创建初始页面"},
+            {"id": "B", "name": "功能扩展", "description": "增量加功能"},
+        ],
+        "blocks": [
+            {"id": "R2-B1", "category": "A", "summary": "write_file → index.html（14KB 初版）"},
+            {"id": "R2-B2", "category": "B", "summary": "edit_file → index.html（修引号）"},
+        ],
+    }, ensure_ascii=False)
+    task = Task.create(goal="x")
+    task.rounds = [_round(2, "做页面", "好了")]  # _round 自带 done+blocks 外的字段
+    task.rounds[0]["blocks"] = [
+        {"id": "R2-B1", "kind": "work", "start": 0, "end": 1,
+         "start_event": "R2-E01", "end_event": "R2-E02",
+         "touched_files": ["index.html"], "wrote_files": ["index.html"],
+         "command_types": []},
+    ]
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content=labeling))]]),
+                  tools=[], task=task)
+
+    result = agent.label_blocks()
+
+    assert len(result["categories"]) == 2
+    assert result["labels"]["R2-B1"]["category"] == "A"
+    assert "write_file → index.html" in result["labels"]["R2-B1"]["summary"]
+    prompt = agent.llm.calls[0]["messages"][0]["content"]
+    assert "R2-B1" in prompt and "路由式" in prompt  # 摘要进了提示词
+
+
 def test_default_max_turns_is_60():
     """默认步数上限 60（安全网而非配额）。"""
     task = Task.create(goal="x")

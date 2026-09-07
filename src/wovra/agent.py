@@ -461,6 +461,56 @@ class Agent:
             f"\\c 可直接接着干）"
         )
 
+    def label_blocks(self, rounds: Optional[list[dict]] = None) -> dict:
+        """机制二（上下文分化运行时）：低频批量语义标注——零截断的块摘要
+        输入 + 一次 LLM 调用，产出每块路由式摘要与大类归类。
+
+        与水位整理的关系：机制二发生在整理时（同一口锅），本方法是其
+        可独立试跑的形态（scripts/label_blocks.py 离线检查用）。
+        返回 {"categories": [...], "labels": {block_id: {...}}}，不落盘。
+        """
+        rounds = rounds if rounds is not None else self.rounds
+        digests = []
+        for r in rounds:
+            for b in r.get("blocks") or []:
+                digests.append(blocks_module.block_digest(r, b))
+        if not digests:
+            return {"categories": [], "labels": {}}
+        prompt = (
+            "你是工作块标注器。以下是一个长会话里全部工作块的摘要（按时间序）。\n"
+            "职责（最后只输出一个 JSON 对象，不要代码块围栏）：\n"
+            '1. "categories"：把本质同域的块归成少数几个大类（通常 3-8 个，'
+            '如"页面搭建/布局主题/多会话功能/测试建设"），每个为 '
+            '{"id": "A", "name": "大类名", "description": "一句话范围说明"}；\n'
+            '2. "blocks"：每个块一条 {"id": "块id", "category": "大类id", '
+            '"summary": "路由式一句话"}——summary 写明动作与对象'
+            "（如 write_file → css/style.css（14KB 初版）、edit_file → "
+            "js/app.js:448（+720B）、run_command → node tests/run.js（5 套件通过）），"
+            "不要复制内容。块id 必须原样使用输入里给出的 id。\n"
+            "分类只分大类，宁少勿多；相邻块同域是常态。\n\n"
+            + "\n\n".join(digests)
+        )
+        state: Optional[dict] = None
+        for _ in range(2):  # 解析失败重试一次
+            content, _ordered, _usage = self._stream_call(
+                [{"role": "user", "content": prompt}],
+                tools=None,
+                purpose="organization",
+                extra_body={"thinking": {"type": "disabled"}},
+            )
+            state = self._parse_state_json(content)
+            if isinstance(state, dict) and state.get("blocks"):
+                break
+        if not isinstance(state, dict):
+            return {"categories": [], "labels": {}}
+        labels = {
+            item["id"]: item
+            for item in state.get("blocks") or []
+            if isinstance(item, dict) and item.get("id")
+        }
+        categories = [c for c in state.get("categories") or [] if isinstance(c, dict)]
+        return {"categories": categories, "labels": labels}
+
     def _invoke_tool(self, name: str, arguments: str) -> str:
         """解析参数并执行工具，返回结果文本（不含展示与落盘）。"""
         try:

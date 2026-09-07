@@ -207,6 +207,44 @@ def segment_round(r: dict) -> list[dict]:
     return blocks
 
 
+def block_digest(r: dict, b: dict) -> str:
+    """块的确定性摘要（机制二 LLM 标注的输入）：路由式信息，零 LLM。
+
+    只带"动作与对象"——工具名、文件路径、命令原文（截断）、用户输入
+    头部；正文内容不复制（那是 Full 存档的事，索引只做路由）。
+    """
+    events = r.get("events") or []
+    lines = [f"{b['id']}（{b['start_event']}~{b['end_event']}，{b['kind']}）"]
+    ui_head = _head(str((r.get("user_input") or {}).get("original") or ""), 80)
+    if ui_head:
+        lines.append(f"本轮用户输入: {ui_head}")
+    for i in range(b["start"], b["end"] + 1):
+        e = events[i]
+        if e.get("type") != "tool_call":
+            continue
+        for call in (e.get("message") or {}).get("tool_calls") or []:
+            name, args = _call_info(call)
+            if name == "run_command":
+                cmd = str(args.get("command") or "")
+                lines.append(f"  ▸ [{tag_command(cmd)}] {_head(cmd, 100)}")
+            elif name in WRITE_TOOLS:
+                size = len(str(args.get("content") or ""))
+                lines.append(f"  ✎ {name} → {args.get('path', '')}（{size} 字符）")
+            elif name == "edit_file":
+                lines.append(
+                    f"  ✎ edit_file → {args.get('path', '')}"
+                    f"（{len(str(args.get('old_text') or ''))} → "
+                    f"{len(str(args.get('new_text') or ''))} 字符）"
+                )
+            elif name == "read_file":
+                lines.append(f"  👁 read_file ← {args.get('path', '')}")
+    # 块内若含最终回答，附头部（那是"对用户的承诺"，路由价值高）
+    tail = events[b["end"]]
+    if tail.get("type") == "final_answer":
+        lines.append(f"  ◆ 最终回答头: {_head(str(tail['message'].get('content') or ''), 100)}")
+    return "\n".join(lines)
+
+
 def _head(text: str, limit: int) -> str:
     text = " ".join((text or "").split())
     return text if len(text) <= limit else text[:limit] + "…"

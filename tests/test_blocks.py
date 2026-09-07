@@ -180,6 +180,30 @@ def test_empty_round_yields_no_blocks():
 # ---- 渲染 --------------------------------------------------------------------
 
 
+def test_block_digest_routes_not_reproduces():
+    """块摘要 = 路由式信息（动作+对象），不复制正文——机制二输入。"""
+    import json as _json
+
+    events = [
+        _event(9, 1, "user", content="加测试和 agent 演示包"),
+        _event(9, 2, "tool_call", tool="write_file",
+               args={"path": "js/agent-pack.js", "content": "长内容" * 500}),
+        _event(9, 3, "tool_result", content="ok"),
+        _event(9, 4, "tool_call", tool="run_command", args={"command": "node tests/run.js"}),
+        _event(9, 5, "tool_result", content="5 套件通过"),
+        {"id": "R9-E06", "type": "final_answer",
+         "message": {"role": "assistant", "content": "全部完成并验证"}},
+    ]
+    r = _round(9, events)
+    bs = blocks.segment_round(r)
+    digest = "\n\n".join(blocks.block_digest(r, b) for b in bs)
+
+    assert "R9-B1" in digest and "write_file → js/agent-pack.js" in digest
+    assert "[run] node tests/run.js" in digest
+    assert "最终回答头" in digest
+    assert "长内容" * 500 not in digest  # 正文不复制
+
+
 def test_render_round_shows_commands_and_writes():
     """人读视图：块行带事件区间/文件/标签，命令原文缩进可核对。
 
