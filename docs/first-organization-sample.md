@@ -684,6 +684,83 @@ R12 · 2 事件 · 1 块
 3. **R5-B1 一块横跨 5 个文件**（css/js/data/app/README 全量重写）——
    用户当时抱怨的"整体重写"在块结构上一目了然。
 
+## 2.6 机制二首跑：50 块语义标注全量结果（按大类）
+
+> 2026-09-07，`scripts/label_blocks.py` 对本会话 50 块的一次真实 LLM
+> 批量标注（purpose=organization，digest 输入 ~7K tok）：每块路由式
+> 摘要 + 大类归类。以下为全量结果。
+
+**大类**：A 开场介绍（1 块）｜B 页面搭建与主题（9）｜C 模块化重构（3）｜
+D 消息与交互功能（11）｜E 测试建设与初期扩展（23）｜F 工具反馈与优化建议（3）
+
+```text
+── A. 开场介绍 ──────────────────────────────────────
+R1-B1  回复自我介绍（无文件/命令操作）
+
+── B. 页面搭建与主题 ────────────────────────────────
+R2-B1  write_file → index.html（14.3KB 单文件聊天页初版）
+R2-B2  node --check 校验脚本后 edit_file → index.html（修语法/标点）
+R2-B3  edit_file → index.html（调整对话内容）
+R2-B4  node --check 校验后 edit_file → index.html（修复问题）
+R2-B5  harness 模拟测试 + xdg-open 预览，交付单文件聊天页
+R3-B1  write_file → index.html（23KB 多会话版整体重写）
+R3-B2  harness2 会话测试 + xdg-open 预览，交付多会话版
+R4-B1  write_file → index.html（25KB 全屏布局+浅色主题版）
+R4-B2  theme_test 校验 + xdg-open 预览，交付全屏浅色主题版
+
+── C. 模块化重构 ────────────────────────────────────
+R5-B1  write_file → css/style.css、js/data.js、js/app.js、index.html、README.md（模块化拆分初版）
+R5-B2  edit_file → css/style.css（样式微调）
+R5-B3  语法/ID 一致性检查 + harness 校验，交付模块化结构
+
+── D. 消息与交互功能 ────────────────────────────────
+R6-B1  read_file ← index.html/js/app.js/js/data.js 后 edit_file → js/app.js（4 处，消息类型渲染逻辑）
+R6-B2  edit_file → js/app.js（补充消息类型处理）
+R6-B3  edit_file → js/data.js（5 处，扩充 agent 过程演示数据）
+R6-B4  edit_file → css/style.css（新消息类型样式）
+R6-B5  edit_file → js/data.js（修正演示数据）
+R6-B6  harness3 等测试脚本校验 + xdg-open 预览，交付 agent 过程消息
+R7-B1  edit_file → js/app.js（5 处，追问/确认卡片逻辑）
+R7-B2  edit_file → js/data.js（5 处，卡片演示数据）
+R7-B3  read_file ← js/data.js 后 edit_file → js/data.js（核对并调整数据）
+R7-B4  edit_file → css/style.css（交互卡片样式）
+R7-B5  harness4 测试 + edit_file → README.md（3 处）+ 预览，交付交互卡片
+
+── E. 测试建设与初期扩展 ────────────────────────────
+R8-B1   检查 git 状态与 /tmp 测试脚本，输出扩展优先级建议（无代码改动）
+R9-B1   write_file → tests/lib.js、run.js、theme.prelude.js、features.test.js（测试基建落库）
+R9-B2   write_file → tests/sessions.test.js、theme.test.js、agent.test.js
+R9-B3   write_file → tests/interactions.test.js + edit_file → index.html（接入测试）
+R9-B4   write_file → js/agent-pack.js（3.8KB 扩展包）
+R9-B5   edit_file → js/app.js（4 处，接入 agent-pack）
+R9-B6   read_file ← js/app.js 后 edit_file → js/app.js
+R9-B7   edit_file → js/app.js（4 处）
+R9-B8   edit_file → js/app.js（逻辑调整）
+R9-B9   edit_file + read_file → js/app.js
+R9-B10  node --check 校验后 edit_file → js/app.js
+R9-B11  三文件合并语法检查后 edit_file → js/app.js
+R9-B12  校验后 edit_file → tests/features.test.js（3 处）、js/data.js、tests/agent.test.js
+R9-B13  合并语法检查后 edit_file → tests/run.js
+R9-B14  run → node tests/run.js 后 edit_file → js/app.js（修测试暴露问题）
+R9-B15  read_file ← js/app.js 后 edit_file → js/app.js
+R9-B16  语法校验后 edit_file → tests/sessions.test.js
+R9-B17  run → node tests/run.js（2 次）+ edit_file → index.html（2 处）
+R9-B18  edit_file → js/app.js（3 处）
+R9-B19  edit_file → js/app.js（3 处）
+R9-B20  edit_file → js/app.js（3 处）
+R9-B21  edit_file → css/style.css（2 处）
+R9-B22  run → node tests/run.js 全量通过 + 预览，交付测试基建与初期扩展
+
+── F. 工具反馈与优化建议 ────────────────────────────
+R10-B1  讨论 edit_file 等工具痛点与改进建议（无文件操作）
+R11-B1  评价上下文压缩效果并提出改进点（无文件操作）
+R12-B1  补充 agent 优化建议讨论（无文件操作）
+```
+
+标注质量信号：R3-B1 被准确点名「23KB 多会话版整体重写」（用户当时
+发火的场景）；R9-B14 识别出「run 后 edit」的修复循环因果；每轮的
+验证收尾块（harness + 预览）全部正确归类为交付动作。
+
 ## 3. 整理产物统计（每轮）
 
 | 轮 | 事件数 | 精修索引行 | 意图 | 块数 |
