@@ -455,7 +455,7 @@ class Agent:
         self._persist_rounds()
         raise RuntimeError(
             f"本轮已连续工作 {self.max_turns} 步仍未给出最终回答（Round 保持开放，"
-            f"\\继续 可直接接着干）"
+            f"\\c 可直接接着干）"
         )
 
     def _invoke_tool(self, name: str, arguments: str) -> str:

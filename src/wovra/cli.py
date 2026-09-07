@@ -413,7 +413,7 @@ def _drain_status(agent: Agent) -> None:
 def _run_turn(agent: Agent, instruction: str | None) -> str:
     """执行一轮流式对话并负责全部展示。
 
-    instruction=None 表示 \继续：不注入新的用户消息，直接续上开放轮。
+    instruction=None 表示 \c：不注入新的用户消息，直接续上开放轮。
 
     行纪律（解决"思考与回答混在一起、事件行粘连"的问题）：
     * line_open 记录当前终端行是否被流式输出占着——任何事件行
@@ -543,7 +543,7 @@ def _run_turn(agent: Agent, instruction: str | None) -> str:
         agent.finalize_round("open")
         _break_line()
         print(ui.error(str(error)))
-        print(ui.info("本轮保持开放：\\继续（或 /继续）直接接着干，或发新消息补充信息。"))
+        print(ui.info("本轮保持开放：\\c 直接接着干，或发新消息补充信息。"))
         _drain_status(agent)
         print(ui.usage_line(agent.last_stats, maint=agent.last_maint,
                             context=agent.last_context_estimate,
@@ -627,7 +627,8 @@ def cmd_report(args: argparse.Namespace) -> None:
 
 _LOCAL_HELP = """\
 本地命令（\\ 或 / 前缀，纯本地执行：零模型成本、不用等轮次结束）：
-  c / continue / 继续  续上开放轮（步数用尽/中断后接着干，不注入新消息）
+  c / continue       续上开放轮（步数用尽/中断后接着干，不注入新消息）
+  （只输 \ 或 / 也可以：直接显示这份命令列表）
   bg                  后台进程列表
   bg <任务id>          查看某后台进程的增量输出
   bg stop <任务id>     强制停止后台进程
@@ -686,7 +687,7 @@ def _chat_help() -> None:
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
-    print(f"  {ui.paint('bg / undo / 继续', 'bold')}  本地命令（\\help 看全部；零模型成本）")
+    print(f"  {ui.paint('bg / undo / c', 'bold')}  本地命令（\\help 看全部；零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
     print(ui.rule())
@@ -736,7 +737,11 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 continue
             if user_input[:1] in ("\\", "/"):
                 body = user_input[1:].strip().lower()
-                if body in ("c", "continue", "继续"):
+                if body == "":
+                    # 裸前缀：不猜意图，直接给完整命令列表
+                    print(_LOCAL_HELP)
+                    continue
+                if body in ("c", "continue"):
                     # \继续：步数超限/中断后的标准恢复方式——没有新信息
                     # 就不该造一条"继续"用户消息，本地直接续上开放轮
                     has_open = agent.rounds and agent.rounds[-1].get(
@@ -750,7 +755,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
                     except KeyboardInterrupt:
                         # 与正常轮一致：中断保持开放，回到输入行
                         print(
-                            ui.info("本轮已中断，进度已保存（轮未闭合）。\\继续 可接着干。")
+                            ui.info("本轮已中断，进度已保存（轮未闭合）。\\c 可接着干。")
                         )
                         continue
                     if answer:

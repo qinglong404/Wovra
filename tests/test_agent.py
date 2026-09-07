@@ -746,7 +746,7 @@ def test_tier_degradation_under_budget(monkeypatch):
 
 
 def test_resume_continues_open_round_without_new_user_message(monkeypatch, tmp_path):
-    """\\继续 = resume()：不注入新用户消息，直接续上开放轮干到闭合。"""
+    """\\c = resume()：不注入新用户消息，直接续上开放轮干到闭合。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     responses = [
         [_chunk(_delta(content="干完了"))],
