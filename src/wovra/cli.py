@@ -28,7 +28,6 @@ import shutil
 import sys
 import threading
 import time
-from types import SimpleNamespace
 
 from . import task as task_module
 from . import tools as tools_module
@@ -37,7 +36,6 @@ from .agent import (
     MODE_BASELINE,
     MODE_MANAGED,
     Agent,
-    _org_enabled,
     ask_user,
     check_background,
     edit_file,
@@ -193,8 +191,8 @@ def _read_input() -> str:
         from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.patch_stdout import patch_stdout
 
-        # patch_stdout：唤醒线程的输出（自动接手横幅/回合内容）在用户
-        # 半行输入的下方干净重绘，不打碎输入行
+        # patch_stdout：任何系统侧打印（后台任务收尾提示等）都在
+        # 用户半行输入的下方干净重绘，不打碎输入行
         with patch_stdout():
             return prompt(HTML("<ansibrightcyan><b>你&gt; </b></ansibrightcyan>"))
     except KeyboardInterrupt:
@@ -245,24 +243,6 @@ def _system_prompt(mode: str) -> str:
         "做法，不要重试原命令；耗时长的安装或服务器进程用 run_background "
         "后台执行，check_background 查看输出。"
     )
-    # 组织层引导：与组织工具同生同灭（WOVRA_SOLO=1 时整层不存在）——
-    # 实验对照的控制变量必须由运行时持有，不能靠提示词恳求
-    solo = os.environ.get("WOVRA_SOLO", "").strip().lower() in ("1", "true", "yes")
-    org = (
-        ""
-        if solo
-        else (
-            "大型多块任务（如\"复刻一个游戏/应用\"这类含多个独立部分、预计"
-            "几十步以上的工作）不要自己逐步实现——作为主 agent 用 spawn_subtask "
-            "把任务拆成职责块（写清 ownership 文件边界），dispatch_subtask 派发"
-            "到后台进程（非阻塞、立即返回）。派发后不要等待：可继续派发其他块"
-            "或结束回合向用户汇报；每轮上下文里的[子任务派发板]显示各块进展，"
-            "check_subtask 查看账本，merge_subtask 清算（未完成不要清算）。"
-            "子任务在后台无法提问——它会把需要人拍板的事写进决策升级"
-            "（escalations），看到升级就把选项转达用户，拍板结果用 "
-            "dispatch_subtask 的 instruction 带回。小任务直接做即可。"
-        )
-    )
     if mode == MODE_MANAGED:
         extra = (
             "上下文由 Runtime 分层管理：最近几轮全量保留，更早的轮次被"
@@ -274,7 +254,7 @@ def _system_prompt(mode: str) -> str:
             "上下文为全量回放，接近窗口上限时较早轮次会自动压缩成摘要"
             "（baseline 对照模式，行为与常见 Agent 一致）。"
         )
-    return f"{common}{org}{extra}{env}"
+    return f"{common}{extra}{env}"
 
 
 def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool = False) -> Agent:
@@ -485,9 +465,6 @@ def _run_turn(agent: Agent, instruction: str) -> str:
     def _start_tool_watch(name: str) -> None:
         nonlocal tool_watch_thread
         tool_watch_stop.clear()
-        # 子任务派发往往要跑几分钟：10 秒一格的秒表是刷屏噪音——
-        # 拉长到 30 秒一格，且只在真正静默（无任何进展行）时报时
-        step = 30 if name == "run_subtask" else 10
 
         def _tick() -> None:
             waited = 0
@@ -497,14 +474,7 @@ def _run_turn(agent: Agent, instruction: str) -> str:
                 if user_input_pending():
                     continue
                 waited += step
-                if name == "run_subtask":
-                    if time.monotonic() - last_progress_at[0] < step - 5:
-                        continue
-                    print(
-                        ui.wait_hint(f"子任务运行中（累计 {waited} 秒）…"), flush=True
-                    )
-                else:
-                    print(ui.wait_hint(f"{name} 已执行 {waited} 秒…"), flush=True)
+                print(ui.wait_hint(f"{name} 已执行 {waited} 秒…"), flush=True)
 
         tool_watch_thread = threading.Thread(target=_tick, daemon=True)
         tool_watch_thread.start()
@@ -638,7 +608,7 @@ def _child_summaries(parent_id: str) -> list[dict]:
 
 
 def cmd_report(args: argparse.Namespace) -> None:
-    """wovra report：人机协同报告（组织运行时 V1）。
+    """wovra report：人机协同报告（TaskState 机械渲染，零模型成本）。
 
     机械渲染 TaskState 与轮次——零模型成本，随时可看。大局默认，
     细节对主 agent 说"展开 R{k}-E{nn}"按事件 ID 剥开。
@@ -652,45 +622,10 @@ _LOCAL_HELP = """\
   bg                  后台进程列表
   bg <任务id>          查看某后台进程的增量输出
   bg stop <任务id>     强制停止后台进程
-  sub                 子任务列表
-  sub <任务id>         进入子任务页面（状态账本 + 里程碑线）
   undo                撤销最近一条开放轮（打错字/误发送的后悔药）
   help                本帮助
 任务 id 可只写末尾短串或 bg 编号（如 bg 1）。
 Ctrl+C：页面内 = 返回对话；输入行 = 退出会话。"""
-
-
-def _poll_finished_dispatches(task_id: str) -> list[tuple[str, str, int]]:
-    """扫描后台注册表：本会话派发的子任务中已退出且未上报的。
-
-    返回 [(bg_id, 子任务id, exit_code)]。不消费——调用方处理时写
-    entry["notified"]，同一退出只上报一次。
-    """
-    out: list[tuple[str, str, int]] = []
-    for bg_id, entry in tools_module._BACKGROUND_TASKS.items():
-        label = entry.get("label") or ""
-        if not label.startswith("子任务 "):
-            continue
-        if entry.get("session") != task_id or entry.get("notified"):
-            continue
-        code = entry["proc"].poll()
-        if code is not None:
-            out.append((bg_id, label[len("子任务 "):], code))
-    return out
-
-
-def _consume_dispatch(bg_id: str) -> None:
-    entry = tools_module._BACKGROUND_TASKS.get(bg_id)
-    if entry is not None:
-        entry["notified"] = True
-
-
-def _fmt_exit_code(code: int) -> str:
-    if code == 3221225786:  # 0xC000013A STATUS_CONTROL_C_EXIT
-        return "0xC000013A（被 Ctrl+C 终止）"
-    if code < 0:
-        return f"信号 {-code}"
-    return str(code)
 
 
 def _local_command(command: str, task: Task, agent=None) -> None:
@@ -718,31 +653,6 @@ def _local_command(command: str, task: Task, agent=None) -> None:
                 print(check_background(args_[0]))
             else:
                 print(list_background())
-        elif cmd in ("sub", "subs", "子任务"):
-            children = _child_summaries(task.id)
-            if len(parts) == 1:
-                if not children:
-                    print("（无子任务）")
-                    return
-                for c in children:
-                    print(f"- {c['id']}（{c['status']}）：{c['goal']}")
-                print(ui.info("用 sub <任务id> 进入某个子任务的页面"))
-                return
-            target = parts[1]
-            child = next(
-                (c for c in children if c["id"] == target or c["id"].endswith(target)),
-                None,
-            )
-            if child is None:
-                print(f"找不到子任务 {target}（sub 查看列表）")
-                return
-            full = Task.load(child["id"])
-            print(ui.report_view(full, _child_summaries(child["id"])))
-            try:
-                input("（回车返回对话）")
-            except (KeyboardInterrupt, EOFError, OSError):
-                # Ctrl+C / 管道环境无 stdin：都视为"返回对话"
-                print()
         elif cmd in ("undo", "撤销"):
             if agent is None or not agent.rounds:
                 print("（没有可撤销的轮次）")
@@ -762,59 +672,12 @@ def _local_command(command: str, task: Task, agent=None) -> None:
         print()
 
 
-def _auto_wake_once(agent, task: Task, wake_state) -> bool:
-    """子任务结束 → 主 agent 自动接手一次（事件唤醒的核心）。
-
-    独立唤醒线程反复调用本函数：派发的子进程一退出，就驱动主 agent
-    接手（父驱动循环的心跳）——不依赖用户输入。连续 3 次自动接手后
-    暂停（防"派发即崩"循环烧钱），用户输入重置计数。返回是否触发。
-    """
-    if wake_state.turn_active or wake_state.auto_wake >= 3:
-        return False
-    finished = _poll_finished_dispatches(task.id)
-    if not finished:
-        return False
-    with wake_state.lock:
-        if wake_state.turn_active:
-            return False
-        wake_state.turn_active = True
-    try:
-        for bg_id, *_ in finished:
-            _consume_dispatch(bg_id)
-        note = "；".join(
-            f"{bg} → {cid[-6:]}（{_fmt_exit_code(code)}）"
-            for bg, cid, code in finished
-        )
-        print(ui.info(f"检测到子任务结束：{note}——主 agent 自动接手。"))
-        try:
-            answer = _run_turn(agent, (
-                "（系统通知，非用户发言）后台子任务已结束："
-                f"{note}。请查看[子任务派发板]与各子任务账本："
-                "未完成的用 dispatch_subtask 派发下一轮（已完成的部分"
-                "不要重做），完成的 merge_subtask 清算，有决策升级"
-                "（escalations）的把选项转达用户拍板，然后简要汇报。"
-            ))
-        except KeyboardInterrupt:
-            print(ui.info("自动接手已中断。"))
-        except Exception as error:  # noqa: BLE001——自动接手失败不拖垮会话
-            print(ui.error(f"自动接手失败：{error!r}"))
-        else:
-            if answer:
-                print()
-        wake_state.auto_wake += 1
-        if wake_state.auto_wake == 3:
-            print(ui.info("已连续自动接手 3 次，暂停自动唤醒——输入任意消息恢复。"))
-        return True
-    finally:
-        wake_state.turn_active = False
-
-
 def _chat_help() -> None:
     """chat 模式内的帮助。"""
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
-    print(f"  {ui.paint('bg / sub / undo', 'bold')}  本地命令（\\help 看全部；零模型成本）")
+    print(f"  {ui.paint('bg / undo', 'bold')}  本地命令（\\help 看全部；零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
     print(ui.rule())
@@ -842,14 +705,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
         print(ui.rule("Wovra 会话"))
         print(f"{ui.paint('任务', 'bold')}  {task.id}")
         print(f"{ui.paint('模式', 'bold')}  {mode}")
-        # 组织层状态当场自报——环境变量这类"看不见的开关"必须可见，
-        # 否则实验对照的口径只能靠猜（实测教训：set 了但进程没收到）
-        org_on = _org_enabled()
-        print(
-            f"{ui.paint('组织', 'bold')}  "
-            + ("启用（主 agent 可拆分子任务）" if org_on else "禁用（WOVRA_SOLO 单机对照）")
-        )
-        task.record("session", f"启动（mode={mode}，组织层={'启用' if org_on else '禁用'}）")
+        task.record("session", f"启动（mode={mode}）")
         task.save()
         print(f"{ui.paint('目标', 'bold')}  {task.goal or '（未定，将随对话成形）'}")
         print(f"{ui.paint('状态', 'bold')}  {ui.status(task.status)}")
@@ -857,22 +713,6 @@ def cmd_chat(args: argparse.Namespace) -> None:
 
         _replay_history(task)
         print(ui.info("输入指令开始对话；\\help 看本地命令，help 查看帮助，exit 退出。\n"))
-
-        # 事件唤醒线程：子任务进程退出 → 立即驱动主 agent 接手（独立
-        # 线程，不依赖用户输入——wake-on-event，不是 wake-on-iteration）
-        wake_state = SimpleNamespace(
-            auto_wake=0, turn_active=False,
-            lock=threading.RLock(), stop=threading.Event(),
-        )
-
-        def _watch_dispatches() -> None:
-            while not wake_state.stop.wait(2.0):
-                try:
-                    _auto_wake_once(agent, task, wake_state)
-                except Exception:  # noqa: BLE001——唤醒线程绝不带垮会话
-                    continue
-
-        threading.Thread(target=_watch_dispatches, name="wovra-wake", daemon=True).start()
 
         while True:
             try:
@@ -883,7 +723,6 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
                 print(f"\n{ui.success(f'会话已保存。下次继续: {_resume_command(task)}')}")
                 break
-            wake_state.auto_wake = 0  # 用户真实输入：重置自动接手计数
             if not user_input:
                 continue
             if user_input[:1] in ("\\", "/"):
@@ -897,8 +736,6 @@ def cmd_chat(args: argparse.Namespace) -> None:
                 _chat_help()
                 continue
 
-            with wake_state.lock:
-                wake_state.turn_active = True
             try:
                 answer = _run_turn(agent, user_input)
             except KeyboardInterrupt:
@@ -908,12 +745,9 @@ def cmd_chat(args: argparse.Namespace) -> None:
                     f"\n{ui.info('本轮已中断，进度已保存（轮未闭合）。继续输入可接着干，再次 Ctrl+C 退出。')}"
                 )
                 continue
-            finally:
-                wake_state.turn_active = False
             if answer:
                 print()
 
-        wake_state.stop.set()  # 停掉事件唤醒线程
         # 退出前等待后台整理收尾（最多 10 秒）；没赶上的轮次留在
         # 整理水位里，下次触发时批量整理（V3 水位机制，不逐轮补跑）
         if not agent.flush_organization(timeout=10.0):

@@ -245,9 +245,10 @@ Level 2   多个 agent，各自 context             （必要时才做）
 * **V3 机制基线全部保留**：每个 agent（包括主 agent）内部都是完整的
   V3——Round/Event、零截断、水位、批量整理、TaskState、expand、
   文件地图、后台治理。本层不重新发明任何上下文管理。
-* **V1.2 冻结不变，删除安全**：新方案 Level 2 复用的是后台进程**基建**
-  （run_background/taskkill/日志），不是 spawn/dispatch 那套模型驱动
-  机制——运行时发起的拆分与模型发起的 spawn 是两回事。
+* **V1.2 代码已删除（2026-09-07）**：四工具/派发板/唤醒线程/SOLO
+  开关全部移出 src/，文档保留为失败对照。新方案 Level 2 复用的是
+  后台进程**基建**（run_background/taskkill/日志），不是 spawn/dispatch
+  那套模型驱动机制——运行时发起的拆分与模型发起的 spawn 是两回事。
 * **编制制蓝本**（`organization-runtime-v1.md` §13）不与本方案冲突：
   若注册表长出跨任务复用（"下次相关任务让更专注的人去做"），编制制是
   它的远期形态——那是另一天的决定，现在不动。

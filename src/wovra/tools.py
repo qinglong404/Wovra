@@ -774,7 +774,6 @@ def _launch_background(command, label: str, keep_alive: bool,
     task_id = f"bg-{next(_BACKGROUND_SEQ)}"
     log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
     env = dict(os.environ, PYTHONUTF8="1")
-    env.pop("WOVRA_SOLO", None)  # 实验对照开关只作用于启动它的那一层
     with open(log_path, "wb") as log_file:
         proc = subprocess.Popen(
             command,
