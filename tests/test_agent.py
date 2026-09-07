@@ -263,6 +263,29 @@ def test_run_always_uses_streaming():
     assert agent.llm.calls[0]["stream"] is True
 
 
+def test_close_round_computes_blocks(monkeypatch, tmp_path):
+    """轮闭合时零 LLM 计算 Block 结构并随轮次落盘（机制一挂钩）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    responses = [
+        [_chunk(_delta(tool_calls=[_fragment(0, id="c1", name="edit_file",
+                                             arguments=json.dumps({"path": "app.py",
+                                                                   "old_text": "a",
+                                                                   "new_text": "b"}))]))],
+        [_chunk(_delta(content="修好了"))],
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)  # 默认水位，不触发整理
+
+    agent.run("修一下")
+
+    bs = task.rounds[-1]["blocks"]
+    assert len(bs) == 1
+    assert bs[0]["wrote_files"] == ["app.py"]
+    assert bs[0]["kind"] == "work"
+    assert "_idx" not in bs[0]
+    assert len(agent.llm.calls) == 2  # 干活本身 2 次（工具轮+回答轮）；分块零 LLM 不增加
+
+
 # ---- 任务绑定 ------------------------------------------------------------
 
 

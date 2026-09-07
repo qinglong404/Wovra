@@ -82,6 +82,9 @@ V1 实测四大成本（`org-experiment-minecraft.md` §5），新方案各有�
 * 收益：整理输入结构化（LLM 不再从几百个原始事件里自己找结构）、
   文件地图增强、expand 导航、回放分析——**即使组织层永不建成，
   这些也是纯 V3 收益**。
+* （2026-09-07 落地：`src/wovra/blocks.py`——`tag_command` 六类标签 +
+  `segment_round` 纯函数切块，轮闭合时随轮次落盘；`scripts/render_blocks.py`
+  对历史 task.json 离线补算检查，不迁移不修改。）
 
 ### 机制二：低频语义标注（LLM，随水位整理批量做）
 

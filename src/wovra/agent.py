@@ -31,6 +31,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
+from . import blocks as blocks_module
 from . import task as task_module
 from . import tokens
 from . import tools as tools_module
@@ -356,6 +357,9 @@ class Agent:
         if self.current_round is None:
             return
         self.current_round["end_state"] = "completed"
+        # Block 结构化（机制一，零 LLM）：以写/改为截止的确定性分块，
+        # 随轮次落盘——整理输入、文件地图、追溯导航都吃这份结构
+        self.current_round["blocks"] = blocks_module.segment_round(self.current_round)
         self.current_round = None
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:

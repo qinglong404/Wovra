@@ -1,0 +1,202 @@
+"""Block 结构化的离线测试：纯函数、零 LLM、全确定性。"""
+
+import json
+
+from wovra import blocks
+
+
+def _event(seq: int, n: int, etype: str, tool: str = "", args: dict | None = None,
+           content: str = "", tool_calls: list | None = None) -> dict:
+    """构造一个最小事件：tool_call 支持 多调用（tool_calls 直传）。"""
+    if etype == "tool_call":
+        if tool_calls is None:
+            tool_calls = [{
+                "id": f"c{n}", "type": "function",
+                "function": {"name": tool, "arguments": json.dumps(args or {})},
+            }]
+        message = {"role": "assistant", "content": "", "tool_calls": tool_calls}
+    elif etype == "tool_result":
+        message = {"role": "tool", "tool_call_id": f"c{n - 1}", "content": content}
+    else:
+        message = {"role": "user" if etype == "user" else "assistant",
+                   "content": content}
+    return {"id": f"R{seq}-E{n:02d}", "type": etype, "message": message,
+            "truncated": "", "status": ""}
+
+
+def _round(seq: int, events: list) -> dict:
+    return {"seq": seq, "events": events, "end_state": "completed",
+            "user_input": {"original": "", "normalized": ""}, "refined_index": {}}
+
+
+# ---- 命令标签 ----------------------------------------------------------------
+
+
+def test_tag_command_six_categories():
+    """六类标签各就各位；安装类优先于测试（pip install pytest 是环境）。"""
+    cases = {
+        "pytest -q tests/": "test",
+        "python -m pytest -q": "test",
+        "python -m unittest discover": "test",
+        "npm test": "test",
+        "npm run build": "build",
+        "gcc main.c -o main": "build",
+        "python -m py_compile app.py": "build",
+        "pip install numpy": "environment",
+        "pip install pytest": "environment",  # 安装优先，不是 test
+        "uv add rich": "environment",
+        "npm install": "environment",
+        "python -m venv .venv": "environment",
+        "apt-get install curl": "environment",
+        "export WOVRA_SOLO=1": "environment",
+        "uvicorn app:app --port 8000": "environment",
+        "python -m http.server 8000": "environment",
+        "mkdir -p src/utils": "file",
+        "cp a.txt b.txt": "file",
+        "grep -rn TODO src/": "file",
+        "python main.py": "run",
+        "node server.js": "run",
+        "./scripts/run.sh": "run",
+        "bash setup.sh": "run",
+        "git status": "other",
+        "curl https://example.com": "other",
+        "echo hello": "other",
+    }
+    for command, expected in cases.items():
+        assert blocks.tag_command(command) == expected, command
+
+
+# ---- 切块规则 ----------------------------------------------------------------
+
+
+def test_write_is_block_cutoff():
+    """规格样例：读+写 icp 一块；读 ui+写 app 一块；环境自成一块；
+    测试与最终回答一块——写/改文件是块的截止。"""
+    r = _round(17, [
+        _event(17, 1, "user", content="调整 ICP 和 UI"),
+        _event(17, 2, "tool_call", tool="read_file", args={"path": "icp.py"}),
+        _event(17, 3, "tool_result", content="..."),
+        _event(17, 4, "tool_call", tool="write_file", args={"path": "icp.py"}),
+        _event(17, 5, "tool_result", content="ok"),
+        _event(17, 6, "tool_call", tool="read_file", args={"path": "ui.py"}),
+        _event(17, 7, "tool_result", content="..."),
+        _event(17, 8, "tool_call", tool="edit_file",
+               args={"path": "app.py", "old_text": "a", "new_text": "b"}),
+        _event(17, 9, "tool_result", content="ok"),
+        _event(17, 10, "tool_call", tool="run_command",
+               args={"command": "pip install numpy"}),
+        _event(17, 11, "tool_result", content="installed"),
+        _event(17, 12, "tool_call", tool="run_command",
+               args={"command": "pytest -q"}),
+        _event(17, 13, "tool_result", content="1 passed"),
+        _event(17, 14, "final_answer", content="完成了"),
+    ])
+    bs = blocks.segment_round(r)
+
+    assert [b["id"] for b in bs] == ["R17-B1", "R17-B2", "R17-B3", "R17-B4"]
+    # B1：读+写 icp.py，截止于写
+    assert bs[0]["start_event"] == "R17-E01" and bs[0]["end_event"] == "R17-E05"
+    assert bs[0]["wrote_files"] == ["icp.py"]
+    assert bs[0]["touched_files"] == ["icp.py"]
+    # B2：读 ui + 改 app（规格样例里它们同块，截止于改）
+    assert bs[1]["wrote_files"] == ["app.py"]
+    assert bs[1]["touched_files"] == ["ui.py", "app.py"]
+    # B3：环境块自成一块
+    assert bs[2]["kind"] == "environment"
+    assert bs[2]["command_types"] == ["environment"]
+    assert bs[2]["start_event"] == "R17-E10" and bs[2]["end_event"] == "R17-E11"
+    # B4：测试 + 最终回答跟随同一工作块
+    assert bs[3]["command_types"] == ["test"]
+    assert bs[3]["end_event"] == "R17-E14"
+    # 可持久化：无私有字段，能直接 json 落盘
+    assert json.dumps(bs, ensure_ascii=False)
+
+
+def test_round_without_writes_is_single_block():
+    """全轮没有写/改 → 整轮一块（总结成一段话是整理的事）。"""
+    r = _round(3, [
+        _event(3, 1, "user", content="解释一下"),
+        _event(3, 2, "tool_call", tool="read_file", args={"path": "a.py"}),
+        _event(3, 3, "tool_result", content="..."),
+        _event(3, 4, "final_answer", content="解释如下"),
+    ])
+    bs = blocks.segment_round(r)
+    assert len(bs) == 1
+    assert bs[0]["start_event"] == "R3-E01" and bs[0]["end_event"] == "R3-E04"
+    assert bs[0]["wrote_files"] == []
+
+
+def test_merged_user_inputs_start_new_blocks():
+    """合并轮（中断续传）里第二条用户输入开新块：新输入 = 新工作脉络。"""
+    r = _round(5, [
+        _event(5, 1, "user", content="先做 A"),
+        _event(5, 2, "tool_call", tool="write_file", args={"path": "a.py"}),
+        _event(5, 3, "tool_result", content="ok"),
+        _event(5, 4, "user", content="再做 B"),
+        _event(5, 5, "tool_call", tool="write_file", args={"path": "b.py"}),
+        _event(5, 6, "tool_result", content="ok"),
+    ])
+    bs = blocks.segment_round(r)
+    assert len(bs) == 2
+    assert bs[0]["wrote_files"] == ["a.py"]
+    assert bs[1]["wrote_files"] == ["b.py"]
+    assert bs[1]["start_event"] == "R5-E04"
+
+
+def test_environment_commands_group_and_isolate():
+    """环境命令自成环境块且连续合并；用户开口与后续工作各自成块。"""
+    r = _round(9, [
+        _event(9, 1, "user", content="搭环境跑测试"),
+        _event(9, 2, "tool_call", tool="run_command",
+               args={"command": "uv add rich"}),
+        _event(9, 3, "tool_result", content="ok"),
+        _event(9, 4, "tool_call", tool="run_command",
+               args={"command": "export WOVRA_CACHE_RATE=30"}),
+        _event(9, 5, "tool_result", content="ok"),
+        _event(9, 6, "tool_call", tool="run_command",
+               args={"command": "pytest -q"}),
+        _event(9, 7, "tool_result", content="ok"),
+    ])
+    bs = blocks.segment_round(r)
+    assert len(bs) == 3
+    # 用户的请求单独成块（环境是另一"性质"的工作，天然隔离）
+    assert bs[0]["kind"] == "work"
+    assert bs[0]["start_event"] == "R9-E01" and bs[0]["end_event"] == "R9-E01"
+    # 连续两条环境命令合一个环境块
+    assert bs[1]["kind"] == "environment"
+    assert bs[1]["command_types"] == ["environment"]
+    assert bs[1]["start_event"] == "R9-E02" and bs[1]["end_event"] == "R9-E05"
+    # 环境块之后接工作事件必开新块
+    assert bs[2]["kind"] == "work"
+    assert bs[2]["command_types"] == ["test"]
+    assert bs[2]["start_event"] == "R9-E06"
+
+
+def test_empty_round_yields_no_blocks():
+    """没有事件的轮不产生块（防御：不入 blocks 键也不报错）。"""
+    assert blocks.segment_round(_round(1, [])) == []
+
+
+# ---- 渲染 --------------------------------------------------------------------
+
+
+def test_render_round_shows_commands_and_writes():
+    """人读视图：块行带事件区间/文件/标签，命令原文缩进可核对。
+
+    切块语义顺带验证：改文件截止 → 测试命令另起一块。
+    """
+    r = _round(2, [
+        _event(2, 1, "user", content="修一下"),
+        _event(2, 2, "tool_call", tool="edit_file",
+               args={"path": "app.py", "old_text": "a", "new_text": "b"}),
+        _event(2, 3, "tool_result", content="ok"),
+        _event(2, 4, "tool_call", tool="run_command",
+               args={"command": "pytest -q tests/"}),
+        _event(2, 5, "tool_result", content="1 passed"),
+    ])
+    out = blocks.render_round(r)
+    assert "R2 · 5 事件 · 2 块" in out
+    assert "写: app.py" in out
+    assert "[test]" in out
+    assert "▸ [test] pytest -q tests/" in out
+    assert "✎ edit_file(app.py)" in out
