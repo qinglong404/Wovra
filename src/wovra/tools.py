@@ -27,16 +27,11 @@ from pathlib import Path
 # 项目根目录（工作区）：所有文件与命令都限定在这里。
 # 解析顺序：
 #   1. 环境变量 WOVRA_WORKSPACE（显式指定，脚本/自动化用）
-#   2. 启动目录（Claude Code 惯例：在哪启动，工作区就在哪；
-#      在 Wovra 仓库内启动时自动回退到仓库根，避免子目录 Surprise）
-#   3. Wovra 仓库根目录（兜底）
+#   2. 启动目录——在哪启动，工作区就在哪（2026-09-07 用户拍板：
+#      曾有"仓库子目录自动回退仓库根"的反 Surprise 规则，实测与
+#      使用直觉冲突——从 web/ 启动就该以 web/ 为工作区，删除）
 # 注意：会话会绑定其工作区（见 task.py）——恢复旧会话时以会话记录为准。
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_cwd = Path.cwd().resolve()
-if _cwd == _REPO_ROOT or _REPO_ROOT in _cwd.parents:
-    PROJECT_ROOT = _REPO_ROOT
-else:
-    PROJECT_ROOT = _cwd
+PROJECT_ROOT = Path.cwd().resolve()
 _env_ws = os.environ.get("WOVRA_WORKSPACE")
 if _env_ws:
     PROJECT_ROOT = Path(_env_ws).resolve()
