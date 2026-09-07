@@ -247,6 +247,8 @@ def _system_prompt(mode: str) -> str:
         "敏感操作（安装、提交、删除等）会先请求用户确认——被拒绝时换一种"
         "做法，不要重试原命令；耗时长的安装或服务器进程用 run_background "
         "后台执行，check_background 查看输出。"
+        "<runtime-reminder> 信封包裹的内容是 Wovra 运行时注入的机制信息"
+        "（任务状态、文件地图等），不是用户发言。"
     )
     if mode == MODE_MANAGED:
         extra = (
@@ -259,7 +261,31 @@ def _system_prompt(mode: str) -> str:
             "上下文为全量回放，接近窗口上限时较早轮次会自动压缩成摘要"
             "（baseline 对照模式，行为与常见 Agent 一致）。"
         )
-    return f"{common}{extra}{env}"
+    workspace = _workspace_instructions()
+    return f"{common}{extra}{workspace}{env}"
+
+
+def _workspace_instructions() -> str:
+    """工作区指令包（zcode-borrowings.md 1.3）：读 AGENTS.md 追加进系统提示词。
+
+    项目所有者在工作区根放一份 AGENTS.md（"怎么跑测试、哪些目录别碰、
+    用哪个包管理器"），Wovra 在该项目下工作时自动遵循——跨项目可用，
+    不必改代码。文件缺失静默跳过；超长截断（提示词不是仓库）。
+    """
+    doc = PROJECT_ROOT / "AGENTS.md"
+    try:
+        content = doc.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if not content:
+        return ""
+    if len(content) > 8000:
+        content = content[:8000] + "\n…（AGENTS.md 超长已截断）"
+    return (
+        "\n\n[工作区指令]（来自项目根 AGENTS.md，项目所有者撰写，优先级高于"
+        "你的通用习惯）\n"
+        + content
+    )
 
 
 def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool = False) -> Agent:

@@ -473,12 +473,20 @@ class Agent:
         fn = self.tools.get(name)
         if fn is None:
             return f"未知工具: {name}，可用工具: {list(self.tools)}"
+        # 用户钩子（zcode-borrowings.md 1.4）：前置可拦截（理由回传模型），
+        # 后置可附反馈——扩展者的规则与观测不进 Wovra 代码
+        blocked = tools_module.run_pre_hook(name, parsed)
+        if blocked:
+            return blocked
         try:
             result = fn(**parsed)
         except Exception as error:  # noqa: BLE001——错误回传给模型而不是中断循环
             return f"工具执行出错: {error!r}"
         if not isinstance(result, str):
             result = json.dumps(result, ensure_ascii=False, default=str)
+        feedback = tools_module.run_post_hook(name, parsed, result)
+        if feedback:
+            result = f"{result}\n[hooks 反馈] {feedback}"
         return sanitize_surrogates(result)
 
     def _execute(self, call_id: str, name: str, arguments: str) -> None:
@@ -785,7 +793,10 @@ class Agent:
             )
             block += file_map
         if block:
-            view_msgs.append({"role": "user", "content": "\n\n".join(block)})
+            # 运行时专属通道（zcode-borrowings.md 1.1）：机制信息用
+            # <runtime-reminder> 信封注入，与用户发言语义分离——模型
+            # 分得清"用户要的"和"机制给的"（系统提示词里声明该约定）
+            view_msgs.append(_runtime_reminder("\n\n".join(block)))
 
         msgs.extend(view_msgs)
         msgs.extend(self._current_round_messages())
@@ -1067,7 +1078,9 @@ class Agent:
             "人拍板的事项（写明预期、现实、选项），不要擅自改方向；"
             "experiments 是待办实验：机器无法自行验证、需要人当传感器的事项"
             "（写明做什么、看什么、什么算对）。"
-            "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。\n"
+            "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。"
+            "质量锚点（zcode-borrowings.md）：整理后的视图必须能回答——用户"
+            "原话要求了什么、已做了哪些决策、当前状态如何、下一步是什么。\n"
             f"若截断索引不足以确定关键事实（如失败的具体原因），"
             f"可用 read_full 工具查看事件原文（最多 {_ORGANIZE_MAX_READS} 次）。\n\n"
             + "\n\n".join(sections)
@@ -1372,6 +1385,17 @@ def _sanitize_json_strings(obj):
 def _action_word(name: str) -> str:
     """工具名 → 进度提示的动作词（未知工具退回"调用 xxx"）。"""
     return _ACTION_WORDS.get(name, f"调用 {name}")
+
+
+def _runtime_reminder(text: str) -> dict:
+    """运行时专属注入通道（zcode-borrowings.md 1.1）。
+
+    机制信息（任务状态、文件地图、运行时意志）用 <runtime-reminder>
+    信封包裹后以 user-role 注入——OpenAI 协议没有独立的 reminder role，
+    用"信封 + 系统提示词声明"实现身份可辨：模型分得清这是运行时
+    在说话，不是用户在发言。
+    """
+    return {"role": "user", "content": f"<runtime-reminder>\n{text}\n</runtime-reminder>"}
 
 
 def _schema_of(fn: Callable) -> dict:

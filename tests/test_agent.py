@@ -717,6 +717,24 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出结论"
 
 
+def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):
+    """运行时通道（1.1）：任务状态/文件地图以 <runtime-reminder> 信封注入，
+    与用户发言语义分离——模型分得清"机制给的"和"用户要的"。"""
+    task = Task.create(goal="分层回归")
+    task.rounds = [_round(1, "第一轮", "答案一")]
+    task.task_state["goal"] = "存档测试目标"
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    _make_open_round(agent, 2, "继续")
+
+    msgs = agent._assemble_messages()
+    bodies = [m.get("content", "") for m in msgs]
+
+    envelope = [b for b in bodies if b.startswith("<runtime-reminder>")]
+    assert envelope, "任务状态必须走运行时信封"
+    assert "存档测试目标" in envelope[0]
+    assert envelope[0].rstrip().endswith("</runtime-reminder>")
+
+
 def test_unorganized_rounds_stay_full_until_organized(monkeypatch):
     """前缀纪律：未整理轮次永远全量在上下文，无论轮数多少、体量多大——
     分辨率损失只允许来自整理，不来自装配（三档滑窗已废除）。"""

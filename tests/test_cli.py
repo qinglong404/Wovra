@@ -426,6 +426,25 @@ def test_answer_live_renders_once_on_capable_terminal(monkeypatch):
 # ---- 人机协同报告（组织运行时 V1） -------------------------------------------
 
 
+def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):
+    """工作区指令包（1.3）：AGENTS.md 追加进系统提示词，缺失则跳过。"""
+    (tmp_path / "AGENTS.md").write_text(
+        "测试用 uv run pytest；不要动 .wovra/ 目录", encoding="utf-8"
+    )
+    monkeypatch.setattr(cli_module, "PROJECT_ROOT", tmp_path)
+
+    prompt = cli_module._system_prompt("managed")
+
+    assert "[工作区指令]" in prompt
+    assert "uv run pytest" in prompt and "不要动 .wovra/" in prompt
+
+
+def test_workspace_instructions_absent_is_silent(monkeypatch, tmp_path):
+    monkeypatch.setattr(cli_module, "PROJECT_ROOT", tmp_path)
+    prompt = cli_module._system_prompt("managed")
+    assert "[工作区指令]" not in prompt
+
+
 def test_report_view_renders_four_columns(monkeypatch, tmp_path):
     """人视图：机械渲染四栏目 + 子任务列表，零模型成本。"""
     from wovra import ui

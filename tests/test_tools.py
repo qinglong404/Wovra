@@ -854,6 +854,76 @@ def test_list_files_annotates_size_and_mtime(monkeypatch, tmp_path):
     assert "（" in entry and "B" in entry
 
 
+def test_hooks_block_and_feedback(monkeypatch, tmp_path):
+    """用户钩子：pre 拦截（理由回传模型），post 附反馈——扩展点不进代码。"""
+    import json as _json
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    hooks = tmp_path / ".wovra" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre_tool.py").write_text(
+        "import json, sys\n"
+        "p = json.load(sys.stdin)\n"
+        "if p['tool'] == 'write_file' and p['arguments'].get('path', '').endswith('secret.txt'):\n"
+        "    print('secret.txt 属于禁写区')\n"
+        "    sys.exit(1)\n",
+        encoding="utf-8",
+    )
+    (hooks / "post_tool.py").write_text(
+        "import json, sys\n"
+        "p = json.load(sys.stdin)\n"
+        "if p['tool'] == 'write_file':\n"
+        "    print('已同步到审计索引')\n",
+        encoding="utf-8",
+    )
+
+    blocked = tools_module.run_pre_hook("write_file", {"path": "secret.txt"})
+    assert blocked is not None and "禁写区" in blocked
+    assert tools_module.run_pre_hook("write_file", {"path": "ok.txt"}) is None
+
+    feedback = tools_module.run_post_hook("write_file", {"path": "ok.txt"}, "已写入")
+    assert feedback == "已同步到审计索引"
+
+
+def test_hooks_silent_when_absent(monkeypatch, tmp_path):
+    """没有钩子文件：放行、无反馈——扩展机制缺席时不留痕迹。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    assert tools_module.run_pre_hook("write_file", {}) is None
+    assert tools_module.run_post_hook("write_file", {}, "结果") is None
+
+
+def test_invoke_tool_wires_hooks_end_to_end(monkeypatch, tmp_path):
+    """集成：_invoke_tool 走 钩子拦截/放行/反馈 全链路。"""
+    from wovra import tools as tools_module
+    from wovra.agent import Agent
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    hooks = tmp_path / ".wovra" / "hooks"
+    hooks.mkdir(parents=True)
+    (hooks / "pre_tool.py").write_text(
+        "import json, sys\n"
+        "p = json.load(sys.stdin)\n"
+        "if '禁词' in json.dumps(p, ensure_ascii=False):\n"
+        "    print('命中禁词')\n"
+        "    sys.exit(1)\n",
+        encoding="utf-8",
+    )
+
+    def write_file(path, content):
+        return f"已创建 {path}"
+
+    agent = Agent(llm=None, tools=[write_file])
+    blocked = agent._invoke_tool("write_file", json.dumps({"path": "x.txt", "content": "含禁词"}))
+    assert "被用户钩子拦截" in blocked and "命中禁词" in blocked
+    ok = agent._invoke_tool("write_file", json.dumps({"path": "y.txt", "content": "正常"}))
+    assert "已创建 y.txt" in ok
+
+
 def test_background_ownership_prevents_cross_session_management():
     """后台任务归属会话：跨会话查看/停止都被拒，并列出归属。"""
     from wovra import tools as tools_module

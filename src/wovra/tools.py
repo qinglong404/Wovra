@@ -18,6 +18,7 @@ import json
 import locale
 import os
 import re
+import sys
 import subprocess
 import tempfile
 import time
@@ -451,6 +452,72 @@ def list_background() -> str:
 
 
     return "\n".join(lines) + more
+
+
+# ---- 用户 Hooks（.wovra/hooks/：工具调用的前后拦截点） ----------------------
+# zcode-borrowings.md 1.4：扩展者对工具加规则的用户扩展点。约定：
+#   .wovra/hooks/pre_tool.py   每次工具调用前执行（stdin 收 JSON：
+#                              {"tool", "arguments"}）；exit 0 = 放行
+#                              （stdout 忽略），exit 非 0 = 拦截，stdout
+#                              作为拒绝理由回传给模型
+#   .wovra/hooks/post_tool.py  工具执行成功后执行（stdin 同上 + "result"）；
+#                              非空 stdout 作为 [hooks 反馈] 追加到结果
+# 钩子是用户自己的文件——审计、禁写区、公司策略都变成配置而非代码。
+# 钩子出错/超时静默跳过：扩展机制绝不能带垮工具本身。
+
+_HOOK_TIMEOUT = 10
+
+
+def _hook_script(name: str) -> Path | None:
+    script = PROJECT_ROOT / ".wovra" / "hooks" / name
+    return script if script.is_file() else None
+
+
+def _run_hook(script: Path, payload: dict) -> tuple[int, str] | None:
+    """执行一个钩子脚本，返回 (exit_code, stdout)；超时/异常返回 None。"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True, text=True, timeout=_HOOK_TIMEOUT,
+            cwd=PROJECT_ROOT,
+            env=dict(os.environ, PYTHONUTF8="1"),
+        )
+    except (subprocess.TimeoutExpired, OSError):
+        return None
+    return proc.returncode, proc.stdout or ""
+
+
+def run_pre_hook(tool: str, arguments: dict) -> str | None:
+    """工具调用前的用户钩子。返回拦截理由（阻塞执行），None = 放行。
+
+    约定：exit 0 = 放行；exit 非 0 = 拦截，stdout 首选作为拒绝理由
+    （空 stdout 用默认理由）。理由会回传给模型——它能看到原因并换方案。
+    """
+    script = _hook_script("pre_tool.py")
+    if script is None:
+        return None
+    hook = _run_hook(script, {"tool": tool, "arguments": arguments})
+    if hook is None:
+        return None
+    code, out = hook
+    if code == 0:
+        return None
+    reason = out.strip() or "（钩子未说明原因）"
+    _audit(f"[hooks 拦截] {tool}: {reason[:200]}")
+    return f"被用户钩子拦截：{reason}"
+
+
+def run_post_hook(tool: str, arguments: dict, result: str) -> str | None:
+    """工具执行成功后的用户钩子。返回非空反馈（追加到结果），None = 无。"""
+    script = _hook_script("post_tool.py")
+    if script is None:
+        return None
+    hook = _run_hook(script, {"tool": tool, "arguments": arguments, "result": result})
+    if hook is None:
+        return None
+    feedback = hook[1].strip()
+    return feedback[:1000] or None
 
 
 # ---- 敏感操作确认 -------------------------------------------------------------
