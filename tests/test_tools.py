@@ -16,11 +16,14 @@ from wovra.tools import (
     ask_user,
     user_input_pending,
     check_background,
+    delete_file,
     edit_file,
     glob_files,
     list_background,
     read_file,
+    move_file,
     replace_lines,
+    restore_file,
     run_background,
     run_command,
     stop_background,
@@ -704,6 +707,151 @@ def test_run_command_marks_truncated_output(monkeypatch, tmp_path):
     cmd = "type big.txt" if _os.name == "nt" else "cat big.txt"
     result = run_command(cmd)
     assert "输出超限已截断" in result and "3,000" in result
+
+
+def test_checkpoint_archives_and_restores_roundtrip(monkeypatch, tmp_path):
+    """checkpoint：覆盖/编辑自动归档旧版本，restore_file 列出并回滚。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "版本一")
+    write_file("app.py", "版本二")          # 覆盖前自动归档"版本一"
+
+    listing = restore_file("app.py")
+    assert "历史版本" in listing and "版本一" in listing
+
+    result = restore_file("app.py", "2026")
+    assert "已回滚" in result
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "版本一"
+    # 回滚前"版本二"也已归档：可再次回滚还原
+    again = restore_file("app.py", sorted(
+        (tmp_path / ".wovra" / "history" / "app.py").glob("*.bak")
+    )[-1].stem)
+    assert "已回滚" in again
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "版本二"
+
+
+def test_history_prunes_to_keep_limit(monkeypatch, tmp_path):
+    """每文件只保留最近 _HISTORY_KEEP 份，超出淘汰最旧。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    for i in range(13):
+        write_file("app.py", f"v{i}")
+    versions = sorted((tmp_path / ".wovra" / "history" / "app.py").glob("*.bak"))
+    assert len(versions) == tools_module._HISTORY_KEEP
+
+
+def test_write_file_shrink_guard_blocks_and_force_bypasses(monkeypatch, tmp_path):
+    """覆盖写缩水过半 → 防呆拦截；force=true 显式确认后放行。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("page.html", "甲" * 3000)
+    result = write_file("page.html", "薄壳")
+    assert "防呆拦截" in result and "force" in result
+    assert (tmp_path / "page.html").read_text(encoding="utf-8") == "甲" * 3000
+    result = write_file("page.html", "薄壳", force=True)
+    assert "已覆盖" in result
+
+
+def test_delete_file_confirms_archives_and_deletes(monkeypatch, tmp_path):
+    """删除走确认门：拒绝则保留；确认则归档后删除、可回滚。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "要被删的内容")
+    monkeypatch.setattr(tools_module, "_ask_yes_no", lambda q: False)
+    assert "用户拒绝" in delete_file("app.py")
+    assert (tmp_path / "app.py").exists()
+
+    monkeypatch.setattr(tools_module, "_ask_yes_no", lambda q: True)
+    result = delete_file("app.py")
+    assert "已删除" in result and "归档" in result
+    assert not (tmp_path / "app.py").exists()
+    restore = restore_file("app.py", sorted(
+        (tmp_path / ".wovra" / "history" / "app.py").glob("*.bak")
+    )[-1].stem)
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == "要被删的内容"
+
+
+def test_move_file_moves_and_refuses_overwrite(monkeypatch, tmp_path):
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("a.py", "内容")
+    write_file("b.py", "占位")
+    assert "目标已存在" in move_file("a.py", "b.py")
+    result = move_file("a.py", "sub/a.py")
+    assert "已移动" in result
+    assert (tmp_path / "sub" / "a.py").read_text(encoding="utf-8") == "内容"
+
+
+def test_edit_file_multi_match_lists_all_line_numbers(monkeypatch, tmp_path):
+    """多匹配报错列出全部行号：模型扩写上下文消歧不必盲猜。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "todo\n中间\ntodo\n尾部\ntodo")
+    with pytest.raises(ValueError) as excinfo:
+        edit_file("app.py", "todo", "done")
+    message = str(excinfo.value)
+    assert "第 1 行" in message and "第 3 行" in message and "第 5 行" in message
+
+
+def test_edit_file_success_shows_persistent_anchor(monkeypatch, tmp_path):
+    """成功回显持久锚点（最近的注释/函数行）——行号漂移后仍可定位。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    body = "// 配置区：以下为超时参数\nconst TIMEOUT = 30;\nconst RETRY = 3;\nconst BACKOFF = 5;"
+    write_file("app.js", body)
+    result = edit_file("app.js", "const BACKOFF = 5;", "const BACKOFF = 8;")
+    assert "↳ const RETRY = 3;" in result  # 编辑点上方最近的持久锚点
+
+
+def test_ask_user_letter_choices_and_multi(monkeypatch):
+    """ask_user 选项化：敲字母拍板、多选逗号分隔、自由文本仍可用。"""
+    import sys
+
+    from wovra import tools as tools_module
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+
+    answers = iter(["B", "A,C", "我就要 D 这个自定义方案"])
+    monkeypatch.setattr("builtins.input", lambda prompt="": next(answers))
+
+    out = tools_module.ask_user("选一个", "方案甲|方案乙|方案丙")
+    assert out == "用户的回答: 方案乙"
+    out = tools_module.ask_user("选几个", "方案甲|方案乙|方案丙", multi=True)
+    assert out == "用户的回答: 方案甲 | 方案丙"
+    out = tools_module.ask_user("选一个", "方案甲|方案乙|方案丙")
+    assert out == "用户的回答: 我就要 D 这个自定义方案"
+
+
+def test_search_files_context_lines(monkeypatch, tmp_path):
+    """search_files 的 context 参数：匹配行附带前后 N 行（单行内 ⏎ 连接）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "头部\n目标行\n尾部")
+    out = tools_module.search_files("目标", context=1)
+    assert "app.py:2:" in out
+    assert "头部" in out and "尾部" in out and "⏎" in out
+    out = tools_module.search_files("目标")
+    assert "头部" not in out.split("｜上下文")[0] or "｜上下文" not in out
+
+
+def test_list_files_annotates_size_and_mtime(monkeypatch, tmp_path):
+    """list_files 附带大小与修改时间（读段策略与新鲜度判断用）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "内容")
+    out = tools_module.list_files(".")
+    entry = next(e for e in out if e.startswith("app.py"))
+    assert "（" in entry and "B" in entry
 
 
 def test_background_ownership_prevents_cross_session_management():

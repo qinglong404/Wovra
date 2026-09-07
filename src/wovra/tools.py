@@ -20,6 +20,7 @@ import os
 import re
 import subprocess
 import tempfile
+import time
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -40,7 +41,7 @@ if _env_ws:
 # 搜索时跳过的噪声目录（依赖、缓存、运行时数据——搜索它们只有噪音）
 _IGNORED_DIRS = {
     ".git", ".venv", "__pycache__", ".pytest_cache",
-    "tasks", "output", "node_modules",
+    "tasks", "output", "node_modules", ".wovra",
 }
 
 # 变更类工具的失败标记：ui（红色显示）和 task 报告（"失败："前缀）
@@ -113,9 +114,24 @@ def _safe_path(relative: str) -> Path:
 
 
 def list_files(directory: str = ".") -> list[str]:
-    """列出项目内某个目录下的文件和子目录（不含递归）。"""
+    """列出项目内某个目录下的文件和子目录（不含递归）。
+
+    文件附带大小与修改时间——帮模型决定分段读取策略、判断内容新鲜度。
+    """
     path = _safe_path(directory)
-    return sorted(p.name + ("/" if p.is_dir() else "") for p in path.iterdir())
+    out = []
+    for p in sorted(path.iterdir()):
+        if p.is_dir():
+            out.append(p.name + "/")
+            continue
+        try:
+            st = p.stat()
+            size = f"{st.st_size / 1024:.1f}KB" if st.st_size >= 1024 else f"{st.st_size}B"
+            mtime = time.strftime("%m-%d %H:%M", time.localtime(st.st_mtime))
+            out.append(f"{p.name}（{size}, {mtime}）")
+        except OSError:
+            out.append(p.name)
+    return out
 
 
 def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
@@ -147,12 +163,15 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     return f"{header}\n{body}"
 
 
-def search_files(pattern: str, directory: str = ".", glob: str = "*") -> str:
+def search_files(pattern: str, directory: str = ".", glob: str = "*",
+                 context: int = 0) -> str:
     """在项目内用正则表达式搜索文本文件（类似 grep）。
 
     返回 `路径:行号: 行内容` 格式的匹配，最多 50 条；
     自动跳过 .git/.venv 等噪声目录。找"某个函数在哪定义"、
     "哪个文件用了某配置" 都靠它。
+    context：每个匹配额外附带前后 N 行上下文（类似 grep -C，单行内
+    以 ⏎ 连接）——判断匹配性质用；默认 0（省 token）。
     """
     try:
         regex = re.compile(pattern)
@@ -172,11 +191,20 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*") -> str:
             text = path.read_text(encoding="utf-8")
         except (UnicodeDecodeError, PermissionError):
             continue
-        for line_number, line in enumerate(text.splitlines(), start=1):
+        all_lines = text.splitlines()
+        for line_number, line in enumerate(all_lines, start=1):
             if regex.search(line):
                 # 统一用 / 分隔，输出跨平台一致（也便于回填给 read_file 等工具）
                 relative = path.relative_to(PROJECT_ROOT).as_posix()
-                matches.append(f"{relative}:{line_number}: {line.strip()[:200]}")
+                entry = f"{relative}:{line_number}: {line.strip()[:200]}"
+                if context > 0:
+                    lo = max(0, line_number - 1 - context)
+                    hi = min(len(all_lines), line_number + context)
+                    snippet = " ⏎ ".join(
+                        all_lines[i].strip()[:120] for i in range(lo, hi) if all_lines[i].strip()
+                    )
+                    entry += f"  ｜上下文: {snippet}"
+                matches.append(entry)
                 if len(matches) >= 50:
                     return "\n".join(matches) + "\n...(已达 50 条上限，请缩小搜索范围)"
     if not matches:
@@ -367,19 +395,26 @@ def web_search(query: str, max_results: int = 8) -> str:
             + "\n可稍后重试，或用 web_fetch 直接抓取已知网址。")
 
 
-def ask_user(question: str, choices: str = "") -> str:
+def ask_user(question: str, choices: str = "", multi: bool = False) -> str:
     """就需求或编码细节向用户提问，等待用户在终端输入答案。
 
-    choices 可选：用 | 分隔的候选项（如 "是|否|继续"）。非交互环境
-    （重定向/管道）自动降级：建议模型基于已有信息继续。
+    choices 可选：用 | 分隔的候选项（如 "是|否|继续"）——终端渲染成
+    字母选项（A/B/C），用户敲字母即可拍板；multi=True 允许多选
+    （逗号分隔字母，如 A,C）。选项外的自由文本回答始终允许。
+    非交互环境（重定向/管道）自动降级：建议模型基于已有信息继续。
     等待回答期间置 user_input_pending 标记（不计执行时长，同确认）。
     """
     import sys
 
     global _user_input_pending
+    options = [c.strip() for c in choices.split("|") if c.strip()] if choices else []
+    letters = "ABCDEFGH"
     prompt = f"\n[模型提问] {question}"
-    if choices:
-        prompt += f"\n可选: {choices}"
+    if options:
+        for i, opt in enumerate(options[:8]):
+            prompt += f"\n  {letters[i]}. {opt}"
+        prompt += "\n  （敲字母选择；也可直接输入自由回答"
+        prompt += "，多选用逗号分隔如 A,C）" if multi else "）"
     prompt += "\n你的回答> "
     if not sys.stdin.isatty():
         return "（非交互环境，无法获取用户输入。请基于已有信息继续，或在最终回答中说明假设。）"
@@ -390,6 +425,14 @@ def ask_user(question: str, choices: str = "") -> str:
         answer = ""
     finally:
         _user_input_pending = False
+    answer = (answer or "").strip()
+    if options and answer:
+        # 字母选择 → 展开为选项原文；无法解析为字母的输入按自由文本采纳
+        tokens = [t.strip().rstrip(".").upper() for t in answer.split(",")] if multi             else [answer.rstrip(".").upper()]
+        last = letters[len(options) - 1]
+        if all(len(t) == 1 and "A" <= t <= last for t in tokens):
+            picked = " | ".join(options[ord(t) - ord("A")] for t in tokens)
+            return f"用户的回答: {picked}"
     return f"用户的回答: {answer or '（空）'}"
 
 
@@ -507,16 +550,134 @@ def _stale_error(path: Path) -> str | None:
     return None
 
 
+# ---- 文件版本档案（checkpoint：无 git 环境的后悔药） ------------------------
+# 每次覆盖/编辑/按行替换之前，旧内容自动归档到 .wovra/history/<相对路径>/
+# （路径中的 / 替换为 __）。每文件保留最近 _HISTORY_KEEP 份，超出淘汰最旧；
+# restore_file 列出并回滚（回滚前当前内容也归档——回滚本身可再回滚）。
+
+_HISTORY_KEEP = 10
+
+
+def _history_slot(target: Path) -> Path:
+    """文件 → 它的版本档案目录（从 PROJECT_ROOT 现算，测试可重定向）。"""
+    rel = target.relative_to(PROJECT_ROOT).as_posix()
+    return PROJECT_ROOT / ".wovra" / "history" / rel.replace("/", "__")
+
+
+_VERSION_SEQ = itertools.count(1)
+
+
+def _archive_version(target: Path) -> str | None:
+    """把文件的当前内容归档为一份历史版本，返回版本时间戳（失败返回 None）。
+
+    时间戳 = 秒级时间 + 进程内递增序号：同秒内的多次归档也能保证
+    文件名字典序 = 时间序（版本列表按名排序即按时间排序的前提）。
+    """
+    try:
+        old = target.read_text(encoding="utf-8")
+    except (UnicodeDecodeError, OSError):
+        return None  # 非文本/不可读：无法归档，但也不阻止写操作
+    slot = _history_slot(target)
+    slot.mkdir(parents=True, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{next(_VERSION_SEQ):04d}"
+    (slot / f"{stamp}.bak").write_text(old, encoding="utf-8")
+    versions = sorted(slot.glob("*.bak"))
+    for stale in versions[:-_HISTORY_KEEP]:
+        stale.unlink(missing_ok=True)
+    return stamp
+
+
+def restore_file(path: str, version: str = "") -> str:
+    """列出或回滚文件的历史版本（checkpoint 后悔药）。
+
+    version 传空 → 列出该文件所有可用版本（时间戳 + 体量 + 首行）；
+    version 传时间戳前缀（如 20260907-14）→ 回滚到该版本。当前内容
+    会先归档——回滚本身可再回滚。文件被外部修改过会拒绝（防覆盖用户
+    的新改动）。
+    """
+    target = _safe_path(path)
+    stale = _stale_error(target)
+    if stale:
+        return stale
+    slot = _history_slot(target)
+    versions = sorted(slot.glob("*.bak")) if slot.exists() else []
+    if not versions:
+        return f"{path} 没有历史版本（版本归档自启用 checkpoint 起生效）"
+    if not version:
+        lines = [f"{path} 的历史版本（共 {len(versions)} 份，restore_file 传时间戳回滚）："]
+        for v in versions:
+            body = v.read_text(encoding="utf-8")
+            first = body.splitlines()[0][:60] if body.splitlines() else "(空)"
+            lines.append(f"  {v.stem}  {len(body):,} 字符  首行: {first}")
+        return "\n".join(lines)
+    matches = [v for v in versions if v.stem.startswith(version)]
+    if len(matches) != 1:
+        return (
+            f"版本前缀 {version!r} 匹配到 {len(matches)} 份（需要恰好 1 份）。"
+            f"可用版本：{', '.join(v.stem for v in versions)}"
+        )
+    if target.exists():
+        _archive_version(target)  # 当前内容先归档：回滚可撤销
+    target.write_text(matches[0].read_text(encoding="utf-8"), encoding="utf-8")
+    _observe_file(target)
+    _audit(f"[restore_file] {path} ← {matches[0].stem}")
+    return f"已回滚 {path} 到版本 {matches[0].stem}（回滚前的内容已归档，可再次回滚）"
+
+
+def delete_file(path: str) -> str:
+    """删除项目内的一个文件（删除前自动归档，restore_file 可回滚）。
+
+    删除是破坏性操作：交互环境 y/N 确认（默认拒绝），非交互环境放行
+    并留审计标记。只处理文件——空目录请用 run_command 的 rmdir。
+    """
+    target = _safe_path(path)
+    if not target.exists():
+        return f"文件不存在: {path}（解析为 {target}）"
+    if not target.is_file():
+        return f"{path} 是目录而非文件——目录删除请用 run_command（rmdir，仅限空目录）"
+    if not _ask_yes_no(f"确认删除文件 {path}？（删除前自动归档，可 restore_file 回滚）"):
+        _audit(f"[delete_file][用户拒绝] {path}")
+        return "用户拒绝了删除操作。请换一种做法或向用户说明原因。"
+    _archive_version(target)
+    target.unlink()
+    _file_registry.pop(target, None)
+    _audit(f"[delete_file] {path}")
+    return f"已删除 {path}（删除前内容已归档，restore_file 可回滚）"
+
+
+def move_file(path: str, new_path: str) -> str:
+    """移动/重命名项目内的文件（可逆操作，审计留痕，不覆盖目标）。
+
+    new_path 已存在时拒绝——move 永不静默覆盖。移动后文件观察注册表
+    同步更新，后续 edit_file/write_file 以新路径为准。
+    """
+    src = _safe_path(path)
+    dst = _safe_path(new_path)
+    if not src.exists():
+        return f"文件不存在: {path}（解析为 {src}）"
+    if dst.exists():
+        return f"目标已存在: {new_path}（解析为 {dst}）——move 不覆盖，先删除或换名"
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    src.rename(dst)
+    _file_registry.pop(src, None)
+    _observe_file(dst)
+    _audit(f"[move_file] {path} → {new_path}")
+    return f"已移动 {path} → {new_path}"
+
+
 # ---- 变更类工具（AUDITED_TOOLS，Agent 会做完整审计记录） --------------------
 
 
-def write_file(path: str, content: str) -> str:
+def write_file(path: str, content: str, force: bool = False) -> str:
     """创建或整体覆盖项目内的一个文本文件。
 
     覆盖是全量的——只改一部分请用 edit_file，它要求唯一定位，
-    误伤面小得多。覆盖时旧内容会通过审计挂钩完整留底，
-    出问题可以对照还原。若文件在你上次读取后被外部修改过，
+    误伤面小得多。覆盖时旧内容会完整归档（restore_file 可回滚）
+    并通过审计挂钩留底。若文件在你上次读取后被外部修改过，
     会拒绝执行并要求重新确认。
+    防呆：新内容比现有内容缩小过半（且现有内容 ≥1000 字符）时拦截，
+    确认是有意覆盖用 force=true 重试——失误的"整体薄壳化"在结果上
+    与有意重写一模一样，只有大小差异可查（实测教训）。
     """
     target = _safe_path(path)
     stale = _stale_error(target)
@@ -529,8 +690,19 @@ def write_file(path: str, content: str) -> str:
             old = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             old = "(非 UTF-8 内容，未留底)"
+    if (not force and old is not None and len(old) >= 1000
+            and len(content) < len(old) // 2):
+        pct = int((1 - len(content) / len(old)) * 100)
+        return (
+            f"⚠ 防呆拦截：新内容比现有内容缩小约 {pct}%"
+            f"（{len(old):,} → {len(content):,} 字符）。"
+            f"如果这是有意的覆盖（拆分文件、重写为薄壳），用 force=true 重新"
+            f"调用确认；如果只想改一部分，应该用 edit_file。"
+        )
     # 允许写到尚不存在的子目录（模型经常给出 "reports/xx.md" 这类路径）
     target.parent.mkdir(parents=True, exist_ok=True)
+    if existed:
+        _archive_version(target)  # 覆盖前归档旧内容：restore_file 可回滚
     target.write_text(content, encoding="utf-8")
     _observe_file(target)
     action = "覆盖" if existed else "创建"
@@ -618,20 +790,47 @@ def edit_file(path: str, old_text: str, new_text: str,
             )
         raise ValueError(message)
     if count > 1 and not replace_all:
+        positions, pos = [], text.find(old_text)
+        while pos != -1 and len(positions) < 10:
+            positions.append(text.count("\n", 0, pos) + 1)
+            pos = text.find(old_text, pos + 1)
+        where = ", ".join(f"第 {n} 行" for n in positions)
+        more = f"（另有 {count - len(positions)} 处未列出）" if count > len(positions) else ""
         raise ValueError(
-            f"{path} 中待替换文本出现 {count} 次。若意图是全部替换，"
-            f"加 replace_all=True；否则请补充前后文使其唯一定位"
+            f"{path} 中待替换文本出现 {count} 次：{where}{more}。"
+            f"扩大上下文消歧，或加 replace_all=True 全部替换"
         )
     line_no = text.count("\n", 0, text.find(old_text)) + 1
     n = count if replace_all else 1
     replaced = text.replace(old_text, new_text) if replace_all else text.replace(old_text, new_text, 1)
+    _archive_version(target)  # 编辑前归档：restore_file 可回滚
     target.write_text(replaced, encoding="utf-8")
     _observe_file(target)
     scope = f"全部 {n} 处" if replace_all else "唯一一处"
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
     _audit(f"[edit_file] {path}（替换{scope}）\n定位片段:\n{old_text}\n替换为:\n{new_text}")
+    anchor = _persistent_anchor(text, line_no)
     return (f"已修改 {path}（替换{scope}，{len(old_text)} 字符 → {len(new_text)} 字符，"
-            f"位于第 {line_no} 行附近）")
+            f"位于第 {line_no} 行附近{anchor}）")
+
+
+def _persistent_anchor(text: str, line_no: int, max_lookback: int = 40) -> str:
+    """编辑点上方最近的「持久锚点」：注释/函数/类定义行。
+
+    行号在多轮编辑后会漂移，注释与函数名存活得久得多——回显它，
+    模型下一轮还能靠它定位（实测反馈：行号快照易误读）。
+    语言无关启发式：向上最多看 max_lookback 行，命中即返回。
+    """
+    lines = text.split("\n")
+    anchor_re = re.compile(
+        r"(/\*|\*/|//|#\s|def\s|function\s|class\s|const\s|<script|<style|--\s)"
+    )
+    for i in range(min(line_no, len(lines)) - 2, max(-1, len(lines) - 1 - max_lookback), -1):
+        stripped = lines[i].strip()
+        if stripped and anchor_re.search(stripped):
+            shown = stripped if len(stripped) <= 50 else stripped[:50] + "…"
+            return f"（↳ {shown}）"
+    return ""
 
 
 def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -> str:
@@ -666,6 +865,7 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     old_block = "\n".join(lines[start_line - 1:end_line])
     new_lines = new_content.split("\n") if new_content else []
     replaced = lines[:start_line - 1] + new_lines + lines[end_line:]
+    _archive_version(target)  # 替换前归档：restore_file 可回滚
     target.write_text("\n".join(replaced) + ("\n" if trailing else ""), encoding="utf-8")
     _observe_file(target)
     # 旧块与新块都留底（超长截断到 5000，原则与 write_file 备份一致）

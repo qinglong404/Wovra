@@ -38,6 +38,7 @@ from .agent import (
     Agent,
     ask_user,
     check_background,
+    delete_file,
     edit_file,
     get_current_time,
     glob_files,
@@ -45,6 +46,7 @@ from .agent import (
     list_files,
     read_file,
     replace_lines,
+    restore_file,
     run_background,
     run_command,
     search_files,
@@ -55,7 +57,9 @@ from .agent import (
 )
 from .llm import LLMConfigError
 from .task import Task
-from .tools import PROJECT_ROOT, stop_session_backgrounds, user_input_pending
+from .tools import (
+    PROJECT_ROOT, move_file, stop_session_backgrounds, user_input_pending,
+)
 
 
 def _session_lock_path(task: Task):
@@ -280,6 +284,9 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
             edit_file,
             replace_lines,
             run_command,
+            delete_file,
+            move_file,
+            restore_file,
             run_background,
             check_background,
             stop_background,
@@ -415,7 +422,7 @@ def _drain_status(agent: Agent) -> None:
 def _run_turn(agent: Agent, instruction: str | None) -> str:
     """执行一轮流式对话并负责全部展示。
 
-    instruction=None 表示 \c：不注入新的用户消息，直接续上开放轮。
+    instruction=None 表示 \\c：不注入新的用户消息，直接续上开放轮。
 
     行纪律（解决"思考与回答混在一起、事件行粘连"的问题）：
     * line_open 记录当前终端行是否被流式输出占着——任何事件行
@@ -632,7 +639,7 @@ def cmd_report(args: argparse.Namespace) -> None:
 _LOCAL_HELP = """\
 本地命令（\\ 或 / 前缀，纯本地执行：零模型成本、不用等轮次结束）：
   c / continue       续上开放轮（步数用尽/中断后接着干，不注入新消息）
-  （只输 \ 或 / 也可以：直接显示这份命令列表）
+  （只输 \\ 或 / 也可以：直接显示这份命令列表）
   bg                  后台进程列表
   bg <任务id>          查看某后台进程的增量输出
   bg stop <任务id>     强制停止后台进程

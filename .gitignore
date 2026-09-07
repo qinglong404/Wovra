@@ -50,3 +50,4 @@ logs/
 # 受控实验的运行产物（每轮独立目录）
 experiments/runs/
 .wovra-background/
+.wovra/
