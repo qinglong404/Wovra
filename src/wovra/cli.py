@@ -213,10 +213,20 @@ def _system_prompt(mode: str) -> str:
     """
     import platform
 
-    if os.name == "nt":
+    # 按 platform.system() 分流而不是 os.name：macOS 和 Linux 同属
+    # posix，os.name 分不出来——模型若把 macOS 当 Linux，会用上
+    # apt/systemctl 这类 Linux 专属命令，白白浪费一步工具调用
+    system = platform.system()
+    if system == "Windows":
         env = (
             f"当前环境：Windows {platform.release()}，shell 是 cmd.exe——"
             "命令用 Windows 语法（dir/copy/del/start），没有 ls/rm/grep/apt。"
+        )
+    elif system == "Darwin":
+        env = (
+            f"当前环境：macOS（Darwin {platform.release()}），shell 是 "
+            "zsh/Bash——命令用 Unix 语法，但它是 BSD 底层，没有 apt/"
+            "systemctl，装软件用 brew。"
         )
     else:
         env = "当前环境：Linux，shell 是 POSIX sh。"

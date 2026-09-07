@@ -668,9 +668,6 @@ def run_command(command: str, timeout: int | None = None) -> str:
     # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
     # 的问题（http.server 这类孤儿进程曾把管道清理阶段永久挂死），
     # 也没有 PIPE 缓冲写满导致的子进程阻塞，超时后的清理必然可返回
-    # 输出重定向到临时文件而不是 PIPE：文件没有"写端被孙进程攥住"
-    # 的问题（http.server 这类孤儿进程曾把管道清理阶段永久挂死），
-    # 也没有 PIPE 缓冲写满导致的子进程阻塞，超时后的清理必然可返回
     # 子进程强制 UTF-8 输出：否则中文输出按各自主观编码（gbk/utf-8）
     # 混流，父进程解码必出乱码（实测 py_compile 输出花屏）
     child_env = dict(os.environ, PYTHONUTF8="1")

@@ -338,9 +338,43 @@ def test_replay_history_pairs_tool_call_and_result(capsys):
     assert "助手>" in out and "92m[1m" not in out  # Markdown 标签不漏裸码
 
 
-def test_answer_live_degrades_to_plain_stream_without_tty(capsys):
+def test_color_detection_env_rules(monkeypatch):
+    """颜色探测的环境规则：dumb/NO_COLOR/管道关，WOVRA_COLOR=1 强制开。
+
+    回归背景：TERM=dumb 的环境（cron/CI/沙箱）此前照样输出 ANSI，
+    转义码被打成 "?[91m" 乱码——颜色能力必须随终端能力降级。
+    """
+    from wovra import ui
+
+    tty = SimpleNamespace(isatty=lambda: True)
+    monkeypatch.setattr(ui.sys, "stdout", tty)
+    monkeypatch.delenv("WOVRA_COLOR", raising=False)
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    assert ui._detect_color() is True  # 正常交互终端：开
+
+    monkeypatch.setenv("TERM", "dumb")
+    assert ui._detect_color() is False  # 哑终端：转义码会变乱码
+
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("NO_COLOR", "")
+    assert ui._detect_color() is False  # NO_COLOR 存在即关（无论值）
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(ui.sys, "stdout", SimpleNamespace(isatty=lambda: False))
+    assert ui._detect_color() is False  # 管道/重定向：默认纯文本
+
+    monkeypatch.setenv("WOVRA_COLOR", "1")
+    assert ui._detect_color() is True  # 显式强制开，优先级最高
+
+
+def test_answer_live_degrades_to_plain_stream_without_tty(monkeypatch, capsys):
     """非 TTY（管道/测试）下 Live 退化为纯文本流，输出顺序保持。"""
     from wovra import ui
+
+    # 钉死降级路径：即便外部环境设了 WOVRA_COLOR=1，这里也必须走纯文本
+    monkeypatch.setattr(ui, "_ENABLED", False)
 
     ui.answer_live_start()
     ui.answer_live_append("片段1")
@@ -362,7 +396,18 @@ def test_answer_live_renders_once_on_capable_terminal(monkeypatch):
     from wovra import ui
 
     file = io.StringIO()
-    console = Console(file=file, force_terminal=True, width=80, legacy_windows=False)
+    # 测试模拟的是"能力完备的交互终端"，所以环境也要钉成正常值：
+    # rich 对 TERM=dumb 是三层叠加——is_interactive=False、抑制控制
+    # 序列、无颜色系统；只传 force_terminal/force_interactive 时，
+    # dumb 环境下 Live 照样退化成纯打印，测试就随环境漂移了
+    monkeypatch.setenv("TERM", "xterm-256color")
+    console = Console(
+        file=file,
+        force_terminal=True,
+        force_interactive=True,
+        width=80,
+        legacy_windows=False,
+    )
     monkeypatch.setattr(ui, "_console", console)
     monkeypatch.setattr(ui, "_ENABLED", True)
 

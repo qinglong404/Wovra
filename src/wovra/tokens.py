@@ -29,13 +29,33 @@ import unicodedata
 # 默认 30（历史口径）。折扣越浅，基座税越重——这是成本模型的关键参数。
 CACHE_RATE = float(os.environ.get("WOVRA_CACHE_RATE", "30"))
 
-try:
-    import tiktoken
+# tiktoken 词表必须延迟到首次使用才加载：get_encoding 在本地无缓存时
+# 会联网下载（openaipublic CDN）——放模块顶层意味着新机器/离线/网络
+# 受限环境下 import wovra 就卡在网络超时上，整个 CLI 无法启动。
+# 首次 estimate() 时才尝试，失败退化为启发式，代价只是那次调用慢一点。
+# 设 WOVRA_TOKENIZER=heuristic 可彻底跳过 tiktoken（air-gapped 环境）。
+_encoding = None
+_encoding_checked = False
 
-    # cl100k_base 首次使用需要下载词表；失败则走启发式
-    _encoding = tiktoken.get_encoding("cl100k_base")
-except Exception:  # noqa: BLE001——任何失败都只意味着"退化为估算"
-    _encoding = None
+
+def _get_encoding():
+    """惰性获取 tiktoken 词表；只探测一次，之后沿用结果。"""
+    global _encoding, _encoding_checked
+    if not _encoding_checked:
+        _encoding_checked = True
+        if os.environ.get("WOVRA_TOKENIZER", "").strip().lower() not in (
+            "heuristic",
+            "none",
+            "off",
+        ):
+            try:
+                import tiktoken
+
+                # cl100k_base 首次使用需要下载词表；失败则走启发式
+                _encoding = tiktoken.get_encoding("cl100k_base")
+            except Exception:  # noqa: BLE001——任何失败都只意味着"退化为估算"
+                _encoding = None
+    return _encoding
 
 # 类目标识符 → 中文标签（ui 层展示用）
 LABELS = {
@@ -54,8 +74,9 @@ def estimate(text: str) -> int:
     """估算一段文本的 token 数。"""
     if not text:
         return 0
-    if _encoding is not None:
-        return len(_encoding.encode(text))
+    encoding = _get_encoding()
+    if encoding is not None:
+        return len(encoding.encode(text))
     # 启发式：全角字符（中日韩）按 1 字 1 token，其余按 4 字符 1 token，
     # 向上取整（非空文本至少 1 token）
     import math

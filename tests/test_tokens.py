@@ -7,8 +7,14 @@ from wovra import tokens, ui
 
 @pytest.fixture(autouse=True)
 def _heuristic_estimator(monkeypatch):
-    """强制走字符启发式：测试不依赖 tiktoken 词表（可能未下载）。"""
+    """强制走字符启发式：测试不依赖 tiktoken 词表（可能未下载）。
+
+    惰性初始化后要同时钉两个状态：_encoding=None 是探测结果，
+    _encoding_checked=True 表示"已探测过"——只钉前者，首次 estimate()
+    仍会触发词表加载（无缓存时联网下载），测试就不再离线了。
+    """
     monkeypatch.setattr(tokens, "_encoding", None)
+    monkeypatch.setattr(tokens, "_encoding_checked", True)
 
 
 def test_estimate_counts_cjk_and_ascii_differently():
@@ -16,6 +22,40 @@ def test_estimate_counts_cjk_and_ascii_differently():
     assert tokens.estimate("你好") == 2  # 全角字符 1 字 1 token
     assert tokens.estimate("abcdefgh") == 2  # 8 个 ASCII 字符 ≈ 2 token
     assert tokens.estimate("a") == 1  # 非空至少 1
+
+
+def test_tokenizer_env_var_forces_heuristic(monkeypatch):
+    """WOVRA_TOKENIZER=heuristic：彻底跳过 tiktoken（离线机器的逃生口）。"""
+    monkeypatch.setenv("WOVRA_TOKENIZER", "heuristic")
+    monkeypatch.setattr(tokens, "_encoding_checked", False)
+    monkeypatch.setattr(tokens, "_encoding", None)
+
+    assert tokens._get_encoding() is None
+    assert tokens._encoding_checked is True  # 跳过也算探测过，不会反复尝试
+
+
+def test_encoding_probe_runs_once_and_fails_soft(monkeypatch):
+    """词表探测只执行一次且失败软着陆：新机器离线时不会卡启动、
+    也不会每个 estimate 都重试一次网络超时。"""
+    import sys
+    import types
+
+    fake = types.ModuleType("tiktoken")
+
+    def _boom(name):
+        raise RuntimeError("模拟：网络不可用，词表下载失败")
+
+    fake.get_encoding = _boom
+    monkeypatch.setitem(sys.modules, "tiktoken", fake)
+    monkeypatch.setattr(tokens, "_encoding_checked", False)
+    monkeypatch.setattr(tokens, "_encoding", None)
+
+    assert tokens._get_encoding() is None  # 失败 → 启发式，不抛异常
+    fake.get_encoding = lambda name: "ENC"  # 即便之后环境"恢复"
+    assert tokens._get_encoding() is None  # 已探测过 → 记住结果，不再尝试
+
+    monkeypatch.setattr(tokens, "_encoding_checked", False)
+    assert tokens._get_encoding() == "ENC"  # 显式重置探测标志后才重新加载
 
 
 def test_breakdown_separates_six_categories():

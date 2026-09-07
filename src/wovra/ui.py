@@ -6,9 +6,10 @@
     * AI 回答是多行 Markdown（标题/列表/代码块）→ 用 rich 的
       Markdown 渲染，自己解析不现实。这是当初预留的升级点。
 
-降级策略：输出不是终端（重定向/管道/测试捕获）或设置了 NO_COLOR
-时，ANSI 助手退化为纯文本，rich 也会自动关闭样式——保证
-`wovra list > out.md` 这类用法不会混入转义码。
+降级策略：输出不是终端（重定向/管道/测试捕获）、设置了 NO_COLOR、
+或 TERM=dumb（cron/CI/部分内嵌终端，不理解转义码）时，ANSI 助手
+退化为纯文本，rich 也会自动关闭样式——保证 `wovra list > out.md`
+这类用法不会混入转义码。WOVRA_COLOR=1 可在管道里强制保留颜色。
 """
 
 import os
@@ -23,7 +24,31 @@ from rich.text import Text
 from . import tokens as tokens_module
 from .tools import FAILURE_MARKERS
 
-_ENABLED = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
+
+def _detect_color() -> bool:
+    """颜色开关的环境探测：任何"终端不理解转义码"的信号都关闭。
+
+    判定顺序（后三条任一命中即关）：
+        * WOVRA_COLOR=1 → 强制开：`wovra chat | tee run.log` 这类
+          管道用法想要彩色日志时的显式出口，优先级最高；
+        * stdout 不是终端（重定向/管道/测试捕获）→ 关；
+        * NO_COLOR 存在即关（无论值是什么，遵循 No Color 规范；
+          Windows 的 cmd 环境变量大小写不敏感，environ 已统一大小写）；
+        * TERM=dumb → 关：这类终端会把 \033[91m 原样打出来变成
+          "?[91m" 乱码（cron/CI/部分编辑器内嵌终端都是 dumb）。
+    Windows 的 cmd.exe/Windows Terminal 通常不设 TERM——取不到值
+    视为不 dumb，颜色照常启用。
+    """
+    if os.environ.get("WOVRA_COLOR") == "1":
+        return True
+    if not sys.stdout.isatty():
+        return False
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    return os.environ.get("TERM") != "dumb"
+
+
+_ENABLED = _detect_color()
 
 # rich 只在真正要渲染 Markdown 时才创建；样式开关跟随 _ENABLED
 _console = Console(no_color=not _ENABLED)
