@@ -745,6 +745,52 @@ def test_tier_degradation_under_budget(monkeypatch):
     assert "ICP 误差分析完成" not in bodies  # 档 3 不再携带事件索引
 
 
+def test_resume_continues_open_round_without_new_user_message(monkeypatch, tmp_path):
+    """\\继续 = resume()：不注入新用户消息，直接续上开放轮干到闭合。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task)
+
+    # 第一轮被打断（如步数超限/Ctrl+C）：轮保持开放
+    agent._open_or_reuse_round("开始干活")
+    agent._record_event("user", {"role": "user", "content": "开始干活"})
+    agent.finalize_round("open")
+
+    answer = agent.resume()
+
+    assert answer == "干完了"
+    assert task.rounds[-1]["end_state"] == "completed"
+    # 关键断言：历史里只有最初那一条用户消息，resume 没有制造"继续"噪音
+    user_events = [e for e in task.rounds[-1]["events"] if e["type"] == "user"]
+    assert len(user_events) == 1
+
+
+def test_resume_without_open_round_raises(monkeypatch, tmp_path):
+    """没有开放轮时 resume 报错，且不产生任何 LLM 调用。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    try:
+        agent.resume()
+        raised = False
+    except RuntimeError as error:
+        raised = True
+        assert "没有可继续的开放轮次" in str(error)
+    assert raised
+    assert agent.llm.calls == []
+
+
+def test_default_max_turns_is_60():
+    """默认步数上限 60（安全网而非配额）。"""
+    task = Task.create(goal="x")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    assert agent.max_turns == 60
+
+
 def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):
     """轮闭合规则：中断/异常不闭合 Round，多条用户输入并入同一开放轮。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)

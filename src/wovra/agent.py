@@ -83,8 +83,9 @@ _ORGANIZE_MAX_READS = 3
 # 产物暂存、下一轮开启才生效。小会话可能全程不触发——整理成本归零。
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
-# 单轮工具循环的默认步数上限：真实任务步数轻松上两位数，10 步远远不够
-_DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "40"))
+# 单轮工具循环的默认步数上限：安全网而非配额——尽量不在步数上限制
+# LLM（2026-09-07 用户拍板 60），真超限也只是开放轮等待 \继续，不废工作
+_DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
 
 # 工具名 → 进度提示的动作词（"正在<动作>…"）
 _ACTION_WORDS = {
@@ -368,11 +369,39 @@ class Agent:
         # 轮次与会话绑定（rounds 的 seq 随会话持久化）——进程内计数会在
         # 退出重开后归零，长会话的"第 N 轮"就错了（实测教训）
         self.turn_count = self.current_round["seq"]
-        self.last_stats = self._fresh_stats()
         self._record_event("user", {"role": "user", "content": user_input})
         if self.task is not None:
             self.task.record("user_input", user_input)
             self._persist_rounds()
+        return self._work_loop(on_thinking, on_answer_delta)
+
+    def resume(
+        self,
+        on_thinking: Optional[Callable[[str], None]] = None,
+        on_answer_delta: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """续上最近一个开放 Round（\\继续 命令）：不注入任何新的用户消息。
+
+        步数超限 / Ctrl+C 中断后，轮保持开放但没有新信息——再发一句
+        "继续"只会往历史里塞一条噪音用户消息。本方法重建协议消息后
+        直接进工作循环，装配与轮内上下文原样继续。没有开放轮时报错。
+        """
+        last = self.rounds[-1] if self.rounds else None
+        if last is None or last.get("end_state") not in ("", "open"):
+            raise RuntimeError("没有可继续的开放轮次")
+        self.current_round = last
+        # 协议消息从事件的 Full 中重建（它们就是事实来源）
+        self.messages = [e["message"] for e in last["events"]]
+        self.turn_count = last["seq"]
+        return self._work_loop(on_thinking, on_answer_delta)
+
+    def _work_loop(
+        self,
+        on_thinking: Optional[Callable[[str], None]] = None,
+        on_answer_delta: Optional[Callable[[str], None]] = None,
+    ) -> str:
+        """单轮的工具调用主循环：run 与 resume 共用。"""
+        self.last_stats = self._fresh_stats()
 
         for _ in range(self.max_turns):
             if self.on_progress:
@@ -426,7 +455,7 @@ class Agent:
         self._persist_rounds()
         raise RuntimeError(
             f"本轮已连续工作 {self.max_turns} 步仍未给出最终回答（Round 保持开放，"
-            f"继续对话即可接着干）"
+            f"\\继续 可直接接着干）"
         )
 
     def _invoke_tool(self, name: str, arguments: str) -> str:
