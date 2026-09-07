@@ -467,6 +467,8 @@ def _run_turn(agent: Agent, instruction: str | None) -> str:
     def _start_tool_watch(name: str) -> None:
         nonlocal tool_watch_thread
         tool_watch_stop.clear()
+        # 秒表节奏：工具执行期间终端静默，每 10 秒提醒一次"还在干活"
+        step = 10
 
         def _tick() -> None:
             waited = 0
