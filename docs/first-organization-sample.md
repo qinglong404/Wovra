@@ -471,6 +471,219 @@ R8 你问扩展方向，我写了一大段散文列表让你自己挑。其实�
 - js/agent-pack.js（写于 R9）
 ```
 
+## 2.5 块结构（机制一对本会话的划分结果）
+
+12 轮 → 50 块。完整划分如下（✎ 写/改 · ▸ 命令带标签）：
+
+```text
+
+==============================================================
+20260907-141244-17dcb8 · 目标： · 12 轮
+R1 · 2 事件 · 1 块
+  R1-B1 · R1-E01~R1-E02
+R2 · 26 事件 · 5 块
+  R2-B1 · R2-E01~R2-E05 · 写: index.html
+        ✎ write_file(index.html)
+  R2-B2 · R2-E06~R2-E13 · 写: index.html · [run, file]
+        ▸ [run] which node && node -v
+        ▸ [file] sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' > /tmp/chat_check.js && nod…
+        ▸ [file] grep -n '。"\|，"\|、"\|的"\|在"\|说："\|"\.' /tmp/chat_check.js | head -20; echo "----"; grep -c…
+        ✎ edit_file(index.html)
+  R2-B3 · R2-E14~R2-E15 · 写: index.html
+        ✎ edit_file(index.html)
+  R2-B4 · R2-E16~R2-E19 · 写: index.html · [file]
+        ▸ [file] sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' > /tmp/chat_check.js && nod…
+        ✎ edit_file(index.html)
+  R2-B5 · R2-E20~R2-E26 · [file, other]
+        ▸ [file] sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' > /tmp/chat_check.js && nod…
+        ▸ [file] cat > /tmp/harness.js <<'EOF' const fs = require('fs'); const els = {}; function makeEl(){…
+        ▸ [other] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"
+R3 · 16 事件 · 2 块
+  R3-B1 · R3-E01~R3-E03 · 写: index.html
+        ✎ write_file(index.html)
+  R3-B2 · R3-E04~R3-E16 · [file, other]
+        ▸ [file] sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' > /tmp/chat_check.js && nod…
+        ▸ [file] cat > /tmp/harness2.js <<'EOF' const fs = require('fs'); const els = {}; function makeEl(t…
+        ▸ [file] cat > /tmp/harness2.js <<'EOF' const fs = require('fs'); const els = {}; function makeEl(t…
+        ▸ [file] sed -i 's/^const sleep = ms/const rest = ms/; s/await sleep(/await rest(/g' /tmp/harness2.…
+        ▸ [file] sed -i 's/messages.length === 9, "演示会话应有 9 条消息/messages.length === 10, "演示会话应为欢迎语+9条=10条消息…
+        ▸ [other] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"
+R4 · 14 事件 · 2 块
+  R4-B1 · R4-E01~R4-E03 · 写: index.html
+        ✎ write_file(index.html)
+  R4-B2 · R4-E04~R4-E14 · [file, run, other]
+        ▸ [file] sed -n '/^<script>$/,/^<\/script>$/p' index.html | sed '1d;$d' > /tmp/chat_check.js && nod…
+        ▸ [run] node /tmp/harness2.js
+        ▸ [file] cat > /tmp/theme_test.js <<'EOF' const fs = require('fs'); const els = {}; function makeEl…
+        ▸ [file] sed -i 's|set innerHTML(v){ this._inner = v; }, get innerHTML(){ return this._inner; },|se…
+        ▸ [other] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"
+R5 · 20 事件 · 3 块
+  R5-B1 · R5-E01~R5-E07 · 写: css/style.css, js/data.js, js/app.js, index.html, README.md
+        ✎ write_file(css/style.css)
+        ✎ write_file(js/data.js)
+        ✎ write_file(js/app.js)
+        ✎ write_file(index.html)
+        ✎ write_file(README.md)
+  R5-B2 · R5-E08~R5-E09 · 写: css/style.css
+        ✎ edit_file(css/style.css)
+  R5-B3 · R5-E10~R5-E20 · [file]
+        ▸ [file] node --check js/data.js && node --check js/app.js && echo "JS 语法 OK"; echo "---- 检查 index.…
+        ▸ [file] grep -o 'id="[a-zA-Z]*"' index.html | sed 's/id="//;s/"//' | sort > /tmp/ids_html.txt; gre…
+        ▸ [file] cat js/data.js js/app.js > /tmp/chat_check.js && node --check /tmp/chat_check.js && echo "…
+        ▸ [file] sed -i "s|const mem = {};|global.window = global;\nconst mem = {};|" /tmp/harness2.js && n…
+        ▸ [file] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"; echo "---- 项目结构 ----"; find .…
+R6 · 33 事件 · 6 块
+  R6-B1 · R6-E01~R6-E10 · 写: js/app.js · 读: index.html, js/data.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R6-B2 · R6-E11~R6-E12 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+  R6-B3 · R6-E13~R6-E18 · 写: js/data.js
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+  R6-B4 · R6-E19~R6-E20 · 写: css/style.css
+        ✎ edit_file(css/style.css)
+  R6-B5 · R6-E21~R6-E22 · 写: js/data.js
+        ✎ edit_file(js/data.js)
+  R6-B6 · R6-E23~R6-E33 · [file, other]
+        ▸ [file] node --check js/data.js && node --check js/app.js && echo "语法 OK" && cat > /tmp/harness3.j…
+        ▸ [file] python3 - <<'EOF' import re p = "/tmp/harness3.js" src = open(p).read() old = """ querySel…
+        ▸ [file] sed -i 's|switchSession(sessions\[0\].id);\n const cnt = victim.messages.length;|switchSes…
+        ▸ [file] python3 - <<'EOF' # 给 harness2 和 theme_test 补上新 mock 能力 lazy_qs = """ dataset:{}, _attrs:{…
+        ▸ [other] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"
+R7 · 35 事件 · 5 块
+  R7-B1 · R7-E01~R7-E07 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R7-B2 · R7-E08~R7-E13 · 写: js/data.js
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(js/data.js)
+  R7-B3 · R7-E14~R7-E19 · 写: js/data.js
+        ✎ edit_file(js/data.js)
+  R7-B4 · R7-E20~R7-E21 · 写: css/style.css
+        ✎ edit_file(css/style.css)
+  R7-B5 · R7-E22~R7-E35 · 写: README.md · [file, other]
+        ▸ [file] node --check js/data.js && node --check js/app.js && echo "语法 OK" && cat > /tmp/harness4.j…
+        ▸ [file] python3 - <<'EOF' p = "/tmp/harness4.js" src = open(p).read() src = src.replace( 'const bt…
+        ▸ [file] cat js/data.js js/app.js > /tmp/chat_check.js && node --check /tmp/chat_check.js && echo "…
+        ▸ [file] python3 - <<'EOF' p = "/tmp/harness2.js" src = open(p).read() src = src.replace('assert(de…
+        ✎ edit_file(README.md)
+        ✎ edit_file(README.md)
+        ✎ edit_file(README.md)
+        ▸ [other] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"
+R8 · 4 事件 · 1 块
+  R8-B1 · R8-E01~R8-E04 · [file]
+        ▸ [file] git rev-parse --is-inside-work-tree 2>/dev/null || echo "无 git 仓库"; echo "---- /tmp 测试脚本（重…
+R9 · 97 事件 · 22 块
+  R9-B1 · R9-E01~R9-E06 · 写: tests/lib.js, tests/run.js, tests/theme.prelude.js, tests/features.test.js
+        ✎ write_file(tests/lib.js)
+        ✎ write_file(tests/run.js)
+        ✎ write_file(tests/theme.prelude.js)
+        ✎ write_file(tests/features.test.js)
+  R9-B2 · R9-E07~R9-E10 · 写: tests/sessions.test.js, tests/theme.test.js, tests/agent.test.js
+        ✎ write_file(tests/sessions.test.js)
+        ✎ write_file(tests/theme.test.js)
+        ✎ write_file(tests/agent.test.js)
+  R9-B3 · R9-E11~R9-E13 · 写: tests/interactions.test.js, index.html
+        ✎ write_file(tests/interactions.test.js)
+        ✎ edit_file(index.html)
+  R9-B4 · R9-E14~R9-E15 · 写: js/agent-pack.js
+        ✎ write_file(js/agent-pack.js)
+  R9-B5 · R9-E16~R9-E20 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R9-B6 · R9-E21~R9-E24 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+  R9-B7 · R9-E25~R9-E29 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R9-B8 · R9-E30~R9-E31 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+  R9-B9 · R9-E32~R9-E34 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+  R9-B10 · R9-E35~R9-E40 · 写: js/app.js · [file]
+        ▸ [file] node --check js/app.js && node --check js/data.js && node --check js/agent-pack.js && echo…
+        ✎ edit_file(js/app.js)
+  R9-B11 · R9-E41~R9-E46 · 写: js/app.js · [file]
+        ▸ [file] cat js/data.js js/app.js js/agent-pack.js > /tmp/chat_check.js && node --check /tmp/chat_c…
+        ✎ edit_file(js/app.js)
+  R9-B12 · R9-E47~R9-E54 · 写: tests/features.test.js, js/data.js, tests/agent.test.js · [file]
+        ▸ [file] cat js/data.js js/app.js js/agent-pack.js > /tmp/chat_check.js && node --check /tmp/chat_c…
+        ✎ edit_file(tests/features.test.js)
+        ✎ edit_file(tests/features.test.js)
+        ✎ edit_file(tests/features.test.js)
+        ✎ edit_file(js/data.js)
+        ✎ edit_file(tests/agent.test.js)
+  R9-B13 · R9-E55~R9-E58 · 写: tests/run.js · [file]
+        ▸ [file] cat js/data.js js/app.js js/agent-pack.js > /tmp/chat_check.js && node --check /tmp/chat_c…
+        ✎ edit_file(tests/run.js)
+  R9-B14 · R9-E59~R9-E62 · 写: js/app.js · [run]
+        ▸ [run] node tests/run.js
+        ✎ edit_file(js/app.js)
+  R9-B15 · R9-E63~R9-E66 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+  R9-B16 · R9-E67~R9-E70 · 写: tests/sessions.test.js · [file]
+        ▸ [file] node --check js/app.js && cat js/data.js js/app.js js/agent-pack.js > /tmp/chat_check.js &…
+        ✎ edit_file(tests/sessions.test.js)
+  R9-B17 · R9-E71~R9-E77 · 写: index.html · [run]
+        ▸ [run] node tests/run.js && xdg-open index.html >/dev/null 2>&1 & sleep 3; echo "---"; echo "完成标记…
+        ▸ [run] node tests/run.js
+        ✎ edit_file(index.html)
+        ✎ edit_file(index.html)
+  R9-B18 · R9-E78~R9-E81 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R9-B19 · R9-E82~R9-E85 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R9-B20 · R9-E86~R9-E89 · 写: js/app.js
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+        ✎ edit_file(js/app.js)
+  R9-B21 · R9-E90~R9-E92 · 写: css/style.css
+        ✎ edit_file(css/style.css)
+        ✎ edit_file(css/style.css)
+  R9-B22 · R9-E93~R9-E97 · [file, other]
+        ▸ [file] node --check js/app.js && node tests/run.js && echo "==== 项目结构 ====" && find . -type f -no…
+        ▸ [other] xdg-open index.html >/dev/null 2>&1 & sleep 2; echo "已尝试打开"
+R10 · 2 事件 · 1 块
+  R10-B1 · R10-E01~R10-E02
+R11 · 2 事件 · 1 块
+  R11-B1 · R11-E01~R11-E02
+R12 · 2 事件 · 1 块
+  R12-B1 · R12-E01~R12-E02
+
+合计：12 轮 → 50 块（其中环境块 0 个）
+```
+
+**结构读出的三个模式**（机制二语义归堆的输入已经在这）：
+
+1. **R9 巨型轮被拆成 22 个可读的工作单元**：测试脚手架（B1-B2）→
+   agent-pack.js 新建（B4）→ app.js 连续修改（B5-B11）→ 测试修复循环
+   （B12-B16）→ 验证收尾（B17-B22）——97 个事件不再是一坨。
+2. **每轮尾部的"验证块"模式**：几乎所有轮以 [file]/[run]/[other] 的
+   验证命令块收尾（node --check、harness、xdg-open）——工作纪律在
+   结构上可见。
+3. **R5-B1 一块横跨 5 个文件**（css/js/data/app/README 全量重写）——
+   用户当时抱怨的"整体重写"在块结构上一目了然。
+
 ## 3. 整理产物统计（每轮）
 
 | 轮 | 事件数 | 精修索引行 | 意图 | 块数 |
