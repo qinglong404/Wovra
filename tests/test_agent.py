@@ -308,7 +308,7 @@ def test_empty_stream_retries_then_keeps_round_open():
 
 
 def test_resume_after_empty_stream_sees_interruption_note():
-    """重试耗尽 → \c 续跑：中断通知在轮事件里，续跑调用的输入带 steering，
+    """重试耗尽 → \\c 续跑：中断通知在轮事件里，续跑调用的输入带 steering，
     模型不再盲目从头重想 13 分钟。"""
     responses = [
         [_chunk(_delta(reasoning="想了一半"))],
@@ -377,6 +377,55 @@ def test_midstream_api_error_retry_recovers():
     agent = _agent_with([], responses)
     assert agent.run("问") == "恢复"
     assert agent.rounds[-1]["end_state"] == "completed"
+
+
+# ---- D 组实证驱动的机制修正：grace 双条件 + 里程碑驱动轮 ----------------
+
+
+def _round_agent(monkeypatch, tmp_path, n_events, async_org=True):
+    """构造一个带 task 的 agent，当前轮塞 n_events 个事件。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task, async_organization=async_org)
+    monkeypatch.setattr(agent, "_ensure_worker", lambda: None)  # 队列不入消费
+    agent._org_watermark = 10
+    agent.last_context_estimate = 100
+    agent._open_or_reuse_round("干活")
+    for _ in range(n_events):
+        agent._record_event("tool_call", {"role": "assistant", "content": ""})
+    return agent
+
+
+def test_grace_exempts_light_round_but_not_mega_round(monkeypatch, tmp_path):
+    """宽限期双条件（D 组实证：229 步巨型轮全程豁免、水位全场未出力）：
+    前 grace 轮内的轻轮照旧豁免；巨型轮（事件数超限）达水位照常整理。"""
+    light = _round_agent(monkeypatch, tmp_path, n_events=5)
+    light.close_round()
+    assert light._org_queue.qsize() == 0  # 轻轮：宽限期豁免照旧生效
+
+    mega = _round_agent(monkeypatch, tmp_path, n_events=130)
+    mega.close_round()
+    assert mega._org_queue.qsize() == 1  # 巨型轮：不豁免，照常入队整理
+
+
+def test_verify_milestone_closes_round_and_opens_checkpoint(monkeypatch, tmp_path):
+    """里程碑驱动轮：verify_milestone = 检查点 = 轮边界——闭合当前轮、
+    开新轮续写同一回合（新轮 user_input 带运行时说明）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent._open_or_reuse_round("干活")
+    agent.todo(action="start_milestone", goal="大步一", acceptance=["可跑"])
+    agent.todo(action="verify_milestone", evidence="测试全绿")
+
+    assert len(agent.rounds) == 2
+    assert agent.rounds[0]["end_state"] == "completed"
+    assert agent.current_round is agent.rounds[1]
+    assert agent.rounds[1]["end_state"] == "open"
+    assert "大步验收通过" in agent.rounds[1]["user_input"]["original"]
+    assert agent.task.todo["milestone"] is None
+    # 验收证据进了 TaskState 账本
+    assert any("大步一" in c for c in task.get_state().completed)
 
 
 def test_close_round_computes_blocks(monkeypatch, tmp_path):

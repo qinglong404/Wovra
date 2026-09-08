@@ -127,6 +127,9 @@ def test_system_prompt_matches_mode_and_environment(monkeypatch):
     for prompt in (managed, baseline):
         assert "模块化多文件结构" in prompt
         assert "禁止为一条新需求整体重写文件" in prompt
+        # D 组实证驱动的两条：批量调用省首字延迟；观感是前端评分大头
+        assert "批量发出" in prompt
+        assert "一眼全黑" in prompt
     # 运行环境信息防止模型在 Windows 上跑类 Unix 命令
     if _os.name == "nt":
         assert "cmd.exe" in managed and "Windows" in managed

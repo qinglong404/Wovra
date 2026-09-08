@@ -96,6 +96,10 @@ _READ_ONLY_TOOLS = frozenset(
 # 积压量"口径。达标且轮闭合才触发一次批量整理，轮进行中永不打扰；
 # 产物暂存、下一轮开启才生效。小会话可能全程不触发——整理成本归零。
 _ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
+# 宽限期的第二条件（2026-09-08 D 组实证漏洞）：轻轮才豁免——事件数超过
+# 此值的巨型轮（约 60 步预算一轮的规模）即使在前 N 轮也不豁免，达水位
+# 照常整理。豁免要保护的是"开头几轮的最小解释历史"，不是"一轮到底"
+_ORG_GRACE_MAX_EVENTS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_MAX_EVENTS", "120"))
 _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
@@ -821,10 +825,25 @@ class Agent:
             todo["steps"] = []
             self.task.todo = todo
             self.task.save()
+            # 里程碑驱动轮（2026-09-08 用户拍板）：大步验收 = 检查点 =
+            # 轮边界——闭合当前轮并开新轮续写同一回合。D 组实证：一个
+            # 229 步巨型轮跑完全程无闭合，水位机制全场未出力。闭合触发
+            # 水位检查。说明文本放新轮 user_input 与工具结果（不在
+            # assistant tool_call 与 tool 消息之间插事件——严格端点会拒）。
+            if self.current_round is not None:
+                checkpoint_note = (
+                    "[运行时] 大步验收通过，轮次在此闭合"
+                    "（里程碑驱动轮：检查点 = 轮边界）。"
+                )
+                self.close_round()
+                if self._open_or_reuse_round(checkpoint_note):
+                    self._promote_org_results()
+                self._persist_rounds()
             return (
                 f"大步已验收：{milestone['goal']}\n证据：{evidence.strip()}\n"
                 + (tail_note + "\n" if tail_note else "")
-                + "现在可以 start_milestone 写下一大步。"
+                + "轮次已在此闭合并开启新轮（里程碑驱动轮）。"
+                "现在可以 start_milestone 写下一大步。"
             )
         elif action == "drop_milestone":
             if not milestone:
@@ -1788,11 +1807,18 @@ class Agent:
         """
         if self.last_context_estimate < self._org_watermark:
             return
-        # 保护机制：宽限期 + 冷却间隔（2026-09-08 用户拍板）。窗口保底
-        # （紧急折叠）不在豁免范围，是独立的生存线。
+        # 保护机制：宽限期（双条件）+ 冷却间隔（2026-09-08 用户拍板）。
+        # 窗口保底（紧急折叠）不在豁免范围，是独立的生存线。
         current_seq = self.rounds[-1]["seq"] if self.rounds else 0
         if current_seq <= self._org_grace:
-            return  # 宽限期：开头几轮是"解释现状的最小历史"，硬豁免
+            # 宽限期：开头几轮是"解释现状的最小历史"。双条件（D 组实证：
+            # 229 步巨型轮全程豁免，110K 穿过水位而整理全场未出力）——
+            # 只有轻轮才豁免，巨型轮照常整理（块细节格式保真 + expand
+            # 可取回，压缩不再伤最小历史）
+            last_round = self.rounds[-1] if self.rounds else None
+            n_events = len((last_round or {}).get("events") or [])
+            if n_events <= _ORG_GRACE_MAX_EVENTS_DEFAULT:
+                return
         last_maintained = max(
             (
                 r["seq"]
