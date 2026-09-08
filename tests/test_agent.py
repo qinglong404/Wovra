@@ -301,6 +301,31 @@ def test_empty_stream_retries_then_keeps_round_open():
     # 轮未闭合：没有 final_answer 事件，end_state 保持 open（\c 可续）
     assert not any(e["type"] == "final_answer" for e in agent.rounds[-1]["events"])
     assert agent.rounds[-1].get("end_state") == "open"
+    # 中断通知记为持久轮事件，且每轮只记一次（重试/续跑时模型都知道失败过）
+    notes = [e for e in agent.rounds[-1]["events"] if e["type"] == "runtime_note"]
+    assert len(notes) == 1
+    assert "异常终止" in notes[0]["message"]["content"]
+
+
+def test_resume_after_empty_stream_sees_interruption_note():
+    """重试耗尽 → \c 续跑：中断通知在轮事件里，续跑调用的输入带 steering，
+    模型不再盲目从头重想 13 分钟。"""
+    responses = [
+        [_chunk(_delta(reasoning="想了一半"))],
+        [_chunk(_delta(reasoning="又想了一半"))],
+        [_chunk(_delta(reasoning="还是空"))],
+    ]
+    agent = _agent_with([], responses)
+    with pytest.raises(RuntimeError, match="保持开放"):
+        agent.run("第一轮")
+    agent.llm.responses = [[_chunk(_delta(content="续上了"))]]
+    assert agent.resume() == "续上了"
+    last_messages = agent.llm.calls[-1]["messages"]
+    assert any(
+        "runtime-reminder" in str(m.get("content"))
+        and "压缩思考" in str(m.get("content"))
+        for m in last_messages
+    )
 
 
 def test_empty_stream_retry_recovers_and_closes_round():

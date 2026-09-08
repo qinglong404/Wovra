@@ -1156,6 +1156,20 @@ class Agent:
                 fr = self._last_finish_reason or "未返回"
                 if self.task is not None:
                     self.task.record("empty_stream", f"finish_reason={fr}")
+                # 中断通知记为持久轮事件（runtime-reminder 信封，每轮只记
+                # 一次）：重试与 \c 续跑时模型都知道此前响应失败过，重试
+                # 不再是盲目的从头再想——思考无法回传（协议 400），能给的
+                # 只有 steering：压缩思考、直接迈第一小步
+                if empty_streak == 1:
+                    self._record_event(
+                        "runtime_note",
+                        _runtime_reminder(
+                            "上一次响应在生成中途被异常终止，未产出任何正文"
+                            "（长思考流被服务端掐断）。请大幅压缩思考，不要"
+                            "重做完整规划，直接迈出第一小步（一次工具调用），"
+                            "分多步边做边验证。"
+                        ),
+                    )
                 if self._last_finish_reason == "length" or empty_streak > 2:
                     self._persist_rounds()
                     raise RuntimeError(
