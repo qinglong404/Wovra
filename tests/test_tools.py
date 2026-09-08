@@ -2,6 +2,7 @@
 
 import json
 import os as _os
+import re
 from types import SimpleNamespace
 
 import pytest
@@ -99,6 +100,8 @@ def test_run_command_executes_and_returns_output():
     result = run_command("echo hello-wovra")
     assert "exit_code=0" in result
     assert "hello-wovra" in result
+    # 耗时进结果（DeepSeek 点评采纳）：模型看得到命令代价才有自调节信号
+    assert re.search(r"耗时 \d+\.\d+s", result)
 
 
 def test_run_command_reports_failure_exit_code():

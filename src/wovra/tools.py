@@ -1008,6 +1008,7 @@ def run_command(command: str, timeout: int | None = None) -> str:
     # 子进程强制 UTF-8 输出：否则中文输出按各自主观编码（gbk/utf-8）
     # 混流，父进程解码必出乱码（实测 py_compile 输出花屏）
     child_env = dict(os.environ, PYTHONUTF8="1")
+    started = time.monotonic()
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         proc = subprocess.Popen(
             command,
@@ -1039,11 +1040,15 @@ def run_command(command: str, timeout: int | None = None) -> str:
         stdout = out_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
         stderr = err_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
 
+    elapsed = time.monotonic() - started
     header = (
-        f"命令执行失败（exit_code={proc.returncode}）"
+        f"命令执行失败（exit_code={proc.returncode}，耗时 {elapsed:.1f}s）"
         if proc.returncode != 0
-        else "exit_code=0"
+        else f"exit_code=0（耗时 {elapsed:.1f}s）"
     )
+    # 耗时进结果（2026-09-08 用户拍板，DeepSeek 点评采纳）：模型看到
+    # "这条跑了 90s"才有自调节信号——验证分层的代价可见，零配额零
+    # 语义判断。重型验证（浏览器 E2E 等）的累计账由此可算。
 
     def _clip(text: str) -> str:
         """1500 字符上限 + 显式截断标记：静默截断曾让模型把"输出被切"
