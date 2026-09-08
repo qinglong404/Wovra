@@ -765,6 +765,47 @@ def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
     assert task.task_state["completed"] == ["完成项"]
 
 
+def test_org_tool_call_without_seq_matches_positionally(monkeypatch, tmp_path):
+    """GLM 实测会整字段省略 seq：一一对应声明下按位置兜底匹配。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_args = json.dumps({
+        "rounds": [{  # 没有 seq 字段
+            "normalized_user_input": "位置匹配的意图",
+            "key_constraints": "",
+            "block_summaries": [{"id": "R1-B1", "summary": "细节描述"}],
+        }],
+        "state_patch": {},
+    }, ensure_ascii=False)
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c9", name="submit_organization", arguments=org_args),
+    ]))
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk]]),
+                  tools=[], task=task, org_watermark=0)
+
+    agent.run("问")
+
+    assert task.rounds[-1]["pending_org"]["normalized"] == "位置匹配的意图"
+    assert "R1-B1" in task.rounds[-1]["pending_org"]["block_summaries"]
+
+
+def test_org_unusable_product_twice_marks_failed(monkeypatch, tmp_path):
+    """两跳都拿不到可用产物（rounds 空）：整批 failed，不留半份暂存。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    bad = json.dumps({"rounds": [], "state_patch": {}})
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c9", name="submit_organization", arguments=bad),
+    ]))
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk], [org_chunk]]),
+                  tools=[], task=task, org_watermark=0)
+
+    agent.run("问")
+
+    assert task.rounds[-1]["org_state"] == "failed"
+    assert "pending_org" not in task.rounds[-1]
+
+
 def test_submit_organization_guard_is_noop_in_work_dialog():
     """工作对话误调用 submit_organization：只返回说明文本，无副作用。"""
     task = Task.create(goal="x")

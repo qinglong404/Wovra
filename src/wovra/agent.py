@@ -113,7 +113,7 @@ _ORG_SUBMIT_SCHEMA: dict = {
                         "properties": {
                             "seq": {
                                 "type": "integer",
-                                "description": "轮次号",
+                                "description": "整数轮次号（如 9），必须与待整理轮一一对应",
                             },
                             "normalized_user_input": {
                                 "type": "string",
@@ -1287,9 +1287,9 @@ class Agent:
         tools 数组——序列化恒定，前缀缓存常骑；字段语义以 schema 描述为
         唯一事实源），**全部写入 pending_org 暂存区**：本轮装配必须纹丝
         不动（连贯性 + 缓存前缀稳定），下一轮开启时由 _promote_org_results
-        生效。解析失败重试一次，再失败则整批保持 Runtime
-        视图（org_state=failed，回入水位等下次触发），原始层永远不受
-        影响。返回是否成功。
+        生效。产物对应不上批次轮（seq 缺失等畸形，GLM 实测会整字段省略）
+        时纠偏重试一次，仍零匹配则整批 org_state=failed 回入水位，原始层
+        永远不受影响。返回是否成功。
         """
         round_blocks: dict[int, list[dict]] = {}
         map_lines: list[str] = []
@@ -1325,33 +1325,67 @@ class Agent:
             messages, tools=self._schemas, purpose="organization"
         )
         state = self._extract_org_state(content, ordered)
-        if state is None:
+        staged = self._stage_org_state(state, rounds, round_blocks)
+        if staged == 0:
             retry_content, retry_ordered, _usage = self._stream_call(
                 messages
                 + [
                     {"role": "assistant", "content": (content or "")[:2000]},
                     {
                         "role": "user",
-                        "content": "未收到有效产物。请调用 submit_organization 工具提交整理结果（参数即 JSON，不要在正文输出）。",
+                        "content": (
+                            "上一份产物无法对应到待整理轮（常见原因：rounds 元素"
+                            "缺少整数 seq）。请重新调用 submit_organization："
+                            "rounds 与待整理轮一一对应，每个元素必须带整数 seq"
+                            "（如 9）；块 ID 逐字取自[分块地图]。"
+                        ),
                     },
                 ],
                 tools=self._schemas,
                 purpose="organization",
             )
-            state = self._extract_org_state(retry_content, retry_ordered)
-        if not isinstance(state, dict):
+            staged = self._stage_org_state(
+                self._extract_org_state(retry_content, retry_ordered),
+                rounds, round_blocks,
+            )
+        if staged == 0:
+            # 两跳都没有可用产物：保持 Runtime 视图（org_state=failed，
+            # 回入水位等下次触发），原始层永远不受影响
             for r in rounds:
+                r.pop("pending_org", None)
                 r["org_state"] = "failed"
             self._persist_rounds()
             return False
+        for r in rounds:
+            r["org_state"] = "done"
+        self._persist_rounds()
+        return True
 
+    def _stage_org_state(
+        self, state: Optional[dict], rounds: list[dict], round_blocks: dict
+    ) -> int:
+        """把整理产物写进各轮的 pending_org 暂存区，返回匹配到轮的数量。
+
+        轮匹配三级：item["seq"] 整数 → 字符串数字强转 → 一一对应声明下
+        按位置兜底（GLM 实测会整字段省略 seq，2026-09-08 复测发现）。
+        全都对应不上由调用方判失败，不静默吞掉。
+        """
+        if not isinstance(state, dict):
+            return 0
         rounds_by_seq = {r["seq"]: r for r in rounds}
-        for item in state.get("rounds") or []:
-            if not isinstance(item, dict):
-                continue
-            r = rounds_by_seq.get(item.get("seq"))
+        items = [it for it in (state.get("rounds") or []) if isinstance(it, dict)]
+        staged = 0
+        for idx, item in enumerate(items):
+            r = None
+            try:
+                r = rounds_by_seq.get(int(item.get("seq")))
+            except (TypeError, ValueError):
+                r = None
+            if r is None and len(items) == len(rounds):
+                r = rounds[idx]
             if r is None:
                 continue
+            staged += 1
             # 暂存区：不直写正式字段——本轮对话期间的装配由这些字段
             # 组成，动它们就是"下一步替换"，会破坏连贯性和缓存前缀
             pending = r["pending_org"] = {}
@@ -1394,16 +1428,12 @@ class Agent:
                         line_item["line"]
                     )
         patch = state.get("state_patch")
-        if isinstance(patch, dict):
+        if isinstance(patch, dict) and rounds:
             if state.get("is_done") is not None and "is_done" not in patch:
                 patch["is_done"] = bool(state["is_done"])
             # 批次级补丁挂在批内第一轮上：生效时只应用一次
-            if rounds:
-                rounds[0].setdefault("pending_org", {})["state_patch"] = patch
-        for r in rounds:
-            r["org_state"] = "done"
-        self._persist_rounds()
-        return True
+            rounds[0].setdefault("pending_org", {})["state_patch"] = patch
+        return staged
 
     @staticmethod
     def _org_fallback_base(rounds: list[dict]) -> list[dict]:
