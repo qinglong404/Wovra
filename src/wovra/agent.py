@@ -12,10 +12,14 @@
   （调用次数 N→1 摊薄、State Patch 跨轮去重），后台线程执行不阻塞
   对话；产物先暂存，**下一轮开启时才生效**——本轮装配纹丝不动
   （连贯性 + 缓存前缀稳定），过程对用户静默；
-  输入 = 用户输入们 + 事件截断索引 + 最终回答全文；
-  输出 = Normalized 用户意图 + 精修事件索引 + Task State 补丁
+  输入 = 用户输入们 + 分块结构（机制一）+ 按块分组的事件截断索引
+  + 最终回答全文；
+  输出 = Normalized 用户意图 + 关键约束 + **逐块完整细节描述** + Task
+  State 补丁（2026-09-08 用户拍板：块描述必须承载完整细节，事件级
+  精修索引只在无分块结构的旧轮回退使用）
 * Context Assembly：未整理轮次**全量原文**在上下文（执行期零分辨率
-  损失的自然延伸），已整理轮次渲染为紧凑视图（原文+意图+精修索引）；
+  损失的自然延伸），已整理轮次渲染为紧凑视图（👤用户原文 + 🎯意图 +
+  📌关键约束 + 逐块细节描述；无块描述的旧整理轮回退精修事件索引）；
   视图替换只发生在整理生效（新轮开启）那一刻——**只有整理才破坏
   前缀**（2026-09-07 用户拍板，V2 三档滑窗废除：它每轮在装配中部
   改写历史，实测把命中率砸到 49.9%）；窗口保底是唯一天花板
@@ -80,7 +84,7 @@ _READ_ONLY_TOOLS = frozenset(
 )
 
 _ORGANIZE_MAX_CALLS = 4
-_ORGANIZE_MAX_READS = 3
+_ORGANIZE_MAX_READS = 6  # 块细节描述需要更多原文回看（错误原因/关键数字）
 # 水位批量整理：水位口径 = **当前上下文窗口体量**（最近一次装配的估算，
 # 轮闭合时即本轮峰值）——2026-09-07 用户拍板，替代 V3 初版的"未整理
 # 积压量"口径。达标且轮闭合才触发一次批量整理，轮进行中永不打扰；
@@ -902,18 +906,37 @@ class Agent:
         return total
 
     def _render_compact(self, r: dict) -> str:
-        """已整理轮次的紧凑视图：用户原文 + 意图 + 精修事件索引。
+        """已整理轮次的紧凑视图：👤用户原文 + 🎯意图 + 📌关键约束 + 逐块细节。
 
         整理生效后轮次以此形态常驻上下文——它是"水位折叠"的落点，
-        细节永不丢失（expand_history 按 ID 取回原文）。
+        细节永不丢失（expand_history 按块 ID/事件 ID 取回原文）。
+        2026-09-08 用户拍板：块描述承载完整细节，轮首保留第一版视图的
+        用户意图三行式。无块描述的旧整理轮回退到精修事件索引。
         """
-        lines = [f"[R{r['seq']}] 用户：{r['user_input']['original']}"]
-        if r["user_input"].get("normalized"):
-            lines.append(f"意图：{r['user_input']['normalized']}")
-        idx = self._round_index_lines(r)
-        if idx:
-            lines.append("事件索引：")
-            lines += idx
+        lines = [f"[R{r['seq']}]"]
+        ui = r["user_input"]
+        lines.append(f"👤 用户: \"{ui['original']}\"")
+        if ui.get("normalized"):
+            lines.append(f"🎯 意图: {ui['normalized']}")
+        if ui.get("key_constraints"):
+            lines.append(f"📌 关键约束: {ui['key_constraints']}")
+        summaries = r.get("block_summaries") or {}
+        if summaries:
+            lines.append("块细节：")
+            blocks = r.get("blocks") or []
+            if blocks:
+                for b in blocks:
+                    s = summaries.get(b["id"])
+                    if s:
+                        lines.append(f"▸ {b['id']}: {s}")
+            else:
+                for bid in sorted(summaries, key=lambda x: int(x.rsplit("-B", 1)[-1])):
+                    lines.append(f"▸ {bid}: {summaries[bid]}")
+        else:
+            idx = self._round_index_lines(r)
+            if idx:
+                lines.append("事件索引：")
+                lines += idx
         return "\n".join(lines)
 
     def _round_index_lines(self, r: dict) -> list[str]:
@@ -1082,16 +1105,20 @@ class Agent:
         一次调用处理一批（N 轮 N 次调用 → 1 次，摊薄固定开销）：跨轮
         重复交代的决策/背景在 State Patch 里天然去重。可展开性不变——
         事件 ID 与原始历史不受整理影响（§5：合并的是视图，不是历史）。
-        输入 = 各轮用户输入 + 事件截断索引 + 最终回答全文（默认不读
-        原文；截断行不足以确定关键事实时可用 read_full 按上限展开）。
-        输出 = 各轮 Normalized 意图 + 精修事件索引 + 合并 State Patch，
-        **全部写入 pending_org 暂存区**：本轮装配必须纹丝不动（连贯性
-        + 缓存前缀稳定），下一轮开启时由 _promote_org_results 生效。
+        输入 = 各轮用户输入 + 分块结构（机制一）+ 按块分组的事件截断索引
+        + 最终回答全文（默认不读原文；截断行不足以确定关键事实时可用
+        read_full 按上限展开）。
+        输出 = 各轮 Normalized 意图 + 关键约束 + **逐块完整细节描述**
+        （2026-09-08 用户拍板：块描述承载完整细节，不许空洞一词带过）
+        + 合并 State Patch，**全部写入 pending_org 暂存区**：本轮装配
+        必须纹丝不动（连贯性 + 缓存前缀稳定），下一轮开启时由
+        _promote_org_results 生效。无分块结构的旧轮回退精修事件索引。
         过程对用户静默（无状态播报）。关闭思考（格式化任务）。解析
         失败重试一次，仍失败则整批保持 Runtime 视图（org_state=failed，
         回入水位等下次触发），原始层永远不受影响。返回是否成功。
         """
         sections = []
+        round_blocks: dict[int, list[dict]] = {}
         for r in rounds:
             user_inputs = [
                 e["message"].get("content", "")
@@ -1101,25 +1128,67 @@ class Agent:
                 (e for e in reversed(r["events"]) if e["type"] == "final_answer"), None
             )
             final_text = (final_event["message"].get("content") or "") if final_event else ""
-            part = (
-                f"### Round {r['seq']}\n[用户输入]\n" + "\n---\n".join(user_inputs)
-                + "\n[事件截断索引]\n" + truncate.render_round_events(r)
-            )
+            blocks = r.get("blocks") or blocks_module.segment_round(r)
+            round_blocks[r["seq"]] = blocks
+            part = f"### Round {r['seq']}\n[用户输入]\n" + "\n---\n".join(user_inputs)
+            if blocks:
+                block_lines = []
+                for b in blocks:
+                    parts = [f"{b['start_event']}~{b['end_event']}"]
+                    if b["wrote_files"]:
+                        parts.append("写: " + ", ".join(b["wrote_files"]))
+                    reads = [f for f in b["touched_files"] if f not in b["wrote_files"]]
+                    if reads:
+                        parts.append("读: " + ", ".join(reads))
+                    if b["command_types"]:
+                        parts.append("命令[" + ", ".join(b["command_types"]) + "]")
+                    block_lines.append(f"- {b['id']}（{' · '.join(parts)}）")
+                part += "\n[分块结构]\n" + "\n".join(block_lines)
+                grouped = []
+                covered: set[int] = set()
+                for b in blocks:
+                    glines = [f"▸ {b['id']}"]
+                    for i in range(b["start"], b["end"] + 1):
+                        glines.append(truncate.event_index_line(r["events"][i]))
+                    covered.update(range(b["start"], b["end"] + 1))
+                    grouped.append("\n".join(glines))
+                orphans = [
+                    truncate.event_index_line(e)
+                    for i, e in enumerate(r["events"])
+                    if i not in covered
+                ]
+                if orphans:
+                    grouped.append("▸ 未入块事件\n" + "\n".join(orphans))
+                part += "\n[事件截断索引（按块分组）]\n" + "\n\n".join(grouped)
+            else:
+                part += "\n[事件截断索引]\n" + truncate.render_round_events(r)
             if final_text:
                 part += f"\n[最终回答（完整）]\n{final_text[:2000]}"
             sections.append(part)
 
         prompt = (
-            "你是任务整理器。以下是多个已完成 Round 的用户输入、事件截断索引"
-            "与最终回答（按时间顺序排列）。\n"
+            "你是任务整理器。以下是多个已完成 Round 的用户输入、分块结构、"
+            "按块分组的事件截断索引与最终回答（按时间顺序排列）。\n"
             "你的职责（最后只输出一个 JSON 对象，不要代码块围栏）：\n"
             '1. "rounds"：数组，与输入的 Round 一一对应，每个元素为 '
             '{"seq": 轮次号, "normalized_user_input": "该轮用户意图的澄清表述'
             "——不是压缩，是把用户想要什么说得更清楚\", "
-            '"refined_index": [{"id": "该轮的事件ID", "line": "一行摘要"}]}——'
+            '"key_constraints": "该轮用户立下的红线/硬性约束（禁止什么、'
+            '必须怎样、明确否决的方向），没有则给空字符串", '
+            '"block_summaries": [{"id": "块ID（必须逐字取自该轮[分块结构]'
+            '里已有的块ID，每个块一条、一个不落）", '
+            '"summary": "该块的完整细节描述"}]}\n'
+            "块描述的完整性是第一要求：\n"
+            "  * 每块 80~250 字，写清：做了什么、针对哪些文件（路径写全）、"
+            "为什么做、结果与结论；失败的块必须写失败原因与后续怎么修的；\n"
+            "  * 禁止空洞词（\"调整\"\"修改\"\"处理\"不许单独成为描述）；"
+            "关键数字（行数/字节数/条数/次数）与关键命令的目的必须保留；\n"
+            "  * 含最终回答的块，把对用户的承诺/交付口径完整写进去。\n"
+            "（无[分块结构]的旧轮改为给出 \"refined_index\": "
+            "[{\"id\": \"该轮的事件ID\", \"line\": \"一行摘要\"}]——"
             "索引行比截断行更短更准（保留结论：什么可行、什么实测不行、"
             "卡在哪），id 必须取自对应轮次事件流中已有的事件 ID，"
-            "无实质内容的事件（如寒暄）可省略；\n"
+            "无实质内容的事件（如寒暄）可省略。）\n"
             '2. "state_patch"：全部轮次合并后的任务状态增量补丁 '
             '{"completed":[],"decisions":[],"known_issues":[],"open_questions":[],'
             '"escalations":[],"experiments":[],'
@@ -1130,7 +1199,8 @@ class Agent:
             "（写明做什么、看什么、什么算对）。"
             "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。"
             "质量锚点（zcode-borrowings.md）：整理后的视图必须能回答——用户"
-            "原话要求了什么、已做了哪些决策、当前状态如何、下一步是什么。\n"
+            "原话要求了什么、立了哪些约束、已做了哪些决策、当前状态如何、"
+            "下一步是什么。\n"
             f"若截断索引不足以确定关键事实（如失败的具体原因），"
             f"可用 read_full 工具查看事件原文（最多 {_ORGANIZE_MAX_READS} 次）。\n\n"
             + "\n\n".join(sections)
@@ -1202,6 +1272,32 @@ class Agent:
             pending = r["pending_org"] = {}
             if item.get("normalized_user_input"):
                 pending["normalized"] = str(item["normalized_user_input"])
+            if item.get("key_constraints"):
+                pending["key_constraints"] = str(item["key_constraints"])
+            blocks = round_blocks.get(r["seq"]) or []
+            blocks_by_id = {b["id"]: b for b in blocks}
+            summaries = {}
+            for bs in item.get("block_summaries") or []:
+                if (
+                    isinstance(bs, dict)
+                    and str(bs.get("id") or "") in blocks_by_id
+                    and bs.get("summary")
+                ):
+                    summaries[str(bs["id"])] = str(bs["summary"])
+            if blocks_by_id:
+                # 完整性兜底：LLM 漏标的块用确定性路由行补齐——视图里
+                # 不允许出现没有描述的块（用户拍板：保证完整的细节描述）
+                for bid, b in blocks_by_id.items():
+                    if bid not in summaries:
+                        parts = [f"{b['start_event']}~{b['end_event']}"]
+                        if b["wrote_files"]:
+                            parts.append("写: " + ", ".join(b["wrote_files"]))
+                        if b["command_types"]:
+                            parts.append("命令[" + ", ".join(b["command_types"]) + "]")
+                        summaries[bid] = "（LLM 未标注，仅路由）" + " · ".join(parts)
+                pending["block_summaries"] = summaries
+                if not r.get("blocks"):
+                    pending["blocks"] = blocks  # 旧轮现场算出的块结构一并落盘
             valid_ids = {e["id"] for e in r["events"]}
             for line_item in item.get("refined_index") or []:
                 if (
@@ -1241,6 +1337,12 @@ class Agent:
             changed = True
             if pending.get("normalized"):
                 r["user_input"]["normalized"] = pending["normalized"]
+            if pending.get("key_constraints"):
+                r["user_input"]["key_constraints"] = pending["key_constraints"]
+            if pending.get("blocks") and not r.get("blocks"):
+                r["blocks"] = pending["blocks"]  # 旧轮补块结构
+            if pending.get("block_summaries"):
+                r["block_summaries"] = pending["block_summaries"]
             if pending.get("refined_index"):
                 r.setdefault("refined_index", {}).update(pending["refined_index"])
             patch = pending.get("state_patch")
@@ -1302,9 +1404,9 @@ class Agent:
     def expand_history(self, ids: list[str] | str, level: str = "full") -> str:
         """按需展开历史：Truncated → Summary（意图+索引）→ Full 三档读取。
 
-        ids 可为轮（"R3"）或事件（"R3-E02"），容错逗号字符串与大小写；
-        一次可传多个，无调用次数上限。展开只是临时把更高分辨率的信息
-        读进当前上下文，不修改历史。
+        ids 可为轮（"R3"）、块（"R3-B2"，取回整块原文）或事件（"R3-E02"），
+        容错逗号字符串与大小写；一次可传多个，无调用次数上限。展开只是
+        临时把更高分辨率的信息读进当前上下文，不修改历史。
         """
         if isinstance(ids, str):
             ids = [s.strip() for s in ids.split(",") if s.strip()]
@@ -1313,7 +1415,9 @@ class Agent:
             return f"未知级别: {level}，可选 truncated / summary / full"
         results = []
         for rid in ids:
-            if "-E" in rid:
+            if "-B" in rid:
+                results.append(self._expand_block(rid))
+            elif "-E" in rid:
                 results.append(
                     self._read_full_event(rid) if level == "full" else self._event_summary(rid)
                 )
@@ -1354,6 +1458,40 @@ class Agent:
                 )
             return "\n".join(parts)
         return f"未找到轮次: {round_id}"
+
+    def _expand_block(self, block_id: str) -> str:
+        """按块 ID（如 R9-B14）取回该块全部事件的原文（紧凑视图的回放通道）。
+
+        紧凑视图 2026-09-08 起以块描述为主索引、事件行退场，块 ID 是
+        视图里唯一保留的定位锚——expand_history 必须认得它。
+        """
+        head = block_id.lstrip("Rr").split("-B")[0]
+        try:
+            seq = int(head)
+        except ValueError:
+            return f"块 ID 无效: {block_id}"
+        for r in self.rounds:
+            if r["seq"] != seq:
+                continue
+            block = next(
+                (b for b in r.get("blocks") or [] if b["id"] == block_id), None
+            )
+            if block is None:
+                return f"未找到块: {block_id}（该轮无分块结构或块号不存在）"
+            parts = [
+                f"[{block_id}] {block['start_event']}~{block['end_event']}"
+                f"（写: {', '.join(block['wrote_files']) or '无'}）"
+            ]
+            for i in range(block["start"], block["end"] + 1):
+                e = r["events"][i]
+                message = e["message"]
+                body = message.get("content") or ""
+                if message.get("tool_calls"):
+                    calls = json.dumps(message["tool_calls"], ensure_ascii=False)
+                    body = f"调用: {calls}" + (f"\n{body}" if body else "")
+                parts.append(f"--- {e['id']} ({e['type']}) ---\n{body}")
+            return "\n".join(parts)
+        return f"未找到块: {block_id}"
 
     # ---- baseline 阈值压缩（设计文档第 6 节） ------------------------------------
 

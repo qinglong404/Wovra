@@ -289,16 +289,19 @@ def test_close_round_computes_blocks(monkeypatch, tmp_path):
 # ---- 任务绑定 ------------------------------------------------------------
 
 
-def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
-    """水位触发批量整理：State Patch 合并、Normalized 意图与精修索引写回。"""
+def test_organization_updates_state_and_block_summaries(monkeypatch, tmp_path):
+    """水位触发批量整理：State Patch 合并、意图/关键约束/逐块描述写回。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     org_json = json.dumps({
         "rounds": [{
             "seq": 1,
             "normalized_user_input": "用户想搞清楚项目的测试覆盖情况",
-            "refined_index": [
-                {"id": "R1-E01", "line": "询问测试覆盖"},
-                {"id": "R1-E02", "line": "给出覆盖结论"},
+            "key_constraints": "不得修改现有测试用例",
+            "block_summaries": [
+                {"id": "R1-B1",
+                 "summary": "回应测试覆盖询问：说明当前 tests/ 下 5 个套件的覆盖面与"
+                            "缺口（边界条件与异常分支未覆盖），给出按优先级排列的补测"
+                            "建议清单；无文件改动，仅口头结论"},
             ],
         }],
         "state_patch": {
@@ -321,6 +324,8 @@ def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
     assert answer == "干完了"
     # 产物先暂存（本轮装配纹丝不动）：正式字段要等下一轮开启才替换
     assert task.rounds[-1]["pending_org"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
+    assert task.rounds[-1]["pending_org"]["key_constraints"] == "不得修改现有测试用例"
+    assert "R1-B1" in task.rounds[-1]["pending_org"]["block_summaries"]
     assert task.rounds[-1]["user_input"]["normalized"] == ""
     # 模拟下一轮开启：暂存生效
     agent._promote_org_results()
@@ -328,9 +333,10 @@ def test_organization_updates_state_and_refined_index(monkeypatch, tmp_path):
     assert task.task_state["goal"] == "搞清测试覆盖"
     assert task.task_state["is_done"] is True
     assert task.task_state["completed"] == ["梳理测试覆盖"]
-    # Round 结构持久化：Normalized 意图与精修索引写回
+    # Round 结构持久化：意图 / 关键约束 / 逐块描述写回
     assert task.rounds[-1]["user_input"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
-    assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出覆盖结论"
+    assert task.rounds[-1]["user_input"]["key_constraints"] == "不得修改现有测试用例"
+    assert task.rounds[-1]["block_summaries"]["R1-B1"].startswith("回应测试覆盖询问")
     assert task.rounds[-1]["org_state"] == "done"
     assert "pending_org" not in task.rounds[-1]  # 生效后暂存区清空
 
@@ -785,6 +791,108 @@ def test_organized_rounds_render_compact_views(monkeypatch):
     assert "ICP 误差分析完成" not in bodies           # 回答原文不进上下文
     # R2 未整理：全量原文仍在
     assert "按钮改好了" in bodies
+
+
+def test_organized_rounds_render_block_details_view(monkeypatch):
+    """2026-09-08 新契约：已整理轮 = 👤用户/🎯意图/📌关键约束 + 逐块细节描述。
+
+    块描述承载完整细节，事件索引退场；旧整理轮（无块描述）回退精修
+    事件索引（见 test_organized_rounds_render_compact_views）。
+    """
+    task = Task.create(goal="分层回归")
+    task.rounds = [{
+        "seq": 1,
+        "user_input": {
+            "original": "不要用git,先把0和初期扩展做了.",
+            "normalized": "拒绝 git，落库测试脚本并实施全部短期扩展",
+            "key_constraints": "全程禁止任何 git 命令",
+        },
+        "events": [
+            {"id": "R1-E01", "type": "user", "status": "",
+             "truncated": "不要用git", "message": {"role": "user", "content": "不要用git"}},
+            {"id": "R1-E02", "type": "final_answer", "status": "",
+             "truncated": "交付：测试落库 + 五项短期扩展" + "细节" * 200,
+             "message": {"role": "assistant",
+                         "content": "交付：测试落库 + 五项短期扩展" + "细节" * 200}},
+        ],
+        "blocks": [{
+            "id": "R1-B1", "kind": "work", "start": 0, "end": 1,
+            "start_event": "R1-E01", "end_event": "R1-E02",
+            "touched_files": ["tests/run.js"], "wrote_files": ["tests/run.js"],
+            "command_types": ["test"],
+        }],
+        "block_summaries": {
+            "R1-B1": "创建 tests/run.js 一键回归入口（1467 字符，顺序执行 5 个套件"
+                     "并汇总），把散落在 /tmp 的测试脚本正式落库；全程未碰 git",
+        },
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    _make_open_round(agent, 2, "继续")
+
+    msgs = agent._assemble_messages()
+    body = "\n".join(m.get("content", "") for m in msgs)
+
+    assert '👤 用户: "不要用git,先把0和初期扩展做了."' in body
+    assert "🎯 意图: 拒绝 git，落库测试脚本并实施全部短期扩展" in body
+    assert "📌 关键约束: 全程禁止任何 git 命令" in body
+    assert "▸ R1-B1: 创建 tests/run.js 一键回归入口" in body
+    assert "事件索引" not in body                       # 事件行退场
+    assert "细节" * 200 not in body                     # 回答原文不进上下文
+
+
+def test_organization_missing_blocks_get_fallback_route_lines(monkeypatch, tmp_path):
+    """完整性兜底：LLM 漏标的块用确定性路由行补齐——视图里不允许出现
+    没有描述的块（用户拍板：保证完整的细节描述）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_json = json.dumps({
+        "rounds": [{"seq": 1, "normalized_user_input": "意图"}],  # 未给 block_summaries
+        "state_patch": {},
+    }, ensure_ascii=False)
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+        [_chunk(_delta(content=org_json))],
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+
+    agent.run("问")
+
+    blocks = task.rounds[-1]["blocks"]
+    summaries = task.rounds[-1]["pending_org"]["block_summaries"]
+    assert set(summaries) == {b["id"] for b in blocks}   # 覆盖完整
+    assert all("仅路由" in s for s in summaries.values())
+
+
+def test_expand_history_supports_block_ids():
+    """紧凑视图以块 ID 为定位锚：expand_history("R1-B1") 取回整块原文。"""
+    task = Task.create(goal="x")
+    task.rounds = [{
+        "seq": 1,
+        "user_input": {"original": "改按钮", "normalized": "改按钮颜色"},
+        "events": [
+            {"id": "R1-E01", "type": "tool_call", "status": "", "truncated": "调用 edit_file",
+             "message": {"role": "assistant", "tool_calls": [
+                 {"id": "c1", "type": "function",
+                  "function": {"name": "edit_file",
+                               "arguments": "{\"path\": \"app.py\"}"}}]}},
+            {"id": "R1-E02", "type": "final_answer", "status": "", "truncated": "改好了",
+             "message": {"role": "assistant", "content": "按钮已改成蓝色，刷新即可看到"}},
+        ],
+        "blocks": [{
+            "id": "R1-B1", "kind": "work", "start": 0, "end": 1,
+            "start_event": "R1-E01", "end_event": "R1-E02",
+            "touched_files": ["app.py"], "wrote_files": ["app.py"],
+            "command_types": [],
+        }],
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    out = agent.expand_history("R1-B1")
+    assert "R1-E01" in out and "edit_file" in out and "app.py" in out
+    assert "按钮已改成蓝色" in out
+    assert "未找到块" not in out
 
 
 def test_resume_continues_open_round_without_new_user_message(monkeypatch, tmp_path):
