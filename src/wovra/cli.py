@@ -463,6 +463,7 @@ def _run_turn(agent: Agent, instruction: str | None) -> str:
     """
     line_open = False  # 流式输出（思考/回答）是否有未换行的半行
     phase = ""         # 当前流式阶段：thinking / answer
+    think_buf = []     # 思考累积（单行滚动显示，防污染窗口/防视角切换）
 
     def _break_line() -> None:
         nonlocal line_open
@@ -471,17 +472,24 @@ def _run_turn(agent: Agent, instruction: str | None) -> str:
             line_open = False
 
     def on_thinking(text: str) -> None:
-        nonlocal line_open, phase
+        # 思考单行化（2026-09-08 用户拍板）：\r 原地刷新一行，不再整段
+        # 滚动——防止污染窗口、防止思考/回答来回切换视角
+        nonlocal phase
         if phase != "thinking":
             _break_line()
-            print(ui.rule("思考过程"), flush=True)
             phase = "thinking"
-        print(ui.thinking_delta(text), end="", flush=True)
+        think_buf.append(text)
+        line = ui.thinking_line(ui.thinking_head("".join(think_buf)))
+        sys.stdout.write("\r\x1b[2K" + line)
+        sys.stdout.flush()
         line_open = True
 
     def on_answer_delta(text: str) -> None:
         nonlocal phase
         if phase != "answer":
+            _break_line()
+            phase = "answer"
+            think_buf.clear()
             _break_line()
             print(ui.rule("回答"), flush=True)
             ui.answer_live_start()

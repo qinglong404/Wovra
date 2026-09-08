@@ -17,7 +17,7 @@ from wovra.task import Task, TaskState
 
 
 class _StubLLM:
-    """替身 LLM：按消息尾部的指令标记路由到整理/分裂两个响应池。
+    """替身 LLM：按消息内容标记路由到整理/分裂/consult 三个响应池。
 
     池为空时先抛错再记 calls——失败路的空池不产生调用记录，既有
     断言（calls[0] 是整理路）保持确定性。
@@ -25,20 +25,26 @@ class _StubLLM:
 
     model = "stub"
 
-    def __init__(self, responses: list | None = None, split_responses: list | None = None):
+    def __init__(self, responses: list | None = None,
+                 split_responses: list | None = None,
+                 consult_responses: list | None = None):
         self.responses = list(responses or [])
         self.split_responses = list(split_responses or [])
+        self.consult_responses = list(consult_responses or [])
         self.calls: list[dict] = []
 
     def chat(self, messages, tools=None, stream=False, **kwargs):
-        marker = str((messages[-1] or {}).get("content") or "")
-        is_split = "[分裂分析指令]" in marker
-        pool = self.split_responses if is_split else self.responses
+        texts = [str(m.get("content") or "") for m in messages]
+        if any("[分裂分析指令]" in t for t in texts):
+            pool, lane = self.split_responses, "split"
+        elif any("主对话正就以下问题" in t for t in texts):
+            pool, lane = self.consult_responses, "consult"
+        else:
+            pool, lane = self.responses, "org"
         if not pool:
-            raise IndexError("无预备响应（分裂路）" if is_split else "无预备响应（整理路）")
+            raise IndexError(f"无预备响应（{lane}路）")
         self.calls.append({
-            "messages": messages, "stream": stream, "tools": tools,
-            "lane": "split" if is_split else "org",
+            "messages": messages, "stream": stream, "tools": tools, "lane": lane,
         })
         return iter(pool.pop(0))
 
@@ -1000,6 +1006,52 @@ def test_todo_tail_lines_shown_in_reminder(monkeypatch):
     body = "\n".join(m.get("content", "") for m in msgs)
 
     assert "[当前大步] ICP 配准（小步 0/1）" in body
+
+
+def test_registry_default_and_comm_guards():
+    """注册表默认主 agent；自咨询拒绝；未知 agent 列出现存条目。"""
+    task = Task.create(goal="x")
+    assert task.registry[0]["id"] == "A"
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    assert "不要 consult 主 agent" in agent.consult(agent="A", question="?")
+    assert "未找到 agent：Z" in agent.notify(agent="Z", message="m")
+    assert "A(主agent)" in agent.notify(agent="Z", message="m")
+
+
+def test_notify_and_consult_direct_to_user():
+    """单向 notify 落收件箱；双向 consult 以目标视角回答、回复打标签
+    直达用户窗口并返回调用方；收件箱随激活送达。"""
+    collected = []
+    task = Task.create(goal="演示项目")
+    task.registry.append({
+        "id": "B", "name": "前端agent",
+        "description": "负责 index.html 与 css/ 界面层",
+        "file_domains": ["index.html", "css/"],
+        "status": "dormant", "inbox": [],
+    })
+    consult_resp = [_chunk(_delta(content="界面层归我，按钮色值用 #0a84ff"))]
+    agent = Agent(llm=_StubLLM(consult_responses=[consult_resp]), tools=[], task=task)
+    agent._stream_cbs = {"thinking": None, "answer": collected.append}
+
+    out = agent.notify(agent="B", message="接口定了：getStats() 返回 {clicks}")
+    assert "已单向送达" in out
+    assert task.registry[1]["inbox"][0]["message"].startswith("接口定了")
+
+    reply = agent.consult(agent="前端agent", question="UI 改动走谁的文件域？")
+    assert "前端agent 的回复" in reply and "#0a84ff" in reply
+    assert task.registry[1]["inbox"] == []              # 收件箱随激活送达
+    assert collected[0] == "\n[前端agent] "             # 打标签直达用户窗口
+    assert any("#0a84ff" in c for c in collected)
+
+
+def test_thinking_head_single_line():
+    """思考单行化：折叠空白取尾部，单行展示。"""
+    from wovra import ui
+
+    long = "思路" * 200
+    head = ui.thinking_head(long)
+    assert head.startswith("…") and len(head) <= 102
+    assert ui.thinking_line("x").startswith("💭")
 
 
 def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):

@@ -227,6 +227,19 @@ def thinking_delta(text: str) -> str:
     return paint(text, "magenta")
 
 
+def thinking_head(text: str, limit: int = 100) -> str:
+    """思考单行化的内容：折叠空白取**尾部**——单行滚动显示最近思路。"""
+    collapsed = " ".join((text or "").split())
+    if len(collapsed) <= limit:
+        return collapsed
+    return "…" + collapsed[-limit:]
+
+
+def thinking_line(text: str) -> str:
+    """思考单行（品红），配合 \\r 原地刷新。"""
+    return paint(f"💭 {text}", "magenta")
+
+
 def wait_hint(text: str) -> str:
     """等待提示（模型响应中、工具执行中）。"""
     return paint(f"  ⏳ {text}", "cyan")

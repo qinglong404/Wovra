@@ -230,6 +230,9 @@ class Task:
     org_context: str = ""
     pending_instruction: str = ""
     todo: dict = field(default_factory=dict)  # 大步/小步计划账本（深度恒 1）
+    # agent 注册表（机制三）：路径 ID / 类别描述 / 所有权文件域 / 状态 /
+    # 收件箱（单向通信的落信处）。默认只有主 agent；分裂执行时扩充
+    registry: list[dict] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 
@@ -268,6 +271,12 @@ class Task:
             requirements=list(requirements or []),
             acceptance_criteria=list(acceptance_criteria or []),
             workspace=str(tools_module.PROJECT_ROOT),
+            # 注册表默认只有主 agent；分裂执行时扩充（机制三/四）
+            registry=[{
+                "id": "A", "name": "主agent",
+                "description": "全局协调与未归属事务",
+                "file_domains": [], "status": "active", "inbox": [],
+            }],
             created_at=now.isoformat(timespec="seconds"),
             updated_at=now.isoformat(timespec="seconds"),
         )

@@ -435,6 +435,47 @@ _TODO_SCHEMA: dict = {
         },
     },
 }
+# 跨 agent 通信（机制五，2026-09-08 实现为 Level 0.5 骨架）：
+# 单向 notify（只发不等，落收件箱、激活时送达）+ 双向 consult（发并
+# 等回，目标以其职责视角回答）。展示纪律：子 agent 的回答打标签直接
+# 流式进用户窗口（不回路由主 agent 转述），思考全局单行。
+_NOTIFY_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "notify",
+        "description": (
+            "单向通信：把消息转交/通知/交接给另一个 agent，只发不等——"
+            "对方下次被激活时收到。用于交接、通知事实、同步状态。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "目标 agent 的 id 或名称"},
+                "message": {"type": "string", "description": "要转交/通知的内容"},
+            },
+            "required": ["agent", "message"],
+        },
+    },
+}
+_CONSULT_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "consult",
+        "description": (
+            "双向通信：就某问题与另一个 agent 对齐观点/提问，发并等回——"
+            "对方以其职责视角回答（回答直接展示给用户并返回给你）。"
+            "用于接口协商、事实核对、方案对齐。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "目标 agent 的 id 或名称"},
+                "question": {"type": "string", "description": "要对齐/提问的内容"},
+            },
+            "required": ["agent", "question"],
+        },
+    },
+}
 # 单轮工具循环的默认步数上限：安全网而非配额——尽量不在步数上限制
 # LLM（2026-09-07 用户拍板 60），真超限也只是开放轮等待 \继续，不废工作
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
@@ -590,6 +631,9 @@ class Agent:
             self.register(self.submit_domains, schema=_ORG_DOMAINS_SCHEMA)
             # 大步/小步计划账本（工作工具，深度恒 1，见 todo-milestone-tool.md）
             self.register(self.todo, schema=_TODO_SCHEMA)
+            # 跨 agent 通信（机制五）：单向 notify / 双向 consult
+            self.register(self.notify, schema=_NOTIFY_SCHEMA)
+            self.register(self.consult, schema=_CONSULT_SCHEMA)
             # 水位批量整理：上次会话遗留的未整理轮（含崩溃时的 pending /
             # failed）由下一次轮闭合触发时一并收编——加载时不立即补跑
             # （小会话可能永远不需要整理）
@@ -821,6 +865,91 @@ class Agent:
             return f"OK：{action}（{cur['goal']}｜小步 {done_n}/{len(todo['steps'])}）"
         return f"OK：{action}"
 
+    def _registry_entry(self, ref: str) -> Optional[dict]:
+        """按 id 或名称查注册表条目。"""
+        registry = (self.task.registry if self.task is not None else None) or []
+        for entry in registry:
+            if entry.get("id") == ref or entry.get("name") == ref:
+                return entry
+        return None
+
+    def notify(self, agent: str, message: str) -> str:
+        """单向通信（机制五）：转交/通知/交接，只发不等——落目标收件箱，
+        对方下次被激活（consult/路由）时送达。"""
+        if self.task is None:
+            return "notify：当前无任务绑定。"
+        entry = self._registry_entry(agent)
+        if entry is None:
+            known = ", ".join(
+                f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
+            )
+            return f"未找到 agent：{agent}。现存：{known}"
+        entry.setdefault("inbox", []).append({
+            "from": "主agent", "message": message.strip(),
+        })
+        self.task.save()
+        if self.on_progress:
+            self.on_progress(f"📨 单向 → {entry.get('name')}：{message.strip()[:60]}")
+        return f"已单向送达 {entry.get('name')} 的收件箱（只发不等，对方激活时收到）。"
+
+    def consult(self, agent: str, question: str) -> str:
+        """双向通信（机制五）：发并等回——切到目标职责视角回答一次，
+        回复打标签直接流式进用户窗口（不回路由主 agent 转述），同时
+        返回给调用方。目标收件箱随激活送达。"""
+        if self.task is None:
+            return "consult：当前无任务绑定。"
+        entry = self._registry_entry(agent)
+        if entry is None:
+            known = ", ".join(
+                f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
+            )
+            return f"未找到 agent：{agent}。现存：{known}"
+        if entry.get("id") == "A":
+            return "不要 consult 主 agent（那就是你自己）——需要用户输入请用 ask_user。"
+
+        system = (
+            f"你是 {entry.get('name')}（{entry.get('id')}）——"
+            f"{entry.get('description', '')}。"
+            f"所有权文件域：{', '.join(entry.get('file_domains') or []) or '未划定'}。"
+            "主对话正就以下问题与你对齐：用你的职责视角回答，只答职责内"
+            "的内容，简明扼要，不要客套。"
+        )
+        msgs: list[dict] = [{"role": "system", "content": system}]
+        for item in entry.get("inbox") or []:
+            msgs.append({
+                "role": "user",
+                "content": f"[收件箱·来自{item.get('from')}] {item.get('message')}",
+            })
+        if entry.get("inbox"):
+            entry["inbox"] = []  # 已送达
+        state = self.task.get_state()
+        if state.goal or state.current_status:
+            msgs.append({
+                "role": "user",
+                "content": f"[任务背景] 目标：{state.goal}；现状：{state.current_status}",
+            })
+        msgs.append({"role": "user", "content": question.strip()})
+
+        # 子 agent 流式展示：思考沿用全局单行；回答打标签直达用户窗口
+        base = getattr(self, "_stream_cbs", None) or {}
+        think_cb, answer_cb = base.get("thinking"), base.get("answer")
+        label = f"[{entry.get('name')}]"
+        first = [True]
+
+        def sub_answer(text: str) -> None:
+            if answer_cb:
+                if first[0]:
+                    answer_cb("\n" + label + " ")
+                    first[0] = False
+                answer_cb(text)
+
+        reply, _ordered, _usage = self._stream_call(
+            msgs, tools=None, purpose="working",
+            on_thinking=think_cb, on_answer_delta=sub_answer,
+        )
+        self.task.save()
+        return f"{entry.get('name')} 的回复：{reply.strip()}"
+
     def _open_or_reuse_round(self, user_input: str) -> bool:
         """开启新 Round，或续上未闭合的开放 Round（V2 闭合规则）。
 
@@ -960,6 +1089,9 @@ class Agent:
     ) -> str:
         """单轮的工具调用主循环：run 与 resume 共用。"""
         self.last_stats = self._fresh_stats()
+        # 回调暂存：跨 agent 通信工具（consult）流式展示时借用同一管线，
+        # 让子 agent 的输出直接进用户窗口（不打回主 agent 再路由）
+        self._stream_cbs = {"thinking": on_thinking, "answer": on_answer_delta}
 
         for _ in range(self.max_turns):
             if self.on_progress:
