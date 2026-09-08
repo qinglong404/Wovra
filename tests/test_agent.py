@@ -1216,6 +1216,9 @@ def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):
     assert envelope, "任务状态必须走运行时信封"
     assert "存档测试目标" in envelope[0]
     assert envelope[0].rstrip().endswith("</runtime-reminder>")
+    # 信封绝对尾部（D 组实证）：状态高频变化只作废信封本身（~1-2K），
+    # 不作废其前的事件历史——位置保证是缓存纪律的一部分
+    assert msgs[-1]["content"].startswith("<runtime-reminder>")
 
 
 def test_unorganized_rounds_stay_full_until_organized(monkeypatch):

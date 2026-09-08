@@ -1618,14 +1618,20 @@ class Agent:
         todo_lines = self._todo_tail_lines()
         if todo_lines:
             block = todo_lines + block
+
+        msgs.extend(view_msgs)
+        msgs.extend(self._current_round_messages())
+        # 信封绝对尾部（2026-09-08 用户拍板，D 组实证）：todo/TaskState/
+        # 文件地图是高频变化状态，放在当前轮事件之前时每次变化都作废其
+        # 后全部前缀——D 段1 26 次 todo 变化把命中率砸到 77.5%（段2/3
+        # 零变化 99.2-99.5%）。放尾部后状态变化只作废信封本身（~1-2K），
+        # 事件追加与状态变化互不破坏；跨轮边界时前缀还能保留到整段历史
+        # 末尾。位置仍在响应之前，信息与时机不变，纯缓存布局修正。
         if block:
             # 运行时专属通道（zcode-borrowings.md 1.1）：机制信息用
             # <runtime-reminder> 信封注入，与用户发言语义分离——模型
             # 分得清"用户要的"和"机制给的"（系统提示词里声明该约定）
-            view_msgs.append(_runtime_reminder("\n\n".join(block)))
-
-        msgs.extend(view_msgs)
-        msgs.extend(self._current_round_messages())
+            msgs.append(_runtime_reminder("\n\n".join(block)))
         return msgs
 
     def _todo_tail_lines(self) -> list[str]:
