@@ -94,6 +94,8 @@ _READ_ONLY_TOOLS = frozenset(
 # 轮闭合时即本轮峰值）——2026-09-07 用户拍板，替代 V3 初版的"未整理
 # 积压量"口径。达标且轮闭合才触发一次批量整理，轮进行中永不打扰；
 # 产物暂存、下一轮开启才生效。小会话可能全程不触发——整理成本归零。
+_ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
+_ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
 
@@ -430,6 +432,8 @@ class Agent:
         async_organization: bool = False,
         org_watermark: Optional[int] = None,
         org_batch_max: Optional[int] = None,
+        org_grace_rounds: Optional[int] = None,
+        org_cooldown_rounds: Optional[int] = None,
         on_tool_call: Optional[Callable[[str, str], None]] = None,
         on_tool_result: Optional[Callable[[str, str], None]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
@@ -450,6 +454,21 @@ class Agent:
         )
         self._org_batch_max = (
             _ORG_BATCH_MAX_DEFAULT if org_batch_max is None else org_batch_max
+        )
+        # 保护机制（2026-09-08 用户拍板）：宽限期 + 冷却间隔。
+        # 宽限 = 会话前 N 轮硬豁免维护——开头几轮（项目导览/目标陈述）是
+        # 判据二"解释现状的最小历史"的核心，且大项目首查容易瞬间装满，
+        # 不豁免会刚开场就压缩（窗口保底紧急折叠不受豁免，是另一条线）。
+        # 冷却 = 两次维护之间的最小轮距，适配大小不同的起点、防高频。
+        # 分裂后水位按 agent 各自计量、有效容量随分裂增长，阈值无需上调
+        # ——保护旋钮主要服务分裂前的单体阶段。
+        self._org_grace = (
+            _ORG_GRACE_ROUNDS_DEFAULT if org_grace_rounds is None else org_grace_rounds
+        )
+        self._org_cooldown = (
+            _ORG_COOLDOWN_ROUNDS_DEFAULT
+            if org_cooldown_rounds is None
+            else org_cooldown_rounds
         )
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
@@ -1342,6 +1361,21 @@ class Agent:
         """
         if self.last_context_estimate < self._org_watermark:
             return
+        # 保护机制：宽限期 + 冷却间隔（2026-09-08 用户拍板）。窗口保底
+        # （紧急折叠）不在豁免范围，是独立的生存线。
+        current_seq = self.rounds[-1]["seq"] if self.rounds else 0
+        if current_seq <= self._org_grace:
+            return  # 宽限期：开头几轮是"解释现状的最小历史"，硬豁免
+        last_maintained = max(
+            (
+                r["seq"]
+                for r in self.rounds
+                if r.get("org_state") in ("done", "pending")
+            ),
+            default=0,
+        )
+        if last_maintained and current_seq - last_maintained < self._org_cooldown:
+            return  # 冷却间隔：两次维护之间的最小轮距，防高频
         unorganized = self._unorganized_rounds()
         if not unorganized:
             return

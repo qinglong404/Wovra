@@ -330,7 +330,7 @@ def test_organization_updates_state_and_block_summaries(monkeypatch, tmp_path):
     ]
     task = Task.create(goal="初始的模糊想法")
     # org_watermark=0：每轮闭合即触发（等价旧逐轮行为），便于单测
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     answer = agent.run("把活干完")
 
@@ -363,7 +363,7 @@ def test_organization_survives_invalid_json(monkeypatch, tmp_path):
         [_chunk(_delta(content="重试了还是 {{{ 不是"))],  # 重试仍失败
     ]
     task = Task.create(goal="初始目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
@@ -386,7 +386,7 @@ def test_organization_patch_ignores_invalid_fields(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
@@ -440,7 +440,7 @@ def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
         r["org_state"] = ""
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1, 2])))]]),
-        tools=[], task=task, org_watermark=2000, org_batch_max=12,
+        tools=[], task=task, org_watermark=2000, org_batch_max=12, org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000  # 装配峰值 ≥ 水位 → 触发
     old_normalized = task.rounds[0]["user_input"]["normalized"]  # 助手自带的旧值
@@ -483,7 +483,7 @@ def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
             [_chunk(_delta(content=_batch_org_json([1, 2])))],
             [_chunk(_delta(content=_batch_org_json([3])))],
         ]),
-        tools=[], task=task, org_watermark=2000, org_batch_max=2,
+        tools=[], task=task, org_watermark=2000, org_batch_max=2, org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000
 
@@ -512,6 +512,7 @@ def test_pending_backlog_collected_on_trigger(monkeypatch, tmp_path):
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
         tools=[], task=task, org_watermark=1200, org_batch_max=12,
+        org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 1200  # 达到水位 → 触发
 
@@ -731,7 +732,7 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],                     # 重试：合法 JSON
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
@@ -761,7 +762,7 @@ def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
         [org_chunk],
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
@@ -794,7 +795,7 @@ def test_org_tool_call_without_seq_matches_positionally(monkeypatch, tmp_path):
     ]))
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk]]),
-                  tools=[], task=task, org_watermark=0)
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
@@ -811,12 +812,53 @@ def test_org_unusable_product_twice_marks_failed(monkeypatch, tmp_path):
     ]))
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk], [org_chunk]]),
-                  tools=[], task=task, org_watermark=0)
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
     assert task.rounds[-1]["org_state"] == "failed"
     assert "pending_org" not in task.rounds[-1]
+
+
+def test_protection_grace_and_cooldown(monkeypatch, tmp_path):
+    """保护机制：会话前 N 轮硬豁免维护（宽限），两次维护之间最小轮距
+    （冷却）——适配大项目起点，窗口保底紧急折叠不受豁免（另一条线）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+
+    def org_json(*seqs):
+        return json.dumps({
+            "rounds": [{"seq": s, "normalized_user_input": f"R{s} 意图",
+                        "key_constraints": "", "block_summaries": []} for s in seqs],
+            "state_patch": {},
+        }, ensure_ascii=False)
+
+    responses = [
+        [_chunk(_delta(content="R1"))],                    # R1（宽限）
+        [_chunk(_delta(content="R2"))],                    # R2（宽限）
+        [_chunk(_delta(content="R3"))],                    # R3（宽限）
+        [_chunk(_delta(content="R4"))],                    # R4
+        [_chunk(_delta(content=org_json(4)))],             # R4 触发（宽限外首次）
+        [_chunk(_delta(content="R5"))],                    # R5（冷却 1<3）
+        [_chunk(_delta(content="R6"))],                    # R6（冷却 2<3）
+        [_chunk(_delta(content="R7"))],                    # R7
+        [_chunk(_delta(content=org_json(5, 6, 7)))],       # R7 触发（间隔 3 达标）
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task,
+                  org_watermark=0, org_grace_rounds=3, org_cooldown_rounds=3)
+
+    for i in range(1, 8):
+        agent.run(f"轮{i}")
+
+    org_calls = [c for c in agent.llm.calls if c.get("lane") == "org"
+                 and "[整理指令]" in str(c["messages"][-1].get("content", ""))]
+    assert len(org_calls) == 2                       # R4、R7 两次
+    # 宽限期的证据是调用时点（R1-R3 闭合时零维护调用）；R4 批次把它们
+    # 一并收编属正常语义，故只断言 R1 无产物
+    assert task.rounds[0]["user_input"]["normalized"] == ""
+    assert task.rounds[3]["org_state"] == "done"     # R4 整理
+    assert task.rounds[4]["org_state"] == "done"     # R7 批次补齐 R5-R7
+    assert task.rounds[4]["pending_org"]["normalized"] == "R5 意图"
 
 
 def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
@@ -848,7 +890,7 @@ def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
     task.rounds[0]["org_state"] = ""
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=org_json))]], split_responses=[[domains_chunk]]),
-        tools=[], task=task, org_watermark=0,
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000
 
@@ -880,7 +922,7 @@ def test_split_lane_failure_independent(monkeypatch, tmp_path):
     task.rounds = [_round(1, "第一轮", "答案")]
     task.rounds[0]["org_state"] = ""
     agent = Agent(llm=_StubLLM([[_chunk(_delta(content=org_json))]]),
-                  tools=[], task=task, org_watermark=0)
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
     agent.last_context_estimate = 5000
 
     agent._maybe_organize_batch()
@@ -1035,7 +1077,7 @@ def test_organization_missing_blocks_get_fallback_route_lines(monkeypatch, tmp_p
         [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
@@ -1171,7 +1213,7 @@ def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json))],
     ]
     task = Task.create(goal="ICP 调试")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     # 第一次 run 模拟被中断：不闭合（仅持久化，轮保持开放）
     agent._open_or_reuse_round("开始调试 ICP")
@@ -1229,7 +1271,7 @@ def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
         [_chunk(_delta(content=org_json)), _chunk(usage=_usage(60, 30, 90))],
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
