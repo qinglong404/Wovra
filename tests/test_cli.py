@@ -123,6 +123,10 @@ def test_system_prompt_matches_mode_and_environment(monkeypatch):
     baseline = _system_prompt(MODE_BASELINE)
     assert "expand_history" in managed
     assert "expand_history" not in baseline  # baseline 没注册这个工具，不能预告
+    # R5 教训（新需求整体重写文件被用户批评）固化为工程纪律，两模式都有
+    for prompt in (managed, baseline):
+        assert "模块化多文件结构" in prompt
+        assert "禁止为一条新需求整体重写文件" in prompt
     # 运行环境信息防止模型在 Windows 上跑类 Unix 命令
     if _os.name == "nt":
         assert "cmd.exe" in managed and "Windows" in managed
