@@ -13,8 +13,8 @@
   对话；产物先暂存，**下一轮开启时才生效**——本轮装配纹丝不动
   （连贯性 + 缓存前缀稳定），过程对用户静默；
   输入 = 触发时刻的装配原文快照（一字不动，纯追加骑前缀缓存）+ 尾部
-  追加"分块地图 + 整理指令"；单次生成、全部工具禁用（read_full 退役
-  ——原文本来就在眼前）；
+  追加"分块地图 + 整理指令"；单次生成，与工作对话同一 tools 数组
+  （submit_organization 常驻提交，read_full 退役——原文本来就在眼前）；
   输出 = Normalized 用户意图 + 关键约束 + **逐块完整细节描述** + Task
   State 补丁（2026-09-08 用户拍板：块描述必须承载完整细节，事件级
   精修索引只在无分块结构的旧轮回退使用）
@@ -90,6 +90,156 @@ _READ_ONLY_TOOLS = frozenset(
 # 产物暂存、下一轮开启才生效。小会话可能全程不触发——整理成本归零。
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
+
+# 整理产出的提交契约（工具常驻：整理调用与工作对话共用同一 tools 数组，
+# 前缀序列化恒定，缓存才能常骑——2026-09-08 用户拍板）。字段语义写在
+# schema description 里，是唯一事实源；整理指令只补质量要求与批次声明。
+_ORG_SUBMIT_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_organization",
+        "description": (
+            "提交批量整理产物。仅限后台整理阶段调用（作为整理结果的唯一"
+            "出口）；工作对话中调用无效，只返回说明文本。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "rounds": {
+                    "type": "array",
+                    "description": "与待整理轮一一对应，每个元素对应一轮",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "seq": {
+                                "type": "integer",
+                                "description": "轮次号",
+                            },
+                            "normalized_user_input": {
+                                "type": "string",
+                                "description": (
+                                    "该轮用户意图的澄清表述——不是压缩，"
+                                    "是把用户想要什么说得更清楚"
+                                ),
+                            },
+                            "key_constraints": {
+                                "type": "string",
+                                "description": (
+                                    "该轮用户立下的红线/硬性约束（禁止什么、"
+                                    "必须怎样、明确否决的方向），没有则给空字符串"
+                                ),
+                            },
+                            "block_summaries": {
+                                "type": "array",
+                                "description": (
+                                    "逐块完整细节描述。id 逐字取自分块地图，"
+                                    "每个块一条、一个不落、与地图同序"
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "块ID，如 R9-B14",
+                                        },
+                                        "summary": {
+                                            "type": "string",
+                                            "description": (
+                                                "80~250 字，写清：做了什么、针对"
+                                                "哪些文件（路径写全）、为什么做、"
+                                                "结果与结论；失败的块必须写失败"
+                                                "原因与后续怎么修的；禁止空洞词"
+                                                "（调整/修改/处理）单独成描述；"
+                                                "关键数字（行数/字节数/条数/次数）"
+                                                "与关键命令的目的必须保留；含最终"
+                                                "回答的块，把对用户的承诺/交付口径"
+                                                "完整写进去"
+                                            ),
+                                        },
+                                    },
+                                    "required": ["id", "summary"],
+                                },
+                            },
+                            "refined_index": {
+                                "type": "array",
+                                "description": (
+                                    "仅无分块结构的轮使用（替代 block_summaries）："
+                                    "一行式事件摘要，id 取自该轮事件流已有的"
+                                    "事件 ID，无实质内容的事件（如寒暄）可省略；"
+                                    "索引行比截断行更短更准（保留结论：什么可行、"
+                                    "什么实测不行、卡在哪）"
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "id": {
+                                            "type": "string",
+                                            "description": "事件ID，如 R3-E02",
+                                        },
+                                        "line": {
+                                            "type": "string",
+                                            "description": "一行摘要",
+                                        },
+                                    },
+                                    "required": ["id", "line"],
+                                },
+                            },
+                        },
+                        "required": [
+                            "seq", "normalized_user_input", "key_constraints",
+                            "block_summaries",
+                        ],
+                    },
+                },
+                "state_patch": {
+                    "type": "object",
+                    "description": (
+                        "这些轮次合并后的任务状态增量补丁。多轮之间重复交代的"
+                        "决策与背景只记一次，已完成的事项不要重复累积。质量锚点"
+                        "（zcode-borrowings.md）：整理后的视图必须能回答——用户"
+                        "原话要求了什么、立了哪些约束、已做了哪些决策、当前状态"
+                        "如何、下一步是什么"
+                    ),
+                    "properties": {
+                        "completed": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "decisions": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "known_issues": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "open_questions": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "escalations": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "决策升级：实测与预期不符、影响方向、需要上级或"
+                                "人拍板的事项（写明预期、现实、选项），"
+                                "不要擅自改方向"
+                            ),
+                        },
+                        "experiments": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "description": (
+                                "待办实验：机器无法自行验证、需要人当传感器的事项"
+                                "（写明做什么、看什么、什么算对）"
+                            ),
+                        },
+                        "current_status": {"type": "string"},
+                        "goal": {"type": "string"},
+                        "is_done": {"type": "boolean"},
+                    },
+                },
+            },
+            "required": ["rounds", "state_patch"],
+        },
+    },
+}
 # 单轮工具循环的默认步数上限：安全网而非配额——尽量不在步数上限制
 # LLM（2026-09-07 用户拍板 60），真超限也只是开放轮等待 \继续，不废工作
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
@@ -220,6 +370,10 @@ class Agent:
 
         if self.context_mode == MODE_MANAGED:
             self.register(self.expand_history)
+            # 整理提交工具常驻：所有请求的 tools 数组恒定（工作对话与整理
+            # 调用同序列化），前缀缓存才不会在 tools 区分叉。工作期误调用
+            # 由方法体守卫拒绝（见 submit_organization）。
+            self.register(self.submit_organization, schema=_ORG_SUBMIT_SCHEMA)
             # 水位批量整理：上次会话遗留的未整理轮（含崩溃时的 pending /
             # failed）由下一次轮闭合触发时一并收编——加载时不立即补跑
             # （小会话可能永远不需要整理）
@@ -260,14 +414,32 @@ class Agent:
             "prompt_breakdown": dict.fromkeys(tokens.CATEGORIES, 0),
         }
 
-    def register(self, fn: Callable) -> None:
-        """把一个 Python 函数注册为模型可调用的工具。"""
+    def register(self, fn: Callable, schema: Optional[dict] = None) -> None:
+        """把一个 Python 函数注册为模型可调用的工具。
+
+        schema 缺省由函数签名自动生成；传入则整体覆盖（submit_organization
+        的嵌套产出契约用手工 schema，_schema_of 只会生成扁平结构）。
+        """
         if fn.__name__ in self.tools:
             raise ValueError(f"工具重复注册: {fn.__name__}")
         self.tools[fn.__name__] = fn
-        self._schemas.append(_schema_of(fn))
+        self._schemas.append(schema or _schema_of(fn))
 
     # ---- Round 生命周期：开放 → 闭合 ----------------------------------------
+
+    def submit_organization(
+        self, rounds: Optional[list] = None, state_patch: Optional[dict] = None
+    ) -> str:
+        """[守卫] 整理产出的提交工具。
+
+        整理阶段（_organize_rounds）捕获其 tool_call 参数直接解析，不经
+        工具执行；这里的方法体只在**工作对话误调用**时跑到——返回说明
+        文本，不产生任何副作用。
+        """
+        return (
+            "submit_organization 仅由后台整理流程消费（整理阶段捕获其调用参数，"
+            "不经过工具执行）。当前处于工作对话，本次调用被忽略，无副作用。"
+        )
 
     def _open_or_reuse_round(self, user_input: str) -> bool:
         """开启新 Round，或续上未闭合的开放 Round（V2 闭合规则）。
@@ -1111,9 +1283,11 @@ class Agent:
         指令"。全部工具禁用、单次生成：read_full 退役（原文本来就在眼前，
         截断索引再造一遍反而丢了细节还多付一遍生成）。
         输出 = 各轮 Normalized 意图 + 关键约束 + 逐块完整细节描述 + 合并
-        State Patch，**全部写入 pending_org 暂存区**：本轮装配必须纹丝
+        State Patch，经常驻工具 submit_organization 提交（与工作对话同一
+        tools 数组——序列化恒定，前缀缓存常骑；字段语义以 schema 描述为
+        唯一事实源），**全部写入 pending_org 暂存区**：本轮装配必须纹丝
         不动（连贯性 + 缓存前缀稳定），下一轮开启时由 _promote_org_results
-        生效。解析失败重试一次（仍无工具），再失败则整批保持 Runtime
+        生效。解析失败重试一次，再失败则整批保持 Runtime
         视图（org_state=failed，回入水位等下次触发），原始层永远不受
         影响。返回是否成功。
         """
@@ -1139,57 +1313,32 @@ class Agent:
             "上方对话一致；条目格式 = 块ID=起始事件~结束事件）\n"
             + "\n".join(map_lines)
             + "\n\n"
-            "只输出一个 JSON 对象（不要代码块围栏；没有可用工具，不要尝试调用）：\n"
-            '1. "rounds"：数组，与待整理轮一一对应，每个元素为 '
-            '{"seq": 轮次号, "normalized_user_input": "该轮用户意图的澄清表述'
-            "——不是压缩，是把用户想要什么说得更清楚\", "
-            '"key_constraints": "该轮用户立下的红线/硬性约束（禁止什么、'
-            '必须怎样、明确否决的方向），没有则给空字符串", '
-            '"block_summaries": [{"id": "块ID（逐字取自[分块地图]，每个块一条、'
-            '一个不落，与地图同序）", '
-            '"summary": "该块的完整细节描述"}]}\n'
-            "块描述的完整性是第一要求：\n"
-            "  * 每块 80~250 字，写清：做了什么、针对哪些文件（路径写全）、"
-            "为什么做、结果与结论；失败的块必须写失败原因与后续怎么修的；\n"
-            "  * 禁止空洞词（\"调整\"\"修改\"\"处理\"不许单独成为描述）；"
-            "关键数字（行数/字节数/条数/次数）与关键命令的目的必须保留；\n"
-            "  * 含最终回答的块，把对用户的承诺/交付口径完整写进去。\n"
-            "（无分块结构的轮改为给出 \"refined_index\": "
-            "[{\"id\": \"该轮的事件ID\", \"line\": \"一行摘要\"}]——"
-            "索引行比截断行更短更准（保留结论：什么可行、什么实测不行、"
-            "卡在哪），id 必须取自对应轮次事件流中已有的事件 ID，"
-            "无实质内容的事件（如寒暄）可省略。）\n"
-            '2. "state_patch"：这些轮次合并后的任务状态增量补丁 '
-            '{"completed":[],"decisions":[],"known_issues":[],"open_questions":[],'
-            '"escalations":[],"experiments":[],'
-            '"current_status":"...","goal":"...","is_done":bool}——'
-            "escalations 是决策升级：实测与预期不符、影响方向、需要上级或"
-            "人拍板的事项（写明预期、现实、选项），不要擅自改方向；"
-            "experiments 是待办实验：机器无法自行验证、需要人当传感器的事项"
-            "（写明做什么、看什么、什么算对）。"
-            "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。"
-            "质量锚点（zcode-borrowings.md）：整理后的视图必须能回答——用户"
-            "原话要求了什么、立了哪些约束、已做了哪些决策、当前状态如何、"
-            "下一步是什么。"
+            "完成后调用 submit_organization 工具提交结果（唯一出口，不要在"
+            "正文中输出 JSON）。字段语义以工具定义为准；块描述的完整性是第一"
+            "要求，逐字遵守工具定义里 summary 的描述。"
         )
         messages = list(base_messages or self._org_fallback_base(rounds))
         messages.append({"role": "user", "content": instruction})
 
-        content, _ordered, _usage = self._stream_call(
-            messages, tools=None, purpose="organization"
+        # 与工作对话同一 tools 数组：序列化恒定，前缀缓存常骑
+        content, ordered, _usage = self._stream_call(
+            messages, tools=self._schemas, purpose="organization"
         )
-
-        state = self._parse_state_json(content)
-        if state is None and content.strip():
-            retry_content, _ordered, _usage = self._stream_call(
+        state = self._extract_org_state(content, ordered)
+        if state is None:
+            retry_content, retry_ordered, _usage = self._stream_call(
                 messages
                 + [
-                    {"role": "assistant", "content": content[:2000]},
-                    {"role": "user", "content": "你的输出不是合法 JSON。请重新输出，只包含 JSON 对象本身。"},
+                    {"role": "assistant", "content": (content or "")[:2000]},
+                    {
+                        "role": "user",
+                        "content": "未收到有效产物。请调用 submit_organization 工具提交整理结果（参数即 JSON，不要在正文输出）。",
+                    },
                 ],
+                tools=self._schemas,
                 purpose="organization",
             )
-            state = self._parse_state_json(retry_content)
+            state = self._extract_org_state(retry_content, retry_ordered)
         if not isinstance(state, dict):
             for r in rounds:
                 r["org_state"] = "failed"
@@ -1313,6 +1462,21 @@ class Agent:
                         parts.append("[完整原文]\n" + e["full"])
                     return "\n".join(parts)
         return f"未找到事件: {event_id}"
+
+    @staticmethod
+    def _extract_org_state(content: str, ordered: list) -> Optional[dict]:
+        """从整理响应提取产物：优先 submit_organization 的调用参数，
+        回退消息正文 JSON（自由文本输出兼容，主路径是工具出口）。"""
+        for tc in ordered or []:
+            if tc.get("name") != "submit_organization":
+                continue
+            try:
+                state = json.loads(tc.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(state, dict):
+                return state
+        return Agent._parse_state_json(content)
 
     @staticmethod
     def _parse_state_json(text: str) -> Optional[dict]:

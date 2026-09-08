@@ -26,7 +26,7 @@ class _StubLLM:
         self.calls: list[dict] = []
 
     def chat(self, messages, tools=None, stream=False, **kwargs):
-        self.calls.append({"messages": messages, "stream": stream})
+        self.calls.append({"messages": messages, "stream": stream, "tools": tools})
         return iter(self.responses.pop(0))
 
 
@@ -725,6 +725,56 @@ def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
     agent._promote_org_results()  # 模拟下一轮开启：暂存产物生效
     assert task.task_state.get("completed") == ["完成项"]
     assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出结论"
+
+
+def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
+    """整理产物经常驻工具 submit_organization 提交：与工作对话同一 tools
+    数组（序列化恒定，前缀缓存常骑），调用参数被直接解析进暂存区。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_args = json.dumps({
+        "rounds": [{
+            "seq": 1,
+            "normalized_user_input": "澄清的意图",
+            "key_constraints": "禁止 git",
+            "block_summaries": [{"id": "R1-B1", "summary": "完成某事：细节描述"}],
+        }],
+        "state_patch": {"completed": ["完成项"]},
+    }, ensure_ascii=False)
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c9", name="submit_organization", arguments=org_args),
+    ]))
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+        [org_chunk],
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0)
+
+    agent.run("问")
+
+    assert len(agent.llm.calls) == 2
+    # 缓存契约：整理调用的 tools 与工作调用完全一致（序列化恒定）
+    assert agent.llm.calls[0]["tools"] == agent.llm.calls[1]["tools"]
+    assert any(
+        t["function"]["name"] == "submit_organization"
+        for t in agent.llm.calls[1]["tools"]
+    )
+    agent._promote_org_results()
+    assert task.rounds[-1]["user_input"]["key_constraints"] == "禁止 git"
+    assert task.rounds[-1]["block_summaries"]["R1-B1"] == "完成某事：细节描述"
+    assert task.task_state["completed"] == ["完成项"]
+
+
+def test_submit_organization_guard_is_noop_in_work_dialog():
+    """工作对话误调用 submit_organization：只返回说明文本，无副作用。"""
+    task = Task.create(goal="x")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    out = agent.submit_organization(rounds=[{"seq": 1}], state_patch={"is_done": True})
+
+    assert "忽略" in out
+    assert task.task_state == {}
+    assert all("pending_org" not in r for r in task.rounds)
 
 
 def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):
