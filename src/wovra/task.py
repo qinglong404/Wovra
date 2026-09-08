@@ -229,6 +229,7 @@ class Task:
     parent_id: str = ""
     org_context: str = ""
     pending_instruction: str = ""
+    todo: dict = field(default_factory=dict)  # 大步/小步计划账本（深度恒 1）
     created_at: str = ""
     updated_at: str = ""
 

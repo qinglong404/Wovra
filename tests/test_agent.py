@@ -946,6 +946,62 @@ def test_submit_organization_guard_is_noop_in_work_dialog():
     assert all("pending_org" not in r for r in task.rounds)
 
 
+def test_todo_milestone_lifecycle(monkeypatch, tmp_path):
+    """大步/小步账本：深度恒 1、证据闸门、非阻塞人工验收不搁置。"""
+    task = Task.create(goal="演示页")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    # 深度恒 1：无大步时 verify/drop 拒绝；开大步必须带验收标准
+    assert "无开启中的大步" in agent.todo(action="verify_milestone", evidence="x")
+    assert "acceptance" in agent.todo(action="start_milestone", goal="多会话版")
+
+    out = agent.todo(
+        action="start_milestone", goal="多会话版",
+        acceptance=["刷新后会话保留", "删除当前会话回落"],
+    )
+    assert "多会话版" in out
+    # 已有开启中的大步 → 拒绝再开（深度恒 1）
+    assert "深度恒 1" in agent.todo(action="start_milestone", goal="另一个")
+
+    assert "OK" in agent.todo(action="add_step", text="会话数据结构")
+    assert "OK" in agent.todo(action="check_step", text="会话数据结构")
+    assert "OK" in agent.todo(action="add_step", text="切换/删除交互")
+
+    # 非阻塞人工验收：挂起继续干，verify 时一次性呈交并转 experiments
+    out = agent.todo(action="defer_check", text="浅色主题配色是否刺眼（主观，最后统一验收）")
+    assert "挂起" in out
+    out = agent.todo(
+        action="verify_milestone",
+        evidence="node tests/run.js 全绿（5 套件）",
+    )
+    assert "大步已验收" in out and "待办实验" in out
+    assert task.get_state().completed[-1].startswith("[大步] 多会话版")
+    assert any("浅色主题配色" in e for e in task.get_state().experiments)
+    # 关大步即清：小步与挂起项清空，可以开下一大步
+    out = agent.todo(action="start_milestone", goal="搜索功能",
+                     acceptance=["关键词命中高亮"])
+    assert "OK" in out
+    assert task.todo["milestone"]["goal"] == "搜索功能"
+    assert task.todo["steps"] == []
+
+    # 证据闸门：无证据 verify 拒绝
+    assert "evidence" in agent.todo(action="verify_milestone")
+
+
+def test_todo_tail_lines_shown_in_reminder(monkeypatch):
+    """当前大步/小步进进 runtime-reminder 尾部——跨轮续跑的工作记忆。"""
+    task = Task.create(goal="分层回归")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.todo(action="start_milestone", goal="ICP 配准", acceptance=["误差 < 1px"])
+    agent.todo(action="add_step", text="读取标定参数")
+    _make_open_round(agent, 1, "继续")
+
+    msgs = agent._assemble_messages()
+    body = "\n".join(m.get("content", "") for m in msgs)
+
+    assert "[当前大步] ICP 配准（小步 0/1）" in body
+
+
 def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):
     """运行时通道（1.1）：任务状态/文件地图以 <runtime-reminder> 信封注入，
     与用户发言语义分离——模型分得清"机制给的"和"用户要的"。"""

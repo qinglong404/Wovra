@@ -376,6 +376,65 @@ _ORG_DOMAINS_SCHEMA: dict = {
         },
     },
 }
+# 大步/小步计划账本（2026-09-08 用户拍板，设计稿 todo-milestone-tool.md）：
+# 深度恒 1——只存当前大步，验收通过后才写下一大步（滚动计划，化解
+# "计划两层论"）。人工验收分两型：阻塞型（不验收进行不下去）停轮等
+# 反馈；非阻塞型（美观等主观项）defer 挂起继续干，大步收尾一次性呈交，
+# 未决项转 experiments 不搁置。
+_TODO_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "todo",
+        "description": (
+            "大步/小步计划账本（深度恒 1：只存当前大步，验收通过后才写"
+            "下一大步）。大步 = 一次可验收的增量（最简单可跑方案 → 验收"
+            "通过 → 下一大步）；小步 = 大步内的工作清单，跨轮持久、"
+            "关大步即清。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": [
+                        "start_milestone", "add_step", "check_step",
+                        "drop_step", "defer_check", "verify_milestone",
+                        "drop_milestone", "show",
+                    ],
+                    "description": "动作",
+                },
+                "goal": {
+                    "type": "string",
+                    "description": "start_milestone：本大步要交付什么",
+                },
+                "acceptance": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "start_milestone：验收标准（可检验），必填——"
+                        "入口是证据不是自述"
+                    ),
+                },
+                "text": {
+                    "type": "string",
+                    "description": "add/check/drop_step、defer_check 的条目文本",
+                },
+                "evidence": {
+                    "type": "string",
+                    "description": (
+                        "verify_milestone：验收证据（测试输出/人工确认），"
+                        "必填，禁止自述完成"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "drop_milestone：作废原因，必填（计划可证伪，留死亡原因）",
+                },
+            },
+            "required": ["action"],
+        },
+    },
+}
 # 单轮工具循环的默认步数上限：安全网而非配额——尽量不在步数上限制
 # LLM（2026-09-07 用户拍板 60），真超限也只是开放轮等待 \继续，不废工作
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
@@ -529,6 +588,8 @@ class Agent:
             # 由方法体守卫拒绝（见 submit_organization / submit_domains）。
             self.register(self.submit_organization, schema=_ORG_SUBMIT_SCHEMA)
             self.register(self.submit_domains, schema=_ORG_DOMAINS_SCHEMA)
+            # 大步/小步计划账本（工作工具，深度恒 1，见 todo-milestone-tool.md）
+            self.register(self.todo, schema=_TODO_SCHEMA)
             # 水位批量整理：上次会话遗留的未整理轮（含崩溃时的 pending /
             # failed）由下一次轮闭合触发时一并收编——加载时不立即补跑
             # （小会话可能永远不需要整理）
@@ -610,6 +671,155 @@ class Agent:
             "submit_domains 仅由后台分裂分析消费（分析阶段捕获其调用参数，"
             "不经过工具执行）。当前处于工作对话，本次调用被忽略，无副作用。"
         )
+
+    def todo(
+        self,
+        action: str,
+        goal: str = "",
+        acceptance: Optional[list] = None,
+        text: str = "",
+        evidence: str = "",
+        reason: str = "",
+    ) -> str:
+        """大步/小步计划账本（深度恒 1 的滚动计划）。
+
+        人工验收两型（2026-09-08 用户拍板）：阻塞型 = 不验收进行不下去，
+        停轮等反馈（开放轮语义，\\c 续跑）；非阻塞型（美观等主观项）=
+        defer_check 挂起继续干，大步收尾一次性呈交，未决转 experiments
+        不搁置。
+        """
+        if self.task is None:
+            return "todo：当前无任务绑定。"
+        todo = self.task.todo or {}
+        milestone = todo.get("milestone")
+        steps = todo.get("steps") or []
+        deferred = milestone.get("deferred") or [] if milestone else []
+
+        if action == "start_milestone":
+            if milestone:
+                return (
+                    f"已有开启中的大步：{milestone['goal']}（深度恒 1："
+                    "先 verify_milestone 或 drop_milestone，再开新大步）"
+                )
+            if not goal.strip() or not (acceptance or []):
+                return "start_milestone 需要 goal 与 acceptance（验收标准必填——入口是证据不是自述）"
+            todo["milestone"] = {
+                "goal": goal.strip(),
+                "acceptance": [str(a) for a in acceptance],
+                "started_seq": len(self.rounds) + 1,
+                "deferred": [],
+            }
+            todo["steps"] = []
+        elif action == "add_step":
+            if not milestone:
+                return "无开启中的大步——先 start_milestone。"
+            if not text.strip():
+                return "add_step 需要 text。"
+            steps.append({"text": text.strip(), "done": False})
+            todo["steps"] = steps
+        elif action in ("check_step", "drop_step"):
+            if not milestone:
+                return "无开启中的大步。"
+            hit = next((s for s in steps if s["text"] == text.strip()), None)
+            if hit is None:
+                listing = "\n".join(
+                    f"  [{'x' if s['done'] else ' '}] {s['text']}" for s in steps
+                ) or "  （空）"
+                return f"未找到小步：{text.strip()}\n当前小步：\n{listing}"
+            if action == "check_step":
+                hit["done"] = True
+            else:
+                steps.remove(hit)
+            todo["steps"] = steps
+        elif action == "defer_check":
+            if not milestone:
+                return "无开启中的大步。"
+            if not text.strip():
+                return "defer_check 需要 text（待人工验收项）。"
+            deferred.append(text.strip())
+            todo["milestone"]["deferred"] = deferred
+            return (
+                f"已挂起人工验收（非阻塞）：{text.strip()}\n"
+                f"本大步累积 {len(deferred)} 项，将在 verify_milestone 时一次性呈交；"
+                "期间继续工作。"
+            )
+        elif action == "verify_milestone":
+            if not milestone:
+                return "无开启中的大步。"
+            if not evidence.strip():
+                return (
+                    "verify_milestone 需要 evidence（验收证据：测试输出/人工确认）"
+                    "——禁止自述完成。"
+                )
+            entry = f"[大步] {milestone['goal']}（验收：{evidence.strip()}）"
+            self.task.apply_state_patch({"completed": [entry]})
+            if deferred:
+                # 非阻塞人工验收未决项不搁置：转 experiments（人当传感器
+                # 通道），会话收尾一次性呈交
+                self.task.apply_state_patch({
+                    "experiments": [f"[待人工验收] {t}" for t in deferred]
+                })
+            todo.setdefault("history", []).append({
+                "goal": milestone["goal"],
+                "evidence": evidence.strip(),
+                "closed_seq": len(self.rounds),
+            })
+            tail_note = (
+                f"另有 {len(deferred)} 项非阻塞人工验收已转入待办实验"
+                "（未验收不搁置）" if deferred else ""
+            )
+            todo["milestone"] = None
+            todo["steps"] = []
+            self.task.todo = todo
+            self.task.save()
+            return (
+                f"大步已验收：{milestone['goal']}\n证据：{evidence.strip()}\n"
+                + (tail_note + "\n" if tail_note else "")
+                + "现在可以 start_milestone 写下一大步。"
+            )
+        elif action == "drop_milestone":
+            if not milestone:
+                return "无开启中的大步。"
+            if not reason.strip():
+                return "drop_milestone 需要 reason（作废原因——计划可证伪，留死亡原因）。"
+            todo.setdefault("history", []).append({
+                "goal": milestone["goal"],
+                "evidence": f"作废：{reason.strip()}",
+                "closed_seq": len(self.rounds),
+            })
+            if deferred:
+                self.task.apply_state_patch({
+                    "experiments": [f"[待人工验收·大步作废遗留] {t}" for t in deferred]
+                })
+            todo["milestone"] = None
+            todo["steps"] = []
+        elif action == "show":
+            if not milestone:
+                hist = todo.get("history") or []
+                return "无开启中的大步。" + (
+                    f"\n已验收 {len(hist)} 个大步。" if hist else ""
+                )
+            lines = [
+                f"当前大步：{milestone['goal']}（自 R{milestone['started_seq']}）",
+                "验收标准：\n" + "\n".join(f"  - {a}" for a in milestone["acceptance"]),
+            ]
+            if steps:
+                lines.append("小步：\n" + "\n".join(
+                    f"  [{'x' if s['done'] else ' '}] {s['text']}" for s in steps
+                ))
+            if deferred:
+                lines.append("挂起人工验收：\n" + "\n".join(f"  - {t}" for t in deferred))
+            return "\n".join(lines)
+        else:
+            return f"未知动作: {action}"
+
+        self.task.todo = todo
+        self.task.save()
+        cur = todo.get("milestone")
+        if cur:
+            done_n = sum(1 for s in todo.get("steps") or [] if s["done"])
+            return f"OK：{action}（{cur['goal']}｜小步 {done_n}/{len(todo['steps'])}）"
+        return f"OK：{action}"
 
     def _open_or_reuse_round(self, user_input: str) -> bool:
         """开启新 Round，或续上未闭合的开放 Round（V2 闭合规则）。
@@ -1187,6 +1397,9 @@ class Agent:
                 "获取现状，通读时按 num_lines=400 连续分段）"
             )
             block += file_map
+        todo_lines = self._todo_tail_lines()
+        if todo_lines:
+            block = todo_lines + block
         if block:
             # 运行时专属通道（zcode-borrowings.md 1.1）：机制信息用
             # <runtime-reminder> 信封注入，与用户发言语义分离——模型
@@ -1196,6 +1409,21 @@ class Agent:
         msgs.extend(view_msgs)
         msgs.extend(self._current_round_messages())
         return msgs
+
+    def _todo_tail_lines(self) -> list[str]:
+        """当前大步/小步进度的尾部展示（跨轮续跑的工作记忆；空则不占位）。"""
+        todo = (self.task.todo or {}) if self.task is not None else {}
+        milestone = todo.get("milestone")
+        if not milestone:
+            return []
+        done_n = sum(1 for s in todo.get("steps") or [] if s["done"])
+        lines = [
+            f"[当前大步] {milestone['goal']}（小步 {done_n}/{len(todo.get('steps') or [])}）"
+        ]
+        deferred = milestone.get("deferred") or []
+        if deferred:
+            lines.append(f"[挂起人工验收] {len(deferred)} 项，大步收尾一次性呈交")
+        return lines
 
     def _current_round_messages(self) -> list[dict]:
         """轮内赦免：当前 Round 事件全量进入上下文，不做任何内容截断。
