@@ -323,6 +323,37 @@ def test_empty_stream_with_length_finish_raises_without_retry():
     assert len(agent.llm.calls) == 1
 
 
+def _boom_stream():
+    """流中途抛服务端错误（实测 2026-09-08：internal error 打断思考流）。"""
+    import openai
+
+    yield _chunk(_delta(reasoning="想了一半"))
+    raise openai.APIError(
+        "The service encountered an unexpected internal error. Request id: 0217",
+        None,
+        body=None,
+    )
+
+
+def test_midstream_api_error_retries_then_keeps_round_open():
+    """服务端流中途报错（APIError 非 RuntimeError 家族）→ 转 LLMStreamError
+    并入空响应护栏：重试至多 2 次，仍错则 raise 且轮保持开放，进程不崩。"""
+    agent = _agent_with([], [_boom_stream(), _boom_stream(), _boom_stream()])
+    with pytest.raises(RuntimeError, match="保持开放"):
+        agent.run("第一轮")
+    assert len(agent.llm.calls) == 3
+    assert not any(e["type"] == "final_answer" for e in agent.rounds[-1]["events"])
+    assert agent.rounds[-1].get("end_state") == "open"
+
+
+def test_midstream_api_error_retry_recovers():
+    """第一次流中途报错、重试拿到正文 → 正常闭合轮次。"""
+    responses = [_boom_stream(), [_chunk(_delta(content="恢复"))]]
+    agent = _agent_with([], responses)
+    assert agent.run("问") == "恢复"
+    assert agent.rounds[-1]["end_state"] == "completed"
+
+
 def test_close_round_computes_blocks(monkeypatch, tmp_path):
     """轮闭合时零 LLM 计算 Block 结构并随轮次落盘（机制一挂钩）。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)

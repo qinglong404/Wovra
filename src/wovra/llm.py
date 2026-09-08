@@ -12,11 +12,21 @@ from typing import Any, Optional
 from dotenv import load_dotenv
 from openai import (
     APIConnectionError,
+    APIError,
     AuthenticationError,
     NotFoundError,
     OpenAI,
     PermissionDeniedError,
 )
+
+
+class LLMStreamError(RuntimeError):
+    """流式迭代中途失败（服务端报错/断流/读超时），保留原始错误文本。
+
+    选 RuntimeError 作基类：agent 主循环把它并入空响应护栏自动重试，
+    重试耗尽后 CLI 的 RuntimeError 分支按"轮保持开放"收尾——无论哪条
+    路，进程都不再被 openai.APIError 打崩。
+    """
 
 
 def _normalize_proxy_schemes() -> None:

@@ -49,7 +49,8 @@ from . import task as task_module
 from . import tokens
 from . import tools as tools_module
 from . import truncate
-from .llm import LLM, reasoning_of
+from .llm import LLM, LLMStreamError, reasoning_of
+from .llm import APIError as _llm_APIError
 from .task import Task, sanitize_surrogates
 from .tools import (
     ask_user,
@@ -1102,14 +1103,22 @@ class Agent:
             if self.on_progress:
                 self.on_progress("等待模型响应…")
             messages = self._assemble_messages()
-            content, ordered, _usage = self._stream_call(
-                messages,
-                tools=self._schemas or None,
-                purpose="working",
-                on_thinking=on_thinking,
-                on_answer_delta=on_answer_delta,
-                on_progress=self.on_progress,
-            )
+            try:
+                content, ordered, _usage = self._stream_call(
+                    messages,
+                    tools=self._schemas or None,
+                    purpose="working",
+                    on_thinking=on_thinking,
+                    on_answer_delta=on_answer_delta,
+                    on_progress=self.on_progress,
+                )
+            except LLMStreamError as error:
+                # 服务端流中途报错：与"流被掐断"同一失败家族——都是没有
+                # 正文的异常终止，并入空响应护栏自动重试。真实错误文本
+                # （含 request id）落 history，finish_reason 记 stream_error
+                if self.task is not None:
+                    self.task.record("empty_stream", f"stream_error: {error}")
+                content, ordered, _usage = "", [], None
 
             if ordered:
                 empty_streak = 0
@@ -1335,7 +1344,20 @@ class Agent:
         usage = None
         first_token_at: Optional[float] = None
         finish_reason: Optional[str] = None
-        for chunk in stream:
+        chunk_iter = iter(stream)
+        while True:
+            try:
+                chunk = next(chunk_iter)
+            except StopIteration:
+                break
+            except _llm_APIError as error:
+                # 服务端在流中途报错（实测：internal error 打断思考流，
+                # openai.APIError 不是 RuntimeError，穿透 CLI 直接打崩进程）。
+                # 只捕获迭代器自己抛的错——回调/清洗里的 bug 不能被伪装成
+                # 流错误触发重试。转 LLMStreamError：主循环并入空响应护栏，
+                # 重试耗尽后 CLI 按"轮保持开放"收尾。
+                self._last_finish_reason = "stream_error"
+                raise LLMStreamError(str(error)) from error
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
             if not getattr(chunk, "choices", None):
