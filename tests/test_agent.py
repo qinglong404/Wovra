@@ -70,8 +70,10 @@ def _fragment(index, id=None, name=None, arguments=None):
     return SimpleNamespace(index=index, id=id, function=SimpleNamespace(name=name, arguments=arguments))
 
 
-def _chunk(delta=None, usage=None):
-    choices = [] if delta is None else [SimpleNamespace(delta=delta)]
+def _chunk(delta=None, usage=None, finish_reason=None):
+    choices = [] if delta is None else [
+        SimpleNamespace(delta=delta, finish_reason=finish_reason)
+    ]
     return SimpleNamespace(choices=choices, usage=usage)
 
 
@@ -280,6 +282,45 @@ def test_run_always_uses_streaming():
     agent = _agent_with([], responses)
     agent.run("问")
     assert agent.llm.calls[0]["stream"] is True
+
+
+def test_empty_stream_retries_then_keeps_round_open():
+    """流被端点掐断（只有思考，正文与 usage 均未到）→ 空串不是最终回答。
+
+    自动重试至多 2 次；仍空则 raise 且轮保持开放（end_state 缺省，\\c 可续）。
+    """
+    responses = [
+        [_chunk(_delta(reasoning="想了一半")), _chunk(_delta())],
+        [_chunk(_delta(reasoning="又想了一半"))],
+        [_chunk(_delta(reasoning="还是空"))],
+    ]
+    agent = _agent_with([], responses)
+    with pytest.raises(RuntimeError, match="保持开放"):
+        agent.run("第一轮")
+    assert len(agent.llm.calls) == 3  # 空响应自动重试了两次
+    # 轮未闭合：没有 final_answer 事件，end_state 保持 open（\c 可续）
+    assert not any(e["type"] == "final_answer" for e in agent.rounds[-1]["events"])
+    assert agent.rounds[-1].get("end_state") == "open"
+
+
+def test_empty_stream_retry_recovers_and_closes_round():
+    """第一次空响应重试后拿到正文 → 正常闭合轮次。"""
+    responses = [
+        [_chunk(_delta(reasoning="断了"))],
+        [_chunk(_delta(content="好了"))],
+    ]
+    agent = _agent_with([], responses)
+    assert agent.run("问") == "好了"
+    assert agent.rounds[-1]["end_state"] == "completed"
+
+
+def test_empty_stream_with_length_finish_raises_without_retry():
+    """finish_reason=length（输出上限）：重试必再撞上限，不重试直接上报。"""
+    responses = [[_chunk(_delta(reasoning="想多了"), finish_reason="length")]]
+    agent = _agent_with([], responses)
+    with pytest.raises(RuntimeError, match="length"):
+        agent.run("第一轮")
+    assert len(agent.llm.calls) == 1
 
 
 def test_close_round_computes_blocks(monkeypatch, tmp_path):

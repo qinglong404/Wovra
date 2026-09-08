@@ -616,6 +616,9 @@ class Agent:
         self.last_context_estimate = 0
         # 端点不支持整理参数的降级提示：每次会话只提示一次，避免每轮刷屏
         self._degrade_warned = False
+        # 最近一次流式调用的 finish_reason（stop/length/tool_calls/未返回）：
+        # 流被掐断时 usage 也缺失，这是唯一诊断线索（空响应防护用）
+        self._last_finish_reason: Optional[str] = None
 
         # baseline 记账：累计输入 token（触发阈值压缩）
         self._baseline_prompt_used = task.baseline_prompt_used if task else 0
@@ -1089,6 +1092,8 @@ class Agent:
     ) -> str:
         """单轮的工具调用主循环：run 与 resume 共用。"""
         self.last_stats = self._fresh_stats()
+        # 空响应护栏：流被端点/代理掐断时只有思考没有正文，连续空响应计数
+        empty_streak = 0
         # 回调暂存：跨 agent 通信工具（consult）流式展示时借用同一管线，
         # 让子 agent 的输出直接进用户窗口（不打回主 agent 再路由）
         self._stream_cbs = {"thinking": on_thinking, "answer": on_answer_delta}
@@ -1107,6 +1112,7 @@ class Agent:
             )
 
             if ordered:
+                empty_streak = 0
                 self._record_event(
                     "tool_call",
                     {
@@ -1131,6 +1137,25 @@ class Agent:
 
             # 模型不再请求工具 → 产出最终回答 → Round 闭合。
             answer = content
+            if not answer.strip():
+                # 流被端点/代理中途掐断：思考流完了，正文与 usage 都没到
+                # （2026-09-08 实测：活跃思考流 13 分钟后被干净掐断，空串
+                # 曾被当成 final_answer 闭合轮次）。空串不是最终回答。
+                # length = 输出上限（重试必再撞，直接上报）；其余按瞬时
+                # 断流自动重试，仍空则轮保持开放交回调用方。
+                empty_streak += 1
+                fr = self._last_finish_reason or "未返回"
+                if self.task is not None:
+                    self.task.record("empty_stream", f"finish_reason={fr}")
+                if self._last_finish_reason == "length" or empty_streak > 2:
+                    self._persist_rounds()
+                    raise RuntimeError(
+                        f"流式响应异常结束（finish_reason={fr}，正文为空）。"
+                        f"Round 保持开放，\\c 可直接接着干"
+                    )
+                if self.on_progress:
+                    self.on_progress("响应为空（流被中断），自动重试…")
+                continue
             self._record_event("final_answer", {"role": "assistant", "content": answer})
             if self.task is not None:
                 self.task.record("final_answer", answer)
@@ -1309,12 +1334,16 @@ class Agent:
         tool_calls_acc: dict[int, dict] = {}
         usage = None
         first_token_at: Optional[float] = None
+        finish_reason: Optional[str] = None
         for chunk in stream:
             if getattr(chunk, "usage", None):
                 usage = chunk.usage
             if not getattr(chunk, "choices", None):
                 continue
-            delta = chunk.choices[0].delta
+            choice = chunk.choices[0]
+            if getattr(choice, "finish_reason", None):
+                finish_reason = choice.finish_reason
+            delta = choice.delta
             if delta is None:
                 continue
 
@@ -1355,6 +1384,7 @@ class Agent:
 
         elapsed = time.monotonic() - start
         ttft = (first_token_at - start) if first_token_at is not None else elapsed
+        self._last_finish_reason = finish_reason
         if usage is not None:
             self._accumulate_usage(usage, purpose)
         if purpose in _MAINTENANCE_PURPOSES:
