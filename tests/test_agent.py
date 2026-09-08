@@ -17,17 +17,30 @@ from wovra.task import Task, TaskState
 
 
 class _StubLLM:
-    """替身 LLM：构造时收到"每次 chat 调用应返回的分块序列"列表。"""
+    """替身 LLM：按消息尾部的指令标记路由到整理/分裂两个响应池。
+
+    池为空时先抛错再记 calls——失败路的空池不产生调用记录，既有
+    断言（calls[0] 是整理路）保持确定性。
+    """
 
     model = "stub"
 
-    def __init__(self, responses: list | None = None):
+    def __init__(self, responses: list | None = None, split_responses: list | None = None):
         self.responses = list(responses or [])
+        self.split_responses = list(split_responses or [])
         self.calls: list[dict] = []
 
     def chat(self, messages, tools=None, stream=False, **kwargs):
-        self.calls.append({"messages": messages, "stream": stream, "tools": tools})
-        return iter(self.responses.pop(0))
+        marker = str((messages[-1] or {}).get("content") or "")
+        is_split = "[分裂分析指令]" in marker
+        pool = self.split_responses if is_split else self.responses
+        if not pool:
+            raise IndexError("无预备响应（分裂路）" if is_split else "无预备响应（整理路）")
+        self.calls.append({
+            "messages": messages, "stream": stream, "tools": tools,
+            "lane": "split" if is_split else "org",
+        })
+        return iter(pool.pop(0))
 
 
 def _agent_with(tools, responses=None) -> Agent:
@@ -806,14 +819,87 @@ def test_org_unusable_product_twice_marks_failed(monkeypatch, tmp_path):
     assert "pending_org" not in task.rounds[-1]
 
 
+def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
+    """水位维护双路并行：整理 + 分裂分析同一快照、同 tools；分裂产物
+    （现状清单/归属/可分性）暂存批首轮，promote 后落正式字段。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "web 演示项目",
+            "file_domains": ["index.html", "js/"],
+            "constraints": ["不用 git"],
+            "goal": "演示页",
+            "block_ids": ["R1-B1"],
+            "superseded": [{"block_ids": ["R1-B1"], "note": "演示取代标注"}],
+        }],
+        "unassigned": {"block_ids": [], "reason": "无"},
+        "split_assessment": {"splittable": False, "reason": "单一活性文件域"},
+    }, ensure_ascii=False)
+    domains_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    org_json = json.dumps({
+        "rounds": [{"seq": 1, "normalized_user_input": "意图",
+                    "key_constraints": "", "block_summaries": []}],
+        "state_patch": {},
+    }, ensure_ascii=False)
+    task = Task.create(goal="目标")
+    task.rounds = [_round(1, "第一轮", "答案")]
+    task.rounds[0]["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=org_json))]], split_responses=[[domains_chunk]]),
+        tools=[], task=task, org_watermark=0,
+    )
+    agent.last_context_estimate = 5000
+
+    agent._maybe_organize_batch()
+
+    # 两路共用同一 tools 数组（缓存契约：序列化恒定）
+    org_calls = [c for c in agent.llm.calls if c.get("lane") == "org"]
+    split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
+    assert org_calls and split_calls
+    assert org_calls[0]["tools"] == split_calls[0]["tools"]
+    r1 = task.rounds[0]
+    assert r1["org_state"] == "done"
+    assert r1["pending_org"]["domains"][0]["name"] == "web 演示项目"
+    assert r1["pending_org"]["split_assessment"]["splittable"] is False
+    agent._promote_org_results()
+    assert r1["domains"][0]["name"] == "web 演示项目"
+    assert r1["split_assessment"]["splittable"] is False
+
+
+def test_split_lane_failure_independent(monkeypatch, tmp_path):
+    """分裂路挂了（无预备响应 → 异常）：整理产物照常落地，无 domains 残留。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_json = json.dumps({
+        "rounds": [{"seq": 1, "normalized_user_input": "意图",
+                    "key_constraints": "", "block_summaries": []}],
+        "state_patch": {},
+    }, ensure_ascii=False)
+    task = Task.create(goal="目标")
+    task.rounds = [_round(1, "第一轮", "答案")]
+    task.rounds[0]["org_state"] = ""
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content=org_json))]]),
+                  tools=[], task=task, org_watermark=0)
+    agent.last_context_estimate = 5000
+
+    agent._maybe_organize_batch()
+
+    r1 = task.rounds[0]
+    assert r1["org_state"] == "done"
+    assert r1["pending_org"]["normalized"] == "意图"   # 整理产物在
+    assert "domains" not in r1["pending_org"]           # 分裂路无残留
+
+
 def test_submit_organization_guard_is_noop_in_work_dialog():
-    """工作对话误调用 submit_organization：只返回说明文本，无副作用。"""
+    """工作对话误调用提交工具：只返回说明文本，无副作用。"""
     task = Task.create(goal="x")
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
 
     out = agent.submit_organization(rounds=[{"seq": 1}], state_patch={"is_done": True})
+    out2 = agent.submit_domains(domains=[], split_assessment={"splittable": True})
 
-    assert "忽略" in out
+    assert "忽略" in out and "忽略" in out2
     assert task.task_state == {}
     assert all("pending_org" not in r for r in task.rounds)
 

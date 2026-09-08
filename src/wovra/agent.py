@@ -17,7 +17,13 @@
   （submit_organization 常驻提交，read_full 退役——原文本来就在眼前）；
   输出 = Normalized 用户意图 + 关键约束 + **逐块完整细节描述** + Task
   State 补丁（2026-09-08 用户拍板：块描述必须承载完整细节，事件级
-  精修索引只在无分块结构的旧轮回退使用）
+  精修索引只在无分块结构的旧轮回退使用）；
+  **并行分裂分析**（2026-09-08 用户拍板）：同一装配快照第二路追加
+  "分块地图 + 分裂分析指令"——现状清单（可运行单元）+ 块 → 域归属
+  （生死标注：被取代的前史归取代者，防"旧版一类、新版一类"）+ 可分
+  性判断（≥2 个互不重叠的活性文件域才算可分，话题不是理由），经
+  submit_domains 提交；两路墙钟 ≈ max、失败互相独立，产物同批暂存
+  同批生效；Level 0 只分析不分裂，分裂执行是 Level 1 的事
 * Context Assembly：未整理轮次**全量原文**在上下文（执行期零分辨率
   损失的自然延伸），已整理轮次渲染为紧凑视图（👤用户原文 + 🎯意图 +
   📌关键约束 + 逐块细节描述；无块描述的旧整理轮回退精修事件索引）；
@@ -75,7 +81,7 @@ _DEFAULT_CONTEXT_LIMIT = int(os.environ.get("WOVRA_CONTEXT_LIMIT", "1000000"))
 _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 
 # 维护性用途：异步执行、可能跨越轮次边界，成本单独记账（不混入 last_stats）
-_MAINTENANCE_PURPOSES = ("organization", "compaction")
+_MAINTENANCE_PURPOSES = ("organization", "compaction", "split")
 
 # 纯只读工具：互不依赖，可在同一批工具调用里并发执行、按序记录
 # （ask_user 会阻塞等用户输入，不参与并行）
@@ -240,6 +246,134 @@ _ORG_SUBMIT_SCHEMA: dict = {
         },
     },
 }
+
+# 分裂分析产出契约（第二个常驻工具）：现状归属 + 可分性判断。
+# 判据（2026-09-08 用户拍板）：分裂单位 = 可独立运行的关注面；块的归属
+# 跟着它触达工件的现世走（被取代的前史归取代者，防止"旧版一类、新版
+# 一类"）；话题不同永远不构成分裂理由——只有现状清单出现 ≥2 个互不
+# 重叠的活性文件域才算可分。粗分裂优先：首分裂只分零状态 vs 工作。
+_ORG_DOMAINS_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_domains",
+        "description": (
+            "提交现状归属与可分性分析。仅限后台整理阶段调用（作为分裂"
+            "分析的唯一出口）；工作对话中调用无效，只返回说明文本。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "domains": {
+                    "type": "array",
+                    "description": (
+                        "现状清单：当前可独立运行的关注面（活性文件域 × "
+                        "约束 × 目标）。被后续重写/取代的早期版本不单独"
+                        "成域，作为取代者域的 superseded 前史"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name": {
+                                "type": "string",
+                                "description": "域名，由现状派生（如\"web 演示项目\"）",
+                            },
+                            "file_domains": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "该域现时拥有的文件/目录（写全路径）",
+                            },
+                            "constraints": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "该域现时有效的约束/红线",
+                            },
+                            "goal": {
+                                "type": "string",
+                                "description": "该域服务的目标",
+                            },
+                            "block_ids": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": (
+                                    "归属本域的块 ID（逐字取自[分块地图]）；"
+                                    "被取代的前史块归属取代者所在域"
+                                ),
+                            },
+                            "superseded": {
+                                "type": "array",
+                                "description": "生死标注：域内已被取代的工作线",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "block_ids": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                        },
+                                        "note": {
+                                            "type": "string",
+                                            "description": "被什么取代，如\"单文件期，被 R5 模块化拆分取代\"",
+                                        },
+                                    },
+                                    "required": ["block_ids", "note"],
+                                },
+                            },
+                        },
+                        "required": ["name", "file_domains", "block_ids"],
+                    },
+                },
+                "unassigned": {
+                    "type": "object",
+                    "description": "不属于任何域的块（如零状态寒暄）→ 归档",
+                    "properties": {
+                        "block_ids": {
+                            "type": "array", "items": {"type": "string"},
+                        },
+                        "reason": {"type": "string"},
+                    },
+                },
+                "split_assessment": {
+                    "type": "object",
+                    "description": (
+                        "可分性判断。仅当现状清单出现 ≥2 个互不重叠的活性"
+                        "文件域才算可分；话题不同永远不构成分裂理由"
+                    ),
+                    "properties": {
+                        "splittable": {"type": "boolean"},
+                        "reason": {"type": "string"},
+                        "proposal": {
+                            "type": "object",
+                            "description": "splittable=true 时的分裂提案",
+                            "properties": {
+                                "units": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "name": {"type": "string"},
+                                            "file_domains": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                            "block_ids": {
+                                                "type": "array",
+                                                "items": {"type": "string"},
+                                            },
+                                            "goal": {"type": "string"},
+                                        },
+                                        "required": ["name", "block_ids"],
+                                    },
+                                },
+                                "rationale": {"type": "string"},
+                            },
+                        },
+                    },
+                    "required": ["splittable", "reason"],
+                },
+            },
+            "required": ["domains", "split_assessment"],
+        },
+    },
+}
 # 单轮工具循环的默认步数上限：安全网而非配额——尽量不在步数上限制
 # LLM（2026-09-07 用户拍板 60），真超限也只是开放轮等待 \继续，不废工作
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
@@ -355,6 +489,7 @@ class Agent:
         self._maint_usage = {
             "organization": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
             "compaction": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
+            "split": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
         }
         self._maint_lock = threading.Lock()
         self.last_maint: dict = {}
@@ -372,8 +507,9 @@ class Agent:
             self.register(self.expand_history)
             # 整理提交工具常驻：所有请求的 tools 数组恒定（工作对话与整理
             # 调用同序列化），前缀缓存才不会在 tools 区分叉。工作期误调用
-            # 由方法体守卫拒绝（见 submit_organization）。
+            # 由方法体守卫拒绝（见 submit_organization / submit_domains）。
             self.register(self.submit_organization, schema=_ORG_SUBMIT_SCHEMA)
+            self.register(self.submit_domains, schema=_ORG_DOMAINS_SCHEMA)
             # 水位批量整理：上次会话遗留的未整理轮（含崩溃时的 pending /
             # failed）由下一次轮闭合触发时一并收编——加载时不立即补跑
             # （小会话可能永远不需要整理）
@@ -438,6 +574,21 @@ class Agent:
         """
         return (
             "submit_organization 仅由后台整理流程消费（整理阶段捕获其调用参数，"
+            "不经过工具执行）。当前处于工作对话，本次调用被忽略，无副作用。"
+        )
+
+    def submit_domains(
+        self, domains: Optional[list] = None,
+        unassigned: Optional[dict] = None,
+        split_assessment: Optional[dict] = None,
+    ) -> str:
+        """[守卫] 分裂分析的提交工具。
+
+        整理阶段（_split_rounds）捕获其 tool_call 参数直接解析，不经
+        工具执行；工作对话误调用只返回说明文本，无副作用。
+        """
+        return (
+            "submit_domains 仅由后台分裂分析消费（分析阶段捕获其调用参数，"
             "不经过工具执行）。当前处于工作对话，本次调用被忽略，无副作用。"
         )
 
@@ -1199,14 +1350,14 @@ class Agent:
             r["org_state"] = "pending"
             self._org_inflight.add(r["seq"])
         if self.async_organization:
-            # 快照在入队瞬间取：它就是"活前缀"——整理调用原样追加指令，
+            # 快照在入队瞬间取：它就是"活前缀"——维护调用原样追加指令，
             # 生产环境里这次调用的输入端骑满前缀缓存
             self._org_queue.put((batch, self._assemble_messages()))
             self._ensure_worker()
         else:
             # 同步模式（run 命令/测试）：立即整理，结果随轮次落盘
             try:
-                self._organize_rounds(batch, self._assemble_messages())
+                self._parallel_maintenance(batch, self._assemble_messages())
             finally:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
@@ -1229,7 +1380,9 @@ class Agent:
                 r["org_state"] = "pending"
                 self._org_inflight.add(r["seq"])
             try:
-                ok = self._organize_rounds(batch, self._assemble_messages())
+                org_ok, _split_ok = self._parallel_maintenance(
+                    batch, self._assemble_messages()
+                )
             except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
                 for r in batch:
                     r["org_state"] = "failed"
@@ -1238,7 +1391,7 @@ class Agent:
             finally:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
-            if not ok or len(batch) < self._org_batch_max:
+            if not org_ok or len(batch) < self._org_batch_max:
                 return
 
     def _ensure_worker(self) -> None:
@@ -1253,9 +1406,10 @@ class Agent:
         while True:
             batch, base_messages = self._org_queue.get()
             try:
-                self._organize_rounds(batch, base_messages)
+                self._parallel_maintenance(batch, base_messages)
             except Exception:  # noqa: BLE001——整理失败不影响主对话
                 for r in batch:
+                    r.pop("pending_org", None)
                     r["org_state"] = "failed"
                 self._persist_rounds()
             finally:
@@ -1440,6 +1594,134 @@ class Agent:
         """base_messages 缺省时的兜底装配：批次轮的原始协议消息（直调/测试用）。"""
         return [e["message"] for r in rounds for e in r["events"]]
 
+    def _split_rounds(
+        self, rounds: list[dict], base_messages: Optional[list[dict]]
+    ) -> bool:
+        """分裂分析路（与整理并行、同一装配快照、同前缀缓存）。
+
+        产物 = 现状清单（可运行单元：文件域 × 约束 × 目标）+ 块 → 域
+        归属（带生死标注）+ 可分性判断，经常驻工具 submit_domains 提交。
+        判据（2026-09-08 用户拍板）：归属跟现状走——被取代的前史归取代
+        者，防止"旧版本一类、新版本一类"；话题不同永远不构成分裂理由；
+        仅现状出现 ≥2 个互不重叠的活性文件域才算可分。Level 0 只分析
+        不分裂：产物暂存待查，分裂执行是 Level 1 的事。
+        """
+        map_lines = []
+        for r in rounds:
+            blocks = r.get("blocks") or blocks_module.segment_round(r)
+            if blocks:
+                ranges = " · ".join(
+                    f"{b['id']}={b['start_event']}~{b['end_event']}" for b in blocks
+                )
+                map_lines.append(f"R{r['seq']}（{len(blocks)} 块）：{ranges}")
+            else:
+                map_lines.append(f"R{r['seq']}：无分块结构（按轮归属）")
+
+        seq_list = "、R".join(str(r["seq"]) for r in rounds)
+        instruction = (
+            "[分裂分析指令]\n"
+            "以上是本会话的完整上下文。请做**现状归属分析**（不是话题分类），"
+            f"对象为这些轮次：R{seq_list}。\n\n"
+            "[分块地图]（块按\"写/改文件为截止\"确定性划分；条目格式 = "
+            "块ID=起始事件~结束事件）\n"
+            + "\n".join(map_lines)
+            + "\n\n"
+            "分析判据：\n"
+            "  1. 先列现状清单：当前可独立运行的关注面（活性文件域 × 约束 ×"
+            " 目标）。被后续重写/取代的早期版本不单独成域，作为取代者域的 "
+            "superseded 前史——防止\"旧版本一类、新版本一类\"；\n"
+            "  2. 把分块地图里的每个块归属到域（block_ids 逐字取自地图）；"
+            "不属于任何域的块（如零状态寒暄）放 unassigned；\n"
+            "  3. 可分性判断：仅当现状清单出现 ≥2 个互不重叠的活性文件域才算"
+            "可分；话题不同永远不构成分裂理由。\n"
+            "完成后调用 submit_domains 工具提交（唯一出口，不要在正文中输出 "
+            "JSON）。字段语义以工具定义为准。"
+        )
+        messages = list(base_messages or self._org_fallback_base(rounds))
+        messages.append({"role": "user", "content": instruction})
+
+        content, ordered, _usage = self._stream_call(
+            messages, tools=self._schemas, purpose="split"
+        )
+        product = self._extract_domains(content, ordered)
+        if product is None:
+            retry_content, retry_ordered, _usage = self._stream_call(
+                messages
+                + [
+                    {"role": "assistant", "content": (content or "")[:2000]},
+                    {
+                        "role": "user",
+                        "content": "未收到有效产物。请调用 submit_domains 工具提交现状归属分析（参数即 JSON，不要在正文输出）。",
+                    },
+                ],
+                tools=self._schemas,
+                purpose="split",
+            )
+            product = self._extract_domains(retry_content, retry_ordered)
+        if product is None:
+            return False
+        domains, unassigned, split = product
+        # 暂存到批首轮（与 state_patch 同通道），下一轮开启随 promote 生效
+        pending = rounds[0].setdefault("pending_org", {})
+        pending["domains"] = domains
+        if unassigned:
+            pending["unassigned"] = unassigned
+        if split:
+            pending["split_assessment"] = split
+        self._persist_rounds()
+        return True
+
+    @staticmethod
+    def _extract_domains(content: str, ordered: list):
+        """从分裂分析响应提取产物：优先 submit_domains 调用参数，回退
+        正文 JSON。返回 (domains, unassigned, split_assessment) 或 None。"""
+        state = None
+        for tc in ordered or []:
+            if tc.get("name") != "submit_domains":
+                continue
+            try:
+                state = json.loads(tc.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                continue
+            if isinstance(state, dict):
+                break
+            state = None
+        if state is None:
+            state = Agent._parse_state_json(content)
+        if not isinstance(state, dict) or not state.get("domains"):
+            return None
+        return (
+            state.get("domains"),
+            state.get("unassigned") or {},
+            state.get("split_assessment") or {},
+        )
+
+    def _parallel_maintenance(
+        self, batch: list[dict], base: list[dict]
+    ) -> tuple:
+        """水位维护双路并行：整理 + 分裂分析。
+
+        两路共用同一装配快照、各自追加指令（纯追加骑同一份前缀缓存），
+        墙钟 ≈ max(两路)。失败互相独立——一路挂了另一路照常落地；
+        org 路异常时把批次标 failed（内部失败路径自己已标，不重复）。
+        返回 (org_ok, split_ok)。
+        """
+        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="wovra-maint") as pool:
+            org_fut = pool.submit(self._organize_rounds, batch, base)
+            split_fut = pool.submit(self._split_rounds, batch, base)
+            try:
+                org_ok = bool(org_fut.result())
+            except Exception:  # noqa: BLE001——异常路径也要把 org_state 落成 failed
+                for r in batch:
+                    r.pop("pending_org", None)
+                    r["org_state"] = "failed"
+                org_ok = False
+            try:
+                split_ok = bool(split_fut.result())
+            except Exception:  # noqa: BLE001——分裂路失败不影响整理路产物
+                split_ok = False
+        return org_ok, split_ok
+
     def _promote_org_results(self) -> None:
         """把暂存的整理产物落进正式视图（仅在**新 Round 开启时**调用）。
 
@@ -1465,6 +1747,13 @@ class Agent:
                 r["block_summaries"] = pending["block_summaries"]
             if pending.get("refined_index"):
                 r.setdefault("refined_index", {}).update(pending["refined_index"])
+            # 分裂分析产物（Level 0：只分析不分裂，落档待查）
+            if pending.get("domains"):
+                r["domains"] = pending["domains"]
+            if pending.get("unassigned"):
+                r["unassigned"] = pending["unassigned"]
+            if pending.get("split_assessment"):
+                r["split_assessment"] = pending["split_assessment"]
             patch = pending.get("state_patch")
             if patch and self.task is not None:
                 self.task.apply_state_patch(patch)
