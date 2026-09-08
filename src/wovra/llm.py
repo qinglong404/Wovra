@@ -127,7 +127,12 @@ class LLM:
 
         # base_url 允许为 None：此时 SDK 使用 OpenAI 官方地址。
         self.base_url = base_url
-        self._client = OpenAI(api_key=api_key, base_url=base_url)
+        # 流式读超时 = 相邻分块的最大静默间隔（不是总时长）——真生成时
+        # token 持续到达不会触发；端点挂流（实测空响应吊 751s）在
+        # WOVRA_READ_TIMEOUT 内被切断，交给上层重试。总时长由 token 流
+        # 自然决定，长思考/长输出不受限。
+        self._timeout = float(os.environ.get("WOVRA_READ_TIMEOUT", "180"))
+        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=self._timeout)
 
     def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
              stream: bool = False, **kwargs: Any):
