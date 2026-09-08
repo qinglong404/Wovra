@@ -142,14 +142,15 @@ class LLM:
             # （OpenAI 协议扩展 stream_options，主流兼容服务都支持）。
             # 没有它，流式调用就拿不到 tokens 数，成本核算无从谈起。
             kwargs.setdefault("stream_options", {"include_usage": True})
+        # 可选参数缺省时不发给服务端（工具禁用 = 整个字段省略，而非 null）：
+        # 严格端点对 tools=null / stream=null 这类空值可能直接 400
+        payload: dict[str, Any] = {"model": self.model, "messages": messages}
+        if stream:
+            payload["stream"] = True
+        if tools:
+            payload["tools"] = tools
         try:
-            return self._client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                tools=tools,
-                stream=stream or None,
-                **kwargs,
-            )
+            return self._client.chat.completions.create(**payload, **kwargs)
         except (NotFoundError, AuthenticationError, PermissionDeniedError, APIConnectionError) as error:
             raise LLMConfigError(
                 f"{_config_hint(error, self.model, self.base_url)}\n"

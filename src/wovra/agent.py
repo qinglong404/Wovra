@@ -12,8 +12,9 @@
   （调用次数 N→1 摊薄、State Patch 跨轮去重），后台线程执行不阻塞
   对话；产物先暂存，**下一轮开启时才生效**——本轮装配纹丝不动
   （连贯性 + 缓存前缀稳定），过程对用户静默；
-  输入 = 用户输入们 + 分块结构（机制一）+ 按块分组的事件截断索引
-  + 最终回答全文；
+  输入 = 触发时刻的装配原文快照（一字不动，纯追加骑前缀缓存）+ 尾部
+  追加"分块地图 + 整理指令"；单次生成、全部工具禁用（read_full 退役
+  ——原文本来就在眼前）；
   输出 = Normalized 用户意图 + 关键约束 + **逐块完整细节描述** + Task
   State 补丁（2026-09-08 用户拍板：块描述必须承载完整细节，事件级
   精修索引只在无分块结构的旧轮回退使用）
@@ -83,8 +84,6 @@ _READ_ONLY_TOOLS = frozenset(
      "glob_files", "web_fetch", "web_search", "list_background"}
 )
 
-_ORGANIZE_MAX_CALLS = 4
-_ORGANIZE_MAX_READS = 6  # 块细节描述需要更多原文回看（错误原因/关键数字）
 # 水位批量整理：水位口径 = **当前上下文窗口体量**（最近一次装配的估算，
 # 轮闭合时即本轮峰值）——2026-09-07 用户拍板，替代 V3 初版的"未整理
 # 积压量"口径。达标且轮闭合才触发一次批量整理，轮进行中永不打扰；
@@ -1028,12 +1027,14 @@ class Agent:
             r["org_state"] = "pending"
             self._org_inflight.add(r["seq"])
         if self.async_organization:
-            self._org_queue.put(batch)
+            # 快照在入队瞬间取：它就是"活前缀"——整理调用原样追加指令，
+            # 生产环境里这次调用的输入端骑满前缀缓存
+            self._org_queue.put((batch, self._assemble_messages()))
             self._ensure_worker()
         else:
             # 同步模式（run 命令/测试）：立即整理，结果随轮次落盘
             try:
-                self._organize_rounds(batch)
+                self._organize_rounds(batch, self._assemble_messages())
             finally:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
@@ -1056,7 +1057,7 @@ class Agent:
                 r["org_state"] = "pending"
                 self._org_inflight.add(r["seq"])
             try:
-                ok = self._organize_rounds(batch)
+                ok = self._organize_rounds(batch, self._assemble_messages())
             except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
                 for r in batch:
                     r["org_state"] = "failed"
@@ -1078,9 +1079,9 @@ class Agent:
 
     def _org_worker(self) -> None:
         while True:
-            batch = self._org_queue.get()
+            batch, base_messages = self._org_queue.get()
             try:
-                self._organize_rounds(batch)
+                self._organize_rounds(batch, base_messages)
             except Exception:  # noqa: BLE001——整理失败不影响主对话
                 for r in batch:
                     r["org_state"] = "failed"
@@ -1099,84 +1100,53 @@ class Agent:
             time.sleep(0.1)
         return self._org_queue.unfinished_tasks == 0
 
-    def _organize_rounds(self, rounds: list[dict]) -> bool:
+    def _organize_rounds(
+        self, rounds: list[dict], base_messages: Optional[list[dict]] = None
+    ) -> bool:
         """批量整理已闭合的 Round 们（维护管线的工作单元，V3 §4 机制）。
 
-        一次调用处理一批（N 轮 N 次调用 → 1 次，摊薄固定开销）：跨轮
-        重复交代的决策/背景在 State Patch 里天然去重。可展开性不变——
-        事件 ID 与原始历史不受整理影响（§5：合并的是视图，不是历史）。
-        输入 = 各轮用户输入 + 分块结构（机制一）+ 按块分组的事件截断索引
-        + 最终回答全文（默认不读原文；截断行不足以确定关键事实时可用
-        read_full 按上限展开）。
-        输出 = 各轮 Normalized 意图 + 关键约束 + **逐块完整细节描述**
-        （2026-09-08 用户拍板：块描述承载完整细节，不许空洞一词带过）
-        + 合并 State Patch，**全部写入 pending_org 暂存区**：本轮装配
-        必须纹丝不动（连贯性 + 缓存前缀稳定），下一轮开启时由
-        _promote_org_results 生效。无分块结构的旧轮回退精修事件索引。
-        过程对用户静默（无状态播报）。关闭思考（格式化任务）。解析
-        失败重试一次，仍失败则整批保持 Runtime 视图（org_state=failed，
-        回入水位等下次触发），原始层永远不受影响。返回是否成功。
+        2026-09-08 用户拍板：**整理 = 一次追加式对话**。输入 = 触发时刻
+        的装配原文快照（base_messages 一字不动——纯追加才骑得住前缀缓存，
+        任何内联改写都会把缓存从插入点打断）+ 尾部追加"分块地图 + 整理
+        指令"。全部工具禁用、单次生成：read_full 退役（原文本来就在眼前，
+        截断索引再造一遍反而丢了细节还多付一遍生成）。
+        输出 = 各轮 Normalized 意图 + 关键约束 + 逐块完整细节描述 + 合并
+        State Patch，**全部写入 pending_org 暂存区**：本轮装配必须纹丝
+        不动（连贯性 + 缓存前缀稳定），下一轮开启时由 _promote_org_results
+        生效。解析失败重试一次（仍无工具），再失败则整批保持 Runtime
+        视图（org_state=failed，回入水位等下次触发），原始层永远不受
+        影响。返回是否成功。
         """
-        sections = []
         round_blocks: dict[int, list[dict]] = {}
+        map_lines: list[str] = []
         for r in rounds:
-            user_inputs = [
-                e["message"].get("content", "")
-                for e in r["events"] if e["type"] == "user"
-            ]
-            final_event = next(
-                (e for e in reversed(r["events"]) if e["type"] == "final_answer"), None
-            )
-            final_text = (final_event["message"].get("content") or "") if final_event else ""
             blocks = r.get("blocks") or blocks_module.segment_round(r)
             round_blocks[r["seq"]] = blocks
-            part = f"### Round {r['seq']}\n[用户输入]\n" + "\n---\n".join(user_inputs)
             if blocks:
-                block_lines = []
-                for b in blocks:
-                    parts = [f"{b['start_event']}~{b['end_event']}"]
-                    if b["wrote_files"]:
-                        parts.append("写: " + ", ".join(b["wrote_files"]))
-                    reads = [f for f in b["touched_files"] if f not in b["wrote_files"]]
-                    if reads:
-                        parts.append("读: " + ", ".join(reads))
-                    if b["command_types"]:
-                        parts.append("命令[" + ", ".join(b["command_types"]) + "]")
-                    block_lines.append(f"- {b['id']}（{' · '.join(parts)}）")
-                part += "\n[分块结构]\n" + "\n".join(block_lines)
-                grouped = []
-                covered: set[int] = set()
-                for b in blocks:
-                    glines = [f"▸ {b['id']}"]
-                    for i in range(b["start"], b["end"] + 1):
-                        glines.append(truncate.event_index_line(r["events"][i]))
-                    covered.update(range(b["start"], b["end"] + 1))
-                    grouped.append("\n".join(glines))
-                orphans = [
-                    truncate.event_index_line(e)
-                    for i, e in enumerate(r["events"])
-                    if i not in covered
-                ]
-                if orphans:
-                    grouped.append("▸ 未入块事件\n" + "\n".join(orphans))
-                part += "\n[事件截断索引（按块分组）]\n" + "\n\n".join(grouped)
+                ranges = " · ".join(
+                    f"{b['id']}={b['start_event']}~{b['end_event']}" for b in blocks
+                )
+                map_lines.append(f"R{r['seq']}（{len(blocks)} 块）：{ranges}")
             else:
-                part += "\n[事件截断索引]\n" + truncate.render_round_events(r)
-            if final_text:
-                part += f"\n[最终回答（完整）]\n{final_text[:2000]}"
-            sections.append(part)
+                map_lines.append(f"R{r['seq']}：无分块结构（改用 refined_index 事件摘要）")
 
-        prompt = (
-            "你是任务整理器。以下是多个已完成 Round 的用户输入、分块结构、"
-            "按块分组的事件截断索引与最终回答（按时间顺序排列）。\n"
-            "你的职责（最后只输出一个 JSON 对象，不要代码块围栏）：\n"
-            '1. "rounds"：数组，与输入的 Round 一一对应，每个元素为 '
+        seq_list = "、R".join(str(r["seq"]) for r in rounds)
+        instruction = (
+            "[整理指令]\n"
+            "以上是本会话的完整上下文。请把其中这些轮次整理成结构化档案："
+            f"R{seq_list}。其余轮次不要输出。\n\n"
+            "[分块地图]（块按\"写/改文件为截止\"确定性划分，各块出现顺序与"
+            "上方对话一致；条目格式 = 块ID=起始事件~结束事件）\n"
+            + "\n".join(map_lines)
+            + "\n\n"
+            "只输出一个 JSON 对象（不要代码块围栏；没有可用工具，不要尝试调用）：\n"
+            '1. "rounds"：数组，与待整理轮一一对应，每个元素为 '
             '{"seq": 轮次号, "normalized_user_input": "该轮用户意图的澄清表述'
             "——不是压缩，是把用户想要什么说得更清楚\", "
             '"key_constraints": "该轮用户立下的红线/硬性约束（禁止什么、'
             '必须怎样、明确否决的方向），没有则给空字符串", '
-            '"block_summaries": [{"id": "块ID（必须逐字取自该轮[分块结构]'
-            '里已有的块ID，每个块一条、一个不落）", '
+            '"block_summaries": [{"id": "块ID（逐字取自[分块地图]，每个块一条、'
+            '一个不落，与地图同序）", '
             '"summary": "该块的完整细节描述"}]}\n'
             "块描述的完整性是第一要求：\n"
             "  * 每块 80~250 字，写清：做了什么、针对哪些文件（路径写全）、"
@@ -1184,12 +1154,12 @@ class Agent:
             "  * 禁止空洞词（\"调整\"\"修改\"\"处理\"不许单独成为描述）；"
             "关键数字（行数/字节数/条数/次数）与关键命令的目的必须保留；\n"
             "  * 含最终回答的块，把对用户的承诺/交付口径完整写进去。\n"
-            "（无[分块结构]的旧轮改为给出 \"refined_index\": "
+            "（无分块结构的轮改为给出 \"refined_index\": "
             "[{\"id\": \"该轮的事件ID\", \"line\": \"一行摘要\"}]——"
             "索引行比截断行更短更准（保留结论：什么可行、什么实测不行、"
             "卡在哪），id 必须取自对应轮次事件流中已有的事件 ID，"
             "无实质内容的事件（如寒暄）可省略。）\n"
-            '2. "state_patch"：全部轮次合并后的任务状态增量补丁 '
+            '2. "state_patch"：这些轮次合并后的任务状态增量补丁 '
             '{"completed":[],"decisions":[],"known_issues":[],"open_questions":[],'
             '"escalations":[],"experiments":[],'
             '"current_status":"...","goal":"...","is_done":bool}——'
@@ -1200,47 +1170,14 @@ class Agent:
             "多轮之间重复交代的决策与背景只记一次，已完成的事项不要重复累积。"
             "质量锚点（zcode-borrowings.md）：整理后的视图必须能回答——用户"
             "原话要求了什么、立了哪些约束、已做了哪些决策、当前状态如何、"
-            "下一步是什么。\n"
-            f"若截断索引不足以确定关键事实（如失败的具体原因），"
-            f"可用 read_full 工具查看事件原文（最多 {_ORGANIZE_MAX_READS} 次）。\n\n"
-            + "\n\n".join(sections)
+            "下一步是什么。"
         )
+        messages = list(base_messages or self._org_fallback_base(rounds))
+        messages.append({"role": "user", "content": instruction})
 
-        messages = [{"role": "user", "content": prompt}]
-        content = ""
-        reads_left = _ORGANIZE_MAX_READS
-        for _ in range(_ORGANIZE_MAX_CALLS):
-            content, ordered, _usage = self._stream_call(
-                messages,
-                tools=self._organize_schemas(),
-                purpose="organization",
-                extra_body={"thinking": {"type": "disabled"}},
-            )
-            if not ordered:
-                break
-            messages.append({
-                "role": "assistant",
-                "content": content,
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {"name": tc["name"], "arguments": tc["arguments"] or "{}"},
-                    }
-                    for tc in ordered
-                ],
-            })
-            for tc in ordered:
-                if tc["name"] != "read_full" or reads_left <= 0:
-                    result = "整理阶段不再展开更多原文。"
-                else:
-                    reads_left -= 1
-                    try:
-                        target = json.loads(tc["arguments"]).get("event_id", "")
-                    except json.JSONDecodeError:
-                        target = ""
-                    result = self._read_full_event(target)
-                messages.append({"role": "tool", "tool_call_id": tc["id"], "content": result})
+        content, _ordered, _usage = self._stream_call(
+            messages, tools=None, purpose="organization"
+        )
 
         state = self._parse_state_json(content)
         if state is None and content.strip():
@@ -1251,7 +1188,6 @@ class Agent:
                     {"role": "user", "content": "你的输出不是合法 JSON。请重新输出，只包含 JSON 对象本身。"},
                 ],
                 purpose="organization",
-                extra_body={"thinking": {"type": "disabled"}},
             )
             state = self._parse_state_json(retry_content)
         if not isinstance(state, dict):
@@ -1320,6 +1256,11 @@ class Agent:
         self._persist_rounds()
         return True
 
+    @staticmethod
+    def _org_fallback_base(rounds: list[dict]) -> list[dict]:
+        """base_messages 缺省时的兜底装配：批次轮的原始协议消息（直调/测试用）。"""
+        return [e["message"] for r in rounds for e in r["events"]]
+
     def _promote_org_results(self) -> None:
         """把暂存的整理产物落进正式视图（仅在**新 Round 开启时**调用）。
 
@@ -1350,15 +1291,6 @@ class Agent:
                 self.task.apply_state_patch(patch)
         if changed:
             self._persist_rounds()
-
-    def _organize_schemas(self) -> list[dict]:
-        """Organization 阶段唯一的工具：按事件 ID 读取原文（后门，默认不用）。"""
-
-        def read_full(event_id: str) -> str:
-            """按事件 ID（如 R1-E02）读取该事件的完整原文。"""
-            return self._read_full_event(event_id)
-
-        return [_schema_of(read_full)]
 
     def _read_full_event(self, event_id: str) -> str:
         """按事件 ID 返回完整原文，不做内容截断。

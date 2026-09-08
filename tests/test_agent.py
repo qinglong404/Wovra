@@ -435,8 +435,12 @@ def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
     agent._maybe_organize_batch()
 
     assert len(agent.llm.calls) == 1  # 两轮只花一次调用
-    prompt = agent.llm.calls[0]["messages"][0]["content"]
-    assert "Round 1" in prompt and "Round 2" in prompt
+    # 追加式输入：装配原文在前，整理指令/分块地图追加在后
+    prompt = "\n".join(
+        str(m.get("content") or "") for m in agent.llm.calls[0]["messages"]
+    )
+    assert "[整理指令]" in prompt and "[分块地图]" in prompt
+    assert "甲" * 100 in prompt  # 装配原文直接进输入，不是重建索引
     # 产物进暂存区，正式字段保持旧值（本轮装配保持原样）
     assert task.rounds[0]["pending_org"]["normalized"] == "R1 意图"
     assert task.rounds[1]["pending_org"]["normalized"] == "R2 意图"
