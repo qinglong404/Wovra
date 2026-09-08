@@ -1395,11 +1395,11 @@ def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
     assert "R2-B1" in prompt and "路由式" in prompt  # 摘要进了提示词
 
 
-def test_default_max_turns_is_60():
-    """默认步数上限 60（安全网而非配额）。"""
+def test_default_max_turns_is_200():
+    """默认步数上限 200（安全网而非配额；60 时代用户实测两次撞顶）。"""
     task = Task.create(goal="x")
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
-    assert agent.max_turns == 60
+    assert agent.max_turns == 200
 
 
 def test_open_round_merges_interrupted_runs(monkeypatch, tmp_path):

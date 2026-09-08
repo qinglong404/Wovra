@@ -478,8 +478,9 @@ _CONSULT_SCHEMA: dict = {
     },
 }
 # 单轮工具循环的默认步数上限：安全网而非配额——尽量不在步数上限制
-# LLM（2026-09-07 用户拍板 60），真超限也只是开放轮等待 \继续，不废工作
-_DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "60"))
+# LLM，真超限也只是开放轮等待 \继续，不废工作。2026-09-08 用户实测
+# 连续两次撞 60（DeepSeek harness 同任务用过 112 步），上调至 200
+_DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "200"))
 
 # 工具名 → 进度提示的动作词（"正在<动作>…"）
 _ACTION_WORDS = {
