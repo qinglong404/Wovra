@@ -131,6 +131,8 @@ def test_system_prompt_matches_mode_and_environment(monkeypatch):
         assert "批量发出" in prompt
         assert "一眼全黑" in prompt
         assert "验证分层" in prompt
+        # D' 组实证：单次响应承载大批量写入 → 生成数分钟 → 缓存过期全价重算
+        assert "大文件写每轮一两个" in prompt
     # 运行环境信息防止模型在 Windows 上跑类 Unix 命令
     if _os.name == "nt":
         assert "cmd.exe" in managed and "Windows" in managed
