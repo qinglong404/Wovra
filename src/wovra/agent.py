@@ -1444,6 +1444,20 @@ class Agent:
         self._last_finish_reason = finish_reason
         if usage is not None:
             self._accumulate_usage(usage, purpose)
+            # 逐调用用量落账（2026-09-09 缓存法医的产物）：usage 行按轮
+            # 聚合，逐调用粒度缺失正是 D/E 归因要做事件重建的原因——
+            # 从今往后每次调用自带 prompt/cached/miss/ttft 对账数据，
+            # provider 上报的可信度可直接用 TTFT 交叉验证
+            if self.task is not None:
+                details = getattr(usage, "prompt_tokens_details", None)
+                cached = getattr(details, "cached_tokens", None) or 0
+                self.task.record(
+                    "llm_call",
+                    f"[{purpose}] prompt={usage.prompt_tokens or 0:,} "
+                    f"cached={cached:,} miss={(usage.prompt_tokens or 0) - cached:,} "
+                    f"completion={usage.completion_tokens or 0:,} "
+                    f"ttft={ttft:.1f}s dur={elapsed:.1f}s finish={self._last_finish_reason or '未返回'}",
+                )
         if purpose in _MAINTENANCE_PURPOSES:
             # 维护性开销异步执行、可能跨越轮次边界，混进 last_stats 会
             # 漏记（会话结束丢失）或错记进下一轮（实测教训）
