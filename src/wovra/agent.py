@@ -1917,11 +1917,20 @@ class Agent:
             (
                 r["seq"]
                 for r in self.rounds
-                if r.get("org_state") in ("done", "pending")
+                if r.get("org_state") == "done"
+                or (
+                    r.get("org_state") == "pending"
+                    and r["seq"] in self._org_inflight
+                )
             ),
             default=0,
         )
         if last_maintained and current_seq - last_maintained < self._org_cooldown:
+            # 冷却口径只认"真正维护过"：done（完成）或本进程在飞（pending
+            # 且 seq ∈ _org_inflight）。崩溃遗留的 pending（上个进程维护
+            # 线程被中断的半程状态）不算已维护——否则冷却把它们当刚维护
+            # 过，挡掉本次会话第一次补整理（F 组实证：6 轮 pending 续跑，
+            # R7/R8 闭合被 8-6=2 < 3 连挡两轮，压缩迟迟不开始）。
             return  # 冷却间隔：两次维护之间的最小轮距，防高频
         unorganized = self._unorganized_rounds()
         if not unorganized:

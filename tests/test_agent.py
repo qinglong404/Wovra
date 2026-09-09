@@ -674,6 +674,57 @@ def test_pending_backlog_collected_on_trigger(monkeypatch, tmp_path):
     assert task.rounds[0]["org_state"] == "done"
 
 
+def test_crash_leftover_pending_not_blocked_by_cooldown(monkeypatch, tmp_path):
+    """冷却只认真正维护过（done / 本进程在飞）：崩溃遗留的 pending
+    （上个进程维护线程被中断的半程状态）不占冷却——F 组实证：6 轮
+    pending 续跑后 R7/R8 闭合被 last_maintained=6 的冷却连挡两轮，
+    压缩迟迟不开始。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    rounds = []
+    for i in range(1, 9):
+        r = _round(i, "甲" * 2400, "甲" * 2400)
+        r["org_state"] = "pending" if i <= 6 else ""  # R1-R6 崩溃遗留
+        rounds.append(r)
+    task.rounds = rounds
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json(list(range(1, 9)))))]]),
+        tools=[], task=task, org_watermark=1200, org_batch_max=12,
+        org_grace_rounds=3, org_cooldown_rounds=3,
+    )
+    agent.last_context_estimate = 1200
+
+    agent._maybe_organize_batch()  # 当前轮 seq=8：8-6=2 < 3，旧逻辑会被挡
+
+    assert len(agent.llm.calls) == 1  # 崩溃遗留不占冷却，直接补整理
+    assert all(r["org_state"] == "done" for r in task.rounds)
+
+
+def test_inflight_pending_still_counts_for_cooldown(monkeypatch, tmp_path):
+    """本进程在飞批次仍占冷却：维护期间轮闭合不重复触发。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    rounds = []
+    for i in range(1, 9):
+        r = _round(i, "甲" * 2400, "甲" * 2400)
+        r["org_state"] = "pending" if i <= 6 else ""
+        rounds.append(r)
+    task.rounds = rounds
+    agent = Agent(
+        llm=_StubLLM(), tools=[], task=task, org_watermark=1200, org_batch_max=12,
+        org_grace_rounds=3, org_cooldown_rounds=3,
+    )
+    agent._org_inflight.update(range(1, 7))  # 本进程在飞（async 已入队）
+    agent.last_context_estimate = 1200
+
+    agent._maybe_organize_batch()
+
+    assert len(agent.llm.calls) == 0  # 冷却生效：在飞批次期间不重复触发
+    assert task.rounds[0]["org_state"] == "pending"  # 未动
+
+
 def test_state_patch_maintains_escalations_and_experiments(monkeypatch, tmp_path):
     """决策升级与待办实验是状态账本一等公民（机制五），落盘可重载。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
