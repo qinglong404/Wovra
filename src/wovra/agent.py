@@ -99,7 +99,6 @@ _ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
 # 宽限期的第二条件（2026-09-08 D 组实证漏洞）：轻轮才豁免——事件数超过
 # 此值的巨型轮（约 60 步预算一轮的规模）即使在前 N 轮也不豁免，达水位
 # 照常整理。豁免要保护的是"开头几轮的最小解释历史"，不是"一轮到底"
-_ORG_GRACE_MAX_EVENTS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_MAX_EVENTS", "120"))
 _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
@@ -417,7 +416,9 @@ _TODO_SCHEMA: dict = {
                     "items": {"type": "string"},
                     "description": (
                         "start_milestone：验收标准（可检验），必填——"
-                        "入口是证据不是自述"
+                        "入口是证据不是自述。里程碑驱动轮下验收即轮边界"
+                        "（verify 时闭合当前轮），验收标准的粒度质量直接"
+                        "决定轮粒度与整理质量——按可验收的增量划大步"
                     ),
                 },
                 "text": {
@@ -1813,18 +1814,13 @@ class Agent:
         """
         if self.last_context_estimate < self._org_watermark:
             return
-        # 保护机制：宽限期（双条件）+ 冷却间隔（2026-09-08 用户拍板）。
-        # 窗口保底（紧急折叠）不在豁免范围，是独立的生存线。
+        # 保护机制：宽限期（3 轮全豁免）+ 冷却间隔（2026-09-09 用户拍板：
+        # 双条件不认可，恢复全豁免——提出 3 轮时已考虑 229 步巨轮，巨轮
+        # 在宽限期内同样豁免；代价知情：超水位推迟的整理由冷却后的批次
+        # 补上）。窗口保底（紧急折叠）不在豁免范围，是独立的生存线。
         current_seq = self.rounds[-1]["seq"] if self.rounds else 0
         if current_seq <= self._org_grace:
-            # 宽限期：开头几轮是"解释现状的最小历史"。双条件（D 组实证：
-            # 229 步巨型轮全程豁免，110K 穿过水位而整理全场未出力）——
-            # 只有轻轮才豁免，巨型轮照常整理（块细节格式保真 + expand
-            # 可取回，压缩不再伤最小历史）
-            last_round = self.rounds[-1] if self.rounds else None
-            n_events = len((last_round or {}).get("events") or [])
-            if n_events <= _ORG_GRACE_MAX_EVENTS_DEFAULT:
-                return
+            return  # 宽限期：开头几轮是"解释现状的最小历史"，全豁免
         last_maintained = max(
             (
                 r["seq"]

@@ -379,7 +379,7 @@ def test_midstream_api_error_retry_recovers():
     assert agent.rounds[-1]["end_state"] == "completed"
 
 
-# ---- D 组实证驱动的机制修正：grace 双条件 + 里程碑驱动轮 ----------------
+# ---- 里程碑驱动轮（D 组实证驱动；grace 双条件经用户否决已回滚）----------
 
 
 def _round_agent(monkeypatch, tmp_path, n_events, async_org=True):
@@ -396,16 +396,16 @@ def _round_agent(monkeypatch, tmp_path, n_events, async_org=True):
     return agent
 
 
-def test_grace_exempts_light_round_but_not_mega_round(monkeypatch, tmp_path):
-    """宽限期双条件（D 组实证：229 步巨型轮全程豁免、水位全场未出力）：
-    前 grace 轮内的轻轮照旧豁免；巨型轮（事件数超限）达水位照常整理。"""
+def test_grace_exempts_all_rounds_within_limit(monkeypatch, tmp_path):
+    """宽限期（2026-09-09 用户拍板：3 轮全豁免，无事件数上限——提出
+    3 轮时已考虑 229 步巨轮）：前 grace 轮内轻轮与巨型轮一律豁免。"""
     light = _round_agent(monkeypatch, tmp_path, n_events=5)
     light.close_round()
-    assert light._org_queue.qsize() == 0  # 轻轮：宽限期豁免照旧生效
+    assert light._org_queue.qsize() == 0  # 轻轮：宽限期豁免
 
     mega = _round_agent(monkeypatch, tmp_path, n_events=130)
     mega.close_round()
-    assert mega._org_queue.qsize() == 1  # 巨型轮：不豁免，照常入队整理
+    assert mega._org_queue.qsize() == 0  # 巨型轮：同样豁免（用户确认）
 
 
 def test_verify_milestone_closes_round_and_opens_checkpoint(monkeypatch, tmp_path):
