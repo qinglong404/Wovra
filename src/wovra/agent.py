@@ -832,6 +832,7 @@ class Agent:
             # 水位检查。说明文本放新轮 user_input 与工具结果（不在
             # assistant tool_call 与 tool 消息之间插事件——严格端点会拒）。
             if self.current_round is not None:
+                closed_seq = self.current_round["seq"]
                 checkpoint_note = (
                     "[运行时] 大步验收通过，轮次在此闭合"
                     "（里程碑驱动轮：检查点 = 轮边界）。"
@@ -840,6 +841,12 @@ class Agent:
                 if self._open_or_reuse_round(checkpoint_note):
                     self._promote_org_results()
                 self._persist_rounds()
+                # 轮边界必须在窗口里可见——否则用户体感"一轮"与账本的
+                # 多轮对不上（F 组实测：5 次里程碑闭合全程静默）
+                if self.on_progress:
+                    self.on_progress(
+                        f"🏁 大步『{milestone['goal']}』验收闭合——轮次 R{closed_seq} 归档，开新轮续写"
+                    )
             return (
                 f"大步已验收：{milestone['goal']}\n证据：{evidence.strip()}\n"
                 + (tail_note + "\n" if tail_note else "")
