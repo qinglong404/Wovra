@@ -1,4 +1,4 @@
-"""D/E 组缓存塌陷法医（2026-09-09）：逐调用生成时长重建 + TTL 拟合。
+"""A/D/E 组缓存法医（2026-09-09）：逐调用生成时长重建 + TTL 拟合。
 
 用法：uv run python scripts/d_e_forensic.py
 数据源：tasks/20260908-201257-dccb41（D）/ 20260908-231729-6d526e（E）。
@@ -75,5 +75,6 @@ def report(label, path, actual_miss):
 
 
 if __name__ == "__main__":
-    report("E", "tasks/20260908-231729-6d526e/task.json", 1_888_304)
+    report("A", "tasks/20260906-161916-f5594a/task.json", usage_miss("tasks/20260906-161916-f5594a/task.json"))
     report("D", "tasks/20260908-201257-dccb41/task.json", usage_miss("tasks/20260908-201257-dccb41/task.json"))
+    report("E", "tasks/20260908-231729-6d526e/task.json", 1_888_304)
