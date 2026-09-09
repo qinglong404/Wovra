@@ -1200,6 +1200,34 @@ def test_thinking_head_single_line():
     assert ui.thinking_line("x").startswith("💭")
 
 
+def test_step_count_continues_across_resume(monkeypatch, tmp_path):
+    """同一轮被打断后 \c 续跑：步数按轮累计续上（预算属于轮不属于段），
+    超限按累计数报。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([
+        [_chunk(_delta(content="R1"))],
+        [_chunk(_delta(content="续跑完成"))],
+    ]), tools=[], task=task, max_turns=5)
+
+    agent.run("开始")                          # R1：1 步，闭合
+    assert task.rounds[0]["steps_used"] == 1
+
+    agent._open_or_reuse_round("继续干")        # 新开放轮，模拟已用 4 步被打断
+    agent.current_round["steps_used"] = 4
+    agent.resume()                             # 续跑只剩 1 步预算
+
+    assert task.rounds[-1]["end_state"] == "completed"
+    assert task.rounds[-1]["steps_used"] == 5  # 4+1 续上，没有重置
+
+    # 已达上限再续：按累计数报超限
+    agent._open_or_reuse_round("再续")
+    agent.current_round["steps_used"] = 5
+    with pytest.raises(RuntimeError) as excinfo:
+        agent.resume()
+    assert "累计工作 5 步" in str(excinfo.value)
+
+
 def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):
     """运行时通道（1.1）：任务状态/文件地图以 <runtime-reminder> 信封注入，
     与用户发言语义分离——模型分得清"机制给的"和"用户要的"。"""

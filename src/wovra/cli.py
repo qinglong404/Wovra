@@ -491,7 +491,7 @@ def _run_turn(agent: Agent, instruction: str | None) -> str:
     def on_thinking(text: str) -> None:
         # 思考单行化（2026-09-08 用户拍板）：\r 原地刷新一行，不再整段
         # 滚动——防止污染窗口、防止思考/回答来回切换视角
-        nonlocal phase
+        nonlocal phase, line_open
         if phase != "thinking":
             _break_line()
             phase = "thinking"
@@ -507,10 +507,8 @@ def _run_turn(agent: Agent, instruction: str | None) -> str:
             _break_line()
             phase = "answer"
             think_buf.clear()
-            _break_line()
             print(ui.rule("回答"), flush=True)
             ui.answer_live_start()
-            phase = "answer"
         # TTY 下进 rich Live 实时渲染 Markdown（与回放观感一致）；
         # 非 TTY 自动退化为纯文本流
         ui.answer_live_append(text)

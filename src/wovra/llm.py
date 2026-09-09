@@ -69,6 +69,31 @@ def reasoning_of(part) -> str:
     )
 
 
+def cached_tokens_of(usage) -> tuple[int, int]:
+    """返回 (缓存命中 tok, 未命中 tok)——各服务字段位置不同。
+
+    OpenAI 协议：prompt_tokens_details.cached_tokens；DeepSeek：顶层
+    prompt_cache_hit_tokens / prompt_cache_miss_tokens（SDK 未建模时
+    落在 model_extra）。miss 缺省时用 prompt - hit 兜底。
+    """
+    details = getattr(usage, "prompt_tokens_details", None)
+    hit = getattr(details, "cached_tokens", None) or 0
+    hit_ds = getattr(usage, "prompt_cache_hit_tokens", None)
+    if hit_ds is None:
+        hit_ds = (getattr(usage, "model_extra", None) or {}).get(
+            "prompt_cache_hit_tokens"
+        ) or 0
+    miss_ds = getattr(usage, "prompt_cache_miss_tokens", None)
+    if miss_ds is None:
+        miss_ds = (getattr(usage, "model_extra", None) or {}).get(
+            "prompt_cache_miss_tokens"
+        ) or 0
+    prompt = getattr(usage, "prompt_tokens", 0) or 0
+    hit = int(max(hit or 0, hit_ds or 0))
+    miss = int(miss_ds) if miss_ds else max(0, prompt - hit)
+    return hit, miss
+
+
 class LLMConfigError(RuntimeError):
     """模型服务接入配置错误（BASE_URL / 模型名 / 密钥 / 网络）。
 

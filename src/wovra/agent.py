@@ -49,7 +49,7 @@ from . import task as task_module
 from . import tokens
 from . import tools as tools_module
 from . import truncate
-from .llm import LLM, LLMStreamError, reasoning_of
+from .llm import LLM, LLMStreamError, cached_tokens_of, reasoning_of
 from .llm import APIError as _llm_APIError
 from .task import Task, sanitize_surrogates
 from .tools import (
@@ -1120,7 +1120,15 @@ class Agent:
         # 让子 agent 的输出直接进用户窗口（不打回主 agent 再路由）
         self._stream_cbs = {"thinking": on_thinking, "answer": on_answer_delta}
 
-        for _ in range(self.max_turns):
+        # 步数按轮累计（2026-09-09 用户拍板：同一轮被打断后 \c 续跑要
+        # 续上——预算属于轮而不属于段；记在 round 上随持久化，进程重启
+        # 后也续。里程碑轮开新轮 = 新预算）
+        steps_used = (self.current_round or {}).get("steps_used", 0)
+        self.last_stats["llm_calls"] = steps_used  # 展示口径同步续上
+        while steps_used < self.max_turns:
+            steps_used += 1
+            if self.current_round is not None:
+                self.current_round["steps_used"] = steps_used
             if self.on_progress:
                 self.on_progress("等待模型响应…")
             messages = self._assemble_messages()
@@ -1213,8 +1221,8 @@ class Agent:
         # 由调用方决定后续（重试/人工介入）。
         self._persist_rounds()
         raise RuntimeError(
-            f"本轮已连续工作 {self.max_turns} 步仍未给出最终回答（Round 保持开放，"
-            f"\\c 可直接接着干）"
+            f"本轮已累计工作 {steps_used} 步（达到上限 {self.max_turns}）仍未给出"
+            f"最终回答（Round 保持开放，\\c 续跑会接着这个步数计数）"
         )
 
     def label_blocks(self, rounds: Optional[list[dict]] = None) -> dict:
@@ -1449,8 +1457,7 @@ class Agent:
             # 从今往后每次调用自带 prompt/cached/miss/ttft 对账数据，
             # provider 上报的可信度可直接用 TTFT 交叉验证
             if self.task is not None:
-                details = getattr(usage, "prompt_tokens_details", None)
-                cached = getattr(details, "cached_tokens", None) or 0
+                cached, _miss = cached_tokens_of(usage)
                 self.task.record(
                     "llm_call",
                     f"[{purpose}] prompt={usage.prompt_tokens or 0:,} "
@@ -1533,8 +1540,7 @@ class Agent:
         """
         details = getattr(usage, "completion_tokens_details", None)
         reasoning_tokens = getattr(details, "reasoning_tokens", None)
-        prompt_details = getattr(usage, "prompt_tokens_details", None)
-        cached = getattr(prompt_details, "cached_tokens", None) or 0
+        cached, _miss = cached_tokens_of(usage)
 
         if purpose in _MAINTENANCE_PURPOSES:
             with self._maint_lock:
