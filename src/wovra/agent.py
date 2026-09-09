@@ -96,12 +96,14 @@ _READ_ONLY_TOOLS = frozenset(
 # 积压量"口径。达标且轮闭合才触发一次批量整理，轮进行中永不打扰；
 # 产物暂存、下一轮开启才生效。小会话可能全程不触发——整理成本归零。
 _ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
-# 宽限期的第二条件（2026-09-08 D 组实证漏洞）：轻轮才豁免——事件数超过
-# 此值的巨型轮（约 60 步预算一轮的规模）即使在前 N 轮也不豁免，达水位
-# 照常整理。豁免要保护的是"开头几轮的最小解释历史"，不是"一轮到底"
+# 2026-09-09 用户拍板：3 轮全豁免（含巨轮），双条件否决已回滚
 _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 _ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
+# 维护路硬上限（2026-09-09 F 组实测）：超大基座上整理调用可深度思考
+# 细水长流 23 分钟不完成（读超时不触发——token 在流），一次挂起借冷却
+# 计数堵死整条管线。硬上限到点判 failed 解锁，冷却后重试。
+_ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 
 # 整理产出的提交契约（工具常驻：整理调用与工作对话共用同一 tools 数组，
 # 前缀序列化恒定，缓存才能常骑——2026-09-08 用户拍板）。字段语义写在
@@ -541,6 +543,7 @@ class Agent:
         org_batch_max: Optional[int] = None,
         org_grace_rounds: Optional[int] = None,
         org_cooldown_rounds: Optional[int] = None,
+        org_maint_timeout: Optional[float] = None,
         on_tool_call: Optional[Callable[[str, str], None]] = None,
         on_tool_result: Optional[Callable[[str, str], None]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
@@ -576,6 +579,9 @@ class Agent:
             _ORG_COOLDOWN_ROUNDS_DEFAULT
             if org_cooldown_rounds is None
             else org_cooldown_rounds
+        )
+        self._org_maint_timeout = (
+            _ORG_MAINT_TIMEOUT_DEFAULT if org_maint_timeout is None else org_maint_timeout
         )
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
@@ -2220,23 +2226,58 @@ class Agent:
         两路共用同一装配快照、各自追加指令（纯追加骑同一份前缀缓存），
         墙钟 ≈ max(两路)。失败互相独立——一路挂了另一路照常落地；
         org 路异常时把批次标 failed（内部失败路径自己已标，不重复）。
+        **硬上限 WOVRA_MAINT_TIMEOUT**（F 组实测：325K 大基座上整理调用
+        深度思考细水长流 23 分钟不完成，读超时不触发——token 在流；
+        到点判 failed 解锁管线，冷却后重试。守护线程化保证进程退出
+        不被挂起调用拖住）。启动/结束落账 history，挂起可观测。
         返回 (org_ok, split_ok)。
         """
-        with ThreadPoolExecutor(max_workers=2, thread_name_prefix="wovra-maint") as pool:
-            org_fut = pool.submit(self._organize_rounds, batch, base)
-            split_fut = pool.submit(self._split_rounds, batch, base)
+        if self.task is not None:
+            self.task.record(
+                "maintenance",
+                f"启动：批次 R{batch[0]['seq']}-R{batch[-1]['seq']}"
+                f"（{len(batch)} 轮，输入快照 {len(base)} 条消息，硬上限 {self._org_maint_timeout:.0f}s）",
+            )
+        results = {"org": False, "split": False}
+        lane_done = {"org": threading.Event(), "split": threading.Event()}
+
+        def lane(kind: str, fn) -> None:
             try:
-                org_ok = bool(org_fut.result())
-            except Exception:  # noqa: BLE001——异常路径也要把 org_state 落成 failed
-                for r in batch:
-                    r.pop("pending_org", None)
-                    r["org_state"] = "failed"
-                org_ok = False
-            try:
-                split_ok = bool(split_fut.result())
-            except Exception:  # noqa: BLE001——分裂路失败不影响整理路产物
-                split_ok = False
-        return org_ok, split_ok
+                results[kind] = bool(fn())
+            except Exception as error:  # noqa: BLE001——单路失败不拖垮另一路
+                if kind == "org":
+                    for r in batch:
+                        r.pop("pending_org", None)
+                        r["org_state"] = "failed"
+                if self.task is not None:
+                    self.task.record("maintenance", f"{kind} 路失败：{str(error)[:150]}")
+            lane_done[kind].set()
+
+        org_thread = threading.Thread(
+            target=lane, args=("org", lambda: self._organize_rounds(batch, base)),
+            name="wovra-maint-org", daemon=True,
+        )
+        split_thread = threading.Thread(
+            target=lane, args=("split", lambda: self._split_rounds(batch, base)),
+            name="wovra-maint-split", daemon=True,
+        )
+        org_thread.start()
+        split_thread.start()
+        # 总预算内等两路：先等 org（关键产物），剩余预算给 split；
+        # 超时不强杀——挂起路随守护线程终结或迟到完成（产物仍有效）
+        end = time.monotonic() + self._org_maint_timeout
+        for evt in (lane_done["org"], lane_done["split"]):
+            remaining = end - time.monotonic()
+            if remaining > 0:
+                evt.wait(remaining)
+        timed_out = not (lane_done["org"].is_set() and lane_done["split"].is_set())
+        if self.task is not None:
+            self.task.record(
+                "maintenance",
+                f"结束：org={results['org']} split={results['split']}"
+                + ("（超时返回，挂起路随守护线程终结或迟到完成）" if timed_out else ""),
+            )
+        return results["org"], results["split"]
 
     def _promote_org_results(self) -> None:
         """把暂存的整理产物落进正式视图（仅在**新 Round 开启时**调用）。
