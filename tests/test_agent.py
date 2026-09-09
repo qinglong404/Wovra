@@ -1154,6 +1154,61 @@ def test_todo_tail_lines_shown_in_reminder(monkeypatch):
     assert "[当前大步] ICP 配准（小步 0/1）" in body
 
 
+def test_start_milestone_acceptance_cap_and_started_seq(monkeypatch, tmp_path):
+    """大步收窄约束：验收标准硬上限 3 条（F 组 4-6 条打包把轮拖大）；
+    started_seq 落在当前轮（修 len(rounds)+1 在轮已开时偏一位的偏差）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent._open_or_reuse_round("干活")
+
+    out = agent.todo(
+        action="start_milestone", goal="打包件",
+        acceptance=["a", "b", "c", "d"],
+    )
+    assert "硬上限" in out
+    assert (task.todo or {}).get("milestone") is None
+
+    out = agent.todo(
+        action="start_milestone", goal="收窄的大步",
+        acceptance=["a", "b", "c"],
+    )
+    assert "OK" in out
+    assert task.todo["milestone"]["started_seq"] == 1  # 当前轮 R1
+
+
+def test_milestone_map_lines_rounds_to_milestones(monkeypatch, tmp_path):
+    """轮 ↔ 大步映射：verify 历史带 started_seq 精确成段；缺 started_seq
+    的旧数据按"上一个大步闭合轮 +1"推断；在飞大步标进行中；无大步记录
+    返回空列表（不注入指令）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent._open_or_reuse_round("起步")
+    agent.todo(action="start_milestone", goal="大步甲", acceptance=["可跑"])
+    agent.todo(action="verify_milestone", evidence="测试全绿")  # 闭合 R1
+    agent.todo(action="start_milestone", goal="大步乙", acceptance=["可点"])
+    agent.todo(action="verify_milestone", evidence="演示通过")  # 闭合 R2
+    agent.todo(action="start_milestone", goal="大步丙", acceptance=["好看"])
+
+    lines = agent._milestone_map_lines(agent.rounds)
+    assert f"  R1 ← 大步『大步甲』（已验收）" in lines
+    assert f"  R2 ← 大步『大步乙』（已验收）" in lines
+    assert f"  R3 ← 大步『大步丙』（进行中）" in lines
+
+    # 旧数据兼容：无 started_seq 时按上一个大步闭合轮 +1 推断，区间不重叠
+    for e in task.todo["history"]:
+        e.pop("started_seq", None)
+    lines2 = agent._milestone_map_lines(agent.rounds)
+    assert f"  R1 ← 大步『大步甲』（已验收）" in lines2
+    assert f"  R2 ← 大步『大步乙』（已验收）" in lines2
+    assert f"  R3 ← 大步『大步丙』（进行中）" in lines2
+
+    # 无大步记录：返回空列表，指令不注入映射段
+    agent2 = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="g2"))
+    assert agent2._milestone_map_lines([{"seq": 1}]) == []
+
+
 def test_registry_default_and_comm_guards():
     """注册表默认主 agent；自咨询拒绝；未知 agent 列出现存条目。"""
     task = Task.create(goal="x")

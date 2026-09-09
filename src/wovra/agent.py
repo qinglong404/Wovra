@@ -417,10 +417,11 @@ _TODO_SCHEMA: dict = {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "start_milestone：验收标准（可检验），必填——"
-                        "入口是证据不是自述。里程碑驱动轮下验收即轮边界"
-                        "（verify 时闭合当前轮），验收标准的粒度质量直接"
-                        "决定轮粒度与整理质量——按可验收的增量划大步"
+                        "start_milestone：验收标准（可检验），必填，硬上限 3 条"
+                        "（1-3 条）——入口是证据不是自述。里程碑驱动轮下验收即"
+                        "轮边界（verify 时闭合当前轮），验收标准宽度直接决定轮"
+                        "粒度与整理批次大小：按可验收的增量划大步，超 3 条拆成"
+                        "下一大步"
                     ),
                 },
                 "text": {
@@ -763,10 +764,22 @@ class Agent:
                 )
             if not goal.strip() or not (acceptance or []):
                 return "start_milestone 需要 goal 与 acceptance（验收标准必填——入口是证据不是自述）"
+            if len(acceptance) > 3:
+                return (
+                    f"acceptance 共 {len(acceptance)} 条，超过 3 条硬上限（1-3 条）"
+                    "——一个大步只承载一次可验收增量：里程碑驱动轮下验收即轮"
+                    "边界，大步越宽轮越晚闭合、整理批次越大（F 组实测 4-6 条"
+                    "打包的大步把上下文堆到 325K）。把超出的验收标准拆成下一"
+                    "大步，重试 start_milestone。"
+                )
             todo["milestone"] = {
                 "goal": goal.strip(),
                 "acceptance": [str(a) for a in acceptance],
-                "started_seq": len(self.rounds) + 1,
+                "started_seq": (
+                    self.current_round["seq"]
+                    if self.current_round is not None
+                    else len(self.rounds) + 1
+                ),
                 "deferred": [],
             }
             todo["steps"] = []
@@ -822,6 +835,7 @@ class Agent:
             todo.setdefault("history", []).append({
                 "goal": milestone["goal"],
                 "evidence": evidence.strip(),
+                "started_seq": milestone.get("started_seq"),
                 "closed_seq": len(self.rounds),
             })
             tail_note = (
@@ -867,6 +881,7 @@ class Agent:
             todo.setdefault("history", []).append({
                 "goal": milestone["goal"],
                 "evidence": f"作废：{reason.strip()}",
+                "started_seq": milestone.get("started_seq"),
                 "closed_seq": len(self.rounds),
             })
             if deferred:
@@ -1683,6 +1698,50 @@ class Agent:
             lines.append(f"[挂起人工验收] {len(deferred)} 项，大步收尾一次性呈交")
         return lines
 
+    def _milestone_map_lines(self, rounds: list[dict]) -> list[str]:
+        """轮 ↔ 大步映射（整理/分裂指令的现状归属辅助）。
+
+        大步 = 可验收单元（todo.history 已验收 + 在飞 milestone）。同一
+        大步的轮通常同属一个功能域，映射帮整理/分裂分析判断现状归属；
+        历史条目缺 started_seq（迁移前的旧数据）时按"上一个大步闭合轮
+        +1"推断，保证区间无重叠。无大步记录返回空列表。
+        """
+        todo = (self.task.todo or {}) if self.task is not None else {}
+        spans: list[tuple[int, Optional[int], str, str]] = []
+        prev_end = 0
+        for e in todo.get("history") or []:
+            end = e.get("closed_seq")
+            if end is None:
+                continue
+            start = e.get("started_seq")
+            if not start or start <= prev_end:
+                start = prev_end + 1
+            spans.append((start, end, str(e.get("goal") or ""), "已验收"))
+            prev_end = end
+        m = todo.get("milestone")
+        if m and m.get("started_seq"):
+            start = m["started_seq"]
+            if start <= prev_end:
+                start = prev_end + 1
+            spans.append((start, None, str(m.get("goal") or ""), "进行中"))
+        if not spans:
+            return []
+        lines = [
+            "[轮↔大步映射]（大步 = 可验收单元；同一大步的轮通常同属一个功能域，"
+            "辅助现状归属判断）"
+        ]
+        for r in rounds:
+            seq = r["seq"]
+            tag = "未进入大步"
+            for start, end, goal, status in spans:
+                if (end is None and seq >= start) or (
+                    end is not None and start <= seq <= end
+                ):
+                    tag = f"大步『{goal[:36]}』（{status}）"
+                    break
+            lines.append(f"  R{seq} ← {tag}")
+        return lines
+
     def _current_round_messages(self) -> list[dict]:
         """轮内赦免：当前 Round 事件全量进入上下文，不做任何内容截断。
 
@@ -1981,6 +2040,7 @@ class Agent:
                 map_lines.append(f"R{r['seq']}：无分块结构（改用 refined_index 事件摘要）")
 
         seq_list = "、R".join(str(r["seq"]) for r in rounds)
+        ms_lines = self._milestone_map_lines(rounds)
         instruction = (
             "[整理指令]\n"
             "以上是本会话的完整上下文。请把其中这些轮次整理成结构化档案："
@@ -1989,7 +2049,8 @@ class Agent:
             "上方对话一致；条目格式 = 块ID=起始事件~结束事件）\n"
             + "\n".join(map_lines)
             + "\n\n"
-            "完成后调用 submit_organization 工具提交结果（唯一出口，不要在"
+            + ("\n".join(ms_lines) + "\n\n" if ms_lines else "")
+            + "完成后调用 submit_organization 工具提交结果（唯一出口，不要在"
             "正文中输出 JSON）。字段语义以工具定义为准；块描述的完整性是第一"
             "要求，逐字遵守工具定义里 summary 的描述。"
         )
@@ -2140,6 +2201,7 @@ class Agent:
                 map_lines.append(f"R{r['seq']}：无分块结构（按轮归属）")
 
         seq_list = "、R".join(str(r["seq"]) for r in rounds)
+        ms_lines = self._milestone_map_lines(rounds)
         instruction = (
             "[分裂分析指令]\n"
             "以上是本会话的完整上下文。请做**现状归属分析**（不是话题分类），"
@@ -2148,7 +2210,8 @@ class Agent:
             "块ID=起始事件~结束事件）\n"
             + "\n".join(map_lines)
             + "\n\n"
-            "分析判据：\n"
+            + ("\n".join(ms_lines) + "\n\n" if ms_lines else "")
+            + "分析判据：\n"
             "  1. 先列现状清单：当前可独立运行的关注面（活性文件域 × 约束 ×"
             " 目标）。被后续重写/取代的早期版本不单独成域，作为取代者域的 "
             "superseded 前史——防止\"旧版本一类、新版本一类\"；\n"
