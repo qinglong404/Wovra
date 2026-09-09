@@ -293,6 +293,31 @@ cached_tokens（prompt_tokens_details，token 级精确：63K 档命中
 时段（白天/深夜）各跑一次验证负载依赖假设；pacer 策略暂缓——等
 复测把"容量驱逐"从假设变数字。
 
+### DeepSeek 官方探针（2026-09-09，端点切换后同口径重测）
+
+栈迁移：deepseek-v4.1-flash-expires-on-0910 @ api.deepseek.com（用户
+充值 200 元官方套餐）。缓存字段兼容已做（DeepSeek 用顶层
+prompt_cache_hit_tokens / prompt_cache_miss_tokens，SDK 落 model_extra，
+cached_tokens_of 统一解析）。同口径阶梯重发：
+
+| 间隔 | 50,585 tok 前缀 | 151,099 tok 前缀 |
+|---|---|---|
+| 0s（冷启） | 0% | **33.4%**（50,432 tok 跨前缀头复用！） |
+| 10s / 30s / 60s / 120s / 300s / **600s** | **全部 99.7%** | **全部 99.9%** |
+
+**三条结论**：
+
+1. **DeepSeek：TTL > 10 分钟、双尺寸、零衰减、零方差**——上报精确到
+   token 级（命中差值 = 追加指令本身），跨前缀头复用也成立（151K
+   请求的 0s 命中 = 30K 档缓存的头部直接匹配）。
+2. **E 组塌陷定性收口**：E 跑在方舟 glm-5.3-flash 上，其 53.5% 塌陷
+   是方舟侧大前缀驱逐（188K×600s 死亡、E 的 55-90K 前缀+分钟级间隔
+   落在危险区）——与 DeepSeek 无关。迁移 DeepSeek 后该问题整体消失。
+3. **pacing 提示词的缓存理由失效**（DeepSeek 上长生成不杀缓存），
+   但保留：响应过长有中断风险（E 实测 empty_stream ×1），拆分降低
+   爆炸半径。逐调用落账（llm_call 行）会在 DeepSeek 上积累 99.7%+
+   基线，任何偏离立即暴露。
+
 ## 3. 机制实战验证清单（全部第一次真跑通）
 
 1. **t0 合著**：主 agent 主动 ask_user"做哪种模式？A 创造·经典
