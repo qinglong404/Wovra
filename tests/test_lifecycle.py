@@ -129,3 +129,25 @@ def test_ledger_wired_with_file_blocks():
     assert entry["versions"] == ["R1-E02", "R2-E02"]
     assert ledger.state_of("a.js") == lifecycle.STATE_LIVE
     assert ledger.live_count() == 1
+
+
+def test_rejected_delete_does_not_kill():
+    """delete_file 被用户拒绝（结果文本含失败标记）：账本不标记 dead。"""
+    ledger = lifecycle.FileLedger()
+    ledger.update(_round(1, [
+        _event(1, 2, "tool_call", tool="write_file",
+               args={"path": "keep.js", "content": "x"}),
+        _event(1, 3, "tool_result", content="ok"),
+    ]))
+    ledger.update(_round(2, [
+        _event(2, 2, "tool_call", tool="delete_file", args={"path": "keep.js"}),
+        _event(2, 3, "tool_result", content="用户拒绝了删除操作。请换一种做法。"),
+    ]))
+    assert ledger.state_of("keep.js") == lifecycle.STATE_LIVE
+
+    # 真删除才翻 dead
+    ledger.update(_round(3, [
+        _event(3, 2, "tool_call", tool="delete_file", args={"path": "keep.js"}),
+        _event(3, 3, "tool_result", content="已删除 keep.js（删除前内容已归档）"),
+    ]))
+    assert ledger.state_of("keep.js") == lifecycle.STATE_DEAD

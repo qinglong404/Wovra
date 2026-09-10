@@ -33,6 +33,10 @@ _OP_OF = {
     **{t: "delete" for t in DELETE_TOOLS},
 }
 
+# delete_file 的失败返回标记（用户拒绝 / 文件不存在 / 目标是目录）——
+# 命中任一即不标记 dead（删除没真发生，账本不能记假死）。
+_DELETE_FAIL_MARKERS = ("拒绝", "不存在", "是目录")
+
 STATE_LIVE = "live"
 STATE_DEAD = "dead"
 STATE_READ_ONLY = "read_only"
@@ -81,22 +85,44 @@ class FileLedger:
 
         blocks 可选：segment_round_by_file 的产物，用于登记 block_refs
         （文件 → 块 的跨轮索引，分裂拼装时直接用）。
+        删除按结果判定：delete_file 被用户拒绝/文件不存在时不算死亡
+        （读结果文本，零 LLM）。
         """
         touched: list[str] = []
+        pending_deletes: dict[str, dict] = {}  # call_id → {path, event}
+        results: dict[str, str] = {}           # call_id → 结果文本
+
         for event in round_.get("events") or []:
-            if event.get("type") != "tool_call":
-                continue
-            for call in (event.get("message") or {}).get("tool_calls") or []:
-                name, args = _call_info(call)
-                op = _OP_OF.get(name)
-                if op is None:
-                    continue
-                path = str(args.get("path") or "")
-                if not path:
-                    continue
-                self._apply(path, op, str(event.get("id") or ""))
-                if path not in touched:
-                    touched.append(path)
+            message = event.get("message") or {}
+            etype = event.get("type")
+            if etype == "tool_call":
+                for call in message.get("tool_calls") or []:
+                    name, args = _call_info(call)
+                    op = _OP_OF.get(name)
+                    if op is None:
+                        continue
+                    path = str(args.get("path") or "")
+                    if not path:
+                        continue
+                    eid = str(event.get("id") or "")
+                    if op == "delete":
+                        pending_deletes[str(call.get("id") or "")] = {
+                            "path": path, "event": eid,
+                        }
+                    else:
+                        self._apply(path, op, eid)
+                    if path not in touched:
+                        touched.append(path)
+            elif etype == "tool_result":
+                results[str(message.get("tool_call_id") or "")] = str(
+                    message.get("content") or ""
+                )
+
+        for call_id, info in pending_deletes.items():
+            content = results.get(call_id) or ""
+            if not any(m in content for m in _DELETE_FAIL_MARKERS):
+                self._apply(info["path"], "delete", info["event"])
+
         if blocks:
             for b in blocks:
                 if b.get("kind") == "file" and b.get("file"):

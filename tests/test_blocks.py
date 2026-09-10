@@ -329,3 +329,39 @@ def test_segment_by_file_delete_op():
     old = [b for b in bs if b.get("file") == "old.js"][0]
     assert old["kind"] == "file"
     assert old["ops"] == [{"e": "R6-E02", "op": "delete"}]
+
+
+def test_segment_by_file_failed_call_no_empty_file_block():
+    """参数截断的文件操作（解析不出 path）不产生空文件块，落入工具块
+    （R28 三次 write_file 参数被掐断的实证场景）。"""
+    r = _round(8, [
+        _event(8, 1, "user", content="写"),
+        _event(8, 2, "tool_call", tool="write_file",
+               args={"content": "…被截断的 JSON…"}),
+        _event(8, 3, "tool_result", content="工具参数不是合法 JSON"),
+        _event(8, 4, "final_answer", content="失败"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    assert all(b.get("file") not in ("", None) for b in bs if b["kind"] == "file")
+    assert ("tool", "") in [(b["kind"], b.get("file", "")) for b in bs]
+
+
+def test_segment_by_file_parallel_batch_dedup():
+    """并行批次的同一事件只计入归属块一次（不按调用数翻倍）。"""
+    r = _round(9, [
+        _event(9, 1, "user", content="并行"),
+        _event(9, 2, "tool_call", tool_calls=[
+            {"id": "c2a", "type": "function",
+             "function": {"name": "run_command",
+                          "arguments": json.dumps({"command": "pytest"})}},
+            {"id": "c2b", "type": "function",
+             "function": {"name": "run_command",
+                          "arguments": json.dumps({"command": "node a.js"})}},
+        ]),
+        _event(9, 3, "tool_result", content="ok"),
+        _event(9, 4, "tool_result", content="ok"),
+        _event(9, 5, "final_answer", content="ok"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    tool_block = [b for b in bs if b["kind"] == "tool"][0]
+    assert tool_block["events"] == ["R9-E02", "R9-E03", "R9-E04"]

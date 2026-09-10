@@ -305,8 +305,12 @@ FILE_OP_TOOLS = {
 
 
 def _block_kind(name: str, args: dict) -> str:
-    """tool_call → 归属块类：file / environment / tool（零 LLM）。"""
-    if name in FILE_OP_TOOLS:
+    """tool_call → 归属块类：file / environment / tool（零 LLM）。
+
+    文件操作但路径解析不出（参数截断等失败调用）按 tool 计——它没碰到
+    任何文件，不产生文件块（R28 三次 write_file 参数被掐断的实证）。
+    """
+    if name in FILE_OP_TOOLS and str(args.get("path") or ""):
         return "file"
     if name == "run_command" and tag_command(str(args.get("command") or "")) == "environment":
         return "environment"
@@ -394,30 +398,33 @@ def segment_round_by_file(r: dict) -> list[dict]:
             else:
                 if cur is None or cur["kind"] != "tool":
                     open_cur("tool", idx)
+            owners: dict[int, dict] = {}  # 事件只入各归属块一次（并行批次去重）
             for call in message.get("tool_calls") or []:
                 name, args = _call_info(call)
                 cid = str(call.get("id") or "")
-                if name in FILE_OP_TOOLS:
-                    path = str(args.get("path") or "")
+                if name in FILE_OP_TOOLS and str(args.get("path") or ""):
+                    path = str(args.get("path"))
                     blk = file_blocks.get(path)
                     if blk is None:
                         blk = _fblock("file", idx)
                         blk["file"] = path
                         file_blocks[path] = blk
                     blk["ops"].append({"e": eid, "op": FILE_OP_TOOLS[name]})
-                    blk["_evs"].append(eid)
                     blk["_first"] = min(blk["_first"], idx)
                     blk["_last"] = max(blk["_last"], idx)
                     call_owner[cid] = blk
+                    owners[id(blk)] = blk
                 else:
                     if cur is None:  # 理论不可达，安全兜底
                         open_cur("tool", idx)
                     if name == "run_command":
                         _remember(cur, "command_types",
                                   tag_command(str(args.get("command") or "")))
-                    cur["_evs"].append(eid)
-                    cur["_last"] = max(cur["_last"], idx)
                     call_owner[cid] = cur
+                    owners[id(cur)] = cur
+            for blk in owners.values():
+                blk["_evs"].append(eid)
+                blk["_last"] = max(blk["_last"], idx)
         elif etype == "tool_result":
             blk = call_owner.get(str(message.get("tool_call_id") or ""))
             if blk is None:
