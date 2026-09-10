@@ -374,6 +374,8 @@ def _finalize_fblock(seq: int, bno: int, b: dict) -> dict:
         out["ops"] = b["ops"]
     if b.get("fail_tags"):
         out["fail_tags"] = list(b["fail_tags"])
+    if b.get("_has_tools"):
+        out["has_tools"] = True
     if b["command_types"]:
         out["command_types"] = b["command_types"]
     return out
@@ -393,6 +395,7 @@ def segment_round_by_file(r: dict) -> list[dict]:
     user_blocks: list[dict] = []
     cur: Optional[dict] = None
     pending: list[str] = []
+    pending_tool = False  # 挂起事件里含工具调用（并入首块后标记）
     user_seen = False
     call_owner: dict[str, dict] = {}  # tool_call_id → 归属块
     results: dict[str, str] = {}       # tool_call_id → 结果文本（幽灵判定）
@@ -453,10 +456,13 @@ def segment_round_by_file(r: dict) -> list[dict]:
                     if cur is None:
                         if eid not in pending:
                             pending.append(eid)
+                        pending_tool = True
                         continue
                     if name == "run_command":
                         _remember(cur, "command_types",
                                   tag_command(str(args.get("command") or "")))
+                    if cur["kind"] == "file":
+                        cur["_has_tools"] = True  # 工具事件确定性吸收进本块
                     call_owner[cid] = cur
                     owners[id(cur)] = cur
             for blk in owners.values():
@@ -507,5 +513,7 @@ def segment_round_by_file(r: dict) -> list[dict]:
     if pending:
         first = min(merged, key=lambda b: b["_first"])
         first["_evs"] = pending + first["_evs"]
+        if pending_tool and first["kind"] == "file":
+            first["_has_tools"] = True
     merged.sort(key=lambda b: b["_first"])
     return [_finalize_fblock(seq, i + 1, b) for i, b in enumerate(merged)]

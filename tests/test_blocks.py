@@ -421,3 +421,26 @@ def test_segment_by_file_user_supplement_block():
         {"e": "R11-E05", "op": "edit", "c": "c5"},
     ]
 
+
+
+def test_segment_by_file_block_level_tools():
+    """工具事件确定性吸收进具体文件块：谁吸收谁打 has_tools（块级精确，
+    不整轮打标）。"""
+    r = _round(12, [
+        _event(12, 1, "user", content="干活"),
+        _event(12, 2, "tool_call", tool="write_file",
+               args={"path": "a.js", "content": "x"}),
+        _event(12, 3, "tool_result", content="ok"),
+        _event(12, 4, "tool_call", tool="run_command",
+               args={"command": "pytest -q tests/"}),
+        _event(12, 5, "tool_result", content="1 passed"),
+        _event(12, 6, "tool_call", tool="write_file",
+               args={"path": "b.js", "content": "y"}),
+        _event(12, 7, "tool_result", content="ok"),
+        _event(12, 8, "final_answer", content="done"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    a = [b for b in bs if b.get("file") == "a.js"][0]
+    b = [b for b in bs if b.get("file") == "b.js"][0]
+    assert a.get("has_tools") is True   # pytest 吸收进 a.js 块
+    assert not b.get("has_tools")       # b.js 只写了，没吸收工具

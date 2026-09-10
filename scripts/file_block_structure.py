@@ -94,14 +94,13 @@ def _state_label(ledger_state: str) -> str:
 
 
 def block_label(b: dict, versions_before: dict, has_tools: bool,
-                file_count: int, state: str) -> str:
+                state: str) -> str:
     """块标签行（只打标签，不写内容）。
 
-    工具标签规则（用户规格 2026-09-09）：
-      * 本轮只有 1 个文件块 → 工具调用确定服务该文件，打「工具」；
-      * 本轮多个文件块 → 不确定归属哪个，打「工具?」；
+    工具标签（2026-09-09 用户拍板：块级精确，Runtime 消解归属）：
+      * 文件块 —— 工具事件确定性吸收进具体块，谁吸收谁打「工具」，
+        模型不用猜归属；
       * 保底块（无文件交互）调用工具了 → 打「工具」。
-    幽灵文件块（从未真实存在）：保留块，打「幽灵」标签，状态 DEAD。
     """
     if b["kind"] == "fallback":
         return "【保底块】：" + ("工具" if has_tools else "")
@@ -114,15 +113,28 @@ def block_label(b: dict, versions_before: dict, has_tools: bool,
         label = f"【{b['file']}(DEAD)】：{'，'.join(b['fail_tags'])}"
     else:
         label = f"【{b['file']}({state})】：{block_tags(b, versions_before)}"
-    if has_tools:
-        label += "，工具" if file_count == 1 else "，工具?"
+    if b.get("has_tools"):
+        label += "，工具"
     return label
+
+
+def _fmt_anchor_run(run: list[int]) -> str:
+    """连续轮号压缩成区间+单号：R1-R2/R5。"""
+    parts, start = [], run[0]
+    prev = run[0]
+    for seq in run[1:] + [None]:
+        if seq is None or seq != prev + 1:
+            parts.append(str(start) if start == prev else f"{start}-{prev}")
+            start = seq
+        prev = seq
+    return "R" + "/R".join(parts)
 
 
 def build(task_id: str) -> str:
     d = task_module.Task.load(task_id)
     ledger = lifecycle.FileLedger()
     lines: list[str] = []
+    chat_run: list[int] = []  # 连续纯聊天轮（保底块且无工具）合并
     for r in d.rounds:
         seq = r["seq"]
         versions_before = {p: len(e["versions"])
@@ -130,13 +142,23 @@ def build(task_id: str) -> str:
         bs = blocks.segment_round_by_file(r)
         ledger.update(r, blocks=bs)
         has_tools = round_has_tool_calls(r)
-        file_count = sum(1 for b in bs if b["kind"] == "file")
+        is_chat = len(bs) == 1 and bs[0]["kind"] == "fallback" and not has_tools
+        if is_chat:
+            chat_run.append(seq)
+            continue
+        if chat_run:
+            lines.append(f"{_fmt_anchor_run(chat_run)}：无有效助手结论")
+            lines.append("")
+            chat_run = []
         lines.append(f"R{seq}：")
         lines.append("\n\n".join(
-            block_label(b, versions_before, has_tools, file_count,
+            block_label(b, versions_before, has_tools,
                         _state_label(ledger.state_of(b.get("file", ""))))
             for b in bs
         ))
+        lines.append("")
+    if chat_run:
+        lines.append(f"{_fmt_anchor_run(chat_run)}：无有效助手结论")
         lines.append("")
     return "\n".join(lines)
 
