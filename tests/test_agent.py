@@ -569,7 +569,7 @@ def test_watermark_defers_organization_below_threshold(monkeypatch, tmp_path):
     task.rounds = [_round(1, "甲" * 2400, "甲" * 2400)]
     agent = Agent(
         llm=_StubLLM(), tools=[], task=task,
-        org_watermark=5000, org_batch_max=12,
+        org_watermark=5000,
     )
     agent.last_context_estimate = 100  # 装配峰值远低于水位
 
@@ -592,7 +592,7 @@ def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
         r["org_state"] = ""
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1, 2])))]]),
-        tools=[], task=task, org_watermark=2000, org_batch_max=12, org_grace_rounds=0, org_cooldown_rounds=0,
+        tools=[], task=task, org_watermark=2000, org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000  # 装配峰值 ≥ 水位 → 触发
     old_normalized = task.rounds[0]["user_input"]["normalized"]  # 助手自带的旧值
@@ -618,8 +618,9 @@ def test_watermark_triggers_single_batch_call(monkeypatch, tmp_path):
     assert task.task_state["goal"] == "批量目标"
 
 
-def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
-    """超过批量上限：每次触发只收编最老的一批，剩余留给下次闭合。"""
+def test_watermark_collects_all_unorganized(monkeypatch, tmp_path):
+    """批次上限已删除（2026-09-09 用户拍板）：到水位一次性收编全部未整理
+    轮，不再分批。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
     task = Task.create(goal="x")
@@ -631,11 +632,8 @@ def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
     for r in task.rounds:
         r["org_state"] = ""
     agent = Agent(
-        llm=_StubLLM([
-            [_chunk(_delta(content=_batch_org_json([1, 2])))],
-            [_chunk(_delta(content=_batch_org_json([3])))],
-        ]),
-        tools=[], task=task, org_watermark=2000, org_batch_max=2, org_grace_rounds=0, org_cooldown_rounds=0,
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1, 2, 3])))]]),
+        tools=[], task=task, org_watermark=2000, org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000
 
@@ -643,14 +641,13 @@ def test_watermark_respects_batch_cap(monkeypatch, tmp_path):
 
     assert task.rounds[0]["org_state"] == "done"
     assert task.rounds[1]["org_state"] == "done"
-    assert task.rounds[2]["org_state"] == ""  # 第三轮未收编
-    prompt = agent.llm.calls[0]["messages"][0]["content"]
-    assert "Round 3" not in prompt
+    assert task.rounds[2]["org_state"] == "done"  # 全部收编，不分批
+    prompt = "\n".join(str(m.get("content") or "") for m in agent.llm.calls[0]["messages"])
+    assert "丙" * 100 in prompt  # 第三轮原文也在快照里
 
-    # 收尾补整理（run 模式退出路径）：不问水位，把剩余轮消化掉
+    # 收尾补整理（run 模式退出路径）：无剩余未整理轮，不产生新调用
     agent.organize_backlog()
-    assert task.rounds[2]["org_state"] == "done"
-    assert len(agent.llm.calls) == 2
+    assert len(agent.llm.calls) == 1
 
 
 def test_pending_backlog_collected_on_trigger(monkeypatch, tmp_path):
@@ -663,7 +660,7 @@ def test_pending_backlog_collected_on_trigger(monkeypatch, tmp_path):
     task.rounds = [pending]
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
-        tools=[], task=task, org_watermark=1200, org_batch_max=12,
+        tools=[], task=task, org_watermark=1200,
         org_grace_rounds=0, org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 1200  # 达到水位 → 触发
@@ -690,7 +687,7 @@ def test_crash_leftover_pending_not_blocked_by_cooldown(monkeypatch, tmp_path):
     task.rounds = rounds
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_batch_org_json(list(range(1, 9)))))]]),
-        tools=[], task=task, org_watermark=1200, org_batch_max=12,
+        tools=[], task=task, org_watermark=1200,
         org_grace_rounds=3, org_cooldown_rounds=3,
     )
     agent.last_context_estimate = 1200
@@ -713,7 +710,7 @@ def test_inflight_pending_still_counts_for_cooldown(monkeypatch, tmp_path):
         rounds.append(r)
     task.rounds = rounds
     agent = Agent(
-        llm=_StubLLM(), tools=[], task=task, org_watermark=1200, org_batch_max=12,
+        llm=_StubLLM(), tools=[], task=task, org_watermark=1200,
         org_grace_rounds=3, org_cooldown_rounds=3,
     )
     agent._org_inflight.update(range(1, 7))  # 本进程在飞（async 已入队）

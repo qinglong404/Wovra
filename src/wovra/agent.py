@@ -100,7 +100,6 @@ _ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
 # 2026-09-09 用户拍板：3 轮全豁免（含巨轮），双条件否决已回滚
 _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
-_ORG_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_ORG_BATCH_MAX", "12"))
 # 维护路硬上限（2026-09-09 F 组实测）：超大基座上整理调用可深度思考
 # 细水长流 23 分钟不完成（读超时不触发——token 在流），一次挂起借冷却
 # 计数堵死整条管线。硬上限到点判 failed 解锁，冷却后重试。
@@ -546,7 +545,6 @@ class Agent:
         context_limit: Optional[int] = None,
         async_organization: bool = False,
         org_watermark: Optional[int] = None,
-        org_batch_max: Optional[int] = None,
         org_grace_rounds: Optional[int] = None,
         org_cooldown_rounds: Optional[int] = None,
         org_maint_timeout: Optional[float] = None,
@@ -563,13 +561,11 @@ class Agent:
         self.context_limit = context_limit or _DEFAULT_CONTEXT_LIMIT
         # 整理是否异步执行：chat 模式开（不阻塞对话），run/测试用同步（确定性）
         self.async_organization = async_organization
-        # V3 水位批量整理参数（水位 = 未整理轮原始内容体量阈值；批量上限
-        # = 单次整理调用最多处理的轮数，防止整理提示词自身失控）
+        # V3 水位批量整理参数（水位 = 未整理轮原始内容体量阈值；2026-09-09
+        # 用户拍板：批次上限删除——触发只看窗口是否到水位，到水位收编全部
+        # 未整理轮）
         self._org_watermark = (
             _ORG_WATERMARK_DEFAULT if org_watermark is None else org_watermark
-        )
-        self._org_batch_max = (
-            _ORG_BATCH_MAX_DEFAULT if org_batch_max is None else org_batch_max
         )
         # 保护机制（2026-09-08 用户拍板）：宽限期 + 冷却间隔。
         # 宽限 = 会话前 N 轮硬豁免维护——开头几轮（项目导览/目标陈述）是
@@ -1906,9 +1902,10 @@ class Agent:
 
         水位口径 = last_context_estimate（最近一次装配的估算，轮闭合时
         即本轮峰值）——不是未整理积压量（2026-09-07 用户拍板）。每次轮
-        闭合至多触发一批（上限 _org_batch_max 轮，最老的先整理）；剩余
-        未整理轮留给下次闭合继续消化。产物暂存不直写：本轮装配保持
-        原样，下一轮开启才生效（_promote_org_results）；过程对用户静默。
+        闭合到水位则收编**全部**未整理轮（2026-09-09 用户拍板：批次上限
+        删除，触发只看水位；最老的先整理）。产物暂存不直写：本轮装配
+        保持原样，下一轮开启才生效（_promote_org_results）；过程对用户
+        静默。
         """
         if self.last_context_estimate < self._org_watermark:
             return
@@ -1941,7 +1938,7 @@ class Agent:
         unorganized = self._unorganized_rounds()
         if not unorganized:
             return
-        batch = unorganized[: self._org_batch_max]
+        batch = unorganized
         for r in batch:
             r["org_state"] = "pending"
             self._org_inflight.add(r["seq"])
@@ -1959,7 +1956,7 @@ class Agent:
                     self._org_inflight.discard(r["seq"])
 
     def organize_backlog(self) -> None:
-        """立即整理全部未整理轮（分批同步）——run 模式进程收尾用。
+        """立即整理全部未整理轮（同步）——run 模式进程收尾用。
 
         chat 模式不调用：水位设计允许小会话全程不整理（成本归零）；
         run 是一次性任务单元，退出前补整理，TaskState 才能跟得上
@@ -1971,7 +1968,7 @@ class Agent:
             unorganized = self._unorganized_rounds()
             if not unorganized:
                 return
-            batch = unorganized[: self._org_batch_max]
+            batch = unorganized
             for r in batch:
                 r["org_state"] = "pending"
                 self._org_inflight.add(r["seq"])
@@ -1987,7 +1984,7 @@ class Agent:
             finally:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
-            if not org_ok or len(batch) < self._org_batch_max:
+            if not org_ok:
                 return
 
     def _ensure_worker(self) -> None:

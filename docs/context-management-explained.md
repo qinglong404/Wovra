@@ -278,8 +278,7 @@ compaction    压缩的钱（对照组的阈值压缩）
 | `WOVRA_HISTORY_BUDGET_RATIO` | 0.3 | 历史加载预算 = 窗口 × 比例（决定几轮后开始降档） |
 | `WOVRA_CONTEXT_LIMIT` | 1,000,000 | 模型窗口（决定预算绝对值与 baseline 阈值） |
 | `WOVRA_COMPRESS_THRESHOLD` | 0.8 | baseline 压缩触发点（× 窗口） |
-| `WOVRA_ORG_WATERMARK` | 100,000 tok | 整理水位：未整理内容体量到线才触发批量整理 |
-| `WOVRA_ORG_BATCH_MAX` | 12 轮 | 单次批量整理的轮数上限 |
+| `WOVRA_ORG_WATERMARK` | 100,000 tok | 整理水位：未整理内容体量到线才触发批量整理（到线收编全部未整理轮，2026-09-09 起无批次上限） |
 | `TRUNCATED_LIMIT` | 120 字符 | 每条索引行的长度 |
 | `STATE_LIST_CAP` | 200 条 | 任务状态每类容量 |
 
