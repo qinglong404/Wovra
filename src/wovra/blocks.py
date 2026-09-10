@@ -323,6 +323,20 @@ def _block_kind(name: str, args: dict) -> str:
     return "tool"
 
 
+# 文件操作失败标记（读/删没真发生）：文件不存在、越界拦截——幽灵文件
+# 不产生文件块（nope.txt 的 FileNotFoundError 实证）。
+_GHOST_MARKERS = ("不存在", "FileNotFoundError", "No such file",
+                  "路径越界", "工具执行出错")
+
+
+def _op_real(op: dict, results: dict) -> bool:
+    """文件块的操作是否真实发生：写/改恒真；读/删看结果有无失败标记。"""
+    if op["op"] in ("write", "edit"):
+        return True
+    content = results.get(op.get("c", "")) or ""
+    return not any(m in content for m in _GHOST_MARKERS)
+
+
 def _fblock(kind: str, idx: int) -> dict:
     return {
         "kind": kind,
@@ -350,6 +364,8 @@ def _finalize_fblock(seq: int, bno: int, b: dict) -> dict:
     if b["kind"] == "file":
         out["file"] = b["file"]
         out["ops"] = b["ops"]
+    if b.get("ghost"):
+        out["ghost"] = True
     if b["command_types"]:
         out["command_types"] = b["command_types"]
     return out
@@ -369,6 +385,7 @@ def segment_round_by_file(r: dict) -> list[dict]:
     cur: Optional[dict] = None
     pending: list[str] = []
     call_owner: dict[str, dict] = {}  # tool_call_id → 归属块
+    results: dict[str, str] = {}       # tool_call_id → 结果文本（幽灵判定）
 
     def new_file(path: str, idx: int) -> dict:
         blk = file_blocks.get(path)
@@ -401,7 +418,9 @@ def segment_round_by_file(r: dict) -> list[dict]:
                 k = _block_kind(name, args)
                 if k == "file":
                     blk = new_file(str(args["path"]), idx)
-                    blk["ops"].append({"e": eid, "op": FILE_OP_TOOLS[name]})
+                    blk["ops"].append({
+                        "e": eid, "op": FILE_OP_TOOLS[name], "c": cid,
+                    })
                     blk["_first"] = min(blk["_first"], idx)
                     blk["_last"] = max(blk["_last"], idx)
                     call_owner[cid] = blk
@@ -428,6 +447,9 @@ def segment_round_by_file(r: dict) -> list[dict]:
                 blk["_last"] = max(blk["_last"], idx)
         elif etype == "tool_result":
             blk = call_owner.get(str(message.get("tool_call_id") or ""))
+            results[str(message.get("tool_call_id") or "")] = str(
+                message.get("content") or ""
+            )
             if blk is None:
                 if cur is None:
                     pending.append(eid)
@@ -442,6 +464,12 @@ def segment_round_by_file(r: dict) -> list[dict]:
                 cur["_last"] = max(cur["_last"], idx)
             else:
                 pending.append(eid)
+
+    # 幽灵文件块：读/删全失败（文件不存在/越界拦截）——文件从未真实
+    # 存在过，保留块但打幽灵标记（nope.txt 的 FileNotFoundError 实证）
+    for blk in file_blocks.values():
+        if not any(_op_real(o, results) for o in blk["ops"]):
+            blk["ghost"] = True
 
     merged = list(file_blocks.values()) + ([env_block] if env_block else [])
     if not merged:

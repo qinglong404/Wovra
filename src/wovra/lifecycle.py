@@ -33,9 +33,12 @@ _OP_OF = {
     **{t: "delete" for t in DELETE_TOOLS},
 }
 
-# delete_file 的失败返回标记（用户拒绝 / 文件不存在 / 目标是目录）——
-# 命中任一即不标记 dead（删除没真发生，账本不能记假死）。
-_DELETE_FAIL_MARKERS = ("拒绝", "不存在", "是目录")
+# 文件操作的失败返回标记（读/删没真发生）：文件不存在、越界拦截、
+# 用户拒绝、目标是目录——命中任一即不按成功计（幽灵文件不产生状态）。
+_OP_FAIL_MARKERS = (
+    "不存在", "FileNotFoundError", "No such file",
+    "路径越界", "工具执行出错", "拒绝", "是目录",
+)
 
 STATE_LIVE = "live"
 STATE_DEAD = "dead"
@@ -85,12 +88,12 @@ class FileLedger:
 
         blocks 可选：segment_round_by_file 的产物，用于登记 block_refs
         （文件 → 块 的跨轮索引，分裂拼装时直接用）。
-        删除按结果判定：delete_file 被用户拒绝/文件不存在时不算死亡
-        （读结果文本，零 LLM）。
+        读/删按结果判定：文件不存在、越界拦截、被拒绝时不算成功——
+        幽灵文件（从未存在的 nope.txt）不产生 read_only/dead 状态。
         """
         touched: list[str] = []
-        pending_deletes: dict[str, dict] = {}  # call_id → {path, event}
-        results: dict[str, str] = {}           # call_id → 结果文本
+        pending_ops: dict[str, dict] = {}  # call_id → {path, event, op}
+        results: dict[str, str] = {}       # call_id → 结果文本
 
         for event in round_.get("events") or []:
             message = event.get("message") or {}
@@ -105,9 +108,9 @@ class FileLedger:
                     if not path:
                         continue
                     eid = str(event.get("id") or "")
-                    if op == "delete":
-                        pending_deletes[str(call.get("id") or "")] = {
-                            "path": path, "event": eid,
+                    if op in ("read", "delete"):
+                        pending_ops[str(call.get("id") or "")] = {
+                            "path": path, "event": eid, "op": op,
                         }
                     else:
                         self._apply(path, op, eid)
@@ -118,10 +121,10 @@ class FileLedger:
                     message.get("content") or ""
                 )
 
-        for call_id, info in pending_deletes.items():
+        for call_id, info in pending_ops.items():
             content = results.get(call_id) or ""
-            if not any(m in content for m in _DELETE_FAIL_MARKERS):
-                self._apply(info["path"], "delete", info["event"])
+            if not any(m in content for m in _OP_FAIL_MARKERS):
+                self._apply(info["path"], info["op"], info["event"])
 
         if blocks:
             for b in blocks:

@@ -87,20 +87,30 @@ def block_tags(b: dict, versions_before: dict) -> str:
     return "，".join(tags)
 
 
+def _state_label(ledger_state: str) -> str:
+    """文件状态显示：live→LIVE / dead→DEAD / read_only→LIVE（存在即可用）。
+    HISTORICAL 预留：文件被另一文件取代时（move/重构替换）出现，本会话数据暂无。"""
+    return {"live": "LIVE", "dead": "DEAD"}.get(ledger_state, "LIVE")
+
+
 def block_label(b: dict, versions_before: dict, has_tools: bool,
-                file_count: int) -> str:
+                file_count: int, state: str) -> str:
     """块标签行（只打标签，不写内容）。
 
     工具标签规则（用户规格 2026-09-09）：
       * 本轮只有 1 个文件块 → 工具调用确定服务该文件，打「工具」；
       * 本轮多个文件块 → 不确定归属哪个，打「工具?」；
       * 保底块（无文件交互）调用工具了 → 打「工具」。
+    幽灵文件块（从未真实存在）：保留块，打「幽灵」标签，状态 DEAD。
     """
     if b["kind"] == "fallback":
         return "【保底块】：" + ("工具" if has_tools else "")
     if b["kind"] == "environment":
         return "【环境块】："
-    label = f"【{b['file']}】：{block_tags(b, versions_before)}"
+    if b.get("ghost"):
+        label = f"【{b['file']}(DEAD)】：幽灵"
+    else:
+        label = f"【{b['file']}({state})】：{block_tags(b, versions_before)}"
     if has_tools:
         label += "，工具" if file_count == 1 else "，工具?"
     return label
@@ -120,7 +130,9 @@ def build(task_id: str) -> str:
         file_count = sum(1 for b in bs if b["kind"] == "file")
         lines.append(f"R{seq}：")
         lines.append("\n\n".join(
-            block_label(b, versions_before, has_tools, file_count) for b in bs
+            block_label(b, versions_before, has_tools, file_count,
+                        _state_label(ledger.state_of(b.get("file", ""))))
+            for b in bs
         ))
         lines.append("")
     return "\n".join(lines)

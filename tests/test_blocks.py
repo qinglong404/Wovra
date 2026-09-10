@@ -255,8 +255,8 @@ def test_segment_by_file_basic_layout():
     # 同一文件的读+写聚合在同一块，ops 保留时序
     world = bs[0]
     assert world["ops"] == [
-        {"e": "R7-E02", "op": "write"},
-        {"e": "R7-E04", "op": "read"},
+        {"e": "R7-E02", "op": "write", "c": "c2"},
+        {"e": "R7-E04", "op": "read", "c": "c4"},
     ]
     assert world["events"] == ["R7-E02", "R7-E03", "R7-E04", "R7-E05"]
     # 测试命令与最终回答并入最后一个活动块（renderer.js）
@@ -284,8 +284,8 @@ def test_segment_by_file_interleaved_same_file():
     bs = blocks.segment_round_by_file(r)
     assert len(bs) == 1 and bs[0]["file"] == "a.js"
     assert bs[0]["ops"] == [
-        {"e": "R3-E02", "op": "write"},
-        {"e": "R3-E06", "op": "edit"},
+        {"e": "R3-E02", "op": "write", "c": "c2"},
+        {"e": "R3-E06", "op": "edit", "c": "c6"},
     ]
     assert bs[0]["events"] == [
         "R3-E02", "R3-E03", "R3-E04", "R3-E05", "R3-E06", "R3-E07", "R3-E08",
@@ -325,7 +325,7 @@ def test_segment_by_file_delete_op():
     bs = blocks.segment_round_by_file(r)
     old = [b for b in bs if b.get("file") == "old.js"][0]
     assert old["kind"] == "file"
-    assert old["ops"] == [{"e": "R6-E02", "op": "delete"}]
+    assert old["ops"] == [{"e": "R6-E02", "op": "delete", "c": "c2"}]
 
 
 def test_segment_by_file_failed_call_falls_back():
@@ -362,3 +362,24 @@ def test_segment_by_file_parallel_batch_dedup():
     bs = blocks.segment_round_by_file(r)
     assert len(bs) == 1 and bs[0]["kind"] == "fallback"
     assert bs[0]["events"] == ["R9-E02", "R9-E03", "R9-E04", "R9-E05"]
+
+
+
+def test_segment_by_file_ghost_block():
+    """读/删全失败的文件（FileNotFoundError / 路径越界）→ 保留块但打
+    ghost 标记（文件从未真实存在，nope.txt 实证）。"""
+    r = _round(10, [
+        _event(10, 1, "user", content="测试读不存在文件"),
+        _event(10, 2, "tool_call", tool="read_file", args={"path": "nope.txt"}),
+        _event(10, 3, "tool_result",
+               content="工具执行出错: FileNotFoundError(2, 'No such file or directory')"),
+        _event(10, 4, "tool_call", tool="read_file", args={"path": "ok.txt"}),
+        _event(10, 5, "tool_result", content="ok.txt 内容"),
+        _event(10, 6, "final_answer", content="完成"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    nope = [b for b in bs if b.get("file") == "nope.txt"][0]
+    assert nope.get("ghost") is True
+    ok = [b for b in bs if b.get("file") == "ok.txt"][0]
+    assert not ok.get("ghost")
+
