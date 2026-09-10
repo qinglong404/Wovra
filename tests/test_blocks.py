@@ -491,9 +491,9 @@ def test_segment_by_file_research_only_no_tool_tag():
     assert not b.get("has_tools")
 
 
-def test_segment_by_file_user_block_needs_fallback():
-    """用户块不占保底名额：含用户块且无文件/环境交互的轮，用户补充块
-    与保底块并存（至少两块）——不能只描述用户输入丢了模型输出。"""
+def test_segment_by_file_chat_supplement_merges_into_fallback():
+    """纯聊天轮（只有保底块）的中途用户补充并入保底块，不单独成块——
+    需求（轮头用户输入）先于结论；用户块只在有文件/环境交互的轮出现。"""
     r = _round(15, [
         _event(15, 1, "user", content="问"),
         _event(15, 2, "tool_call", tool="web_search", args={"query": "x"}),
@@ -502,10 +502,7 @@ def test_segment_by_file_user_block_needs_fallback():
         _event(15, 5, "final_answer", content="回答"),
     ])
     bs = blocks.segment_round_by_file(r)
-    kinds = [b["kind"] for b in bs]
-    assert len(bs) >= 2
-    assert "user" in kinds and "fallback" in kinds
-    # 时间序：调研工具(E02)在前，用户补充(E04)在后
-    assert kinds == ["fallback", "user"]
-    assert bs[0]["events"] == ["R15-E02", "R15-E03", "R15-E05"]  # 助手结论+工具
-    assert bs[1]["events"] == ["R15-E04"]                        # 用户补充
+    assert len(bs) == 1 and bs[0]["kind"] == "fallback"
+    assert bs[0]["events"] == [
+        "R15-E01", "R15-E02", "R15-E03", "R15-E04", "R15-E05",
+    ]  # 全部事件（含补充），轮头渲染时并入用户输入

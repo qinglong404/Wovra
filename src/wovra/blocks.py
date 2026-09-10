@@ -513,24 +513,14 @@ def segment_round_by_file(r: dict) -> list[dict]:
 
     merged = list(file_blocks.values()) + ([env_block] if env_block else [])
     if not merged:
-        if user_blocks:
-            # 用户块不占保底名额：用户补充块 + 保底块并存（至少两块）——
-            # 保底承载助手结论，不能只描述用户输入丢了模型输出
-            non_user = [(i, e) for i, e in enumerate(events)
-                        if e.get("type") != "user"]
-            fb = _fblock("fallback", non_user[0][0] if non_user else 0)
-            fb["_evs"] = [str(e.get("id") or "") for _, e in non_user]
-            fb["_last"] = max((i for i, _ in non_user), default=0)
-            merged = user_blocks + [fb]
-            pending = []  # 保底块已含全部非用户事件（含挂起），防重复
-        else:
-            # 保底块：整轮一块（无文件/环境/用户补充交互）
-            fb = _fblock("fallback", 0)
-            fb["_evs"] = [str(e.get("id") or "") for e in events]
-            fb["_last"] = max(len(events) - 1, 0)
-            return [_finalize_fblock(seq, 1, fb)]
-    else:
-        merged += user_blocks
+        # 纯聊天轮：单一保底块（含全部事件）。中途用户补充并入轮头
+        # 用户输入（需求先于结论），不单独成块——用户块只在有文件/
+        # 环境交互的轮出现（那里它排在时间序里，不与结论抢位）
+        fb = _fblock("fallback", 0)
+        fb["_evs"] = [str(e.get("id") or "") for e in events]
+        fb["_last"] = max(len(events) - 1, 0)
+        return [_finalize_fblock(seq, 1, fb)]
+    merged += user_blocks
     if pending:
         first = min(merged, key=lambda b: b["_first"])
         first["_evs"] = pending + first["_evs"]
