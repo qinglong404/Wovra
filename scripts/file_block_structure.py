@@ -11,8 +11,15 @@
 
     【agent.py】：只读
 
-块标签：保底块 / 环境块 / 【文件】：生命周期标签（创建/修改/只读/删除，
-账本判创建 vs 修改）。标签定义由用户另行给出，此处只产出标签。
+块标签（用户定义 2026-09-09）：
+    创建——write_file 且之前无此文件；
+    重构——write_file 但文件已存在（整体重写）；
+    修改——edit_file / replace_lines（编辑修改，非清空重写）；
+    读——有 read 操作且其后有写/改/删操作；
+    只读——只进行了 read 操作；
+    删除——删除文件操作。
+工具标签：本轮单文件块→工具（确定归属）；多文件块→工具?；保底块
+调用工具→工具。
 """
 
 from __future__ import annotations
@@ -45,20 +52,35 @@ def round_has_tool_calls(r: dict) -> bool:
 
 
 def block_tags(b: dict, versions_before: dict) -> str:
-    """文件块的生命周期标签（零 LLM），可多标签：
-    创建（首写）/ 修改（后续写）/ 只读（仅读无写删）/ 删除，按序拼接。
-    例如本轮创建又删除 → 「创建，删除」。
+    """文件块的生命周期标签（零 LLM），可多标签，按定义拼接：
+
+    创建——write_file 且之前无此文件；
+    重构——write_file 但文件已存在（整体重写）；
+    修改——edit_file / replace_lines（编辑修改，非清空重写）；
+    读——有 read 操作且其后有写/改/删操作（读服务于后续动作）；
+    只读——只进行了 read 操作；
+    删除——删除文件操作。
     """
     ops = b.get("ops") or []
-    has_write = any(o["op"] in ("write", "edit") for o in ops)
-    has_read = any(o["op"] == "read" for o in ops)
+    has_write = any(o["op"] == "write" for o in ops)
+    has_edit = any(o["op"] == "edit" for o in ops)
     has_delete = any(o["op"] == "delete" for o in ops)
+    reads = [i for i, o in enumerate(ops) if o["op"] == "read"]
+    leading_read = any(
+        any(ops[j]["op"] in ("write", "edit", "delete")
+            for j in range(i + 1, len(ops)))
+        for i in reads
+    )
     tags = []
     if has_write:
         tags.append(
-            "创建" if versions_before.get(b.get("file", ""), 0) == 0 else "修改"
+            "创建" if versions_before.get(b.get("file", ""), 0) == 0 else "重构"
         )
-    if has_read and not has_write and not has_delete:
+    if has_edit:
+        tags.append("修改")
+    if leading_read:
+        tags.append("读")
+    elif reads and not has_write and not has_edit and not has_delete:
         tags.append("只读")
     if has_delete:
         tags.append("删除")
