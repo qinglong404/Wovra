@@ -226,12 +226,12 @@ def test_render_round_shows_commands_and_writes():
     assert "✎ edit_file(app.py)" in out
 
 
-# ---- v2：按文件聚合的块切分（讨论v2 机制，零 LLM） -------------------------
+# ---- v3：按文件聚合的块切分（用户格式规格，零 LLM） -------------------------
 
 
 def test_segment_by_file_basic_layout():
-    """一轮 → 用户/文件/工具/助手块：一个文件的所有交互聚合一块，
-    非文件工具独立成块，最终回答收尾。"""
+    """一轮 → 只有文件块：一个文件的所有交互聚合一块；非文件工具与
+    助手结论并入当前活动块（最近的文件块）；用户输入不进块。"""
     r = _round(7, [
         _event(7, 1, "user", content="加个黑夜"),
         _event(7, 2, "tool_call", tool="write_file",
@@ -248,25 +248,22 @@ def test_segment_by_file_basic_layout():
         _event(7, 10, "final_answer", content="完成"),
     ])
     bs = blocks.segment_round_by_file(r)
-    kinds = [(b["kind"], b.get("file", "")) for b in bs]
-    assert kinds == [
-        ("user", ""),
+    assert [(b["kind"], b.get("file", "")) for b in bs] == [
         ("file", "world.js"),
         ("file", "renderer.js"),
-        ("tool", ""),
-        ("assistant", ""),
     ]
     # 同一文件的读+写聚合在同一块，ops 保留时序
-    world = bs[1]
+    world = bs[0]
     assert world["ops"] == [
         {"e": "R7-E02", "op": "write"},
         {"e": "R7-E04", "op": "read"},
     ]
     assert world["events"] == ["R7-E02", "R7-E03", "R7-E04", "R7-E05"]
-    # 工具块带命令标签
-    assert bs[3]["command_types"] == ["test"]
-    # 助手块只收最终回答
-    assert bs[4]["events"] == ["R7-E10"]
+    # 测试命令与最终回答并入最后一个活动块（renderer.js）
+    assert bs[1]["events"] == [
+        "R7-E06", "R7-E07", "R7-E08", "R7-E09", "R7-E10",
+    ]
+    assert bs[1]["command_types"] == ["test"]
 
 
 def test_segment_by_file_interleaved_same_file():
@@ -285,17 +282,18 @@ def test_segment_by_file_interleaved_same_file():
         _event(3, 8, "final_answer", content="done"),
     ])
     bs = blocks.segment_round_by_file(r)
-    a_block = [b for b in bs if b.get("file") == "a.js"][0]
-    assert a_block["ops"] == [
+    assert len(bs) == 1 and bs[0]["file"] == "a.js"
+    assert bs[0]["ops"] == [
         {"e": "R3-E02", "op": "write"},
         {"e": "R3-E06", "op": "edit"},
     ]
-    # 工具块夹在中间独立成块
-    assert ("tool", "") in [(b["kind"], b.get("file", "")) for b in bs]
+    assert bs[0]["events"] == [
+        "R3-E02", "R3-E03", "R3-E04", "R3-E05", "R3-E06", "R3-E07", "R3-E08",
+    ]
 
 
 def test_segment_by_file_environment_and_chat_only():
-    """环境命令独立成环境块；纯聊天轮只有用户+助手两块。"""
+    """环境命令独立成环境块（本轮合并为一块）；纯聊天轮 → 保底 1 块。"""
     r = _round(4, [
         _event(4, 1, "user", content="装依赖"),
         _event(4, 2, "tool_call", tool="run_command",
@@ -305,16 +303,15 @@ def test_segment_by_file_environment_and_chat_only():
     ])
     bs = blocks.segment_round_by_file(r)
     assert [(b["kind"], b.get("command_types")) for b in bs] == [
-        ("user", None),
         ("environment", ["environment"]),
-        ("assistant", None),
     ]
     r2 = _round(5, [
         _event(5, 1, "user", content="你好"),
         _event(5, 2, "final_answer", content="你好呀"),
     ])
     bs2 = blocks.segment_round_by_file(r2)
-    assert [b["kind"] for b in bs2] == ["user", "assistant"]
+    assert [b["kind"] for b in bs2] == ["fallback"]
+    assert bs2[0]["events"] == ["R5-E02"]  # 用户输入由轮头承载
 
 
 def test_segment_by_file_delete_op():
@@ -331,9 +328,9 @@ def test_segment_by_file_delete_op():
     assert old["ops"] == [{"e": "R6-E02", "op": "delete"}]
 
 
-def test_segment_by_file_failed_call_no_empty_file_block():
-    """参数截断的文件操作（解析不出 path）不产生空文件块，落入工具块
-    （R28 三次 write_file 参数被掐断的实证场景）。"""
+def test_segment_by_file_failed_call_falls_back():
+    """参数截断的文件操作（解析不出 path）不产生空文件块；整轮无文件/
+    环境交互时保底 1 块（R28 三次 write_file 参数被掐断的实证场景）。"""
     r = _round(8, [
         _event(8, 1, "user", content="写"),
         _event(8, 2, "tool_call", tool="write_file",
@@ -342,8 +339,8 @@ def test_segment_by_file_failed_call_no_empty_file_block():
         _event(8, 4, "final_answer", content="失败"),
     ])
     bs = blocks.segment_round_by_file(r)
-    assert all(b.get("file") not in ("", None) for b in bs if b["kind"] == "file")
-    assert ("tool", "") in [(b["kind"], b.get("file", "")) for b in bs]
+    assert len(bs) == 1 and bs[0]["kind"] == "fallback"
+    assert all(not b.get("file") for b in bs)
 
 
 def test_segment_by_file_parallel_batch_dedup():
@@ -363,5 +360,5 @@ def test_segment_by_file_parallel_batch_dedup():
         _event(9, 5, "final_answer", content="ok"),
     ])
     bs = blocks.segment_round_by_file(r)
-    tool_block = [b for b in bs if b["kind"] == "tool"][0]
-    assert tool_block["events"] == ["R9-E02", "R9-E03", "R9-E04"]
+    assert len(bs) == 1 and bs[0]["kind"] == "fallback"
+    assert bs[0]["events"] == ["R9-E02", "R9-E03", "R9-E04", "R9-E05"]

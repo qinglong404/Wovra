@@ -1,8 +1,17 @@
 """按文件分块 + 生命周期账本 → 效果文档（零 LLM，纯确定性）。
 
 用法：python scripts/file_block_structure.py <task_id> [--out docs/xxx.md]
-产出：逐轮块结构 + 文件生命周期账本（LIVE/DEAD/READ_ONLY）的可读视图，
-供人工核验分块质量与生命周期推导。
+输出 = 用户格式规格（2026-09-09）：
+    R{n}（{events} 事件 · {blocks} 块）【没有文件交互，触发保底 1 块】
+    👤 用户: "…"
+    🎯 意图: ***（待整理填充）
+    📌 关键约束: ***
+    块细节：
+    【保底块】：助手结论。
+    【环境块】：…（为什么这样做+结果，LLM 整理填充；此处为确定性摘要）
+    【world.js】：修改，write(E02), read(E04)
+块名规则：文件块带生命周期标签（创建/修改/只读/删除，账本判创建 vs 修改）；
+环境块不打标签；无文件交互的轮保底 1 块。
 """
 
 from __future__ import annotations
@@ -21,29 +30,46 @@ def _head(text: str, limit: int = 60) -> str:
     return text if len(text) <= limit else text[:limit] + "…"
 
 
-def render_round_block(seq: int, b: dict, events: list) -> str:
-    """一块一行摘要（人读用）。"""
+def block_tag(b: dict, versions_before: dict) -> str:
+    """文件块的生命周期标签（零 LLM）：删除 > 创建/修改（账本判）> 只读。"""
+    ops = b.get("ops") or []
+    if any(o["op"] == "delete" for o in ops):
+        return "删除"
+    if any(o["op"] in ("write", "edit") for o in ops):
+        return "创建" if versions_before.get(b.get("file", ""), 0) == 0 else "修改"
+    return "只读"
+
+
+def block_line(seq: int, b: dict, events: list, versions_before: dict) -> str:
+    """块细节一行（确定性摘要；整理（LLM）接管后由它写描述）。"""
     kind = b["kind"]
-    if kind == "file":
-        ops = ", ".join(f"{o['op']}({o['e'].rsplit('-E',1)[-1]})" for o in b["ops"])
-        return f"- **{b['id']}** file `{b['file']}`：{ops} · {len(b['events'])} 事件"
-    if kind == "environment":
-        tags = "/".join(b.get("command_types") or [])
-        return f"- **{b['id']}** 环境块[{tags}]：{len(b['events'])} 事件"
-    if kind == "tool":
-        tags = "/".join(b.get("command_types") or []) or "其他"
-        return f"- **{b['id']}** 工具块[{tags}]：{len(b['events'])} 事件"
-    if kind == "user":
-        ui = next(
-            (str(e["message"].get("content") or "") for e in events
-             if e["id"] == b["start_event"]), "")
-        return f"- **{b['id']}** 用户：{_head(ui)}"
-    if kind == "assistant":
+    evs = {e["id"]: e for e in events}
+    if kind == "fallback":
         fa = next(
             (str(e["message"].get("content") or "") for e in events
-             if e["id"] == b["start_event"]), "")
-        return f"- **{b['id']}** 助手：{_head(fa)}"
-    return f"- **{b['id']}** {kind}"
+             if e.get("type") == "final_answer"), "")
+        return f"【保底块】：助手结论。{_head(fa, 80)}"
+    if kind == "environment":
+        cmds = []
+        for eid in b.get("events") or []:
+            e = evs.get(eid) or {}
+            if e.get("type") != "tool_call":
+                continue
+            for call in (e.get("message") or {}).get("tool_calls") or []:
+                fn = call.get("function") or {}
+                if fn.get("name") == "run_command":
+                    import json as _json
+                    try:
+                        args = _json.loads(fn.get("arguments") or "{}")
+                    except Exception:
+                        args = {}
+                    cmds.append(_head(str(args.get("command") or ""), 50))
+        return f"【环境块】：{'；'.join(cmds) or '环境配置'}"
+    if kind == "file":
+        ops = ", ".join(f"{o['op']}({o['e'].rsplit('-E', 1)[-1]})"
+                        for o in (b.get("ops") or []))
+        return f"【{b['file']}】：{block_tag(b, versions_before)}，{ops or '工具调用'}"
+    return f"【{kind}】"
 
 
 def build(task_id: str) -> str:
@@ -68,13 +94,17 @@ def build(task_id: str) -> str:
         ledger.update(r, blocks=bs)
 
     dist = {n: per_round_files.count(n) for n in sorted(set(per_round_files))}
+    fallback_n = sum(1 for r in d.rounds
+                     if not any(b["kind"] != "fallback"
+                                for b in blocks.segment_round_by_file(r)))
     lines += [
-        f"- 轮数：{len(d.rounds)}，总事件 {total_events}，总块数 {total_blocks}",
+        f"- 轮数：{len(d.rounds)}，总事件 {total_events}，总块数 {total_blocks}"
+        f"（保底轮 {fallback_n}）",
         f"- 每轮文件块数分布：" +
         "，".join(f"{n} 个 × {c} 轮" for n, c in dist.items()),
         f"- 生命周期：LIVE **{ledger.live_count()}** / DEAD "
-        f"{sum(1 for e in ledger.entries().values() if e['state']=='dead')} / "
-        f"READ_ONLY {sum(1 for e in ledger.entries().values() if e['state']=='read_only')}",
+        f"{sum(1 for e in ledger.entries().values() if e['state'] == 'dead')} / "
+        f"READ_ONLY {sum(1 for e in ledger.entries().values() if e['state'] == 'read_only')}",
         "",
         "## 文件生命周期账本",
         "",
@@ -110,16 +140,30 @@ def build(task_id: str) -> str:
         lines.append(f"| `{e['path']}` | {e['read_count']} |")
     lines.append("")
 
-    lines.append("## 逐轮块结构")
+    lines.append("## 逐轮结构化结果")
     lines.append("")
+
+    # 第二轮：按用户格式规格输出，且带生命周期标签（需账本判创建 vs 修改）
+    ledger2 = lifecycle.FileLedger()
     for r in d.rounds:
         seq = r["seq"]
+        versions_before = {p: len(e["versions"])
+                           for p, e in ledger2.entries().items()}
         bs = blocks.segment_round_by_file(r)
+        ledger2.update(r, blocks=bs)
         evs = r.get("events") or []
-        lines.append(f"### R{seq}（{len(evs)} 事件 · {len(bs)} 块）")
+        ui = r.get("user_input") or {}
+        note = ""
+        if len(bs) == 1 and bs[0]["kind"] == "fallback":
+            note = "【没有文件交互，触发保底 1 块】"
+        lines.append(f"### R{seq}（{len(evs)} 事件 · {len(bs)} 块）{note}")
         lines.append("")
+        lines.append(f"👤 用户: \"{_head(ui.get('original') or '', 80)}\"")
+        lines.append(f"🎯 意图: {ui.get('normalized') or '***'}")
+        lines.append(f"📌 关键约束: {ui.get('key_constraints') or '***'}")
+        lines.append("块细节：")
         for b in bs:
-            lines.append(render_round_block(seq, b, evs))
+            lines.append(block_line(seq, b, evs, versions_before))
         lines.append("")
     return "\n".join(lines)
 

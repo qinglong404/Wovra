@@ -289,11 +289,17 @@ def render_round(r: dict, blocks: Optional[list[dict]] = None) -> str:
     return "\n".join(lines)
 
 
-# ---- v2：按文件聚合的块切分（讨论v2 机制，零 LLM） -------------------------
-# 2026-09-09 用户拍板：块的划分从"事件截止"改为"工作对象"——一个文件的
-# 所有交互（读/写/改/删）聚合为一个块，加上 用户 / 环境（命令标签）/
-# 工具 / 助手 块。块是分裂拼装的最小单位：跨轮按文件索引块，快速拼子
-# 视图。纯规则、零 LLM，与 v1 segment_round 并存（v1 退役由格式规格定）。
+# ---- v2/v3：按文件聚合的块切分（讨论v2 机制，零 LLM） -----------------------
+# 2026-09-09 用户拍板格式规格：块只有三种——
+#   * file       一个文件在本轮的全部交互（ops：read/write/edit/delete），
+#                带生命周期标签（创建/修改/只读/删除，账本判创建 vs 修改）；
+#   * environment 本轮环境命令合并为一块（描述"为什么这样做+结果"）；
+#   * fallback   轮内无任何文件/环境交互时的保底块（整轮一块，助手结论
+#                是描述主体）。
+# 用户输入不进块（轮头 👤/🎯/📌 承载）；非文件非环境工具事件与助手
+# 结论并入"当前活动块"（最近的文件块/环境块）；轮首无活动块时挂起并入
+# 首个块——每个事件恰好归属一个块，块是分裂拼装的最小单位。
+# 纯规则、零 LLM；v1 segment_round 退役由格式规格定。
 
 FILE_OP_TOOLS = {
     "read_file": "read",
@@ -330,7 +336,7 @@ def _fblock(kind: str, idx: int) -> dict:
 
 
 def _finalize_fblock(seq: int, bno: int, b: dict) -> dict:
-    """剥私有字段，落成可持久化的 v2 块结构。"""
+    """剥私有字段，落成可持久化的 v3 块结构。"""
     evs = b.pop("_evs")
     out = {
         "id": f"R{seq}-B{bno}",
@@ -350,32 +356,34 @@ def _finalize_fblock(seq: int, bno: int, b: dict) -> dict:
 
 
 def segment_round_by_file(r: dict) -> list[dict]:
-    """按文件聚合一个 Round 的块（纯函数，零 LLM）。
+    """按工作对象聚合一个 Round 的块（纯函数，零 LLM）。
 
-    块类：file（一个文件的所有交互，跨事件聚合）/ user（每条用户输入）/
-    environment（run_command 环境标签，连续段合一块）/ tool（其余非文件
-    工具调用，连续段合一块）/ assistant（最终回答）。文件块带 ops
-    （{e, op} 操作序列，op ∈ read/write/edit/delete），跨轮供生命周期
-    账本与分裂拼装使用。返回块按首事件在轮内的出现顺序排序。
+    块类：file / environment / fallback。返回块按首事件在轮内的出现
+    顺序排序；轮内每个事件恰好归属一个块（用户输入除外——它由轮头
+    👤/🎯/📌 承载）。
     """
     events = r.get("events") or []
     seq = r.get("seq", 0)
     file_blocks: dict[str, dict] = {}
-    others: list[dict] = []
+    env_block: Optional[dict] = None
     cur: Optional[dict] = None
+    pending: list[str] = []
     call_owner: dict[str, dict] = {}  # tool_call_id → 归属块
 
-    def close_cur() -> None:
-        nonlocal cur
-        if cur is not None:
-            if cur["_evs"]:
-                others.append(cur)
-            cur = None
+    def new_file(path: str, idx: int) -> dict:
+        blk = file_blocks.get(path)
+        if blk is None:
+            blk = _fblock("file", idx)
+            blk["file"] = path
+            file_blocks[path] = blk
+        return blk
 
-    def open_cur(kind: str, idx: int) -> None:
-        nonlocal cur
-        close_cur()
-        cur = _fblock(kind, idx)
+    def new_env(idx: int) -> dict:
+        nonlocal env_block, cur
+        if env_block is None:
+            env_block = _fblock("environment", idx)
+        cur = env_block
+        return env_block
 
     for idx, event in enumerate(events):
         etype = event.get("type")
@@ -383,40 +391,33 @@ def segment_round_by_file(r: dict) -> list[dict]:
         message = event.get("message") or {}
 
         if etype == "user":
-            close_cur()
-            b = _fblock("user", idx)
-            b["_evs"].append(eid)
-            others.append(b)
-        elif etype == "tool_call":
-            infos = [_call_info(c) for c in message.get("tool_calls") or []]
-            kinds = [_block_kind(n, a) for n, a in infos]
-            if any(k == "file" for k in kinds):
-                close_cur()
-            elif any(k == "environment" for k in kinds):
-                if cur is None or cur["kind"] != "environment":
-                    open_cur("environment", idx)
-            else:
-                if cur is None or cur["kind"] != "tool":
-                    open_cur("tool", idx)
-            owners: dict[int, dict] = {}  # 事件只入各归属块一次（并行批次去重）
+            continue  # 轮头承载，不进块
+
+        if etype == "tool_call":
+            owners: dict[int, dict] = {}  # 事件只入各归属块一次（并行去重）
             for call in message.get("tool_calls") or []:
                 name, args = _call_info(call)
                 cid = str(call.get("id") or "")
-                if name in FILE_OP_TOOLS and str(args.get("path") or ""):
-                    path = str(args.get("path"))
-                    blk = file_blocks.get(path)
-                    if blk is None:
-                        blk = _fblock("file", idx)
-                        blk["file"] = path
-                        file_blocks[path] = blk
+                k = _block_kind(name, args)
+                if k == "file":
+                    blk = new_file(str(args["path"]), idx)
                     blk["ops"].append({"e": eid, "op": FILE_OP_TOOLS[name]})
                     blk["_first"] = min(blk["_first"], idx)
                     blk["_last"] = max(blk["_last"], idx)
                     call_owner[cid] = blk
                     owners[id(blk)] = blk
+                    cur = blk
+                elif k == "environment":
+                    blk = new_env(idx)
+                    _remember(blk, "command_types",
+                              tag_command(str(args.get("command") or "")))
+                    call_owner[cid] = blk
+                    owners[id(blk)] = blk
                 else:
-                    if cur is None:  # 理论不可达，安全兜底
-                        open_cur("tool", idx)
+                    if cur is None:
+                        if eid not in pending:
+                            pending.append(eid)
+                        continue
                     if name == "run_command":
                         _remember(cur, "command_types",
                                   tag_command(str(args.get("command") or "")))
@@ -429,24 +430,30 @@ def segment_round_by_file(r: dict) -> list[dict]:
             blk = call_owner.get(str(message.get("tool_call_id") or ""))
             if blk is None:
                 if cur is None:
-                    open_cur("tool", idx)
+                    pending.append(eid)
+                    continue
                 blk = cur
             blk["_evs"].append(eid)
             blk["_last"] = max(blk["_last"], idx)
-        elif etype == "final_answer":
-            close_cur()
-            b = _fblock("assistant", idx)
-            b["_evs"].append(eid)
-            others.append(b)
         else:
-            # runtime_note 等杂项事件：跟随当前非文件块
+            # final_answer / runtime_note 等：并入当前活动块；无则挂起
             if cur is not None:
                 cur["_evs"].append(eid)
                 cur["_last"] = max(cur["_last"], idx)
-    close_cur()
+            else:
+                pending.append(eid)
 
-    merged = list(file_blocks.values()) + others
+    merged = list(file_blocks.values()) + ([env_block] if env_block else [])
+    if not merged:
+        # 保底块：整轮一块（无文件/环境交互）；用户输入由轮头承载不进块
+        fb = _fblock("fallback", 0)
+        fb["_evs"] = [
+            str(e.get("id") or "") for e in events if e.get("type") != "user"
+        ]
+        fb["_last"] = max(len(events) - 1, 0)
+        return [_finalize_fblock(seq, 1, fb)]
+    if pending:
+        first = min(merged, key=lambda b: b["_first"])
+        first["_evs"] = pending + first["_evs"]
     merged.sort(key=lambda b: b["_first"])
-    return [
-        _finalize_fblock(seq, i + 1, b) for i, b in enumerate(merged)
-    ]
+    return [_finalize_fblock(seq, i + 1, b) for i, b in enumerate(merged)]

@@ -125,7 +125,7 @@ def test_ledger_wired_with_file_blocks():
     bs2 = blocks.segment_round_by_file(r2)
     ledger.update(r2, blocks=bs2)
     entry = ledger.entries()["a.js"]
-    assert entry["block_refs"] == ["R1-B2", "R2-B2"]
+    assert entry["block_refs"] == ["R1-B1", "R2-B1"]
     assert entry["versions"] == ["R1-E02", "R2-E02"]
     assert ledger.state_of("a.js") == lifecycle.STATE_LIVE
     assert ledger.live_count() == 1
