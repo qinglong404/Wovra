@@ -18,12 +18,30 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from wovra import blocks, lifecycle, task as task_module  # noqa: E402
+
+
+def round_has_tool_calls(r: dict) -> bool:
+    """本轮是否有"工具类"调用（run_command 非环境、list_files、web_fetch、
+    todo 等；文件操作与环境命令不算——它们各有标签/块承载）。"""
+    for event in r.get("events") or []:
+        if event.get("type") != "tool_call":
+            continue
+        for call in (event.get("message") or {}).get("tool_calls") or []:
+            fn = call.get("function") or {}
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            if blocks._block_kind(str(fn.get("name") or ""), args) == "tool":
+                return True
+    return False
 
 
 def block_tag(b: dict, versions_before: dict) -> str:
@@ -36,13 +54,17 @@ def block_tag(b: dict, versions_before: dict) -> str:
     return "只读"
 
 
-def block_label(b: dict, versions_before: dict) -> str:
+def block_label(b: dict, versions_before: dict, has_tools: bool) -> str:
     """块标签行（只打标签，不写内容）。"""
     if b["kind"] == "fallback":
         return "【保底块】："
     if b["kind"] == "environment":
         return "【环境块】："
-    return f"【{b['file']}】：{block_tag(b, versions_before)}"
+    label = f"【{b['file']}】：{block_tag(b, versions_before)}"
+    if has_tools:
+        # 工具? = 本轮有工具类调用，该文件块的吸收事件里可能有工具调用
+        label += "，工具?"
+    return label
 
 
 def build(task_id: str) -> str:
@@ -55,8 +77,11 @@ def build(task_id: str) -> str:
                            for p, e in ledger.entries().items()}
         bs = blocks.segment_round_by_file(r)
         ledger.update(r, blocks=bs)
+        has_tools = round_has_tool_calls(r)
         lines.append(f"R{seq}：")
-        lines.append("\n\n".join(block_label(b, versions_before) for b in bs))
+        lines.append("\n\n".join(
+            block_label(b, versions_before, has_tools) for b in bs
+        ))
         lines.append("")
     return "\n".join(lines)
 
