@@ -323,18 +323,24 @@ def _block_kind(name: str, args: dict) -> str:
     return "tool"
 
 
-# 文件操作失败标记（读/删没真发生）：文件不存在、越界拦截——幽灵文件
-# 不产生文件块（nope.txt 的 FileNotFoundError 实证）。
-_GHOST_MARKERS = ("不存在", "FileNotFoundError", "No such file",
-                  "路径越界", "工具执行出错")
+# 读/删操作的结果失败分类（2026-09-09 用户拍板）：
+#   幽灵——文件不存在（FileNotFoundError），从未真实存在；
+#   越界——路径越界被安全拦截（读没发生）；
+#   工具出错（通用执行错误）——不用管，不作特殊分类。
+_NOT_FOUND_MARKERS = ("不存在", "FileNotFoundError", "No such file")
+_ESCAPE_MARKERS = ("路径越界",)
 
 
-def _op_real(op: dict, results: dict) -> bool:
-    """文件块的操作是否真实发生：写/改恒真；读/删看结果有无失败标记。"""
+def _op_failure(op: dict, results: dict) -> Optional[str]:
+    """读/删操作的结果失败分类：幽灵 / 越界 / None（成功或通用工具出错）。"""
     if op["op"] in ("write", "edit"):
-        return True
+        return None
     content = results.get(op.get("c", "")) or ""
-    return not any(m in content for m in _GHOST_MARKERS)
+    if any(m in content for m in _NOT_FOUND_MARKERS):
+        return "幽灵"
+    if any(m in content for m in _ESCAPE_MARKERS):
+        return "越界"
+    return None
 
 
 def _fblock(kind: str, idx: int) -> dict:
@@ -364,8 +370,8 @@ def _finalize_fblock(seq: int, bno: int, b: dict) -> dict:
     if b["kind"] == "file":
         out["file"] = b["file"]
         out["ops"] = b["ops"]
-    if b.get("ghost"):
-        out["ghost"] = True
+    if b.get("fail_tags"):
+        out["fail_tags"] = list(b["fail_tags"])
     if b["command_types"]:
         out["command_types"] = b["command_types"]
     return out
@@ -465,11 +471,18 @@ def segment_round_by_file(r: dict) -> list[dict]:
             else:
                 pending.append(eid)
 
-    # 幽灵文件块：读/删全失败（文件不存在/越界拦截）——文件从未真实
-    # 存在过，保留块但打幽灵标记（nope.txt 的 FileNotFoundError 实证）
+    # 失败块分类：读/删全失败（幽灵=文件不存在 / 越界=路径越界）→ 保留
+    # 块但打失败标签（agent.py 越界、nope.txt 幽灵的实证）；通用工具出错
+    # 不作分类（不用管）。
     for blk in file_blocks.values():
-        if not any(_op_real(o, results) for o in blk["ops"]):
-            blk["ghost"] = True
+        failures = [_op_failure(o, results) for o in blk["ops"]]
+        if all(f is not None for f in failures):
+            fail_tags = []
+            for tag in ("幽灵", "越界"):
+                if tag in failures:
+                    fail_tags.append(tag)
+            if fail_tags:
+                blk["fail_tags"] = fail_tags
 
     merged = list(file_blocks.values()) + ([env_block] if env_block else [])
     if not merged:

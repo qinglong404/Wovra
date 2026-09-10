@@ -365,21 +365,31 @@ def test_segment_by_file_parallel_batch_dedup():
 
 
 
-def test_segment_by_file_ghost_block():
-    """读/删全失败的文件（FileNotFoundError / 路径越界）→ 保留块但打
-    ghost 标记（文件从未真实存在，nope.txt 实证）。"""
+def test_segment_by_file_ghost_and_escape_blocks():
+    """读全失败的文件块保留并分类：FileNotFoundError→幽灵（文件从未存在）、
+    路径越界→越界（安全拦截）、通用工具出错→不作分类（不用管）。"""
     r = _round(10, [
-        _event(10, 1, "user", content="测试读不存在文件"),
+        _event(10, 1, "user", content="测试读"),
         _event(10, 2, "tool_call", tool="read_file", args={"path": "nope.txt"}),
         _event(10, 3, "tool_result",
                content="工具执行出错: FileNotFoundError(2, 'No such file or directory')"),
-        _event(10, 4, "tool_call", tool="read_file", args={"path": "ok.txt"}),
-        _event(10, 5, "tool_result", content="ok.txt 内容"),
-        _event(10, 6, "final_answer", content="完成"),
+        _event(10, 4, "tool_call", tool="read_file",
+               args={"path": "../outside.py"}),
+        _event(10, 5, "tool_result",
+               content="工具执行出错: ValueError('路径越界，只允许访问项目目录内的文件: ../outside.py')"),
+        _event(10, 6, "tool_call", tool="read_file", args={"path": "ok.txt"}),
+        _event(10, 7, "tool_result", content="ok.txt 内容"),
+        _event(10, 8, "tool_call", tool="read_file", args={"path": "boom.txt"}),
+        _event(10, 9, "tool_result", content="工具执行出错: 编码错误"),
+        _event(10, 10, "final_answer", content="完成"),
     ])
     bs = blocks.segment_round_by_file(r)
     nope = [b for b in bs if b.get("file") == "nope.txt"][0]
-    assert nope.get("ghost") is True
+    assert nope.get("fail_tags") == ["幽灵"]
+    esc = [b for b in bs if b.get("file") == "../outside.py"][0]
+    assert esc.get("fail_tags") == ["越界"]
     ok = [b for b in bs if b.get("file") == "ok.txt"][0]
-    assert not ok.get("ghost")
+    assert not ok.get("fail_tags")
+    boom = [b for b in bs if b.get("file") == "boom.txt"][0]
+    assert not boom.get("fail_tags")  # 通用工具出错：不用管，不作分类
 
