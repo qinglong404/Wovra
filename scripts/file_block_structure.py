@@ -44,14 +44,25 @@ def round_has_tool_calls(r: dict) -> bool:
     return False
 
 
-def block_tag(b: dict, versions_before: dict) -> str:
-    """文件块的生命周期标签（零 LLM）：删除 > 创建/修改（账本判）> 只读。"""
+def block_tags(b: dict, versions_before: dict) -> str:
+    """文件块的生命周期标签（零 LLM），可多标签：
+    创建（首写）/ 修改（后续写）/ 只读（仅读无写删）/ 删除，按序拼接。
+    例如本轮创建又删除 → 「创建，删除」。
+    """
     ops = b.get("ops") or []
-    if any(o["op"] == "delete" for o in ops):
-        return "删除"
-    if any(o["op"] in ("write", "edit") for o in ops):
-        return "创建" if versions_before.get(b.get("file", ""), 0) == 0 else "修改"
-    return "只读"
+    has_write = any(o["op"] in ("write", "edit") for o in ops)
+    has_read = any(o["op"] == "read" for o in ops)
+    has_delete = any(o["op"] == "delete" for o in ops)
+    tags = []
+    if has_write:
+        tags.append(
+            "创建" if versions_before.get(b.get("file", ""), 0) == 0 else "修改"
+        )
+    if has_read and not has_write and not has_delete:
+        tags.append("只读")
+    if has_delete:
+        tags.append("删除")
+    return "，".join(tags)
 
 
 def block_label(b: dict, versions_before: dict, has_tools: bool,
@@ -67,7 +78,7 @@ def block_label(b: dict, versions_before: dict, has_tools: bool,
         return "【保底块】：" + ("工具" if has_tools else "")
     if b["kind"] == "environment":
         return "【环境块】："
-    label = f"【{b['file']}】：{block_tag(b, versions_before)}"
+    label = f"【{b['file']}】：{block_tags(b, versions_before)}"
     if has_tools:
         label += "，工具" if file_count == 1 else "，工具?"
     return label
