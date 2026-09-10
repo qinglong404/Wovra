@@ -522,6 +522,7 @@ def segment_round_by_file(r: dict) -> list[dict]:
             fb["_evs"] = [str(e.get("id") or "") for _, e in non_user]
             fb["_last"] = max((i for i, _ in non_user), default=0)
             merged = user_blocks + [fb]
+            pending = []  # 保底块已含全部非用户事件（含挂起），防重复
         else:
             # 保底块：整轮一块（无文件/环境/用户补充交互）
             fb = _fblock("fallback", 0)
