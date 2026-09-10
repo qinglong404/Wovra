@@ -46,6 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 
 from . import blocks as blocks_module
+from . import lifecycle as lifecycle_module
 from . import task as task_module
 from . import tokens
 from . import tools as tools_module
@@ -259,6 +260,136 @@ _ORG_SUBMIT_SCHEMA: dict = {
     },
 }
 
+# 压缩元信息：整理指令头部的静态说明（轮次范围动态注入）。给整理模型
+# 和后续续跑 agent 提供术语定义——LIVE/DEAD/B1 这类机制词不解释会让
+# 上下文之外的读者误判（评审反馈：DEAD 被理解为失败，实际是"已闭环/
+# 清理"）。
+_ORG_META_INFO = (
+    "[压缩元信息]\n"
+    "- 本次整理范围：R{seq_list}。连续纯聊天轮已合并为组（如 R1-2），"
+    "组内共用一个块描述、一个综合意图。\n"
+    "- 状态定义：LIVE=文件当前有效（内容以磁盘为准，需要细节时重新读）；"
+    "DEAD=已删除/已闭环/测试已清理（不是失败）；B1=该轮第一个块。\n"
+    "- 原文都在会话历史里，本视图只降分辨率不删事实；后续需要细节时按"
+    "块/事件取回原文。\n"
+)
+
+
+def _clip_quote(text: str, limit: int = 60) -> str:
+    """用户原话锚点：压平换行并截断，供分块地图每轮首行展示。"""
+    flat = " ".join(str(text or "").split())
+    return flat if len(flat) <= limit else flat[:limit] + "…"
+
+
+# 分裂分析判据（2026-09-10 用户定稿）：三步走 + 语义聚合（不按路径）+
+# 最浅可分层。硬数据（活性文件清单/上限）由 Runtime 注入，LLM 只做
+# 语义判断（块归属、域命名/描述、层级关系）。
+_SPLIT_INSTRUCTIONS = (
+    "[分裂分析判据]\n"
+    "三步走：\n"
+    "1. 保底块归属：无文件交互的纯聊天块（保底块/合并组）逐个判断——\n"
+    "   与某文件域相关（真的在讨论/决策该域的事）→ 该 block_id 写进\n"
+    "   对应域的 block_ids；无关的独立思想（寒暄/身份确认等没落到任何\n"
+    "   文件工作上的讨论）→ 放 unassigned，归主 agent。\n"
+    "2. 文件域聚合：把当前活性文件按**功能语义**聚合成层级——域名 +\n"
+    "   描述 + 文件 + 目标 + 约束 + 块归属。**不是按路径**！路径只是\n"
+    "   线索：同目录可属不同域、不同目录可属同域。被取代的前史归取代\n"
+    "   者（superseded，防\"旧版一类新版一类\"）；同一大类下有多条\n"
+    "   工作线时往下分层（parent 表达子域）——不能只给顶层。\n"
+    "3. 分裂判定：找**能形成有效分裂的最浅层**——顶层节点 ≥2 个就用\n"
+    "   顶层；顶层只有 1 个节点但它有 ≥2 个子节点，用该子层；全链单子\n"
+    "   （所有文件本质同属一条工作线）则不可分。候选单元数不得超过\n"
+    "   硬数据的活性文件数上限。\n"
+    "**域归属完整性（强制）**：分块地图里的每个块都必须有归宿——\n"
+    "在某个域的 block_ids 里、或放 unassigned（独立思想，归主 agent）；\n"
+    "禁止出现无归宿的块。\n"
+    "**粒度稳定（强制）**：域 = 可独立推进/交付的工作单元，不是\"每类\n"
+    "文档一个域\"。独立成域必须同时满足 ①有独立的后续动作或交付目标\n"
+    "②独立的文件域（不与其它域共享文件）。两条不满足 → 并入最相关域。\n"
+    "同类收敛：同一阶段、同性质的产出物（评判/笔记/快照类文档）服务\n"
+    "同一目标、无独立交付物时收敛为一个域——不要因为\"读的是不同源码\n"
+    "文件\"（如提示词 vs 机制）把同一轮知识沉淀工作拆开；块数少的同类\n"
+    "工作线尤应并入。同一批数据两次分析应给出同构域树（数量与层级一致）。\n"
+    "域描述（description）必填：一句话说清每个域干什么、产出什么——\n"
+    "供路由与多 agent 交流对象选择。\n"
+    "完成后调用 submit_domains 提交（唯一出口，不要在正文输出 JSON）。\n"
+)
+
+# 整理指令的静态标签说明（2026-09-09 用户定稿，docs/org-prompt-v1.md）。
+# 标签 = 分辨率指令不是重要性评分：写多细、写什么由标签决定，模型不做
+# "哪些重要"的判断——消除 org 的"应该怎么写"思考（15K 思考撞输出上限
+# 的病根）。模块级常量不随批次变化：追加式指令，前缀缓存稳定。
+_ORG_TAG_INSTRUCTIONS = (
+    "[标签说明]\n"
+    "一、块类型 → 产物\n"
+    "1. 文件块【路径(状态)】：标签序列 —— 把块内内容综合总结成一段话：\n"
+    "   按标签序列所代表的时间序交代：从哪来、做了什么、结果如何；多标签\n"
+    "   只做覆盖检查（每项都交代到），不作为分段格式；带「工具」的块 =\n"
+    "   吸收了验证/执行类工具（test/build/run）：把工具调用结果融进叙述，\n"
+    "   构成因果链（如\"改了 X，跑 pytest 验证通过\"）；只写动作不写结果是\n"
+    "   缺失。一段话写完，不拆条、不重复标签。\n"
+    "2. 环境块【环境块】：为什么做环境准备（目的）+ 结果，简练一段。\n"
+    "3. 用户块【用户块】：轮头**之后**的用户补充/修正输入。先保留\n"
+    "   补充原话（引号），再附要点（插在哪段工作之后）。原话取补充\n"
+    "   输入本身，不是轮头原文。与文件块独立成段，不混写。\n"
+    "4. 保底块【保底块】：（可能带「工具」）助手结论，简练一段。纯聊天\n"
+    "   轮（无「工具」）自由发挥：如实描述这轮实际内容（寒暄/问答/\n"
+    "   决策讨论/方案谋划），不要用占位词敷衍。\n"
+    "二、文件块标签 → 写什么\n"
+    "   创建：文件用途、整体结构、核心设计思想（骨架级，写充实）\n"
+    "   重构：重写动机、与旧版的关键差异、现在的结构（差异是重点）\n"
+    "   修改：改了什么实现、为什么改、影响什么\n"
+    "   读：为什么读、读出的关键结论（它服务于后续的写/改/删）\n"
+    "   只读：文件用途/大致结构，细节不展开——需要时重新读\n"
+    "   删除：删了什么、为什么删、最终结论\n"
+    "   幽灵：路径：动作；幽灵（文件不存在）；结果；无实质内容\n"
+    "   越界：路径：动作；越界（被安全拦截）；结果；无实质内容\n"
+    "   测试/实验文件块（创建-读-删除的测试矩阵成员）：统一一行模板\n"
+    "     \"文件：测[特性]；结果[正常/异常]：[结论]\"（如\n"
+    "     \"t2_empty.txt：测空文件读取；read_file 返回'是空文件'，正常\"）。\n"
+    "     信息量小，一行即可，禁止跳过。\n"
+    "三、状态 → 详略底线\n"
+    "   LIVE：当前有效内容/结构写清楚——这是现状，后续工作基于它；\n"
+    "   DEAD：只保留死亡原因与最终结论。测试/实验类文件即使 DEAD，路径、\n"
+    "     操作序列、结果、失败原因必须保留（它验证了什么、怎么验的、结果\n"
+    "     如何，属于结论的一部分）；状态已在标签行给出，正文不要重复解释\n"
+    "     状态。\n"
+    "四、用户输入（轮头）：👤 用户原文 / 🎯 意图（澄清后）/ 📌 关键约束——\n"
+    "   全量保存，最高分辨率。\n"
+    "   🎯 意图只提炼该轮轮头用户输入原话的内容：短批准句（如\"可以\"）\n"
+    "     的意图 = 批准/同意上文的提议，不扩展不脑补；轮内事件（ask_user\n"
+    "     的回复、工具结果）不是意图来源；合并组综合组内所有轮的原话。\n"
+    "     意图必须与该轮 👤 用户原文直接对应——原文里没有的内容（如其他\n"
+    "     轮的\"可以测试A\"\"23M/458M\"等）一律不得写进意图。\n"
+    "   📌 约束标注来源轮次与时效：格式 [R7] 只读限定 agent-test；被后续\n"
+    "     轮覆盖的约束注明覆盖关系（如\"R8 用户新指令开放写入，覆盖 R7\n"
+    "     只读\"）；同一约束多次出现只保留最新状态并带最新来源轮次。\n"
+    "     轮内用户拍板的关键决策（ask_user 的回复、明确的选型如\"选 C\"）\n"
+    "     也写入该轮 📌 约束。\n"
+    "五、轮头与块描述分工：轮头已承载\"用户说了什么、要什么、约束什么\"，\n"
+    "   块描述不得复述用户输入，只写助手/工具对它的响应——做了什么、\n"
+    "   结论是什么。\n"
+    "六、合并与覆盖（2026-09-10 用户拍板）\n"
+    "   1. 连续纯聊天轮（保底块且无「工具」）在[分块地图]中合并为一组\n"
+    "      （如 R1-2）：组内只输出一个块描述（写到组内第一轮的块上，\n"
+    "      其余轮不写），同时 🎯 意图/📌 约束综合组内所有轮的用户输入\n"
+    "      提炼一次（写在组内第一轮）——禁止只取其中某一轮的内容；\n"
+    "      合并组块描述内部按子轮分段标注（R19：…/R20：…/…），便于\n"
+    "      后续按轮拉开原文；\n"
+    "   2. 每个块都必须给出描述，一个不落：信息量少的块一句带过即可，\n"
+    "      禁止跳过不写；\n"
+    "   3. 块 ID 与内容必须严格一一对应：从[分块地图]第一个块开始按\n"
+    "      顺序写，不跳号、不错位——某块的内容必须写在该块的 ID 下，\n"
+    "      禁止把 A 块的内容挂到 B 块的 ID（实测易犯：测试矩阵轮整体\n"
+    "      错位一位）。\n"
+    "七、篇幅\n"
+    "   标签定了分辨率基线，块内实际信息量只做微调：大改动/长推理/关键决策\n"
+    "   写满该标签允许的篇幅；低信息量块（寒暄/一句话问答）两三行甚至一句\n"
+    "   即可；关键数字（行数/字节数/条数/次数）与关键命令的目的必须保留；\n"
+    "   禁止空洞词（\"调整\"\"修改\"\"处理\"）单独成描述；含最终回答的块，对\n"
+    "   用户的承诺/交付口径完整写入。\n"
+)
+
 # 分裂分析产出契约（第二个常驻工具）：现状归属 + 可分性判断。
 # 判据（2026-09-08 用户拍板）：分裂单位 = 可独立运行的关注面；块的归属
 # 跟着它触达工件的现世走（被取代的前史归取代者，防止"旧版一类、新版
@@ -278,16 +409,31 @@ _ORG_DOMAINS_SCHEMA: dict = {
                 "domains": {
                     "type": "array",
                     "description": (
-                        "现状清单：当前可独立运行的关注面（活性文件域 × "
-                        "约束 × 目标）。被后续重写/取代的早期版本不单独"
-                        "成域，作为取代者域的 superseded 前史"
+                        "文件域：按**功能语义**聚合的现状清单（不是按路径！"
+                        "路径只是线索——同目录可属不同域、不同目录可属同域）。"
+                        "层级用 parent 表达（子域 parent=父域 name，顶层留空）——"
+                        "同一大类下有多条工作线时要往下分层，不能只给顶层。"
+                        "被后续重写/取代的早期版本不单独成域，作为取代者域的 "
+                        "superseded 前史"
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
                             "name": {
                                 "type": "string",
-                                "description": "域名，由现状派生（如\"web 演示项目\"）",
+                                "description": "域名，由功能语义派生（如\"web 演示前端\"）",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": (
+                                    "域描述（一句话说清这个域是干什么的、"
+                                    "产出什么）——供路由与多 agent 交流对象"
+                                    "选择使用"
+                                ),
+                            },
+                            "parent": {
+                                "type": "string",
+                                "description": "父域 name；顶层域留空",
                             },
                             "file_domains": {
                                 "type": "array",
@@ -330,12 +476,20 @@ _ORG_DOMAINS_SCHEMA: dict = {
                                 },
                             },
                         },
-                        "required": ["name", "file_domains", "block_ids"],
+                        "required": ["name", "description", "file_domains", "block_ids"],
                     },
                 },
                 "unassigned": {
                     "type": "object",
-                    "description": "不属于任何域的块（如零状态寒暄）→ 归档",
+                    "description": (
+                        "独立思想块（唯一出口，2026-09-10 用户拍板）："
+                        "与任何文件域都无关的纯聊天块/合并组——如寒暄、"
+                        "身份确认、没有落到任何文件工作上的独立讨论——"
+                        "放这里，归主 agent。判断标准：该块是否真的在"
+                        "讨论/决策某个文件域的事？是 → 写进该域 block_ids；"
+                        "否 → 放这里。**域归属完整性**：分块地图的每个块"
+                        "要么在某个域的 block_ids 里、要么在这里，一个不落"
+                    ),
                     "properties": {
                         "block_ids": {
                             "type": "array", "items": {"type": "string"},
@@ -346,8 +500,10 @@ _ORG_DOMAINS_SCHEMA: dict = {
                 "split_assessment": {
                     "type": "object",
                     "description": (
-                        "可分性判断。仅当现状清单出现 ≥2 个互不重叠的活性"
-                        "文件域才算可分；话题不同永远不构成分裂理由"
+                        "可分性判断：找**能形成有效分裂的最浅层**——顶层节点"
+                        "≥2 个就用顶层；顶层只有 1 个节点但它有 ≥2 个子节点，"
+                        "就用该子层；全链单子（所有文件本质同属一条工作线）"
+                        "则不可分。候选单元数不得超过活性文件数（Runtime 上限）"
                     ),
                     "properties": {
                         "splittable": {"type": "boolean"},
@@ -358,10 +514,18 @@ _ORG_DOMAINS_SCHEMA: dict = {
                             "properties": {
                                 "units": {
                                     "type": "array",
+                                    "description": (
+                                        "候选分裂单元（最浅可分层的节点），"
+                                        "数量 ≤ 活性文件数"
+                                    ),
                                     "items": {
                                         "type": "object",
                                         "properties": {
                                             "name": {"type": "string"},
+                                            "description": {
+                                                "type": "string",
+                                                "description": "单元描述（供路由/交流对象选择）",
+                                            },
                                             "file_domains": {
                                                 "type": "array",
                                                 "items": {"type": "string"},
@@ -588,6 +752,10 @@ class Agent:
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()
+        # 整理代次（2026-09-10 用户拍板：视图只保留最近 3 批整理，更早的
+        # 按文件状态折叠）：每次成功整理 +1，批次轮打 org_generation 落盘；
+        # 旧轮无该字段视为第 1 代（最老，优先折叠）。
+        self._org_generation = 0
         # 子任务派发板：每轮刷新的机械状态行（进程/账本/升级计数），
         # 注入装配尾部——主 agent 每轮都"看得见"子任务进展
         self.on_tool_call = on_tool_call
@@ -1645,12 +1813,34 @@ class Agent:
 
         view_msgs: list[dict] = []
         organized_rounds: list[dict] = []
+        # 折叠判定（2026-09-10 用户拍板）：视图只保留最近 3 批整理
+        # （org_generation 最大的 3 代）；更早的轮按文件当前状态折叠——
+        # ledger 现场重算（含当前轮），零 LLM、状态不过期
+        ledger = lifecycle_module.FileLedger()
+        for rr in past:
+            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
+        if self.current_round is not None:
+            ledger.update(
+                self.current_round,
+                blocks=blocks_module.segment_round_by_file(self.current_round),
+            )
+        done_gens = sorted(
+            {r.get("org_generation", 1) for r in past
+             if r.get("org_state") == "done"}
+        )
+        keep_min = done_gens[-1] - 2 if done_gens else 0
         for r in past:
             if r.get("org_state") == "done":
                 # 已整理：紧凑视图（原文+意图+精修索引；细节可 expand_history 取回）
                 organized_rounds.append(r)
+                if r.get("org_generation", 1) >= keep_min:
+                    compact = self._render_compact(r)
+                else:
+                    compact = self._render_collapsed(r, ledger)
+                if compact is None:
+                    continue  # 合并组非组首轮：由组首轮合并显示
                 view_msgs.append({"role": "user", "content": r["user_input"]["original"]})
-                view_msgs.append({"role": "assistant", "content": self._render_compact(r)})
+                view_msgs.append({"role": "assistant", "content": compact})
             else:
                 # 未整理：原文全量——分辨率损失只允许来自整理，不来自装配
                 view_msgs.extend(e["message"] for e in r["events"])
@@ -1792,7 +1982,7 @@ class Agent:
                 )
         return total
 
-    def _render_compact(self, r: dict) -> str:
+    def _render_compact(self, r: dict) -> Optional[str]:
         """已整理轮次的紧凑视图：👤用户原文 + 🎯意图 + 📌关键约束 + 逐块细节。
 
         整理生效后轮次以此形态常驻上下文——它是"水位折叠"的落点，
@@ -1800,10 +1990,28 @@ class Agent:
         2026-09-08 用户拍板：块描述承载完整细节；2026-09-09 修订为信息量
         自适应（低信息量块两三行即可）。轮首保留第一版视图的
         用户意图三行式。无块描述的旧整理轮回退到精修事件索引。
+        2026-09-10 合并显示：连续纯聊天轮合并为组——非组首轮返回
+        None（调用方跳过，不产生视图），组首轮头部显示 [R1-2] 锚点。
         """
-        lines = [f"[R{r['seq']}]"]
+        if r.get("merged_skip"):
+            return None
         ui = r["user_input"]
-        lines.append(f"👤 用户: \"{ui['original']}\"")
+        if r.get("merged_anchor"):
+            anchor = r["merged_anchor"]
+            lines = [f"[{anchor}]"]
+            # 合并组：组内所有轮的用户原文都保留（R1-2 里 R2 的 👤 不能丢）
+            seqs = [r["seq"]]
+            seqs += [
+                rr["seq"] for rr in self.rounds
+                if rr.get("merged_skip") == anchor
+            ]
+            seqs.sort()
+            for seq in seqs:
+                rr = next(x for x in self.rounds if x["seq"] == seq)
+                lines.append(f"👤 用户: \"{rr['user_input']['original']}\"")
+        else:
+            lines = [f"[R{r['seq']}]"]
+            lines.append(f"👤 用户: \"{ui['original']}\"")
         if ui.get("normalized"):
             lines.append(f"🎯 意图: {ui['normalized']}")
         if ui.get("key_constraints"):
@@ -1825,6 +2033,41 @@ class Agent:
             if idx:
                 lines.append("事件索引：")
                 lines += idx
+        return "\n".join(lines)
+
+    def _render_collapsed(self, r: dict, ledger) -> Optional[str]:
+        """早期轮折叠视图（2026-09-10 用户拍板：视图只保留最近 3 批整理）。
+
+        折叠行 = 👤 原文 + 🎯 意图 + 当前仍 LIVE 的文件的块摘要；其余块
+        折叠成一行说明（防止模型误以为该轮只有这些块）。文件状态用装配
+        时的实时 ledger（整理时的状态会过期，新会话文件可能重建/删除）。
+        两级展开：expand_history 轮号 → 视图（summary 档）→ 原文（full 档）。
+        """
+        if r.get("merged_skip"):
+            return None
+        lines = [f"[R{r['seq']}]（折叠）"]
+        ui = r["user_input"]
+        lines.append(f"👤 用户: \"{ui['original']}\"")
+        if ui.get("normalized"):
+            lines.append(f"🎯 意图: {ui['normalized']}")
+        summaries = r.get("block_summaries") or {}
+        # 现场重算 v3 块（不信持久化 v2：旧轮 blocks 是 kind=work，无 file）
+        v3_by_id = {b["id"]: b for b in blocks_module.segment_round_by_file(r)}
+        kept = []
+        for bid, s in summaries.items():
+            b = v3_by_id.get(bid)
+            if b is None or b.get("kind") != "file":
+                continue
+            if ledger.state_of(b.get("file", "")) == "live":
+                kept.append(f"▸ {bid}: {s}")
+        if kept:
+            lines.append("（以下块涉及的文件当前仍存活）")
+            lines += kept
+        folded = len(summaries) - len(kept)
+        if folded > 0:
+            lines.append(
+                f"（其余 {folded} 块已折叠，expand_history 可按轮/块展开）"
+            )
         return "\n".join(lines)
 
     def _round_index_lines(self, r: dict) -> list[str]:
@@ -2019,9 +2262,130 @@ class Agent:
             time.sleep(0.1)
         return self._org_queue.unfinished_tasks == 0
 
+    def _block_map_lines(
+        self, rounds: list[dict]
+    ) -> tuple[dict[int, list[dict]], list[str], list[dict]]:
+        """分块地图（v3 按文件分块 + 标签行，零 LLM），供整理/分裂指令用。
+
+        现场重算——不信轮上持久化的 blocks（181052 等旧会话存的是
+        kind=work 旧结构）；FileLedger 按批内轮序推演，用每轮开始时的
+        版本数判定 创建 vs 重构（与 scripts/file_block_structure.py 的
+        build 同流程，标签行即分辨率指令）。
+
+        连续纯聊天轮（单保底块且无工具）合并为一组（2026-09-10 用户
+        拍板：组内只输出一个结果）：地图显示 R1-2（2 轮·纯聊天合并），
+        合成块 ID R1-2-B1；merged_groups 携带组信息，供 _stage_org_state
+        落地时广播到组内每轮。
+        """
+        ledger = lifecycle_module.FileLedger()
+        round_blocks: dict[int, list[dict]] = {}
+        merged_groups: list[dict] = []
+        map_lines: list[str] = []
+        i = 0
+        n = len(rounds)
+        while i < n:
+            r = rounds[i]
+            blocks = blocks_module.segment_round_by_file(r)
+            round_blocks[r["seq"]] = blocks
+            versions_before = {
+                p: len(e["versions"]) for p, e in ledger.entries().items()
+            }
+            is_chat = (
+                len(blocks) == 1 and blocks[0]["kind"] == "fallback"
+                and not blocks_module.round_has_tool_calls(r)
+            )
+            if not is_chat:
+                if blocks:
+                    orig = (r.get("user_input") or {}).get("original") or ""
+                    sub = [
+                        f"R{r['seq']}（{len(blocks)} 块）· 👤 {_clip_quote(orig)}"
+                    ]
+                    round_tools = blocks_module.round_has_tool_calls(r)
+                    for b in blocks:
+                        if b["kind"] == "file":
+                            state = blocks_module.state_label(
+                                blocks_module.block_end_state(
+                                    ledger.state_of(b["file"]), b
+                                )
+                            )
+                        else:
+                            state = ""
+                        label = blocks_module.label_line(
+                            b, versions_before, state, round_tools
+                        )
+                        extra = ""
+                        if b["kind"] == "user":
+                            # 用户块：附补充输入原话锚点（轮头之后的用户事件）
+                            bevs = set(b.get("events") or [])
+                            texts = [
+                                e["message"].get("content") or ""
+                                for e in r["events"]
+                                if e.get("type") == "user" and e.get("id") in bevs
+                            ]
+                            if texts:
+                                extra = f" · 👤 {_clip_quote('；'.join(texts))}"
+                        sub.append(
+                            f"  {b['id']} {label}{extra}"
+                            f"（{b['start_event']}~{b['end_event']}）"
+                        )
+                    map_lines.append("\n".join(sub))
+                else:
+                    map_lines.append(
+                        f"R{r['seq']}：无分块结构（改用 refined_index 事件摘要）"
+                    )
+                ledger.update(r, blocks=blocks)
+                i += 1
+                continue
+            # 连续纯聊天轮 → 合并组（组内只输出一个结果）
+            group = [r]
+            j = i + 1
+            while j < n:
+                rj = rounds[j]
+                bj = blocks_module.segment_round_by_file(rj)
+                if (
+                    len(bj) == 1 and bj[0]["kind"] == "fallback"
+                    and not blocks_module.round_has_tool_calls(rj)
+                ):
+                    group.append(rj)
+                    j += 1
+                else:
+                    break
+            first_seq, last_seq = group[0]["seq"], group[-1]["seq"]
+            anchor = (
+                f"R{first_seq}" if first_seq == last_seq
+                else f"R{first_seq}-{last_seq}"
+            )
+            bid = f"{anchor}-B1"
+            first_ev = group[0]["events"][0].get("id") or ""
+            last_ev = group[-1]["events"][-1].get("id") or ""
+            merged_groups.append({
+                "bid": bid,
+                "anchor": anchor,
+                "seqs": [g["seq"] for g in group],
+                "first_seq": first_seq,
+            })
+            sub = [f"{anchor}（{len(group)} 轮·纯聊天合并）"]
+            for g in group:
+                go = (g.get("user_input") or {}).get("original") or ""
+                sub.append(f"  👤 {_clip_quote(go)}")
+            sub.append(f"  {bid} 【保底块】：（{first_ev}~{last_ev}）")
+            map_lines.append("\n".join(sub))
+            for g in group:
+                round_blocks[g["seq"]] = [{
+                    "id": bid,
+                    "kind": "fallback",
+                    "start_event": first_ev,
+                    "end_event": last_ev,
+                }]
+                ledger.update(
+                    g, blocks=blocks_module.segment_round_by_file(g)
+                )
+            i = j
+        return round_blocks, map_lines, merged_groups
+
     def _organize_rounds(
         self, rounds: list[dict], base_messages: Optional[list[dict]] = None
-    ) -> bool:
+    ) -> tuple:
         """批量整理已闭合的 Round 们（维护管线的工作单元，V3 §4 机制）。
 
         2026-09-08 用户拍板：**整理 = 一次追加式对话**。输入 = 触发时刻
@@ -2035,21 +2399,12 @@ class Agent:
         唯一事实源），**全部写入 pending_org 暂存区**：本轮装配必须纹丝
         不动（连贯性 + 缓存前缀稳定），下一轮开启时由 _promote_org_results
         生效。产物对应不上批次轮（seq 缺失等畸形，GLM 实测会整字段省略）
-        时纠偏重试一次，仍零匹配则整批 org_state=failed 回入水位，原始层
-        永远不受影响。返回是否成功。
+        时整批 org_state=failed 回入水位，原始层永远不受影响——**不重试**
+        （2026-09-10 用户拍板：重试只是再付一遍完整生成，不能确定解决
+        失败）。返回 (是否成功, 交换记录或 None)——交换记录供分裂阶段
+        纯追加（(messages, content, ordered)）。
         """
-        round_blocks: dict[int, list[dict]] = {}
-        map_lines: list[str] = []
-        for r in rounds:
-            blocks = r.get("blocks") or blocks_module.segment_round(r)
-            round_blocks[r["seq"]] = blocks
-            if blocks:
-                ranges = " · ".join(
-                    f"{b['id']}={b['start_event']}~{b['end_event']}" for b in blocks
-                )
-                map_lines.append(f"R{r['seq']}（{len(blocks)} 块）：{ranges}")
-            else:
-                map_lines.append(f"R{r['seq']}：无分块结构（改用 refined_index 事件摘要）")
+        round_blocks, map_lines, merged_groups = self._block_map_lines(rounds)
 
         seq_list = "、R".join(str(r["seq"]) for r in rounds)
         ms_lines = self._milestone_map_lines(rounds)
@@ -2057,63 +2412,62 @@ class Agent:
             "[整理指令]\n"
             "以上是本会话的完整上下文。请把其中这些轮次整理成结构化档案："
             f"R{seq_list}。其余轮次不要输出。\n\n"
-            "[分块地图]（块按\"写/改文件为截止\"确定性划分，各块出现顺序与"
-            "上方对话一致；条目格式 = 块ID=起始事件~结束事件）\n"
+            + _ORG_META_INFO.format(seq_list=seq_list)
+            + "\n"
+            "[分块地图]（块由 Runtime 按工作对象确定性划分并打了标签；"
+            "标签 = 写多细、写什么的指令，按标签执行，不需要判断哪些"
+            "内容重要）\n"
             + "\n".join(map_lines)
             + "\n\n"
             + ("\n".join(ms_lines) + "\n\n" if ms_lines else "")
-            + "完成后调用 submit_organization 工具提交结果（唯一出口，不要在"
-            "正文中输出 JSON）。字段语义以工具定义为准；块描述篇幅与块的"
-            "实际信息量成正比——信息量大的块写完整细节，信息量小的块"
-            "（寒暄/一句话问答/零状态轮）两三行即可，不要为低信息量块"
-            "强行堆字数。"
+            + _ORG_TAG_INSTRUCTIONS
+            + "\n完成后调用 submit_organization 工具提交结果（唯一出口，不要"
+            "在正文中输出 JSON）。字段语义以工具定义为准；块 ID 逐字取自"
+            "[分块地图]，每个块一条、一个不落、与地图同序。"
         )
         messages = list(base_messages or self._org_fallback_base(rounds))
         messages.append({"role": "user", "content": instruction})
 
-        # 与工作对话同一 tools 数组：序列化恒定，前缀缓存常骑
+        # org 工具收窄为只留 submit_organization（2026-09-10）：模型会把
+        # 整理指令当普通工作对话乱调工具（实测正文说"先重建 HTML 前端"
+        # 然后去调 write_file）——收窄工具集是硬约束，比提示词可靠。
+        # 牺牲 org 路的前缀缓存（维护调用低频，可接受）。
+        org_tools = [
+            s for s in self._schemas
+            if s.get("function", {}).get("name") == "submit_organization"
+        ]
         content, ordered, _usage = self._stream_call(
-            messages, tools=self._schemas, purpose="organization"
+            messages, tools=org_tools, purpose="organization",
         )
         state = self._extract_org_state(content, ordered)
-        staged = self._stage_org_state(state, rounds, round_blocks)
+        staged = self._stage_org_state(
+            state, rounds, round_blocks, merged_groups
+        )
         if staged == 0:
-            retry_content, retry_ordered, _usage = self._stream_call(
-                messages
-                + [
-                    {"role": "assistant", "content": (content or "")[:2000]},
-                    {
-                        "role": "user",
-                        "content": (
-                            "上一份产物无法对应到待整理轮（常见原因：rounds 元素"
-                            "缺少整数 seq）。请重新调用 submit_organization："
-                            "rounds 与待整理轮一一对应，每个元素必须带整数 seq"
-                            "（如 9）；块 ID 逐字取自[分块地图]。"
-                        ),
-                    },
-                ],
-                tools=self._schemas,
-                purpose="organization",
-            )
-            staged = self._stage_org_state(
-                self._extract_org_state(retry_content, retry_ordered),
-                rounds, round_blocks,
-            )
-        if staged == 0:
-            # 两跳都没有可用产物：保持 Runtime 视图（org_state=failed，
-            # 回入水位等下次触发），原始层永远不受影响
+            # 无可用产物：保持 Runtime 视图（org_state=failed，回入水位
+            # 等下次触发），原始层永远不受影响。2026-09-10 用户拍板：
+            # 不重试——重试只是再付一遍完整生成，不能确定解决失败
+            # （实测两次重试同因失败：输出预算/模型行为不因重试改变）。
             for r in rounds:
                 r.pop("pending_org", None)
                 r["org_state"] = "failed"
             self._persist_rounds()
-            return False
+            return False, None
         for r in rounds:
             r["org_state"] = "done"
+        # 代次打标：最近 3 批视图保留，更早的按文件状态折叠（2026-09-10）
+        self._org_generation += 1
+        for r in rounds:
+            r["org_generation"] = self._org_generation
         self._persist_rounds()
-        return True
+        # 交换记录（2026-09-10）：split 阶段纯追加这段对话——org 刚跑完
+        # KV 全热，分裂白得整理产物（12K+），只付自己的指令 ~1.5K
+        exchange = (messages, content or "", ordered or [])
+        return True, exchange
 
     def _stage_org_state(
-        self, state: Optional[dict], rounds: list[dict], round_blocks: dict
+        self, state: Optional[dict], rounds: list[dict], round_blocks: dict,
+        merged_groups: Optional[list[dict]] = None,
     ) -> int:
         """把整理产物写进各轮的 pending_org 暂存区，返回匹配到轮的数量。
 
@@ -2160,9 +2514,11 @@ class Agent:
                 for bid, b in blocks_by_id.items():
                     if bid not in summaries:
                         parts = [f"{b['start_event']}~{b['end_event']}"]
-                        if b["wrote_files"]:
+                        if b["kind"] == "file":
+                            parts.append(b["file"])
+                        elif b.get("wrote_files"):  # 旧 v2 块兼容
                             parts.append("写: " + ", ".join(b["wrote_files"]))
-                        if b["command_types"]:
+                        if b.get("command_types"):
                             parts.append("命令[" + ", ".join(b["command_types"]) + "]")
                         summaries[bid] = "（LLM 未标注，仅路由）" + " · ".join(parts)
                 pending["block_summaries"] = summaries
@@ -2184,6 +2540,31 @@ class Agent:
                 patch["is_done"] = bool(state["is_done"])
             # 批次级补丁挂在批内第一轮上：生效时只应用一次
             rounds[0].setdefault("pending_org", {})["state_patch"] = patch
+        # 合并组广播（2026-09-10 用户拍板）：连续纯聊天轮合并为一个
+        # 结果——组内任一轮拿到合成块描述则全组共享；组首轮标记
+        # merged_anchor（视图显示 [R1-2] 锚点），非组首轮标记
+        # merged_skip（视图跳过，由组首合并显示）
+        for mg in merged_groups or []:
+            text = ""
+            for seq in mg["seqs"]:
+                r = rounds_by_seq.get(seq)
+                po = (r or {}).get("pending_org") or {}
+                s = po.get("block_summaries", {}).get(mg["bid"])
+                if s:
+                    text = s
+                    break
+            if not text:
+                continue  # 组内无人写（LLM 全跳）：保持各自兜底行
+            for seq in mg["seqs"]:
+                r = rounds_by_seq.get(seq)
+                if r is None:
+                    continue
+                po = r.setdefault("pending_org", {})
+                po["block_summaries"] = {mg["bid"]: text}
+                if seq == mg["first_seq"]:
+                    po["merged_anchor"] = mg["anchor"]
+                else:
+                    po["merged_skip"] = mg["anchor"]
         return staged
 
     @staticmethod
@@ -2192,74 +2573,117 @@ class Agent:
         return [e["message"] for r in rounds for e in r["events"]]
 
     def _split_rounds(
-        self, rounds: list[dict], base_messages: Optional[list[dict]]
+        self, rounds: list[dict], exchange: Optional[tuple],
+        base_messages: Optional[list[dict]] = None,
     ) -> bool:
-        """分裂分析路（与整理并行、同一装配快照、同前缀缓存）。
+        """分裂分析（串行维护管线的第二阶段，2026-09-10 用户定稿）。
 
-        产物 = 现状清单（可运行单元：文件域 × 约束 × 目标）+ 块 → 域
-        归属（带生死标注）+ 可分性判断，经常驻工具 submit_domains 提交。
-        判据（2026-09-08 用户拍板）：归属跟现状走——被取代的前史归取代
-        者，防止"旧版本一类、新版本一类"；话题不同永远不构成分裂理由；
-        仅现状出现 ≥2 个互不重叠的活性文件域才算可分。Level 0 只分析
-        不分裂：产物暂存待查，分裂执行是 Level 1 的事。
+        输入 = 整理对话的**纯追加延续**：org 的 messages + assistant(提交
+        调用) + org 产物 + 分裂指令。org 刚跑完 KV 全热——分裂白得完整
+        整理产物（12K+），只付自己的指令 ~1.5K（缓存友好的关键）。
+        判据三步（见 _SPLIT_INSTRUCTIONS）：保底块归属（独立思想归主
+        agent）→ 按功能语义聚合文件域层级（不按路径）→ 找最浅可分层
+        判分裂。硬数据（活性文件清单 + 上限）由 Runtime 注入，LLM 只做
+        语义判断。开思考（用户拍板：不开思考不调工具且质量低）。
+        Level 0 只分析不分裂：产物暂存待查。
         """
-        map_lines = []
-        for r in rounds:
-            blocks = r.get("blocks") or blocks_module.segment_round(r)
-            if blocks:
-                ranges = " · ".join(
-                    f"{b['id']}={b['start_event']}~{b['end_event']}" for b in blocks
-                )
-                map_lines.append(f"R{r['seq']}（{len(blocks)} 块）：{ranges}")
+        if exchange is not None:
+            org_messages, org_content, org_ordered = exchange
+            messages = list(org_messages)
+            if org_ordered:
+                # 工具调用形态（真实路径）：重建提交对话保证结构合法
+                messages.append({
+                    "role": "assistant",
+                    "content": org_content or None,
+                    "tool_calls": [
+                        {
+                            "id": tc.get("id") or f"org_{i}",
+                            "type": "function",
+                            "function": {
+                                "name": tc.get("name") or "submit_organization",
+                                "arguments": tc.get("arguments") or "{}",
+                            },
+                        }
+                        for i, tc in enumerate(org_ordered)
+                    ],
+                })
+                messages.append({
+                    "role": "tool",
+                    "tool_call_id": (org_ordered[0].get("id") if org_ordered
+                                     else "org_0"),
+                    "content": "已收到整理产物。",
+                })
             else:
-                map_lines.append(f"R{r['seq']}：无分块结构（按轮归属）")
+                # 正文 JSON 形态（fallback）：assistant 原文即可
+                messages.append({
+                    "role": "assistant", "content": org_content or "",
+                })
+        else:
+            messages = list(
+                base_messages or self._org_fallback_base(rounds)
+            )
 
+        # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
+        hard_lines, n_live = self._split_hard_data(rounds)
+        round_blocks, map_lines, _merged = self._block_map_lines(rounds)
+        all_ids = {
+            b["id"] for blocks in round_blocks.values() for b in blocks
+        }
         seq_list = "、R".join(str(r["seq"]) for r in rounds)
-        ms_lines = self._milestone_map_lines(rounds)
         instruction = (
             "[分裂分析指令]\n"
-            "以上是本会话的完整上下文。请做**现状归属分析**（不是话题分类），"
-            f"对象为这些轮次：R{seq_list}。\n\n"
-            "[分块地图]（块按\"写/改文件为截止\"确定性划分；条目格式 = "
-            "块ID=起始事件~结束事件）\n"
+            "以上是本会话的完整上下文（含刚完成的整理产物与分块地图）。"
+            f"请做**现状归属分析**（不是话题分类），对象为这些轮次：R{seq_list}。\n\n"
+            "[硬数据]（Runtime 生成，零 LLM）\n"
+            + "\n".join(hard_lines)
+            + f"\n- 活性文件数（分裂单元数上限）：{n_live}\n\n"
+            "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
             + "\n".join(map_lines)
             + "\n\n"
-            + ("\n".join(ms_lines) + "\n\n" if ms_lines else "")
-            + "分析判据：\n"
-            "  1. 先列现状清单：当前可独立运行的关注面（活性文件域 × 约束 ×"
-            " 目标）。被后续重写/取代的早期版本不单独成域，作为取代者域的 "
-            "superseded 前史——防止\"旧版本一类、新版本一类\"；\n"
-            "  2. 把分块地图里的每个块归属到域（block_ids 逐字取自地图）；"
-            "不属于任何域的块（如零状态寒暄）放 unassigned；\n"
-            "  3. 可分性判断：仅当现状清单出现 ≥2 个互不重叠的活性文件域才算"
-            "可分；话题不同永远不构成分裂理由。\n"
-            "完成后调用 submit_domains 工具提交（唯一出口，不要在正文中输出 "
-            "JSON）。字段语义以工具定义为准。"
+            + _SPLIT_INSTRUCTIONS
         )
-        messages = list(base_messages or self._org_fallback_base(rounds))
         messages.append({"role": "user", "content": instruction})
 
+        # 与 org 同策略：只留 submit_domains（收窄工具集是硬约束）
+        # 开思考（不传 thinking disabled）：语义判断需要推理，实测
+        # 不开思考不调工具、质量低（用户拍板）。
+        split_tools = [
+            s for s in self._schemas
+            if s.get("function", {}).get("name") == "submit_domains"
+        ]
         content, ordered, _usage = self._stream_call(
-            messages, tools=self._schemas, purpose="split"
+            messages, tools=split_tools, purpose="split",
         )
         product = self._extract_domains(content, ordered)
         if product is None:
-            retry_content, retry_ordered, _usage = self._stream_call(
-                messages
-                + [
-                    {"role": "assistant", "content": (content or "")[:2000]},
-                    {
-                        "role": "user",
-                        "content": "未收到有效产物。请调用 submit_domains 工具提交现状归属分析（参数即 JSON，不要在正文输出）。",
-                    },
-                ],
-                tools=self._schemas,
-                purpose="split",
-            )
-            product = self._extract_domains(retry_content, retry_ordered)
-        if product is None:
+            # 与 org 同策略：不重试（2026-09-10 用户拍板）
             return False
         domains, unassigned, split = product
+        # 主 agent 兜底（2026-09-10，thoughts 字段收敛后）：没被任何域
+        # 认领的块 = 独立思想/零散块 → Runtime 自动归 unassigned（主
+        # agent 剩余集合）。模型忘了填 unassigned 也不丢块——语义上
+        # "没有域认领"与"归主 agent"等价，不需要模型再声明一次。
+        covered = {
+            b for d in domains if isinstance(d, dict)
+            for b in (d.get("block_ids") or [])
+        }
+        kept = [
+            b for b in ((unassigned or {}).get("block_ids") or [])
+            if b in all_ids
+        ]
+        orphans = sorted(all_ids - covered - set(kept))
+        if orphans:
+            unassigned = {
+                "block_ids": kept + orphans,
+                "reason": (unassigned or {}).get("reason")
+                or "未被任何文件域认领（独立思想/零散块），归主 agent",
+            }
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：{len(orphans)} 块未被域认领，已自动归主 agent "
+                    f"{orphans[:8]}" + ("…" if len(orphans) > 8 else ""),
+                )
         # 暂存到批首轮（与 state_patch 同通道），下一轮开启随 promote 生效
         pending = rounds[0].setdefault("pending_org", {})
         pending["domains"] = domains
@@ -2269,6 +2693,31 @@ class Agent:
             pending["split_assessment"] = split
         self._persist_rounds()
         return True
+
+    def _split_hard_data(self, rounds: list[dict]) -> tuple[list[str], int]:
+        """分裂硬数据（零 LLM）：活性文件清单 + 数量。
+
+        新会话文件状态已变——必须现场重算 ledger（不信持久化状态）。
+        只列 live / read_only（磁盘上存在的），dead 不列（分裂对象是
+        现状，死文件不占域、不占上限）。
+        """
+        ledger = lifecycle_module.FileLedger()
+        for rr in self.rounds:
+            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
+        lines = ["- 活性文件清单（状态 live/read_only，块引用供归属）："]
+        n = 0
+        for path, e in sorted(ledger.entries().items()):
+            if e["state"] == lifecycle_module.STATE_DEAD:
+                continue
+            n += 1
+            refs = " ".join(e.get("block_refs") or [])
+            lines.append(
+                f"  - {path}（{e['state']}；写 {e['write_count']}/"
+                f"读 {e['read_count']}；块: {refs or '无'}）"
+            )
+        if n == 0:
+            lines.append("  （无——当前无任何活性文件，无可分域）")
+        return lines, n
 
     @staticmethod
     def _extract_domains(content: str, ordered: list):
@@ -2289,25 +2738,46 @@ class Agent:
             state = Agent._parse_state_json(content)
         if not isinstance(state, dict) or not state.get("domains"):
             return None
+        domains = Agent._dedupe_domains(state.get("domains") or [])
         return (
-            state.get("domains"),
+            domains,
             state.get("unassigned") or {},
             state.get("split_assessment") or {},
         )
 
+    @staticmethod
+    def _dedupe_domains(domains: list) -> list:
+        """代码层兜底（2026-09-10）：同块跨域重复（模型偶发）按先到先留
+        去重——子上下文拼装时同块出现在两个域会浪费且引起归属歧义。
+        域名单保持原顺序；重复只从后续域移除。"""
+        seen: set = set()
+        for d in domains:
+            if not isinstance(d, dict):
+                continue
+            ids = d.get("block_ids") or []
+            kept = []
+            for bid in ids:
+                if bid in seen:
+                    continue
+                seen.add(bid)
+                kept.append(bid)
+            d["block_ids"] = kept
+        return domains
+
     def _parallel_maintenance(
         self, batch: list[dict], base: list[dict]
     ) -> tuple:
-        """水位维护双路并行：整理 + 分裂分析。
+        """水位维护管线：整理 → 分裂（串行两阶段，2026-09-10 用户定稿）。
 
-        两路共用同一装配快照、各自追加指令（纯追加骑同一份前缀缓存），
-        墙钟 ≈ max(两路)。失败互相独立——一路挂了另一路照常落地；
-        org 路异常时把批次标 failed（内部失败路径自己已标，不重复）。
-        **硬上限 WOVRA_MAINT_TIMEOUT**（F 组实测：325K 大基座上整理调用
-        深度思考细水长流 23 分钟不完成，读超时不触发——token 在流；
-        到点判 failed 解锁管线，冷却后重试。守护线程化保证进程退出
-        不被挂起调用拖住）。启动/结束落账 history，挂起可观测。
-        返回 (org_ok, split_ok)。
+        原并行双路（各自骑 base 快照）改为串行追加：分裂作为整理对话的
+        纯追加延续——org 刚跑完 KV 全热，分裂白得完整整理产物（12K+），
+        只付自己的指令 ~1.5K（实测 org cached=83,968/命中 95%，tools
+        收窄不影响 messages 前缀缓存）。**org 失败则 split 跳过**（分裂
+        依赖整理质量，失败批次不产出）。
+        **硬上限 WOVRA_MAINT_TIMEOUT**：两阶段总预算（F 组实测大基座
+        深度思考 23 分钟不完成，读超时不触发——token 在流；到点判
+        failed 解锁管线）。守护线程化保证进程退出不被挂起调用拖住。
+        启动/结束落账 history，挂起可观测。返回 (org_ok, split_ok)。
         """
         if self.task is not None:
             self.task.record(
@@ -2316,43 +2786,45 @@ class Agent:
                 f"（{len(batch)} 轮，输入快照 {len(base)} 条消息，硬上限 {self._org_maint_timeout:.0f}s）",
             )
         results = {"org": False, "split": False}
-        lane_done = {"org": threading.Event(), "split": threading.Event()}
+        box: dict = {}
 
-        def lane(kind: str, fn) -> None:
+        def run() -> None:
             try:
-                results[kind] = bool(fn())
-            except Exception as error:  # noqa: BLE001——单路失败不拖垮另一路
-                if kind == "org":
-                    for r in batch:
-                        r.pop("pending_org", None)
-                        r["org_state"] = "failed"
+                results["org"], exchange = self._organize_rounds(batch, base)
+                box["exchange"] = exchange
+            except Exception as error:  # noqa: BLE001——失败不拖垮管线
+                for r in batch:
+                    r.pop("pending_org", None)
+                    r["org_state"] = "failed"
+                self._persist_rounds()
                 if self.task is not None:
-                    self.task.record("maintenance", f"{kind} 路失败：{str(error)[:150]}")
-            lane_done[kind].set()
+                    self.task.record(
+                        "maintenance", f"org 阶段失败：{str(error)[:150]}"
+                    )
+                return
+            if not results["org"]:
+                return  # org 失败：split 跳过（依赖整理质量）
+            try:
+                results["split"] = self._split_rounds(
+                    batch, box.get("exchange"), base
+                )
+            except Exception as error:  # noqa: BLE001
+                if self.task is not None:
+                    self.task.record(
+                        "maintenance", f"split 阶段失败：{str(error)[:150]}"
+                    )
 
-        org_thread = threading.Thread(
-            target=lane, args=("org", lambda: self._organize_rounds(batch, base)),
-            name="wovra-maint-org", daemon=True,
+        thread = threading.Thread(
+            target=run, name="wovra-maintenance", daemon=True
         )
-        split_thread = threading.Thread(
-            target=lane, args=("split", lambda: self._split_rounds(batch, base)),
-            name="wovra-maint-split", daemon=True,
-        )
-        org_thread.start()
-        split_thread.start()
-        # 总预算内等两路：先等 org（关键产物），剩余预算给 split；
-        # 超时不强杀——挂起路随守护线程终结或迟到完成（产物仍有效）
-        end = time.monotonic() + self._org_maint_timeout
-        for evt in (lane_done["org"], lane_done["split"]):
-            remaining = end - time.monotonic()
-            if remaining > 0:
-                evt.wait(remaining)
-        timed_out = not (lane_done["org"].is_set() and lane_done["split"].is_set())
+        thread.start()
+        thread.join(self._org_maint_timeout)
+        timed_out = thread.is_alive()
         if self.task is not None:
             self.task.record(
                 "maintenance",
                 f"结束：org={results['org']} split={results['split']}"
-                + ("（超时返回，挂起路随守护线程终结或迟到完成）" if timed_out else ""),
+                + ("（超时返回，挂起阶段随守护线程终结或迟到完成）" if timed_out else ""),
             )
         return results["org"], results["split"]
 
@@ -2381,6 +2853,11 @@ class Agent:
                 r["block_summaries"] = pending["block_summaries"]
             if pending.get("refined_index"):
                 r.setdefault("refined_index", {}).update(pending["refined_index"])
+            # 合并组标记（连续纯聊天轮合并显示）：组首 anchor，非组首 skip
+            if pending.get("merged_anchor"):
+                r["merged_anchor"] = pending["merged_anchor"]
+            if pending.get("merged_skip"):
+                r["merged_skip"] = pending["merged_skip"]
             # 分裂分析产物（Level 0：只分析不分裂，落档待查）
             if pending.get("domains"):
                 r["domains"] = pending["domains"]
@@ -2495,7 +2972,16 @@ class Agent:
                 lines = [f"[R{seq}] 用户：{r['user_input']['original']}"]
                 if r["user_input"].get("normalized"):
                     lines.append(f"意图：{r['user_input']['normalized']}")
-                lines += self._round_index_lines(r)
+                summaries = r.get("block_summaries") or {}
+                if summaries:
+                    # 视图优先（2026-09-10 折叠行的两级展开：行→视图→原文）
+                    lines.append("块视图：")
+                    for bid in sorted(
+                        summaries, key=lambda x: int(x.rsplit("-B", 1)[-1])
+                    ):
+                        lines.append(f"▸ {bid}: {summaries[bid]}")
+                else:
+                    lines += self._round_index_lines(r)
                 return "\n".join(lines)
             parts = [f"[R{seq}] 用户：{r['user_input']['original']}"]
             for e in r["events"]:

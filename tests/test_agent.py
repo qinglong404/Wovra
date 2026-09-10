@@ -915,30 +915,23 @@ def test_expand_history_tolerates_string_ids_and_case(monkeypatch):
     assert "第一轮完整回答内容" in result
 
 
-def test_organization_retries_after_invalid_json(monkeypatch, tmp_path):
-    """整理输出非法 JSON 时重试一次，重试成功则正常应用。"""
+def test_organization_no_retry_on_invalid_json(monkeypatch, tmp_path):
+    """整理输出非法 JSON 时整批失败，不重试（2026-09-10 用户拍板：
+    重试只是再付一遍完整生成，不能确定解决失败）。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    org_json = json.dumps({
-        "rounds": [{
-            "seq": 1,
-            "normalized_user_input": "澄清的意图",
-            "refined_index": [{"id": "R1-E02", "line": "给出结论"}],
-        }],
-        "state_patch": {"completed": ["完成项"]},
-    }, ensure_ascii=False)
     responses = [
         [_chunk(_delta(content="干完了"))],
-        [_chunk(_delta(content="我觉得应该这样：blahblah"))],  # 第一次：夹带说明文字
-        [_chunk(_delta(content=org_json))],                     # 重试：合法 JSON
+        [_chunk(_delta(content="我觉得应该这样：blahblah"))],  # 非法产物
     ]
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
-    agent._promote_org_results()  # 模拟下一轮开启：暂存产物生效
-    assert task.task_state.get("completed") == ["完成项"]
-    assert task.rounds[-1]["refined_index"]["R1-E02"] == "给出结论"
+    assert len(agent.llm.calls) == 2          # 只有干活 + 整理各一次，无重试
+    assert task.rounds[-1]["org_state"] == "failed"   # 整批失败，回入水位
+    assert task.task_state == {}              # 补丁未应用
+    assert task.rounds[-1]["user_input"]["normalized"] == ""
 
 
 def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
@@ -967,12 +960,13 @@ def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
     agent.run("问")
 
     assert len(agent.llm.calls) == 2
-    # 缓存契约：整理调用的 tools 与工作调用完全一致（序列化恒定）
-    assert agent.llm.calls[0]["tools"] == agent.llm.calls[1]["tools"]
-    assert any(
-        t["function"]["name"] == "submit_organization"
-        for t in agent.llm.calls[1]["tools"]
-    )
+    # 工具契约（2026-09-10 用户拍板）：org 收窄为只留 submit_organization
+    # ——关思考后模型会把整理指令当普通工作对话乱调工具（实测去调
+    # write_file），收窄工具集是硬约束；代价是 org 路前缀缓存不再可骑
+    # （维护调用低频，可接受）
+    assert [t["function"]["name"] for t in agent.llm.calls[1]["tools"]] == [
+        "submit_organization"
+    ]
     agent._promote_org_results()
     assert task.rounds[-1]["user_input"]["key_constraints"] == "禁止 git"
     assert task.rounds[-1]["block_summaries"]["R1-B1"] == "完成某事：细节描述"
@@ -1096,11 +1090,17 @@ def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
 
     agent._maybe_organize_batch()
 
-    # 两路共用同一 tools 数组（缓存契约：序列化恒定）
+    # 工具契约（2026-09-10 用户拍板）：org/split 各自收窄为唯一出口
+    # 工具（submit_organization / submit_domains），不再与工作共用数组
     org_calls = [c for c in agent.llm.calls if c.get("lane") == "org"]
     split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
     assert org_calls and split_calls
-    assert org_calls[0]["tools"] == split_calls[0]["tools"]
+    assert [t["function"]["name"] for t in org_calls[0]["tools"]] == [
+        "submit_organization"
+    ]
+    assert [t["function"]["name"] for t in split_calls[0]["tools"]] == [
+        "submit_domains"
+    ]
     r1 = task.rounds[0]
     assert r1["org_state"] == "done"
     assert r1["pending_org"]["domains"][0]["name"] == "web 演示项目"
@@ -1939,3 +1939,257 @@ def test_ttft_recorded_in_stats_and_usage_line(monkeypatch, tmp_path):
     assert agent.last_stats["ttft_max"] > 0
     line = ui.usage_line(agent.last_stats)
     assert "首字" in line and "合计" in line
+
+
+# ---- 视图分代折叠（2026-09-10 用户拍板：视图只保留最近 3 批整理）------
+
+
+def _mk_file_round(seq: int, user_text: str, paths: list[str]) -> dict:
+    """构造一轮：user + 每路径一个 write_file 调用/结果 + final。"""
+    events = [
+        {"id": f"R{seq}-E01", "type": "user",
+         "message": {"role": "user", "content": user_text}},
+    ]
+    eid = 2
+    for i, path in enumerate(paths):
+        events.append({
+            "id": f"R{seq}-E0{eid}", "type": "tool_call",
+            "message": {"role": "assistant", "content": "",
+                        "tool_calls": [{"id": f"c{seq}-{i}",
+                                        "function": {"name": "write_file",
+                                                     "arguments": json.dumps({"path": path})}}]},
+        })
+        eid += 1
+        events.append({
+            "id": f"R{seq}-E0{eid}", "type": "tool_result",
+            "message": {"role": "tool", "tool_call_id": f"c{seq}-{i}", "content": "ok"},
+        })
+        eid += 1
+    events.append({"id": f"R{seq}-E0{eid}", "type": "final_answer",
+                   "message": {"role": "assistant", "content": "done"}})
+    return {
+        "seq": seq,
+        "user_input": {"original": user_text, "normalized": ""},
+        "events": events,
+        "end_state": "completed",
+    }
+
+
+def test_render_collapsed_keeps_live_blocks_only():
+    """折叠视图：👤+🎯 + 当前仍 LIVE 的块摘要；其余块折叠并注明。"""
+    r1 = _mk_file_round(1, "写两个文件", ["a.txt", "b.txt"])
+    r2 = _mk_file_round(2, "删 b", ["b.txt"])
+    agent = Agent(llm=_StubLLM(), tools=[])
+    agent.rounds = [r1, r2]
+    # 现场重算 v3 块 + ledger 推演（b.txt 被 R2 重写仍 live——改为删）
+    from wovra import blocks as blocks_module
+    from wovra import lifecycle as lifecycle_module
+    ledger = lifecycle_module.FileLedger()
+    # 让 b.txt 变 dead：直接构造 delete 事件太啰嗦，用 ledger 状态注入
+    ledger.update(r1, blocks=blocks_module.segment_round_by_file(r1))
+    # 模拟 b.txt 已死：手工把 ledger 条目改 dead
+    b_entry = ledger.entries().get("b.txt")
+    b_entry["state"] = "dead"
+    r1["block_summaries"] = {
+        "R1-B1": "a.txt 描述",
+        "R1-B2": "b.txt 描述",
+    }
+    r1["user_input"]["normalized"] = "写两个文件"
+    out = agent._render_collapsed(r1, ledger)
+    assert out is not None
+    assert "（折叠）" in out
+    assert "👤 用户:" in out
+    assert "🎯 意图: 写两个文件" in out
+    assert "a.txt 描述" in out          # LIVE 块保留
+    assert "b.txt 描述" not in out      # dead 块折叠
+    assert "其余 1 块已折叠" in out
+
+
+def test_assemble_collapses_oldest_generation():
+    """装配：最近 3 代全量视图，第 1 代折叠（org_generation 判定）。"""
+    rounds = []
+    for seq in range(1, 9):
+        rounds.append(_mk_file_round(seq, f"轮{seq}", [f"f{seq}.txt"]))
+    for i, r in enumerate(rounds):
+        r["org_state"] = "done"
+        r["org_generation"] = i // 2 + 1   # 1,1,2,2,3,3,4,4 → 4 代
+        r["block_summaries"] = {
+            f"R{r['seq']}-B1": f"{r['seq']} 的块描述",
+        }
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.rounds = rounds
+    msgs = agent._assemble_messages_impl()
+    texts = [str(m.get("content") or "") for m in msgs]
+    joined = "\n".join(texts)
+    # 第 1 代（R1-R2）折叠
+    assert "R1]（折叠）" in joined
+    assert "R2]（折叠）" in joined
+    # 第 2-4 代（R3-R8）全量视图（无折叠标记）
+    assert "R3]（折叠）" not in joined
+    assert "R4]（折叠）" not in joined
+    assert "R8]（折叠）" not in joined
+    # 折叠轮的块描述不出现（除了保留的 LIVE 块）；R1 的 f1.txt 全轮 live → 保留
+    assert "1 的块描述" in joined
+
+
+def test_expand_round_summary_shows_block_view():
+    """expand_history summary 档优先显示块视图（折叠行的第一级展开）。"""
+    r1 = _mk_file_round(1, "写文件", ["a.txt"])
+    r1["org_state"] = "done"
+    r1["block_summaries"] = {"R1-B1": "创建 a.txt：测试写入"}
+    r1["user_input"]["normalized"] = "写一个文件"
+    agent = Agent(llm=_StubLLM(), tools=[])
+    agent.rounds = [r1]
+    out = agent.expand_history("R1", level="summary")
+    assert "块视图：" in out
+    assert "R1-B1: 创建 a.txt：测试写入" in out
+    # 第二级：full 档取回原文
+    full = agent.expand_history("R1", level="full")
+    assert "写文件" in full
+
+
+# ---- 分裂串行管线（2026-09-10 用户定稿：整理 → 分裂纯追加）----------
+
+
+def _split_fixture(monkeypatch, tmp_path, org_pool, split_pool):
+    """构造带水位触发的 agent：org 池 / split 池分别给响应。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="目标")
+    task.rounds = [_round(1, "第一轮", "答案")]
+    task.rounds[0]["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM(org_pool, split_responses=split_pool),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    return agent, task
+
+
+_DOMAINS_ARGS = json.dumps({
+    "thoughts": [{"block_id": "R1-B1", "related_domain": "",
+                  "reason": "寒暄，独立思想归主 agent"}],
+    "domains": [{
+        "name": "web 演示",
+        "description": "纯 HTML 演示页，产出可视化灵感",
+        "file_domains": ["index.html"],
+        "block_ids": ["R1-B1"],
+    }],
+    "split_assessment": {"splittable": False, "reason": "单一活性文件域"},
+}, ensure_ascii=False)
+
+
+def _domains_chunk():
+    return _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=_DOMAINS_ARGS),
+    ]))
+
+
+def _org_json():
+    return json.dumps({
+        "rounds": [{"seq": 1, "normalized_user_input": "意图",
+                    "key_constraints": "", "block_summaries": []}],
+        "state_patch": {},
+    }, ensure_ascii=False)
+
+
+def test_split_appends_to_org_conversation(monkeypatch, tmp_path):
+    """分裂输入 = 整理对话的纯追加（缓存友好）：split messages 以 org
+    messages 为前缀 + assistant(提交调用) + tool 结果 + 分裂指令。"""
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        [[_chunk(_delta(content=_org_json()))]], [[_domains_chunk()]],
+    )
+    agent._maybe_organize_batch()
+
+    org_calls = [c for c in agent.llm.calls if c.get("lane") == "org"]
+    split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
+    assert org_calls and split_calls
+    org_msgs = org_calls[0]["messages"]
+    split_msgs = split_calls[0]["messages"]
+    assert len(split_msgs) > len(org_msgs)
+    assert split_msgs[:len(org_msgs)] == org_msgs          # 纯追加：前缀骑缓存
+    appended = split_msgs[len(org_msgs):]
+    if appended[0].get("tool_calls"):
+        assert appended[0]["tool_calls"][0]["function"]["name"] == "submit_organization"
+        assert appended[1]["role"] == "tool"               # 提交结果
+        assert "[分裂分析指令]" in str(appended[2]["content"])  # 分裂指令
+    else:
+        # 正文 JSON fallback：assistant 原文 + 分裂指令
+        assert appended[0]["role"] == "assistant"
+        assert "[分裂分析指令]" in str(appended[1]["content"])
+    # 开思考（不传 thinking disabled）：语义判断需要推理（用户拍板）
+    assert "extra_body" not in split_calls[0] or not split_calls[0].get("extra_body")
+    # 产物：thoughts 与 domains 都落暂存
+    assert task.rounds[0]["pending_org"]["domains"][0]["name"] == "web 演示"
+    assert task.rounds[0]["pending_org"]["split_assessment"]["splittable"] is False
+
+
+def test_split_skipped_when_org_fails(monkeypatch, tmp_path):
+    """org 失败则 split 跳过（分裂依赖整理质量，失败批次不产出）。"""
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path, [], [[_domains_chunk()]],  # org 池空 → 失败
+    )
+    agent._maybe_organize_batch()
+
+    assert task.rounds[0]["org_state"] == "failed"
+    assert not any(c.get("lane") == "split" for c in agent.llm.calls)
+
+
+def test_split_hard_data_lists_live_files(monkeypatch, tmp_path):
+    """硬数据（零 LLM）：活性文件清单 + 数量；dead 文件不占上限。"""
+    agent = Agent(llm=_StubLLM(), tools=[])
+    agent.rounds = [_mk_file_round(1, "写文件", ["a.txt", "b.txt"])]
+    lines, n = agent._split_hard_data(agent.rounds)
+    assert n == 2
+    joined = "\n".join(lines)
+    assert "a.txt" in joined and "b.txt" in joined
+    assert "活性文件数" not in joined  # 数量由调用方拼接
+
+
+def test_dedupe_domains_cross_domain_blocks():
+    """代码层兜底：同一块跨域重复（模型偶发）按先到先留去重。"""
+    domains = [
+        {"name": "域A", "block_ids": ["R7-B1", "R5-B1"], "file_domains": []},
+        {"name": "域B", "block_ids": ["R5-B1", "R9-B1"], "file_domains": []},
+    ]
+    out = Agent._dedupe_domains(domains)
+    assert out[0]["block_ids"] == ["R7-B1", "R5-B1"]
+    assert out[1]["block_ids"] == ["R9-B1"]   # 跨域重复被移除
+    assert len(out) == 2                       # 域本身保留
+
+
+def test_split_orphans_auto_go_to_main_agent(monkeypatch, tmp_path):
+    """主 agent 兜底：没被任何域认领的块自动归 unassigned（不丢块）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "某域", "description": "d", "file_domains": [],
+            "block_ids": ["R1-B1"],
+        }],
+        "split_assessment": {"splittable": False, "reason": "r"},
+    }, ensure_ascii=False)
+    domains_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    org_json = json.dumps({
+        "rounds": [{"seq": 1, "normalized_user_input": "意图",
+                    "key_constraints": "", "block_summaries": []}],
+        "state_patch": {},
+    }, ensure_ascii=False)
+    task = Task.create(goal="目标")
+    task.rounds = [_round(1, "第一轮", "答案")]
+    task.rounds[0]["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=org_json))]],
+                     split_responses=[[domains_chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+    pending = task.rounds[0]["pending_org"]
+    # R1-B1 进了域；没有其它块，无孤儿 → unassigned 不产生
+    assert "R1-B1" in pending["domains"][0]["block_ids"]
+    assert "unassigned" not in pending or not pending.get("unassigned")

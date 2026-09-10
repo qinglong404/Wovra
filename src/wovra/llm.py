@@ -167,6 +167,11 @@ class LLM:
         # WOVRA_READ_TIMEOUT 内被切断，交给上层重试。总时长由 token 流
         # 自然决定，长思考/长输出不受限。
         self._timeout = float(os.environ.get("WOVRA_READ_TIMEOUT", "180"))
+        # 输出上限显式声明（2026-09-10）：不传 max_tokens 时端点默认锁
+        # 4,096——org 全覆盖产物、write_file 大参数都在此截断。官方上限
+        # 384K（393,216 token），直接声明到顶，观察模型实际能用到多少
+        # （诊断用；若实际用不满可后续收窄）。
+        self._max_tokens = int(os.environ.get("WOVRA_MAX_TOKENS", "393216"))
         self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=self._timeout)
 
     def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
@@ -189,6 +194,7 @@ class LLM:
             payload["stream"] = True
         if tools:
             payload["tools"] = tools
+        payload["max_tokens"] = self._max_tokens
         try:
             return self._client.chat.completions.create(**payload, **kwargs)
         except (NotFoundError, AuthenticationError, PermissionDeniedError, APIConnectionError) as error:

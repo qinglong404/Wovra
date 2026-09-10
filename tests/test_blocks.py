@@ -506,3 +506,46 @@ def test_segment_by_file_chat_supplement_merges_into_fallback():
     assert bs[0]["events"] == [
         "R15-E01", "R15-E02", "R15-E03", "R15-E04", "R15-E05",
     ]  # 全部事件（含补充），轮头渲染时并入用户输入
+
+
+def test_symlink_security_messages_classify_correctly():
+    """安全加固后的新返回文案，在块层分类正确（端到端锁）。
+
+    三件事一起验：
+    * 读界外链接被拦 → 越界（不是幽灵）；
+    * 删悬空链接成功 → 正常删除块，**不**打幽灵（文案改动前会误判）；
+    * 普通写入不受影响。
+    """
+    from wovra.blocks import label_line, segment_round_by_file
+
+    def ev(i, etype, msg):
+        return {"id": f"E{i}", "type": etype, "message": msg}
+
+    round_ = {
+        "seq": 1,
+        "round_user_input": "链接边界",
+        "events": [
+            ev(1, "user_input", {"content": "链接边界"}),
+            ev(2, "tool_call", {"tool_calls": [{
+                "id": "c1", "function": {"name": "read_file",
+                                         "arguments": '{"path": "link_escape.md"}'}}]}),
+            ev(3, "tool_result", {"tool_call_id": "c1", "content":
+                "工具执行出错: ValueError('路径越界，只允许访问项目目录内的文件: "
+                "link_escape.md（该路径是指向工作区之外的符号链接；允许的根目录: /tmp/ws）')"}),
+            ev(4, "tool_call", {"tool_calls": [{
+                "id": "c2", "function": {"name": "delete_file",
+                                         "arguments": '{"path": "dangling.txt"}'}}]}),
+            ev(5, "tool_result", {"tool_call_id": "c2", "content":
+                "已删除符号链接 dangling.txt → /tmp/x（该链接原本已失效）"}),
+            ev(6, "tool_call", {"tool_calls": [{
+                "id": "c3", "function": {"name": "write_file",
+                                         "arguments": '{"path": "real.py", "content": "x=1"}'}}]}),
+            ev(7, "tool_result", {"tool_call_id": "c3", "content": "已创建 real.py（3 字符）"}),
+            ev(8, "assistant", {"content": "完成"}),
+        ],
+    }
+    segments = {b.get("file"): b for b in segment_round_by_file(round_) if b.get("file")}
+
+    assert segments["link_escape.md"].get("fail_tags") == ["越界"]
+    assert "fail_tags" not in segments["dangling.txt"], "删悬空链接是成功，不该被标幽灵"
+    assert label_line(segments["dangling.txt"], {}, "live").startswith("【dangling.txt(live)】")
