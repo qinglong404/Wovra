@@ -54,16 +54,22 @@ def block_tag(b: dict, versions_before: dict) -> str:
     return "只读"
 
 
-def block_label(b: dict, versions_before: dict, has_tools: bool) -> str:
-    """块标签行（只打标签，不写内容）。"""
+def block_label(b: dict, versions_before: dict, has_tools: bool,
+                file_count: int) -> str:
+    """块标签行（只打标签，不写内容）。
+
+    工具标签规则（用户规格 2026-09-09）：
+      * 本轮只有 1 个文件块 → 工具调用确定服务该文件，打「工具」；
+      * 本轮多个文件块 → 不确定归属哪个，打「工具?」；
+      * 保底块（无文件交互）调用工具了 → 打「工具」。
+    """
     if b["kind"] == "fallback":
-        return "【保底块】："
+        return "【保底块】：" + ("工具" if has_tools else "")
     if b["kind"] == "environment":
         return "【环境块】："
     label = f"【{b['file']}】：{block_tag(b, versions_before)}"
     if has_tools:
-        # 工具? = 本轮有工具类调用，该文件块的吸收事件里可能有工具调用
-        label += "，工具?"
+        label += "，工具" if file_count == 1 else "，工具?"
     return label
 
 
@@ -78,9 +84,10 @@ def build(task_id: str) -> str:
         bs = blocks.segment_round_by_file(r)
         ledger.update(r, blocks=bs)
         has_tools = round_has_tool_calls(r)
+        file_count = sum(1 for b in bs if b["kind"] == "file")
         lines.append(f"R{seq}：")
         lines.append("\n\n".join(
-            block_label(b, versions_before, has_tools) for b in bs
+            block_label(b, versions_before, has_tools, file_count) for b in bs
         ))
         lines.append("")
     return "\n".join(lines)
