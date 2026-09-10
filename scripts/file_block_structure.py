@@ -147,7 +147,7 @@ def build(task_id: str) -> str:
             chat_run.append(seq)
             continue
         if chat_run:
-            lines.append(f"{_fmt_anchor_run(chat_run)}：无有效助手结论")
+            lines.append(f"{_fmt_anchor_run(chat_run)}：无法定夺")
             lines.append("")
             chat_run = []
         lines.append(f"R{seq}：")
@@ -158,7 +158,7 @@ def build(task_id: str) -> str:
         ))
         lines.append("")
     if chat_run:
-        lines.append(f"{_fmt_anchor_run(chat_run)}：无有效助手结论")
+        lines.append(f"{_fmt_anchor_run(chat_run)}：无法定夺")
         lines.append("")
     return "\n".join(lines)
 
