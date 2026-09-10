@@ -444,3 +444,48 @@ def test_segment_by_file_block_level_tools():
     b = [b for b in bs if b.get("file") == "b.js"][0]
     assert a.get("has_tools") is True   # pytest 吸收进 a.js 块
     assert not b.get("has_tools")       # b.js 只写了，没吸收工具
+
+
+def test_segment_by_file_verify_vs_research_tools():
+    """工具归属 v2：验证类（test/build/run）吸收进文件块并打「工具」；
+    调研类（file 标签命令 / web_search / list_files）吸收但不打标——
+    文件块的「工具」只代表有验证/执行类工具。"""
+    r = _round(13, [
+        _event(13, 1, "user", content="干活"),
+        _event(13, 2, "tool_call", tool="write_file",
+               args={"path": "a.js", "content": "x"}),
+        _event(13, 3, "tool_result", content="ok"),
+        _event(13, 4, "tool_call", tool="run_command",
+               args={"command": "grep -rn TODO src/"}),   # 调研类
+        _event(13, 5, "tool_result", content="无结果"),
+        _event(13, 6, "tool_call", tool="web_search", args={"query": "x"}),
+        _event(13, 7, "tool_result", content="结果"),
+        _event(13, 8, "tool_call", tool="run_command",
+               args={"command": "pytest -q tests/"}),     # 验证类
+        _event(13, 9, "tool_result", content="1 passed"),
+        _event(13, 10, "final_answer", content="done"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    a = [b for b in bs if b.get("file") == "a.js"][0]
+    assert a.get("has_tools") is True  # pytest 验证类 → 打标
+    # 只保留验证类：grep/web_search 吸收进块但不触发打标（无法单独断言，
+    # 但验证类存在即说明调研类没把它冲掉——事件都在块里）
+    assert all(e in a["events"] for e in
+               ["R13-E04", "R13-E05", "R13-E06", "R13-E07", "R13-E08", "R13-E09"])
+
+
+def test_segment_by_file_research_only_no_tool_tag():
+    """只有调研类工具（无验证类）：文件块不打「工具」。"""
+    r = _round(14, [
+        _event(14, 1, "user", content="看看"),
+        _event(14, 2, "tool_call", tool="write_file",
+               args={"path": "b.js", "content": "y"}),
+        _event(14, 3, "tool_result", content="ok"),
+        _event(14, 4, "tool_call", tool="run_command",
+               args={"command": "ls -la src/"}),          # 调研类
+        _event(14, 5, "tool_result", content="..."),
+        _event(14, 6, "final_answer", content="done"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    b = [b for b in bs if b.get("file") == "b.js"][0]
+    assert not b.get("has_tools")

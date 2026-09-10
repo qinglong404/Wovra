@@ -332,6 +332,13 @@ def _block_kind(name: str, args: dict) -> str:
 _NOT_FOUND_MARKERS = ("不存在", "FileNotFoundError", "No such file")
 _ESCAPE_MARKERS = ("路径越界",)
 
+# 工具归属 v2（2026-09-09 用户拍板）：执行时按工具性质打标签——
+# 验证类（test/build/run 标签命令）验证刚做的文件工作，吸收进最近
+# 文件块并打「工具」；调研类（file 标签命令、web_search/fetch、
+# list_files）与账本类（todo/notify/consult）吸收但不打标——文件块
+# 的「工具」只代表"有验证/执行类工具，结果需融入叙述"。
+_VERIFY_TAGS = ("test", "build", "run")
+
 
 def _op_failure(op: dict, results: dict) -> Optional[str]:
     """读/删操作的结果失败分类：幽灵 / 越界 / None（成功或通用工具出错）。"""
@@ -395,7 +402,7 @@ def segment_round_by_file(r: dict) -> list[dict]:
     user_blocks: list[dict] = []
     cur: Optional[dict] = None
     pending: list[str] = []
-    pending_tool = False  # 挂起事件里含工具调用（并入首块后标记）
+    pending_verify = False  # 挂起事件里含验证类工具（并入首块后标记）
     user_seen = False
     call_owner: dict[str, dict] = {}  # tool_call_id → 归属块
     results: dict[str, str] = {}       # tool_call_id → 结果文本（幽灵判定）
@@ -456,13 +463,16 @@ def segment_round_by_file(r: dict) -> list[dict]:
                     if cur is None:
                         if eid not in pending:
                             pending.append(eid)
-                        pending_tool = True
+                        if name == "run_command" and tag_command(
+                                str(args.get("command") or "")) in _VERIFY_TAGS:
+                            pending_verify = True
                         continue
                     if name == "run_command":
-                        _remember(cur, "command_types",
-                                  tag_command(str(args.get("command") or "")))
-                    if cur["kind"] == "file":
-                        cur["_has_tools"] = True  # 工具事件确定性吸收进本块
+                        tag = tag_command(str(args.get("command") or ""))
+                        _remember(cur, "command_types", tag)
+                        # 验证类才打「工具」；调研/账本类吸收但不打标
+                        if cur["kind"] == "file" and tag in _VERIFY_TAGS:
+                            cur["_has_tools"] = True
                     call_owner[cid] = cur
                     owners[id(cur)] = cur
             for blk in owners.values():
@@ -513,7 +523,7 @@ def segment_round_by_file(r: dict) -> list[dict]:
     if pending:
         first = min(merged, key=lambda b: b["_first"])
         first["_evs"] = pending + first["_evs"]
-        if pending_tool and first["kind"] == "file":
+        if pending_verify and first["kind"] == "file":
             first["_has_tools"] = True
     merged.sort(key=lambda b: b["_first"])
     return [_finalize_fblock(seq, i + 1, b) for i, b in enumerate(merged)]
