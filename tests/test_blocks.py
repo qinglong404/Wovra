@@ -311,7 +311,7 @@ def test_segment_by_file_environment_and_chat_only():
     ])
     bs2 = blocks.segment_round_by_file(r2)
     assert [b["kind"] for b in bs2] == ["fallback"]
-    assert bs2[0]["events"] == ["R5-E02"]  # 用户输入由轮头承载
+    assert bs2[0]["events"] == ["R5-E01", "R5-E02"]  # 纯聊天轮保底块含全部事件
 
 
 def test_segment_by_file_delete_op():
@@ -361,7 +361,7 @@ def test_segment_by_file_parallel_batch_dedup():
     ])
     bs = blocks.segment_round_by_file(r)
     assert len(bs) == 1 and bs[0]["kind"] == "fallback"
-    assert bs[0]["events"] == ["R9-E02", "R9-E03", "R9-E04", "R9-E05"]
+    assert bs[0]["events"] == ["R9-E01", "R9-E02", "R9-E03", "R9-E04", "R9-E05"]
 
 
 
@@ -392,4 +392,32 @@ def test_segment_by_file_ghost_and_escape_blocks():
     assert not ok.get("fail_tags")
     boom = [b for b in bs if b.get("file") == "boom.txt"][0]
     assert not boom.get("fail_tags")  # 通用工具出错：不用管，不作分类
+
+
+
+def test_segment_by_file_user_supplement_block():
+    """被打断后补充的用户输入 → 用户块（时间序就位）；首条用户输入仍
+    由轮头承载。"""
+    r = _round(11, [
+        _event(11, 1, "user", content="写个功能"),
+        _event(11, 2, "tool_call", tool="write_file",
+               args={"path": "a.js", "content": "x"}),
+        _event(11, 3, "tool_result", content="ok"),
+        _event(11, 4, "user", content="等等，加个约束：不要用全局变量"),
+        _event(11, 5, "tool_call", tool="edit_file",
+               args={"path": "a.js", "old_text": "x", "new_text": "y"}),
+        _event(11, 6, "tool_result", content="ok"),
+        _event(11, 7, "final_answer", content="done"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    kinds = [b["kind"] for b in bs]
+    # 同一文件聚合为一块（含用户补充前后的两次操作），用户补充独立成块
+    assert kinds == ["file", "user"]
+    assert bs[1]["events"] == ["R11-E04"]
+    a_blocks = [b for b in bs if b.get("file") == "a.js"]
+    assert len(a_blocks) == 1
+    assert a_blocks[0]["ops"] == [
+        {"e": "R11-E02", "op": "write", "c": "c2"},
+        {"e": "R11-E05", "op": "edit", "c": "c5"},
+    ]
 

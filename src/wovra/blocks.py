@@ -296,9 +296,11 @@ def render_round(r: dict, blocks: Optional[list[dict]] = None) -> str:
 #   * environment 本轮环境命令合并为一块（描述"为什么这样做+结果"）；
 #   * fallback   轮内无任何文件/环境交互时的保底块（整轮一块，助手结论
 #                是描述主体）。
-# 用户输入不进块（轮头 👤/🎯/📌 承载）；非文件非环境工具事件与助手
-# 结论并入"当前活动块"（最近的文件块/环境块）；轮首无活动块时挂起并入
-# 首个块——每个事件恰好归属一个块，块是分裂拼装的最小单位。
+# 首条用户输入不进块（轮头 👤/🎯/📌 承载）；被打断后补充/修正的用户
+# 输入 → 用户块（全量保存）；非文件非环境工具事件与助手结论并入"当前
+# 活动块"（最近的文件块/环境块）；轮首无活动块时挂起并入首个块——
+# 每个事件恰好归属一个块，块是分裂拼装的最小单位。
+# 块顺序 = 块内第一次交互在事件流中的时间顺序。
 # 纯规则、零 LLM；v1 segment_round 退役由格式规格定。
 
 FILE_OP_TOOLS = {
@@ -388,8 +390,10 @@ def segment_round_by_file(r: dict) -> list[dict]:
     seq = r.get("seq", 0)
     file_blocks: dict[str, dict] = {}
     env_block: Optional[dict] = None
+    user_blocks: list[dict] = []
     cur: Optional[dict] = None
     pending: list[str] = []
+    user_seen = False
     call_owner: dict[str, dict] = {}  # tool_call_id → 归属块
     results: dict[str, str] = {}       # tool_call_id → 结果文本（幽灵判定）
 
@@ -414,7 +418,14 @@ def segment_round_by_file(r: dict) -> list[dict]:
         message = event.get("message") or {}
 
         if etype == "user":
-            continue  # 轮头承载，不进块
+            if not user_seen:
+                user_seen = True
+                continue  # 首条用户输入由轮头 👤/🎯/📌 承载
+            # 被打断后补充/修正的用户输入 → 用户块（全量保存，时间序就位）
+            b = _fblock("user", idx)
+            b["_evs"].append(eid)
+            user_blocks.append(b)
+            continue
 
         if etype == "tool_call":
             owners: dict[int, dict] = {}  # 事件只入各归属块一次（并行去重）
@@ -486,13 +497,13 @@ def segment_round_by_file(r: dict) -> list[dict]:
 
     merged = list(file_blocks.values()) + ([env_block] if env_block else [])
     if not merged:
-        # 保底块：整轮一块（无文件/环境交互）；用户输入由轮头承载不进块
+        # 保底块：整轮一块（无文件/环境交互）；用户输入全部包含——
+        # 纯聊天轮的补充内容也是对话事实，整理时可见
         fb = _fblock("fallback", 0)
-        fb["_evs"] = [
-            str(e.get("id") or "") for e in events if e.get("type") != "user"
-        ]
+        fb["_evs"] = [str(e.get("id") or "") for e in events]
         fb["_last"] = max(len(events) - 1, 0)
         return [_finalize_fblock(seq, 1, fb)]
+    merged += user_blocks
     if pending:
         first = min(merged, key=lambda b: b["_first"])
         first["_evs"] = pending + first["_evs"]

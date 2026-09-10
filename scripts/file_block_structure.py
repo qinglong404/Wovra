@@ -107,6 +107,8 @@ def block_label(b: dict, versions_before: dict, has_tools: bool,
         return "【保底块】：" + ("工具" if has_tools else "")
     if b["kind"] == "environment":
         return "【环境块】："
+    if b["kind"] == "user":
+        return "【用户块】："
     if b.get("fail_tags"):
         # 失败块：幽灵=读文件不存在（从未存在）/ 越界=路径越界被拦
         label = f"【{b['file']}(DEAD)】：{'，'.join(b['fail_tags'])}"
