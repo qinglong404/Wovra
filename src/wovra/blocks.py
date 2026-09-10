@@ -287,3 +287,159 @@ def render_round(r: dict, blocks: Optional[list[dict]] = None) -> str:
                 elif name in WRITE_TOOLS:
                     lines.append(f"        ✎ {name}({args.get('path', '')})")
     return "\n".join(lines)
+
+
+# ---- v2：按文件聚合的块切分（讨论v2 机制，零 LLM） -------------------------
+# 2026-09-09 用户拍板：块的划分从"事件截止"改为"工作对象"——一个文件的
+# 所有交互（读/写/改/删）聚合为一个块，加上 用户 / 环境（命令标签）/
+# 工具 / 助手 块。块是分裂拼装的最小单位：跨轮按文件索引块，快速拼子
+# 视图。纯规则、零 LLM，与 v1 segment_round 并存（v1 退役由格式规格定）。
+
+FILE_OP_TOOLS = {
+    "read_file": "read",
+    "write_file": "write",
+    "edit_file": "edit",
+    "replace_lines": "edit",
+    "delete_file": "delete",
+}
+
+
+def _block_kind(name: str, args: dict) -> str:
+    """tool_call → 归属块类：file / environment / tool（零 LLM）。"""
+    if name in FILE_OP_TOOLS:
+        return "file"
+    if name == "run_command" and tag_command(str(args.get("command") or "")) == "environment":
+        return "environment"
+    return "tool"
+
+
+def _fblock(kind: str, idx: int) -> dict:
+    return {
+        "kind": kind,
+        "_first": idx,
+        "_last": idx,
+        "_evs": [],
+        "file": "",
+        "ops": [],
+        "command_types": [],
+    }
+
+
+def _finalize_fblock(seq: int, bno: int, b: dict) -> dict:
+    """剥私有字段，落成可持久化的 v2 块结构。"""
+    evs = b.pop("_evs")
+    out = {
+        "id": f"R{seq}-B{bno}",
+        "kind": b["kind"],
+        "start": b["_first"],
+        "end": b["_last"],
+        "start_event": evs[0] if evs else "",
+        "end_event": evs[-1] if evs else "",
+        "events": evs,
+    }
+    if b["kind"] == "file":
+        out["file"] = b["file"]
+        out["ops"] = b["ops"]
+    if b["command_types"]:
+        out["command_types"] = b["command_types"]
+    return out
+
+
+def segment_round_by_file(r: dict) -> list[dict]:
+    """按文件聚合一个 Round 的块（纯函数，零 LLM）。
+
+    块类：file（一个文件的所有交互，跨事件聚合）/ user（每条用户输入）/
+    environment（run_command 环境标签，连续段合一块）/ tool（其余非文件
+    工具调用，连续段合一块）/ assistant（最终回答）。文件块带 ops
+    （{e, op} 操作序列，op ∈ read/write/edit/delete），跨轮供生命周期
+    账本与分裂拼装使用。返回块按首事件在轮内的出现顺序排序。
+    """
+    events = r.get("events") or []
+    seq = r.get("seq", 0)
+    file_blocks: dict[str, dict] = {}
+    others: list[dict] = []
+    cur: Optional[dict] = None
+    call_owner: dict[str, dict] = {}  # tool_call_id → 归属块
+
+    def close_cur() -> None:
+        nonlocal cur
+        if cur is not None:
+            if cur["_evs"]:
+                others.append(cur)
+            cur = None
+
+    def open_cur(kind: str, idx: int) -> None:
+        nonlocal cur
+        close_cur()
+        cur = _fblock(kind, idx)
+
+    for idx, event in enumerate(events):
+        etype = event.get("type")
+        eid = str(event.get("id") or "")
+        message = event.get("message") or {}
+
+        if etype == "user":
+            close_cur()
+            b = _fblock("user", idx)
+            b["_evs"].append(eid)
+            others.append(b)
+        elif etype == "tool_call":
+            infos = [_call_info(c) for c in message.get("tool_calls") or []]
+            kinds = [_block_kind(n, a) for n, a in infos]
+            if any(k == "file" for k in kinds):
+                close_cur()
+            elif any(k == "environment" for k in kinds):
+                if cur is None or cur["kind"] != "environment":
+                    open_cur("environment", idx)
+            else:
+                if cur is None or cur["kind"] != "tool":
+                    open_cur("tool", idx)
+            for call in message.get("tool_calls") or []:
+                name, args = _call_info(call)
+                cid = str(call.get("id") or "")
+                if name in FILE_OP_TOOLS:
+                    path = str(args.get("path") or "")
+                    blk = file_blocks.get(path)
+                    if blk is None:
+                        blk = _fblock("file", idx)
+                        blk["file"] = path
+                        file_blocks[path] = blk
+                    blk["ops"].append({"e": eid, "op": FILE_OP_TOOLS[name]})
+                    blk["_evs"].append(eid)
+                    blk["_first"] = min(blk["_first"], idx)
+                    blk["_last"] = max(blk["_last"], idx)
+                    call_owner[cid] = blk
+                else:
+                    if cur is None:  # 理论不可达，安全兜底
+                        open_cur("tool", idx)
+                    if name == "run_command":
+                        _remember(cur, "command_types",
+                                  tag_command(str(args.get("command") or "")))
+                    cur["_evs"].append(eid)
+                    cur["_last"] = max(cur["_last"], idx)
+                    call_owner[cid] = cur
+        elif etype == "tool_result":
+            blk = call_owner.get(str(message.get("tool_call_id") or ""))
+            if blk is None:
+                if cur is None:
+                    open_cur("tool", idx)
+                blk = cur
+            blk["_evs"].append(eid)
+            blk["_last"] = max(blk["_last"], idx)
+        elif etype == "final_answer":
+            close_cur()
+            b = _fblock("assistant", idx)
+            b["_evs"].append(eid)
+            others.append(b)
+        else:
+            # runtime_note 等杂项事件：跟随当前非文件块
+            if cur is not None:
+                cur["_evs"].append(eid)
+                cur["_last"] = max(cur["_last"], idx)
+    close_cur()
+
+    merged = list(file_blocks.values()) + others
+    merged.sort(key=lambda b: b["_first"])
+    return [
+        _finalize_fblock(seq, i + 1, b) for i, b in enumerate(merged)
+    ]

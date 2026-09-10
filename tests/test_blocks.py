@@ -224,3 +224,108 @@ def test_render_round_shows_commands_and_writes():
     assert "[test]" in out
     assert "▸ [test] pytest -q tests/" in out
     assert "✎ edit_file(app.py)" in out
+
+
+# ---- v2：按文件聚合的块切分（讨论v2 机制，零 LLM） -------------------------
+
+
+def test_segment_by_file_basic_layout():
+    """一轮 → 用户/文件/工具/助手块：一个文件的所有交互聚合一块，
+    非文件工具独立成块，最终回答收尾。"""
+    r = _round(7, [
+        _event(7, 1, "user", content="加个黑夜"),
+        _event(7, 2, "tool_call", tool="write_file",
+               args={"path": "world.js", "content": "x" * 100}),
+        _event(7, 3, "tool_result", content="ok"),
+        _event(7, 4, "tool_call", tool="read_file", args={"path": "world.js"}),
+        _event(7, 5, "tool_result", content="line1"),
+        _event(7, 6, "tool_call", tool="edit_file",
+               args={"path": "renderer.js", "old_text": "a", "new_text": "b"}),
+        _event(7, 7, "tool_result", content="ok"),
+        _event(7, 8, "tool_call", tool="run_command",
+               args={"command": "pytest -q tests/"}),
+        _event(7, 9, "tool_result", content="1 passed"),
+        _event(7, 10, "final_answer", content="完成"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    kinds = [(b["kind"], b.get("file", "")) for b in bs]
+    assert kinds == [
+        ("user", ""),
+        ("file", "world.js"),
+        ("file", "renderer.js"),
+        ("tool", ""),
+        ("assistant", ""),
+    ]
+    # 同一文件的读+写聚合在同一块，ops 保留时序
+    world = bs[1]
+    assert world["ops"] == [
+        {"e": "R7-E02", "op": "write"},
+        {"e": "R7-E04", "op": "read"},
+    ]
+    assert world["events"] == ["R7-E02", "R7-E03", "R7-E04", "R7-E05"]
+    # 工具块带命令标签
+    assert bs[3]["command_types"] == ["test"]
+    # 助手块只收最终回答
+    assert bs[4]["events"] == ["R7-E10"]
+
+
+def test_segment_by_file_interleaved_same_file():
+    """同一文件的操作被其他工具隔开：仍聚合为同一文件块。"""
+    r = _round(3, [
+        _event(3, 1, "user", content="修"),
+        _event(3, 2, "tool_call", tool="write_file",
+               args={"path": "a.js", "content": "x"}),
+        _event(3, 3, "tool_result", content="ok"),
+        _event(3, 4, "tool_call", tool="run_command",
+               args={"command": "node a.js"}),
+        _event(3, 5, "tool_result", content="ok"),
+        _event(3, 6, "tool_call", tool="edit_file",
+               args={"path": "a.js", "old_text": "x", "new_text": "y"}),
+        _event(3, 7, "tool_result", content="ok"),
+        _event(3, 8, "final_answer", content="done"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    a_block = [b for b in bs if b.get("file") == "a.js"][0]
+    assert a_block["ops"] == [
+        {"e": "R3-E02", "op": "write"},
+        {"e": "R3-E06", "op": "edit"},
+    ]
+    # 工具块夹在中间独立成块
+    assert ("tool", "") in [(b["kind"], b.get("file", "")) for b in bs]
+
+
+def test_segment_by_file_environment_and_chat_only():
+    """环境命令独立成环境块；纯聊天轮只有用户+助手两块。"""
+    r = _round(4, [
+        _event(4, 1, "user", content="装依赖"),
+        _event(4, 2, "tool_call", tool="run_command",
+               args={"command": "pip install numpy"}),
+        _event(4, 3, "tool_result", content="ok"),
+        _event(4, 4, "final_answer", content="好了"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    assert [(b["kind"], b.get("command_types")) for b in bs] == [
+        ("user", None),
+        ("environment", ["environment"]),
+        ("assistant", None),
+    ]
+    r2 = _round(5, [
+        _event(5, 1, "user", content="你好"),
+        _event(5, 2, "final_answer", content="你好呀"),
+    ])
+    bs2 = blocks.segment_round_by_file(r2)
+    assert [b["kind"] for b in bs2] == ["user", "assistant"]
+
+
+def test_segment_by_file_delete_op():
+    """delete_file 计入文件块的 op 序列。"""
+    r = _round(6, [
+        _event(6, 1, "user", content="删掉旧版"),
+        _event(6, 2, "tool_call", tool="delete_file", args={"path": "old.js"}),
+        _event(6, 3, "tool_result", content="已归档删除"),
+        _event(6, 4, "final_answer", content="删了"),
+    ])
+    bs = blocks.segment_round_by_file(r)
+    old = [b for b in bs if b.get("file") == "old.js"][0]
+    assert old["kind"] == "file"
+    assert old["ops"] == [{"e": "R6-E02", "op": "delete"}]
