@@ -96,9 +96,13 @@ def _launch_background(command: str, keep_alive: bool) -> tuple[str, subprocess.
     log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
     env = dict(os.environ, PYTHONUTF8="1")
     with open(log_path, "wb") as log_file:
+        # stdin 接 DEVNULL（同 run_command，见 worklog-20260911.md §5-P2）：
+        # 后台命令不该悬在"用户看不见的确认提示"上等输入——那就成了
+        # 启动即假死、且等待期按键可能被误当授权。
         proc = subprocess.Popen(
             command,
             shell=True,
+            stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
             cwd=safety.PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内

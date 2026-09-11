@@ -109,3 +109,25 @@ def test_stop_session_backgrounds_kills_owned_but_spares_keep_alive(monkeypatch)
     tools_module.set_current_session("session-A")
     stop_background(id_resident)
     tools_module.background._BACKGROUND_TASKS.clear()
+
+
+def test_background_child_stdin_is_devnull(monkeypatch):
+    """后台子进程 stdin 同样接 DEVNULL（worklog-20260911.md §5-P2）：
+    后台命令不该悬在用户看不见的确认提示上等输入——那是"启动即假死"，
+    等待期的按键还可能被误当授权。"""
+    import subprocess as _subprocess
+
+    from wovra import tools as tools_module
+
+    captured = {}
+    real_popen = _subprocess.Popen
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(tools_module.background.subprocess, "Popen", spy)
+    out = run_background("echo bg-stdin-probe")
+    assert captured.get("stdin") is _subprocess.DEVNULL
+    stop_background(_re_search_id(out))
+    tools_module.background._BACKGROUND_TASKS.clear()

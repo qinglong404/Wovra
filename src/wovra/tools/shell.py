@@ -106,9 +106,17 @@ def run_command(command: str, timeout: int | None = None) -> str:
     child_env = dict(os.environ, PYTHONUTF8="1")
     started = time.monotonic()
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+        # stdin 显式接 DEVNULL（worklog-20260911.md §5-P2）：子进程继承终端
+        # stdin 时 isatty()=True——命令内部若再触发工具层确认门（例：跑探针
+        # 脚本），会阻塞在用户**看不见**的提示上（输出被重定向到临时文件、
+        # 命令结束才回显），等待期间用户敲的字符还会被那个 input() 吃掉，
+        # 敲到 y 就等于无提示地授权了界外访问。接 DEVNULL 后读 stdin 立即
+        # EOF，确认门走确定的非交互路径（敏感操作自动放行并留审计；
+        # 越界授权安全拒绝）。
         proc = subprocess.Popen(
             command,
             shell=True,
+            stdin=subprocess.DEVNULL,
             stdout=out_f,
             stderr=err_f,
             cwd=safety.PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内

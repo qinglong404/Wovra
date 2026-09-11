@@ -141,3 +141,27 @@ def test_confirm_ctrl_c_interrupts_instead_of_refusing(monkeypatch):
     monkeypatch.setattr(builtins, "input", fake_input)
     with pytest.raises(KeyboardInterrupt):
         _ask_yes_no("确认？")
+
+
+def test_run_command_child_stdin_is_devnull(monkeypatch):
+    """子进程 stdin 必须接 DEVNULL（worklog-20260911.md §5-P2）。
+
+    子进程若继承终端 stdin（isatty=True），命令内部再触发工具层确认门
+    就会阻塞在用户**看不见**的提示上（输出被重定向到临时文件），等待
+    期被读走的按键还可能变成"盲授权"界外访问。
+    """
+    import subprocess as _subprocess
+
+    from wovra import tools as tools_module
+
+    captured = {}
+    real_popen = _subprocess.Popen
+
+    def spy(*args, **kwargs):
+        captured.update(kwargs)
+        return real_popen(*args, **kwargs)
+
+    monkeypatch.setattr(tools_module.shell.subprocess, "Popen", spy)
+    result = run_command("echo stdin-probe")
+    assert "stdin-probe" in result
+    assert captured.get("stdin") is _subprocess.DEVNULL
