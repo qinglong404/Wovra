@@ -416,6 +416,8 @@ def test_verify_milestone_closes_round_and_opens_checkpoint(monkeypatch, tmp_pat
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
     agent._open_or_reuse_round("干活")
     agent.todo(action="start_milestone", goal="大步一", acceptance=["可跑"])
+    agent.todo(action="add_step", text="搭起可运行骨架")
+    agent.todo(action="check_step", text="搭起可运行骨架")
     agent.todo(action="verify_milestone", evidence="测试全绿")
 
     assert len(agent.rounds) == 2
@@ -1147,7 +1149,7 @@ def test_submit_organization_guard_is_noop_in_work_dialog():
 
 
 def test_todo_milestone_lifecycle(monkeypatch, tmp_path):
-    """大步/小步账本：深度恒 1、证据闸门、非阻塞人工验收不搁置。"""
+    """大步/小步账本：深度恒 1、结构闸门、证据闸门、非阻塞人工验收不搁置。"""
     task = Task.create(goal="演示页")
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
 
@@ -1163,9 +1165,19 @@ def test_todo_milestone_lifecycle(monkeypatch, tmp_path):
     # 已有开启中的大步 → 拒绝再开（深度恒 1）
     assert "深度恒 1" in agent.todo(action="start_milestone", goal="另一个")
 
+    # 结构闸门：从未拆过小步 → verify 拒绝（大步是阶段，阶段内必须拆）
+    out = agent.todo(action="verify_milestone", evidence="测试全绿")
+    assert "还没有拆过小步" in out
+    assert task.todo["milestone"]["goal"] == "多会话版"  # 大步仍在开
+
     assert "OK" in agent.todo(action="add_step", text="会话数据结构")
     assert "OK" in agent.todo(action="check_step", text="会话数据结构")
     assert "OK" in agent.todo(action="add_step", text="切换/删除交互")
+
+    # 结构闸门：带未完成小步 → verify 拒绝并列出未完成项
+    out = agent.todo(action="verify_milestone", evidence="测试全绿")
+    assert "未完成小步" in out and "切换/删除交互" in out
+    assert "OK" in agent.todo(action="check_step", text="切换/删除交互")
 
     # 非阻塞人工验收：挂起继续干，verify 时一次性呈交并转 experiments
     out = agent.todo(action="defer_check", text="浅色主题配色是否刺眼（主观，最后统一验收）")
@@ -1183,9 +1195,43 @@ def test_todo_milestone_lifecycle(monkeypatch, tmp_path):
     assert "OK" in out
     assert task.todo["milestone"]["goal"] == "搜索功能"
     assert task.todo["steps"] == []
+    assert task.todo["milestone"]["planned"] is False   # 新大步待拆
 
-    # 证据闸门：无证据 verify 拒绝
+    # 证据闸门：无证据 verify 拒绝（在结构闸门之前判定）
+    agent.todo(action="add_step", text="高亮渲染")
     assert "evidence" in agent.todo(action="verify_milestone")
+
+    # 结构闸门不误伤：小步全部完成后（steps 清空）planned 仍为真 → 可验收
+    agent.todo(action="check_step", text="高亮渲染")
+    agent.todo(action="drop_step", text="高亮渲染")  # 例：该步被并入别处
+    out = agent.todo(action="verify_milestone", evidence="演示通过")
+    assert "大步已验收" in out
+
+
+def test_verify_gate_requires_step_planning(monkeypatch, tmp_path):
+    """结构闸门（2026-09-11 用户拍板）：大步 = 阶段、小步 = 阶段内拆解
+    ——跳过拆解直接验收是普通 todo 的用法，必须被拦。
+
+    E/F 组实测 8 个阶段 0 次 add_step（模型跳过拆解闷头做），闸门即为此设。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent._open_or_reuse_round("干活")
+    agent.todo(action="start_milestone", goal="阶段一", acceptance=["可跑"])
+
+    # 未拆小步：拒绝，且不产生 completed 记录、不闭合轮
+    out = agent.todo(action="verify_milestone", evidence="自测通过")
+    assert "还没有拆过小步" in out
+    assert not any("阶段一" in c for c in task.get_state().completed)
+    assert agent.rounds[-1]["end_state"] == "open"
+
+    # 拆一条即可验收（哪怕就一条——账本要能说明这个阶段做了什么）
+    agent.todo(action="add_step", text="唯一工作项")
+    agent.todo(action="check_step", text="唯一工作项")
+    out = agent.todo(action="verify_milestone", evidence="自测通过")
+    assert "大步已验收" in out
+    assert any("阶段一" in c for c in task.get_state().completed)
 
 
 def test_todo_tail_lines_shown_in_reminder(monkeypatch):
@@ -1200,6 +1246,21 @@ def test_todo_tail_lines_shown_in_reminder(monkeypatch):
     body = "\n".join(m.get("content", "") for m in msgs)
 
     assert "[当前大步] ICP 配准（小步 0/1）" in body
+
+
+def test_todo_tail_nudges_step_planning(monkeypatch):
+    """未拆小步时尾部带待办提醒——把"被拒"变成"可操作"，避免验收才发现。"""
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.todo(action="start_milestone", goal="配准", acceptance=["误差 < 1px"])
+    _make_open_round(agent, 1, "继续")
+
+    body = "\n".join(m.get("content", "") for m in agent._assemble_messages())
+    assert "尚未拆小步" in body
+    # 拆过后提醒消失
+    agent.todo(action="add_step", text="读标定")
+    body2 = "\n".join(m.get("content", "") for m in agent._assemble_messages())
+    assert "尚未拆小步" not in body2
 
 
 def test_start_milestone_acceptance_cap_and_started_seq(monkeypatch, tmp_path):
@@ -1234,8 +1295,12 @@ def test_milestone_map_lines_rounds_to_milestones(monkeypatch, tmp_path):
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
     agent._open_or_reuse_round("起步")
     agent.todo(action="start_milestone", goal="大步甲", acceptance=["可跑"])
+    agent.todo(action="add_step", text="甲-1")
+    agent.todo(action="check_step", text="甲-1")
     agent.todo(action="verify_milestone", evidence="测试全绿")  # 闭合 R1
     agent.todo(action="start_milestone", goal="大步乙", acceptance=["可点"])
+    agent.todo(action="add_step", text="乙-1")
+    agent.todo(action="check_step", text="乙-1")
     agent.todo(action="verify_milestone", evidence="演示通过")  # 闭合 R2
     agent.todo(action="start_milestone", goal="大步丙", acceptance=["好看"])
 
@@ -2031,6 +2096,60 @@ def test_assemble_collapses_oldest_generation():
     assert "R8]（折叠）" not in joined
     # 折叠轮的块描述不出现（除了保留的 LIVE 块）；R1 的 f1.txt 全轮 live → 保留
     assert "1 的块描述" in joined
+
+
+def test_org_generation_restored_from_disk_on_restart():
+    """重启恢复代次计数：不能从 0 重来，否则新批次与旧批次撞号。
+
+    撞号的后果是折叠判定反转——下一批新整理被打上"最老"的号，而十几
+    代前的旧轮因号更大成为"最近三代"，二者身份对调。恢复口径与装配端
+    一致：无 org_generation 的已整理轮视为第 1 代。
+    """
+    task = Task.create(goal="g")
+    rounds = []
+    for seq in range(1, 9):
+        r = _mk_file_round(seq, f"轮{seq}", [f"f{seq}.txt"])
+        r["org_state"] = "done"
+        rounds.append(r)
+    rounds[0]["org_generation"] = 3   # 磁盘上已有 3 代
+    rounds[1]["org_generation"] = 3
+    rounds[2]["org_generation"] = 4
+    task.rounds = rounds
+
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    assert agent._org_generation == 4          # 从磁盘最大值续起
+    # 隔离验证：无字段的 done 轮按第 1 代口径计入
+    only_legacy = Task.create(goal="g2")
+    legacy = _mk_file_round(1, "旧轮", ["a.txt"])
+    legacy["org_state"] = "done"               # 无 org_generation（迁移前数据）
+    only_legacy.rounds = [legacy]
+    agent2 = Agent(llm=_StubLLM(), tools=[], task=only_legacy)
+    assert agent2._org_generation == 1         # 与装配端"旧轮=第 1 代"对齐
+    # 下一批新整理（+1）不会是 1，因此不会被判成最老一代而立即折叠
+    agent2._org_generation += 1
+    assert agent2._org_generation == 2
+
+
+def test_org_generation_counter_continues_across_restart():
+    """跨重启不撞号：重启后新批次代次严格大于磁盘上的所有批次。"""
+    task = Task.create(goal="g")
+    r1 = _mk_file_round(1, "写 a", ["a.txt"])
+    r1["org_state"], r1["org_generation"] = "done", 5
+    r1["block_summaries"] = {"R1-B1": "a.txt 描述"}
+    task.rounds = [r1]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent._org_generation += 1
+    assert agent._org_generation == 6
+    # 折叠窗口按 6 计：keep_min = 4，第 5 代与第 6 代都保留
+    r1["org_generation"] = 5
+    r2 = _mk_file_round(2, "写 b", ["b.txt"])
+    r2["org_state"], r2["org_generation"] = "done", 6
+    r2["block_summaries"] = {"R2-B1": "b.txt 描述"}
+    agent.rounds = [r1, r2]
+    msgs = agent._assemble_messages_impl()
+    joined = "\n".join(str(m.get("content") or "") for m in msgs)
+    assert "R1]（折叠）" not in joined          # 第 5 代在最近 3 代窗口内
+    assert "R2]（折叠）" not in joined
 
 
 def test_expand_round_summary_shows_block_view():

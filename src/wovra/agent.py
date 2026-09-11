@@ -561,9 +561,12 @@ _TODO_SCHEMA: dict = {
         "name": "todo",
         "description": (
             "大步/小步计划账本（深度恒 1：只存当前大步，验收通过后才写"
-            "下一大步）。大步 = 一次可验收的增量（最简单可跑方案 → 验收"
-            "通过 → 下一大步）；小步 = 大步内的工作清单，跨轮持久、"
-            "关大步即清。"
+            "下一大步）。两层是两个维度（不是平铺的一条清单）：大步 = "
+            "阶段——从最小可行起步、逐步增加功能，一次可验收的增量；"
+            "小步 = 阶段内的工作拆解——阶段内直接做仍然复杂，必须先 "
+            "add_step 拆成能逐步完成、逐步自证的工作项再动手，全部完成"
+            "后才能 verify（结构闸门：未拆过小步或带未完成小步的验收"
+            "会被拒绝）。"
         ),
         "parameters": {
             "type": "object",
@@ -594,7 +597,11 @@ _TODO_SCHEMA: dict = {
                 },
                 "text": {
                     "type": "string",
-                    "description": "add/check/drop_step、defer_check 的条目文本",
+                    "description": (
+                        "add/check/drop_step、defer_check 的条目文本。"
+                        "add_step 写阶段内的工作项——开好大步后第一件事"
+                        "就是拆小步（结构闸门：没拆过小步的 verify 会被拒）"
+                    ),
                 },
                 "evidence": {
                     "type": "string",
@@ -754,7 +761,9 @@ class Agent:
         self._org_inflight: set[int] = set()
         # 整理代次（2026-09-10 用户拍板：视图只保留最近 3 批整理，更早的
         # 按文件状态折叠）：每次成功整理 +1，批次轮打 org_generation 落盘；
-        # 旧轮无该字段视为第 1 代（最老，优先折叠）。
+        # 旧轮无该字段视为第 1 代（最老，优先折叠）。计数在本类里就地
+        # 恢复（见 rounds 加载处）——重启后从 0 重来会与磁盘旧批次撞号，
+        # 折叠判定反转（新批次被当最老折叠、旧批次反倒全量）。
         self._org_generation = 0
         # 子任务派发板：每轮刷新的机械状态行（进程/账本/升级计数），
         # 注入装配尾部——主 agent 每轮都"看得见"子任务进展
@@ -778,6 +787,19 @@ class Agent:
 
         self.turn_count = 0
         self.rounds: list[dict] = [dict(r) for r in (task.rounds if task else [])]
+        # 代次计数就地恢复：每次成功整理 +1，重启后必须从磁盘上的最大值
+        # 续起——从 0 重来会与旧批次撞号，折叠判定随即反转（新批次被当
+        # 最老折叠、旧批次反倒全量）。口径与装配端一致：_assemble_messages
+        # 把无 org_generation 的已整理轮视为第 1 代，故恢复时同样按
+        # "done 且无字段 → 1"计入，不能只读字段。
+        self._org_generation = max(
+            (
+                r.get("org_generation")
+                or (1 if r.get("org_state") == "done" else 0)
+                for r in self.rounds
+            ),
+            default=0,
+        )
         self.current_round: Optional[dict] = None
         self.messages: list[dict] = []
         self.system_prompt = system_prompt
@@ -913,6 +935,12 @@ class Agent:
     ) -> str:
         """大步/小步计划账本（深度恒 1 的滚动计划）。
 
+        两层是两个维度（2026-09-11 用户拍板）：大步 = 阶段（最小可行 →
+        逐步增加功能），小步 = 阶段内的工作拆解——阶段内工作直接做仍然
+        复杂，必须拆小步推进。与"平铺 todo（一个任务拆几步）"的本质
+        区别即在此，故 verify 设结构闸门：从未拆过小步、或有未完成小步
+        未交代 → 拒绝（E/F 组实测 8 个阶段 0 次小步，模型会直接跳过）。
+
         人工验收两型（2026-09-08 用户拍板）：阻塞型 = 不验收进行不下去，
         停轮等反馈（开放轮语义，\\c 续跑）；非阻塞型（美观等主观项）=
         defer_check 挂起继续干，大步收尾一次性呈交，未决转 experiments
@@ -950,6 +978,11 @@ class Agent:
                     else len(self.rounds) + 1
                 ),
                 "deferred": [],
+                # 是否拆过小步（结构闸门的判据）：verify 前必须为 True。
+                # 与 steps 是否为空分开——全部完成后 steps 会被清空/删除，
+                # 用 planned 记录"规划过"这一事实，模型 add→drop 全清后
+                # 仍可验收（有据可查），但从未拆过会被拒。
+                "planned": False,
             }
             todo["steps"] = []
         elif action == "add_step":
@@ -959,6 +992,7 @@ class Agent:
                 return "add_step 需要 text。"
             steps.append({"text": text.strip(), "done": False})
             todo["steps"] = steps
+            todo["milestone"]["planned"] = True
         elif action in ("check_step", "drop_step"):
             if not milestone:
                 return "无开启中的大步。"
@@ -992,6 +1026,26 @@ class Agent:
                 return (
                     "verify_milestone 需要 evidence（验收证据：测试输出/人工确认）"
                     "——禁止自述完成。"
+                )
+            # 结构闸门（2026-09-11 用户拍板）：大步 = 阶段、小步 = 阶段内
+            # 的拆解——阶段内的活直接做仍然复杂，必须先拆。E/F 组实测
+            # 8 个阶段 0 次小步：不加门模型会跳过拆解直接闷头做。
+            # 判据用 planned（拆过小步这件事）而非 steps 非空——后者在
+            # 全部完成/作废后为空，会误伤正常验收。
+            if not milestone.get("planned"):
+                return (
+                    "verify 被拒：本大步还没有拆过小步。大步 = 阶段（最小可行"
+                    " → 逐步增加功能），阶段内的工作直接做仍然复杂——先用 "
+                    "add_step 拆成能逐步完成、逐步自证的工作项，全部完成后再"
+                    "验收（账本要能说明这个阶段做了什么，哪怕只有一条）。"
+                )
+            undone = [s["text"] for s in steps if not s["done"]]
+            if undone:
+                listing = "\n".join(f"  [ ] {t}" for t in undone)
+                return (
+                    f"verify 被拒：还有 {len(undone)} 条未完成小步：\n{listing}\n"
+                    "先 check_step 完成它们，或 drop_step 说明为什么不用做了"
+                    "（计划可证伪，废弃留痕），再验收。"
                 )
             entry = f"[大步] {milestone['goal']}（验收：{evidence.strip()}）"
             self.task.apply_state_patch({"completed": [entry]})
@@ -1880,10 +1934,13 @@ class Agent:
         milestone = todo.get("milestone")
         if not milestone:
             return []
-        done_n = sum(1 for s in todo.get("steps") or [] if s["done"])
-        lines = [
-            f"[当前大步] {milestone['goal']}（小步 {done_n}/{len(todo.get('steps') or [])}）"
-        ]
+        steps = todo.get("steps") or []
+        done_n = sum(1 for s in steps if s["done"])
+        lines = [f"[当前大步] {milestone['goal']}（小步 {done_n}/{len(steps)}）"]
+        if not milestone.get("planned"):
+            # 结构闸门是拒绝式反馈，但模型看不到"还没拆"这件事——尾部
+            # 用一行提醒把它变成可操作项，避免 verify 时才发现被拒
+            lines.append("[待办] 本大步尚未拆小步——先 add_step 拆出阶段内工作项")
         deferred = milestone.get("deferred") or []
         if deferred:
             lines.append(f"[挂起人工验收] {len(deferred)} 项，大步收尾一次性呈交")
