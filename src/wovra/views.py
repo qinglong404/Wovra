@@ -18,7 +18,7 @@
 
 ```
 [1] 共享 system 人设        ← 公共部分在头部，分叉点尽量往后
-[2] 重组上下文（本域块全分辨率 + 外域块一行指针 + 域卡）
+[2] 本视图历史（逐轮：命中轮的用户原文 + 用户块 + 本域块一行全分辨率）
 [3] 子 agent 身份与约束      ← 稳定尾
 [4] 运行时信封              ← 绝对尾部（现行纪律，不放中部）
 ```
@@ -27,16 +27,30 @@
 中、身份在后**；各视图之间只共享 system 头（实测 ≈1%），收益在"每个视图各自
 积累长链"，不在跨视图共享。
 
-## 归属规则（机械、确定性、可对账）
+## 重组规则：块作筛子、轮作单位（2026-09-12 用户拍板）
 
-每个块**恰好一个**归宿，按优先级：
+整理产物（块）是唯一的原料，分裂写下的文件域（`file_domains`）是筛子，
+且筛子**只用一次**——重组出上下文之后它就失效，视图此后按正常上下文纯追加
+（增删文件不受限），直到该视图自己水位再达标时重复同一过程。
 
-1. **域显式声明**：块 ID 出现在某域的 `block_ids` 里（模型的跨域/例外声明）；
-2. **文件域命中**：块的文件落在某域 `file_domains` 条目下（精确文件或目录
-   前缀）——**最长前缀优先**（`src/a/b.py` 同时命中 `src/` 与 `src/a/` 时归后者，
-   职责粒度更细的那个说了算）；
-3. **兜底归主 agent**：无归宿的块（纯聊天块、独立思想、无文件块）归主 agent
-   ——对齐"排除性判断不做 / 不丢块"：宁可归错到主 agent，也不让块消失。
+逐轮过一遍，对每个视图：
+
+* 该轮命中**本视图名下**的块 ≥1 → 把该轮完整用户原文（`👤 / 🎯 / 📌`）与该轮
+  的用户块、以及命中的块一行全分辨率描述，按时间序摘进本视图；
+* 该轮一块都没命中 → **整轮不出现**（不留轮号占位、不留涉及文件清单、
+  不留块 ID）；
+* 非本视图的块——描述、摘要、块 ID——在本视图字节里一次都不出现（隔离第一）。
+
+块 → 域 的归属是纯集合判断（文件在不在该域的 `file_domains` 下）：
+
+1. **文件域命中**：块的文件落在某域条目下，**最长前缀优先**（`src/a/b.py`
+   同时命中 `src/` 与 `src/a/` 时归后者）——归属必须确定，一块只进一个视图；
+2. **兜底归主 agent**：无文件的块（环境块、保底块、用户块）归主 agent
+   ——环境块恒定归主 agent（用户口径：它不是任何域的活）；
+   "排除性判断不做 / 不丢块"仍然成立：宁可归到主 agent，也不让块消失。
+
+（模型侧产物里的 `block_ids` 不再作为归属依据——它是 v2 时代的命名式指派，
+与本规则冲突时以文件集合为准。）
 
 `verify_completeness()` 把这个不变量变成可断言的事实（整理/分裂的污染就是
 从"块没有归宿、静默消失"开始的）。
@@ -104,27 +118,27 @@ def ownership(
 ) -> dict[str, str]:
     """块 → 域名 的归属映射（机械、确定性；每个块恰有一个归宿）。
 
-    规则见模块 docstring 的三级优先。返回的映射覆盖 `index` 里**每一个**块
-    ——兜底归主 agent（`MAIN_AGENT_ID`）。
+    纯集合判断（见模块 docstring 的重组规则）：块的 `file` 落在某域
+    `file_domains` 下即归它（最长前缀优先）；无文件的块（环境块、保底块、
+    用户块）恒定归主 agent。返回的映射覆盖 `index` 里**每一个**块——兜底归
+    主 agent（`MAIN_AGENT_ID`），不丢块。
+
+    注意：产物里的 `block_ids` 不参与判据（v2 命名式指派的遗留）；判据只有
+    文件集合本身，这样重组与分裂两边共用同一套口径。
     """
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     entries = _file_domain_entries(domains)
-    explicit: dict[str, str] = {}
-    for d in domains:
-        for bid in d.get("block_ids") or []:
-            explicit.setdefault(str(bid), str(d["name"]))
     out: dict[str, str] = {}
     for bid, item in index.items():
-        name = explicit.get(bid)
-        if name is None:
-            path = str(item["block"].get("file") or "")
-            if path:
-                name = _match_domain(path, entries)
+        path = str(item["block"].get("file") or "")
+        name = _match_domain(path, entries) if path else None
         out[bid] = name or MAIN_AGENT_ID
     return out
 
 
-def slice_state(state, file_domains: Iterable[str]) -> dict[str, list[str]]:
+def slice_state(
+    state, file_domains: Iterable[str], *, exclude: bool = False
+) -> dict[str, list[str]]:
     """按文件域切片状态账本（机械匹配，零 LLM）。
 
     * 全局节（goal/current_status/escalations/experiments）**原样保留**——
@@ -136,6 +150,9 @@ def slice_state(state, file_domains: Iterable[str]) -> dict[str, list[str]]:
     "这条账目提到了我的文件吗"的机械命中。**命中 0 条不是错误**——该域还没
     产生相关决策而已；漏切的风险由"全局节永不分片"兜住（人机协同回路与
     目标永不丢）。
+
+    `exclude=True`：只留**没提到**这些文件的条目——主 agent 视图用（它的
+    file_domains 是所有子域文件的补集；反正已归子域的账目，子域自己看）。
     """
     paths = [str(f).strip().strip("/") for f in (file_domains or []) if str(f).strip()]
     needles = set()
@@ -156,7 +173,7 @@ def slice_state(state, file_domains: Iterable[str]) -> dict[str, list[str]]:
         items = getattr(state, field, None) or []
         kept = [
             str(x) for x in items
-            if any(n and n in str(x) for n in needles)
+            if any(n and n in str(x) for n in needles) != exclude
         ]
         if kept:
             out[field] = kept
@@ -166,12 +183,42 @@ def slice_state(state, file_domains: Iterable[str]) -> dict[str, list[str]]:
 def _terse_block(line_prefix: str, bid: str, item: dict, ledger) -> str:
     """一个块的一行重建（有整理描述用描述，没有则用机械 digest）。"""
     b = item["block"]
-    target = b.get("file") or ", ".join(b.get("wrote_files") or []) or "无文件"
+    kind = str(b.get("kind") or "")
+    if kind == "user":
+        target = "用户补充输入"
+    elif kind == "environment":
+        tags = "、".join(str(t) for t in (b.get("command_types") or []))
+        target = f"环境准备（{tags}）" if tags else "环境准备"
+    else:
+        target = b.get("file") or ", ".join(b.get("wrote_files") or []) or "无文件"
     state = ""
-    if b.get("kind") == "file" and ledger is not None and b.get("file"):
+    if kind == "file" and ledger is not None and b.get("file"):
         state = f"｜{ledger.state_of(b['file'])}"
     body = item["summary"] or blocks_module.block_digest(item["round"], b)
     return f"{line_prefix}{bid}（R{item['seq']}｜{target}{state}）: {body}"
+
+
+def _round_lines(r: dict) -> list[str]:
+    """轮头（轮号 + 用户原文 / 意图 / 关键约束）——与紧凑视图同格式。"""
+    r = r or {}
+    ui = r.get("user_input") or {}
+    anchor = r.get("merged_anchor")
+    lines = [f"[{anchor}]" if anchor else f"[R{r.get('seq')}]"]
+    if ui.get("original"):
+        lines.append(f"👤 用户: \"{ui['original']}\"")
+    if ui.get("normalized"):
+        lines.append(f"🎯 意图: {ui['normalized']}")
+    if ui.get("key_constraints"):
+        lines.append(f"📌 关键约束: {ui['key_constraints']}")
+    return lines
+
+
+def _bnum(bid: str) -> int:
+    """块号（排序键；解析不出来当 0）。"""
+    try:
+        return int(str(bid).rsplit("-B", 1)[-1])
+    except ValueError:
+        return 0
 
 
 def view_for_domain(
@@ -186,9 +233,13 @@ def view_for_domain(
 ) -> dict:
     """派生一个域的视图（纯数据，不装配）。
 
+    重组规则（模块 docstring）：逐轮筛——该轮有本视图名下的块才成一段，
+    段内给「轮头（用户原文/意图/约束）+ 该轮用户块 + 本域块一行描述」；
+    一块都没命中的轮整轮不出现（不留轮号、不留文件名、不留块 ID）。
+
     返回：
-        name / path_id / card（域卡行）/ own（本域块全分辨率行）/
-        pointers（外域块一行指针）/ sharded（账本分片）/ counts / est_tokens
+        name / path_id / card（域卡行）/ history（逐轮渲染文本）/
+        own_ids（本视图含的块 ID）/ sharded（账本分片）/ counts / est_tokens / text
     """
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     node = next((d for d in domains if str(d["name"]) == name), None)
@@ -208,59 +259,55 @@ def view_for_domain(
             if isinstance(s, dict) and s.get("note"):
                 card.append(f"（前史：{s.get('note')}）")
     else:
-        card.append("职责：全局协调与未归属事务（独立思想/零散块）")
+        card.append("职责：全局协调与未归属事务（环境准备、独立思想、零散块）")
 
-    own_sorted: list[tuple[int, int, str]] = []
-    by_owner: dict[str, list[str]] = {}
+    # 逐轮归堆：本域块（hit）与该轮的用户块（users，随命中轮一起进）。
+    per_seq: dict[int, dict] = {}
     for bid, owner in owners.items():
         item = index.get(bid)
         if item is None:
             continue
-        if owner == name:
-            # 排序键显式取 (轮号, 块号)，不用解析渲染后的文本（脆）
-            try:
-                bnum = int(str(bid).rsplit("-B", 1)[-1])
-            except ValueError:
-                bnum = 0
-            own_sorted.append((
-                int(item["seq"] or 0), bnum, _terse_block("▸ ", bid, item, ledger)
-            ))
-        else:
-            by_owner.setdefault(owner, []).append(str(bid))
+        try:
+            seq = int(item["seq"] or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        rec = per_seq.setdefault(seq, {"round": item["round"], "hit": [], "users": []})
+        rec["round"] = item["round"]
+        if str(item["block"].get("kind") or "") == "user":
+            rec["users"].append((str(bid), item))
+        elif owner == name:
+            rec["hit"].append((str(bid), item))
 
-    own_sorted.sort()
-    own = [line for _s, _b, line in own_sorted]
+    history: list[str] = []
+    own_ids: list[str] = []
+    hit_rounds = 0
+    for seq in sorted(per_seq):
+        rec = per_seq[seq]
+        if not rec["hit"]:
+            continue  # 非本视图的轮：整轮不出现
+        hit_rounds += 1
+        lines = _round_lines(rec["round"])
+        for bid, item in sorted(rec["users"], key=lambda x: _bnum(x[0])):
+            lines.append(_terse_block("▸ ", bid, item, ledger))
+            own_ids.append(bid)
+        for bid, item in sorted(rec["hit"], key=lambda x: _bnum(x[0])):
+            lines.append(_terse_block("▸ ", bid, item, ledger))
+            own_ids.append(bid)
+        history.extend(lines)
 
-    # 外域块指针：**按属主域聚合**为一行（块 ID 清单），不是一块一行。
-    # 实测量化（2026-09-11，269 块的真实会话）：一块一行约 250 行 ≈ 9K tok，
-    # 而指针的用途只是"这个事实在别处、要细节就按 ID 展开或问属主"——块 ID
-    # 清单同等地可达 expand_history / view_context，聚合后降到 ~2K tok。
-    # 保底是"不丢指针"：每个外域块 ID 都必须出现在某一行的清单里。
-    pointers: list[str] = []
-    for owner, bids in sorted(by_owner.items()):
-        bids.sort(key=lambda s: (int(s.lstrip("R").split("-B")[0]),
-                                 int(s.rsplit("-B", 1)[-1])))
-        pointers.append(f"· {owner}：{len(bids)} 块——{'、'.join(bids)}")
-
-    # 账本分片：子域按自己的 file_domains 切片；**主 agent 拿全量**——
-    # 它是路由器与默认执行者，需要全局视野（它的体量削减来自"外域块一行
-    # 指针"，不来自账本切分）。子域切片里已含全局节（slice_state 保证）。
+    # 账本：子域按自己的 file_domains 切片；主 agent 拿**不属于任何域**的那
+    # 一份（它的 F 就是"别人的文件"的补集）。全局节两者都拿（slice_state 保证）。
+    entries = _file_domain_entries(domains)
     if state is None:
         sharded = {}
     elif node is None:
-        sharded = {f: list(getattr(state, f, None) or []) for f in GLOBAL_STATE_FIELDS}
-        if state.current_status:
-            sharded["current_status"] = [state.current_status]
-        for f in SHARDED_STATE_FIELDS:
-            items = getattr(state, f, None) or []
-            if items:
-                sharded[f] = list(items)
+        sharded = slice_state(state, [p for p, _n in entries], exclude=True)
     else:
         sharded = slice_state(state, node.get("file_domains") or [])
 
-    text_lines = card + ["", "[本域块]（全分辨率）"] + (own or ["（无）"])
-    if pointers:
-        text_lines += ["", "[外域块]（按属主域聚合的块 ID 清单；细节走 expand_history 取块原文，或 view_context 看对方视图）"] + pointers
+    text_lines = card + ["", "[本视图历史]（命中轮的用户原文 + 本域块）"] + (
+        history or ["（无——本域尚无命中轮）"]
+    )
     if sharded:
         text_lines += ["", "[本域账本]"]
         for field, items in sharded.items():
@@ -275,10 +322,10 @@ def view_for_domain(
         "name": name,
         "path_id": path_id,
         "card": card,
-        "own": own,
-        "pointers": pointers,
+        "history": history,
+        "own_ids": own_ids,
         "sharded": sharded,
-        "counts": {"own": len(own), "pointers": len(pointers), "total": len(index)},
+        "counts": {"own": len(own_ids), "rounds": hit_rounds, "total": len(index)},
         "est_tokens": tokens.estimate(text),
         "text": text,
     }
@@ -336,12 +383,16 @@ def build_views(
 def verify_completeness(
     index: dict[str, dict], owners: dict[str, str], views: dict[str, dict]
 ) -> dict:
-    """块归属完整性对账：每个块恰有一个归宿，且真的落进了某个视图。"""
+    """块归属完整性对账：每个块**至少**落进一个视图（块 ID 保留可取回）。
+
+    口径更新（2026-09-12，块作筛子）：一个块可以出现在多个视图里——用户块
+    随命中轮进每个命中它的视图；因此断言从"恰一处"放宽为"至少一处"，但
+    "彻底消失"仍是红色。
+    """
     missing = sorted(set(index) - set(owners))
     rendered: set[str] = set()
     for v in views.values():
-        for line in v["own"]:
-            rendered.add(line.split("（R", 1)[0].replace("▸ ", "").strip())
+        rendered.update(str(b) for b in (v.get("own_ids") or []))
     dropped = sorted(set(index) - rendered)
     return {
         "total": len(index),
@@ -365,8 +416,8 @@ def human_report(built: dict) -> list[str]:
     for name, v in built["views"].items():
         c = v["counts"]
         lines.append(
-            f"- {v['path_id']}（{name}）：本域 {c['own']} 块、"
-            f"指针 {c['pointers']} 块、约 {v['est_tokens']:,} tok"
+            f"- {v['path_id']}（{name}）：命中 {c['rounds']} 轮、"
+            f"本域 {c['own']} 块、约 {v['est_tokens']:,} tok"
         )
     if not built["completeness"]["ok"]:
         lost = built["completeness"]["missing"] + built["completeness"]["dropped_from_views"]
