@@ -146,6 +146,28 @@ def test_view_blocks_by_round_only_returns_hit_rounds():
     assert hits[1]["own_ids"]
 
 
+def test_view_history_is_append_only_across_rounds(monkeypatch):
+    """前缀纯追加：同一视图连续两轮，前一轮的 [system+历史+身份] 段是
+    后一轮同段的**逐字节前缀**——只有尾部（新命中轮 + 信封 + 当前轮）增长。
+
+    这条是"冻结性"的时间维形态（另一条测的是"别人整理不动我"）：
+    组合起来即"视图字节只在自身水位整理生效时才重写，其余纯追加"。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    task = _task_with_domains([_mk_file_round(1, "写工具层", ["src/wovra/tools/safety.py"])])
+    agent = _agent(task)
+    agent._open_or_reuse_round("继续改 src/wovra/tools/safety.py")
+    agent.current_round["active_view"] = "工具层"
+    first = agent._assemble_messages()[:3]  # system + 历史 + 身份（信封之前）
+
+    agent.close_round()
+    agent._open_or_reuse_round("再改 tools/shell.py")
+    agent.current_round["active_view"] = "工具层"
+    later = agent._assemble_messages()
+    assert later[: len(first)] == first          # 纯追加：旧段逐字节不变
+    assert len(later) > len(first)               # 新轮确实增加了内容
+
+
 def test_route_writes_active_view_on_round_open(monkeypatch):
     """路由在轮开启时刻落一次（唯一切换点），随轮持久化。"""
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
