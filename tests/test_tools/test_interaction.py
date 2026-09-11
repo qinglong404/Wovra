@@ -59,6 +59,56 @@ def test_ask_user_letter_choices_and_multi(monkeypatch):
     assert out == "用户的回答: 我就要 D 这个自定义方案"
 
 
+def test_split_choices_tolerates_newlines_labels_and_list():
+    """choices 分割兼容三形态：| 分隔、换行分隔（deepseek 实测）、
+    list；选项自带 A./B. 编号时去掉前缀。"""
+    from wovra.tools.interaction import _split_choices
+
+    assert _split_choices("是|否|继续") == ["是", "否", "继续"]
+    assert _split_choices("我执行 A\n你执行 B\n先不提交") == [
+        "我执行 A", "你执行 B", "先不提交",
+    ]
+    assert _split_choices("A. 甲\nB. 乙") == ["甲", "乙"]
+    assert _split_choices(["甲", "乙"]) == ["甲", "乙"]
+    assert _split_choices("") == []
+
+
+def test_ask_user_newline_choices_render_letters(monkeypatch):
+    """模型用换行而不是 | 时，选项仍逐条渲染成 A/B/C（不再整段塞进
+    一个 A 选项）。"""
+    import sys
+    from types import SimpleNamespace
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    seen = {}
+
+    def fake_input(prompt=""):
+        seen["prompt"] = prompt
+        return "B"
+
+    monkeypatch.setattr("builtins.input", fake_input)
+    out = tools_module.ask_user("怎么处理", choices="甲\n乙\n丙")
+    assert out == "用户的回答: 乙"
+    assert "A. 甲" in seen["prompt"]
+    assert "B. 乙" in seen["prompt"]
+    assert "C. 丙" in seen["prompt"]
+
+
+def test_ask_user_tolerates_list_choices(monkeypatch):
+    """choices 误传成 list 不再崩（原 AttributeError），按选项处理。"""
+    import sys
+    from types import SimpleNamespace
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda: True))
+    monkeypatch.setattr("builtins.input", lambda prompt="": "A")
+    out = tools_module.ask_user("选一个", choices=["方案甲", "方案乙"])
+    assert out == "用户的回答: 方案甲"
+
+
 def test_hooks_block_and_feedback(monkeypatch, tmp_path):
     """用户钩子：pre 拦截（理由回传模型），post 附反馈——扩展点不进代码。"""
     import json as _json

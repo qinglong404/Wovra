@@ -6,25 +6,66 @@
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
 from . import safety
 
+# 选项自带的 "A." / "B、" 编号前缀（模型实测会传，渲染会叠成 "A. A. xxx"）
+_CHOICE_LABEL_RE = re.compile(r"^[A-Ha-h][.、:：)]\s*")
+
+
+def _split_choices(choices) -> list[str]:
+    """把模型给的 choices 拆成候选项（零 LLM）。
+
+    兼容三种形态：| 分隔（约定格式）、换行分隔（deepseek 实测会传
+    换行而非 |）、list/tuple（绕过 schema 类型时）。选项自带编号时
+    去掉前缀，避免渲染成 "A. A. xxx"。
+    """
+    if isinstance(choices, (list, tuple)):
+        raw = "\n".join(str(c) for c in choices)
+    else:
+        raw = str(choices or "")
+    out: list[str] = []
+    for seg in raw.replace("\r", "\n").split("\n"):
+        for part in seg.split("|"):
+            part = part.strip()
+            if not part:
+                continue
+            out.append(_CHOICE_LABEL_RE.sub("", part))
+    return out
+
+
+def _read_answer(prompt_text: str) -> str:
+    """读一行用户回答：交互终端用 prompt_toolkit——它按显示宽度处理
+    光标，中文/emoji 的退格编辑不错位；裸 input() 走内核行编辑，UTF-8
+    中文按字节删、在部分终端上删除会错位（ask_user 输入框实测）。
+
+    非 TTY / 无 prompt_toolkit / ptk 在伪造 tty 上失败（如测试）都退
+    回 input()。
+    """
+    if not sys.stdin.isatty():
+        return input(prompt_text)
+    try:
+        from prompt_toolkit import prompt as _pt_prompt
+    except Exception:  # noqa: BLE001——缺依赖
+        return input(prompt_text)
+    try:
+        return _pt_prompt(prompt_text)
+    except KeyboardInterrupt:
+        raise
+    except Exception:  # noqa: BLE001——ptk 不可用（如测试伪造 tty）
+        return input(prompt_text)
+
 
 def ask_user(question: str, choices: str = "", multi: bool = False) -> str:
     """就需求或编码细节向用户提问，等待用户在终端输入答案。
 
-    choices 可选：用 | 分隔的候选项（如 "是|否|继续"）——终端渲染成
-    字母选项（A/B/C），用户敲字母即可拍板；multi=True 允许多选
-    （逗号分隔字母，如 A,C）。选项外的自由文本回答始终允许。
-    非交互环境（重定向/管道）自动降级：建议模型基于已有信息继续。
-    等待回答期间置 user_input_pending 标记（不计执行时长，同确认）。
+    choices 用 | 分隔候选项（如 "是|否|继续"），不要用换行或列表。
     """
-    import sys
-
-    options = [c.strip() for c in choices.split("|") if c.strip()] if choices else []
+    options = _split_choices(choices)
     letters = "ABCDEFGH"
     prompt = f"\n[模型提问] {question}"
     if options:
@@ -37,7 +78,7 @@ def ask_user(question: str, choices: str = "", multi: bool = False) -> str:
         return "（非交互环境，无法获取用户输入。请基于已有信息继续，或在最终回答中说明假设。）"
     safety._user_input_pending = True
     try:
-        answer = input(prompt)
+        answer = _read_answer(prompt)
     except EOFError:
         answer = ""
     finally:
