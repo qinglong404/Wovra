@@ -359,6 +359,37 @@ def status(status_value: str, width: int | None = None) -> str:
 # ---- 人机协同报告（组织运行时 V1）：机械渲染，零模型成本 ---------------------
 
 
+def _registry_lines(registry: list | None) -> list[str]:
+    """机械渲染 Agent 注册表（零 LLM）。
+
+    注册表是"分裂产物的下游消费者"最早的一处：域树由分裂分析产出，
+    promote 时翻译成条目（`registry.build_entries`），这里给人看。
+    描述与所有权文件域是路由的依据，必须可见——否则用户无法判断
+    分裂质量（"分出来之后能不能用"）。缩进按路径 ID 的层级。
+    """
+    if not registry:
+        return ["-（无）"]
+    lines: list[str] = []
+    for entry in registry:
+        if not isinstance(entry, dict):
+            continue
+        path_id = str(entry.get("id") or "?")
+        depth = max(0, path_id.count("-"))
+        indent = "  " * depth
+        name = str(entry.get("name") or "")
+        status = str(entry.get("status") or "")
+        lines.append(f"{indent}- {path_id}（{name}｜{status}）")
+        desc = " ".join(str(entry.get("description") or "").split())
+        if desc:
+            cut = desc[:160]
+            lines.append(f"{indent}  描述：{cut}{'…' if len(desc) > 160 else ''}")
+        files = [str(f) for f in (entry.get("file_domains") or [])]
+        if files:
+            shown = "、".join(files[:6]) + ("…" if len(files) > 6 else "")
+            lines.append(f"{indent}  所有权文件域：{shown}")
+    return lines
+
+
 def report_view(task, children: list[dict] | None = None) -> str:
     """人机协同报告：大局默认，细节按事件 ID 剥开（机制四）。
 
@@ -408,6 +439,9 @@ def report_view(task, children: list[dict] | None = None) -> str:
         lines += [f"- {c['id']}（{c['status']}）：{c['goal']}" for c in children]
     else:
         lines.append("-（无）")
+
+    lines += ["", "## Agent 注册表（分裂产物，机制三）"]
+    lines += _registry_lines(task.registry)
     lines += [
         "",
         "> 细节按需剥开：对主 agent 说\"展开 R3-E02\"即可取回任意事件原文；",
@@ -527,6 +561,9 @@ def maint_view(task) -> str:
             un_ids = unassigned.get("block_ids") or []
             if un_ids:
                 lines.append(f"  未归属（归主 agent）：{len(un_ids)} 块")
+
+    lines += ["", "## Agent 注册表（分裂产物，机制三）"]
+    lines += _registry_lines(getattr(task, "registry", None))
 
     lines += ["", "## 维护批次（history 记账）"]
     maint = [h for h in (task.history or []) if h.get("kind") == "maintenance"]

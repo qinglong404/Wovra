@@ -9,6 +9,7 @@ import time
 from typing import Optional
 from .. import blocks as blocks_module
 from .. import lifecycle as lifecycle_module
+from .. import registry as registry_module
 from .. import tokens as tokens
 from .. import truncate as truncate
 from .support import (
@@ -1133,9 +1134,30 @@ class _MaintenanceMixin:
                 r["merged_anchor"] = pending["merged_anchor"]
             if pending.get("merged_skip"):
                 r["merged_skip"] = pending["merged_skip"]
-            # 分裂分析产物（Level 0：只分析不分裂，落档待查）
+            # 分裂分析产物（Level 1：落档 + 落实为注册表条目）
             if pending.get("domains"):
                 r["domains"] = pending["domains"]
+                # 组织层落地点（2026-09-11 用户拍板 A：Level 1 视图分化）：
+                # 域树 → 注册表条目是**机械翻译**（语义归模型、体量归机制）。
+                # 幂等合并：崩溃补做/重启重放只更新既有条目。注册表在此
+                # 才第一次长出主 agent 之外的条目——此前永远只有 A。
+                if self.task is not None:
+                    added, updated = registry_module.merge_into(
+                        self.task.registry, pending["domains"]
+                    )
+                    if added or updated:
+                        detail = []
+                        if added:
+                            detail.append(f"新增 {len(added)}（{'、'.join(added)}）")
+                        if updated:
+                            detail.append(
+                                f"更新 {len(updated)}（{'、'.join(updated)}）"
+                            )
+                        self.task.record(
+                            "maintenance",
+                            "registry：分裂产物落实为注册表条目——"
+                            + "，".join(detail),
+                        )
             if pending.get("unassigned"):
                 r["unassigned"] = pending["unassigned"]
             if pending.get("split_assessment"):

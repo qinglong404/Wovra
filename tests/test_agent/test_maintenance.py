@@ -1157,6 +1157,42 @@ def test_split_appends_to_org_conversation(monkeypatch, tmp_path):
     assert task.rounds[0]["pending_org"]["split_assessment"]["splittable"] is False
 
 
+def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
+    """Level 1 视图分化第一步（2026-09-11 用户拍板 A）：分裂产物生效时
+    机械翻译成注册表条目——此前注册表永远只有主 agent A，域树落档后
+    没有任何下游消费者。
+
+    幂等：同一批产物重复 promote 不重复追加（崩溃补做/重启重放安全）。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_domains_chunk()]],
+    )
+    assert [e["id"] for e in task.registry] == ["A"]   # promote 前只有主 agent
+    agent._maybe_organize_batch()
+    # 产物仍在暂存区——注册表此刻还不该动（原子生效协议）
+    assert [e["id"] for e in task.registry] == ["A"]
+
+    agent._promote_org_results()
+    ids = [e["id"] for e in task.registry]
+    assert ids == ["A", "A-1"]                          # 域树 → 路径 ID
+    entry = task.registry[1]
+    assert entry["name"] == "web 演示"
+    assert entry["description"] == "纯 HTML 演示页，产出可视化灵感"
+    assert entry["file_domains"] == ["index.html"]
+    assert entry["status"] == "dormant"                 # 休眠是默认态
+    # 留痕：注册表变更进 maintenance 账本，可查
+    assert any(
+        "registry：分裂产物落实为注册表条目" in str(h.get("detail"))
+        for h in task.history if h.get("kind") == "maintenance"
+    )
+
+    # 幂等：重复 promote（模拟崩溃补做）不重复追加，条目数不变
+    agent._promote_org_results()
+    assert [e["id"] for e in task.registry] == ["A", "A-1"]
+
+
 def test_split_skipped_when_org_fails(monkeypatch, tmp_path):
     """org 失败则 split 跳过（分裂依赖整理质量，失败批次不产出）。"""
     agent, task = _split_fixture(

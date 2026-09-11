@@ -221,6 +221,37 @@ def test_report_view_renders_four_columns(monkeypatch, tmp_path):
     assert child.id in out
 
 
+def test_report_view_renders_agent_registry(monkeypatch, tmp_path):
+    """人视图能看到 Agent 注册表（分裂产物的下游消费者）——描述与
+    所有权文件域是路由依据，必须可见，否则无法判断分裂质量。"""
+    from wovra import ui
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="演示项目")
+    task.registry = [
+        {"id": "A", "name": "主agent", "description": "全局协调与未归属事务",
+         "file_domains": [], "status": "active", "inbox": []},
+        {"id": "A-1", "name": "工具层", "description": "路径与命令边界加固",
+         "file_domains": ["src/wovra/tools/"], "status": "dormant", "inbox": []},
+        {"id": "A-1-1", "name": "安全探针", "description": "边界拦截力仪器",
+         "file_domains": ["experiments/"], "status": "dormant", "inbox": []},
+    ]
+    task.save()
+
+    out = ui.report_view(task)
+    assert "## Agent 注册表（分裂产物，机制三）" in out
+    assert "A-1（工具层｜dormant）" in out
+    assert "路径与命令边界加固" in out
+    assert "所有权文件域：src/wovra/tools/" in out
+    assert "A-1-1（安全探针｜dormant）" in out         # 子条目渲染出来
+    # 缩进体现路径 ID 的层级（职责路径，非管理树）
+    assert "  - A-1-1" in out
+
+    maint = ui.maint_view(task)
+    assert "## Agent 注册表（分裂产物，机制三）" in maint
+    assert "工具层" in maint
+
+
 def test_report_view_renders_todo(monkeypatch, tmp_path):
     """终端报告里能看到大步/小步——此前只存在于模型上下文。"""
     from wovra import ui

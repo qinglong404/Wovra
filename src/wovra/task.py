@@ -452,12 +452,34 @@ class Task:
         流重算结果恒定），故可无风险随加载进行；活跃会话也因此不必手动
         迁移（旧进程会用内存里的旧数据覆盖回去，只有重启后的新进程能治）。
         """
+        from . import registry as registry_module
         from . import tools as tools_module
         from .blocks import migrate as migrate_module
 
         path = TASKS_ROOT / task_id / "task.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         task = cls(**data)
+        # 注册表回填（2026-09-11，Level 1 视图分化第一步的补网）：注册表
+        # 落实是本日才接上的下游，此前已 promote 的分裂产物不会再触发
+        # promote——不补则历史会话的注册表永远只有主 agent。幂等，故可
+        # 随加载进行（与下方块迁移同一模式）。
+        reg_added, reg_updated = registry_module.backfill(
+            task.registry, task.rounds
+        )
+        if reg_added or reg_updated:
+            task.record(
+                "maintenance",
+                "registry：加载期回填分裂产物——"
+                + "，".join(
+                    s for s in (
+                        f"新增 {len(reg_added)}（{'、'.join(reg_added)}）"
+                        if reg_added else "",
+                        f"更新 {len(reg_updated)}（{'、'.join(reg_updated)}）"
+                        if reg_updated else "",
+                    ) if s
+                ),
+            )
+            task.save()
         changed, report = migrate_module.migrate_rounds(task.rounds)
         if changed:
             seqs = "、".join(f"R{seq}" for seq, _b, _a in report[:12])
