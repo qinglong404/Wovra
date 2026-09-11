@@ -382,3 +382,26 @@ def test_replace_lines_directory_gives_hint(monkeypatch, tmp_path):
     (tmp_path / "adir").mkdir()
     result = replace_lines("adir", 1, 2, "x")
     assert "是目录" in result and "list_files" in result
+
+
+def test_restore_file_directory_gives_hint(monkeypatch, tmp_path):
+    """restore_file 传目录 → 明确提示（不是误导性的"没有历史版本"）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "adir").mkdir()
+    result = restore_file("adir")
+    assert "是目录" in result and "list_files" in result
+
+
+def test_restore_file_missing_keeps_no_history(monkeypatch, tmp_path):
+    """restore_file 传不存在文件 → 仍提示"没有历史版本"。
+
+    已删除文件是合法找回对象（delete_file 删除前归档，restore_file 凭历史
+    版本恢复）——对不存在文件**不能**加目录预检，保持原提示正确。
+    """
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    result = restore_file("no-such.md")
+    assert "没有历史版本" in result and "是目录" not in result

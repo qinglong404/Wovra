@@ -360,6 +360,15 @@ def restore_file(path: str, version: str = "") -> str:
     stale = _stale_error(target)
     if stale:
         return stale
+    # 参数误用预检（2026-09-13 摩擦修复）：目标是目录 → 明确提示而不是落到
+    # "没有历史版本"（误导——目录本不该是 restore 对象）。注意：对**不存在**
+    # 的文件不能加预检——已删除文件是合法的找回对象（delete_file 删除前
+    # 归档，restore_file 凭历史版本恢复），提示"没有历史版本"是正确的。
+    if target.is_dir():
+        return (
+            f"路径是目录（而非文件），restore_file 只回滚文件的历史版本：{path}。"
+            f"要列出该目录内容请用 list_files('{path}')。"
+        )
     slot = _history_slot(target)
     if slot is None:
         return f"{path} 位于工作区之外（授权文件不纳入版本档案），restore_file 仅支持工作区内文件"

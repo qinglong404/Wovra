@@ -16,6 +16,8 @@
 
 **第二轮补充（同日）**：修复完上述五个工具后继续以运行者视角实测变更类工具，发现 `edit_file` / `replace_lines` 同样漏掉——对目录参数在 `read_text` 处抛裸 `IsADirectoryError`（files.py read_text 炸）。`delete_file` 有友好提示，唯独这两个编辑工具没跟上。
 
+**第三轮补充（同日）**：实测回滚链路（restore_file/版本档案），发现 `restore_file` 对**目录参数**返回误导性的"没有历史版本"——目录本不该是 restore 对象，提示成"没有历史版本"会让人误以为"这目录曾有版本后来没了"（与 `read_file`/`edit_file`/`write_file` 已修的"是目录"预检同类）。关键边界：对**不存在文件**必须保持"没有历史版本"——已删除文件是合法找回对象（delete_file 删除前归档，restore_file 凭历史版本恢复），不能加目录预检。
+
 ## 实测复现（修复前）
 
 | 误用 | 修复前行为 | 问题 |
@@ -29,6 +31,7 @@
 | `glob_files('*.py', directory='app.py')` | **静默"无匹配文件"** | 同上 |
 | `edit_file('adir', 'a', 'b')`（目录） | 裸 `IsADirectoryError` | 第二轮发现（read_text 处炸） |
 | `replace_lines('adir', 1, 2, 'x')`（目录） | 裸 `IsADirectoryError` | 第二轮发现 |
+| `restore_file('adir')`（目录） | 误导性"没有历史版本" | 第三轮发现 |
 
 ## 修复内容（src/wovra/tools/files.py）
 
@@ -41,6 +44,7 @@
 - `write_file`：目标是目录 → 提示给完整文件路径或用 `list_files` 查看。
 - `edit_file`（第二轮）：目标是目录 → 提示用 `list_files`/`write_file`，不再在 read_text 处裸炸。
 - `replace_lines`（第二轮）：目标是目录 → 提示用 `list_files`/`write_file`，不再裸炸。
+- `restore_file`（第三轮）：目标是目录 → 明确提示"只回滚文件的历史版本"+ `list_files` 出路；对**不存在文件保持**"没有历史版本"（已删除文件是合法找回对象，不能加预检）。
 
 ## 关键约束：文案保留 lifecycle/blocks 子串判定
 
@@ -53,18 +57,19 @@ _OP_FAIL_MARKERS = ("不存在", "FileNotFoundError", "No such file",
 
 新文案刻意保留 `"不存在"` 与 `"是目录"` 子串——否则 `read_file`/`write_file` 对目录/不存在文件的失败会被误判为成功（幽灵文件分类错误，`test_security_probe.py` 和 `test_safety.py` 专门锁过这条）。实施中确实先写成"目标是一个目录"撞上这个判定，测试失败后改回"路径是目录"。
 
-## 测试（+10）
+## 测试（+12）
 
-- `tests/test_tools/test_files.py`：read_file 目录/不存在、list_files 目录不存在/文件目标、write_file 目录目标、edit_file 目录、replace_lines 目录 → 各断言友好提示 + 出路工具名。
+- `tests/test_tools/test_files.py`：read_file 目录/不存在、list_files 目录不存在/文件目标、write_file 目录目标、edit_file 目录、replace_lines 目录、restore_file 目录 + 不存在保持"没有历史版本" → 各断言友好提示 + 出路工具名。
 - `tests/test_tools/test_search.py`：search_files/glob_files 的 directory 指向文件或不存在 → 断言不再静默"无匹配"，且提示 read_file。
 
 ## 验证
 
-- `tests/test_tools/test_files.py + test_search.py`：36 passed
+- `tests/test_tools/test_files.py + test_search.py`：38 passed
 - `tests/test_blocks.py + test_lifecycle.py`（子串判定回归）：26 passed
-- 全量：**304 passed**（第一轮 302 = 294 + 8；第二轮再 +2 = edit_file/replace_lines 目录预检）
+- 全量：**306 passed**（第一轮 302 = 294 + 8；第二轮 +2；第三轮再 +2 = restore_file 目录预检 + 不存在保持原提示）
 
 ## 提交
 
 - 第一轮 commit `c3b1a34`：read/list/search/glob/write 参数预检。
-- 第二轮 commit：`edit_file/replace_lines 目录参数预检（与 read/write 同约定，裸异常→可行动提示；保留 lifecycle 子串判定）`，已推送 origin/main。
+- 第二轮 commit `42a47a2`：edit_file/replace_lines 目录参数预检。
+- 第三轮 commit：`restore_file 目录参数预检（误导性"没有历史版本"→明确提示；不存在文件保持原提示）`，已推送 origin/main。
