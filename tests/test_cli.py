@@ -245,13 +245,20 @@ def test_session_lock_rejects_live_holder_and_cleans_stale(tmp_path):
 
 
 def test_config_error_exits_with_friendly_message(monkeypatch, capsys):
-    """配置错误由 main 统一打印提示并以非零码退出，不打 traceback。"""
+    """配置错误由 main 统一打印提示并以非零码退出,不打 traceback。"""
+    import importlib
+
     from wovra.llm import LLMConfigError
 
     def fake_cmd(args):
-        raise LLMConfigError("模型配置问题：端点上不存在该模型")
+        raise LLMConfigError("模型配置问题:端点上不存在该模型")
 
-    monkeypatch.setattr("wovra.cli.cmd_chat", fake_cmd)
+    # patch 的是 main 模块里 main() 实际调用的那个 cmd_chat（from-import
+    # 绑定）；用 importlib 取模块对象——包属性 `wovra.cli.main` 被入口
+    # 函数同名遮蔽，点号 patch 串会解析到函数上。
+    monkeypatch.setattr(
+        importlib.import_module("wovra.cli.main"), "cmd_chat", fake_cmd
+    )
     with pytest.raises(SystemExit) as excinfo:
         cli_main(["chat"])
     assert excinfo.value.code == 1
@@ -441,7 +448,7 @@ def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):
     (tmp_path / "AGENTS.md").write_text(
         "测试用 uv run pytest；不要动 .wovra/ 目录", encoding="utf-8"
     )
-    monkeypatch.setattr(cli_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli_module.prompt, "PROJECT_ROOT", tmp_path)
 
     prompt = cli_module._system_prompt("managed")
 
@@ -450,7 +457,7 @@ def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):
 
 
 def test_workspace_instructions_absent_is_silent(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(cli_module.prompt, "PROJECT_ROOT", tmp_path)
     prompt = cli_module._system_prompt("managed")
     assert "[工作区指令]" not in prompt
 
