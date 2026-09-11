@@ -24,6 +24,7 @@ interaction 各模块依赖；它自身不 import 包内其它模块。
 import json
 import os
 import re
+import sys
 from pathlib import Path, PurePosixPath
 
 
@@ -548,15 +549,35 @@ def _confirm_reason(command: str) -> str | None:
     return None
 
 
+NONINTERACTIVE_ENV = "WOVRA_NONINTERACTIVE"
+
+
+def _noninteractive() -> bool:
+    """当前进程是否按**非交互**处理：显式标记优先，其次 stdin.isatty()。
+
+    显式标记（`WOVRA_NONINTERACTIVE=1`）由工具层启动子进程时注入
+    （shell.run_command / background._launch_background）。为什么需要它：
+    **Windows 下 NUL 设备（`DEVNULL`）的 `isatty()` 仍返回 True**（实测，
+    见 docs/worklog-20260911.md §7）——只靠 isatty 判定，子进程内的
+    确认门会落在"打印提示 → input() 读 EOF → 拒绝"的中间态，与 Linux
+    （/dev/null → isatty False → 静默放行）不一致。显式标记让"这是
+    无人值守环境"成为确定事实，跨平台一致。
+    """
+    if (os.environ.get(NONINTERACTIVE_ENV) or "").strip() == "1":
+        return True
+    try:
+        return not sys.stdin.isatty()
+    except (AttributeError, ValueError, OSError):
+        return True  # 无法判定时保守按非交互（宁不阻塞，不静默挂死）
+
+
 def _ask_yes_no(question: str) -> bool:
     """交互环境 y/N 询问（默认拒绝）；非交互环境自动放行并留审计。
 
     等待用户回答期间置 user_input_pending 标记：用户思考多久都行
     （不设超时），但终端看门狗不计这段时间的执行时长。"""
-    import sys
-
     global _user_input_pending
-    if not sys.stdin.isatty():
+    if _noninteractive():
         _audit("[确认] 非交互环境，自动放行")
         return True
     _user_input_pending = True
@@ -622,12 +643,10 @@ def _request_path_authorization(targets: list[str], tool: str) -> bool:
     敏感操作（_ask_yes_no 对脚本自动放行是怕阻塞实验），授权自动放行
     等于静默打开工作区边界。授权成功 → 写入持久化清单并返回 True。
     """
-    import sys
-
     new = [t for t in targets if not is_authorized(t)]
     if not new:
         return True
-    if not sys.stdin.isatty():
+    if _noninteractive():
         _audit(f"[授权] 非交互环境拒绝越界访问: {new}")
         return False
     question = (

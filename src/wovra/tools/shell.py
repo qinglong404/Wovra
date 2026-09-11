@@ -104,6 +104,11 @@ def run_command(command: str, timeout: int | None = None) -> str:
     # 子进程强制 UTF-8 输出：否则中文输出按各自主观编码（gbk/utf-8）
     # 混流，父进程解码必出乱码（实测 py_compile 输出花屏）
     child_env = dict(os.environ, PYTHONUTF8="1")
+    # 子进程显式声明非交互（safety.NONINTERACTIVE_ENV）：本层已给子进程
+    # 接了 DEVNULL，但 Windows 下 NUL 的 isatty() 仍为 True（实测，
+    # worklog-20260911.md §7）——只靠 stdin 判定，子进程内的确认门会落在
+    # "打印提示→读 EOF→拒绝"的中间态。显式标记让它成为确定事实。
+    child_env[safety.NONINTERACTIVE_ENV] = "1"
     started = time.monotonic()
     with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
         # stdin 显式接 DEVNULL（worklog-20260911.md §5-P2）：子进程继承终端

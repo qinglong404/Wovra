@@ -165,3 +165,8 @@ def test_run_command_child_stdin_is_devnull(monkeypatch):
     result = run_command("echo stdin-probe")
     assert "stdin-probe" in result
     assert captured.get("stdin") is _subprocess.DEVNULL
+    # 显式非交互标记（worklog-20260911.md §7-C'）：DEVNULL 在 Windows 上
+    # isatty() 仍为 True，故标记才是确定事实
+    assert captured.get("env", {}).get(
+        tools_module.safety.NONINTERACTIVE_ENV
+    ) == "1"

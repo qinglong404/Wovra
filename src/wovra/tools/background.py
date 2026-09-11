@@ -95,6 +95,8 @@ def _launch_background(command: str, keep_alive: bool) -> tuple[str, subprocess.
     task_id = f"bg-{next(_BACKGROUND_SEQ)}"
     log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
     env = dict(os.environ, PYTHONUTF8="1")
+    # 同 run_command：后台子进程显式声明非交互（worklog-20260911.md §7）
+    env[safety.NONINTERACTIVE_ENV] = "1"
     with open(log_path, "wb") as log_file:
         # stdin 接 DEVNULL（同 run_command，见 worklog-20260911.md §5-P2）：
         # 后台命令不该悬在"用户看不见的确认提示"上等输入——那就成了

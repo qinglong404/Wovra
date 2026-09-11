@@ -129,5 +129,8 @@ def test_background_child_stdin_is_devnull(monkeypatch):
     monkeypatch.setattr(tools_module.background.subprocess, "Popen", spy)
     out = run_background("echo bg-stdin-probe")
     assert captured.get("stdin") is _subprocess.DEVNULL
+    assert captured.get("env", {}).get(
+        tools_module.safety.NONINTERACTIVE_ENV
+    ) == "1"
     stop_background(_re_search_id(out))
     tools_module.background._BACKGROUND_TASKS.clear()

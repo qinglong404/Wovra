@@ -669,3 +669,64 @@ def test_windows_absolute_path_outside_is_blocked(monkeypatch, tmp_path):
     result = run_command(f"cat {outside / 'data.txt'}")
     assert "已拒绝执行" in result
     assert "outside data" not in result
+
+
+def test_noninteractive_marker_wins_over_isatty(monkeypatch):
+    """WOVRA_NONINTERACTIVE=1 优先于 isatty（worklog-20260911.md §7-C'）。
+
+    Windows 下 NUL/DEVNULL 的 isatty() 仍返回 True——只靠 stdin 判定，
+    子进程内的确认门会落在"打印提示 → 读 EOF → 拒绝"的中间态，与
+    Linux（/dev/null → 静默放行）不一致。显式标记让"无人值守"成为
+    确定事实，且绝不读输入（读输入在无人环境下就是挂死）。
+    """
+    import builtins
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))  # 假装在终端
+    monkeypatch.setenv(tools_module.safety.NONINTERACTIVE_ENV, "1")
+    assert tools_module.safety._noninteractive() is True
+
+    def no_input(prompt):
+        raise AssertionError("非交互标记下不应读输入（无人环境会挂死）")
+
+    monkeypatch.setattr(builtins, "input", no_input)
+    assert tools_module.safety._ask_yes_no("确认？") is True
+
+
+def test_noninteractive_marker_tolerates_whitespace(monkeypatch):
+    """标记值容错（实测教训）：cmd 的 `set VAR=1 && …` 会把 `&&` 前的空格
+    并进值里（环境变量实际是 "1 "），严格 `== "1"` 会让整个标记静默失效
+    ——探针就是这么又挂了一次。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setenv(tools_module.safety.NONINTERACTIVE_ENV, "1 ")
+    assert tools_module.safety._noninteractive() is True
+
+
+def test_authorization_denied_under_noninteractive_marker(monkeypatch, tmp_path):
+    """同一标记下越界授权仍走**安全拒绝**——两种门的非交互语义不同：
+    确认门怕阻塞实验（自动放行），授权门怕静默拆墙（拒绝）。"""
+    import builtins
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    target = outside / "data.txt"
+    target.write_text("outside data\n", encoding="utf-8")
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", ws)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.setenv(tools_module.safety.NONINTERACTIVE_ENV, "1")
+    monkeypatch.setattr(builtins, "input", lambda prompt: pytest.fail("不应读输入"))
+
+    assert tools_module.safety._request_path_authorization(
+        [str(target)], "文件工具"
+    ) is False
+    assert not tools_module.safety.is_authorized(str(target))
