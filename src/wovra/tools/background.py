@@ -143,7 +143,13 @@ def check_background(task_id: str) -> str:
     body = new_text.strip() or "（无新输出）"
     # 增量输出默认全量返回（2026-09-11 放开，worklog §25）：原先切末 2000
     # 字符，日志开头被静默丢掉——而"什么时候开始报错的"恰恰在开头。
-    return f"[{task_id}] {status}\n{limits.clip(body, f'bg-{task_id}')}"
+    # 超限时指明**日志原文**（不是副本）：它能被 read_file(pattern=...) 定位，
+    # 也能被 search_files 搜——大日志不必全量加载，但随时可检索、可全取。
+    try:
+        log_ref = entry["log"].relative_to(safety.PROJECT_ROOT).as_posix()
+    except ValueError:
+        log_ref = str(entry["log"])
+    return f"[{task_id}] {status}\n{limits.clip(body, f'bg-{task_id}', source=log_ref)}"
 
 
 def _ownership_error(task_id: str, entry: dict) -> str | None:

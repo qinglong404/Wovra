@@ -127,18 +127,24 @@ def clip(text: str, name: str, limit: int | None = None,
 
 def _overflow_note(text: str, preview_n: int, saved: str | None,
                    source: str | None) -> str:
-    """超限提示：先说原文有多大，再说去哪取，最后给省事的替代做法。"""
+    """超限提示：先说原文有多大，再说去哪取/怎么定位，最后给省事的替代做法。
+
+    2026-09-12 强化（用户口径）：大输出可以不全加载，但必须能**快速定位**
+    到要的那一段，且永远不丢信息。故提示里直接给出定位用法（pattern=）。
+    """
     lines = text.count("\n") + 1
     size = f"原文共 {len(text):,} 字符 / {lines:,} 行"
     if source:
         return (
             f"…（{size}；此处只内联开头 {preview_n:,} 字符。完整内容仍在原文件 "
-            f"{source}，用 read_file 按区间取回。）"
+            f"{source}：用 read_file('{source}', pattern='关键词') 定位，"
+            f"或按 start_line/num_lines 取任意区间。）"
         )
     if saved:
         return (
             f"…（{size}；此处只内联开头 {preview_n:,} 字符。完整内容已落盘 "
-            f"{saved}，用 read_file 分段读取取回，或让命令只输出关键部分。）"
+            f"{saved}：用 read_file('{saved}', pattern='关键词') 定位，"
+            f"或按 start_line/num_lines 取任意区间；也可让命令只输出关键部分。）"
         )
     return (
         f"…（{size}；此处只内联开头 {preview_n:,} 字符。落盘失败，"

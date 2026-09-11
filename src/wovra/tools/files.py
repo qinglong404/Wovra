@@ -44,6 +44,9 @@ _READ_MAX_LINES = 20_000
 _SEARCH_MAX_MATCHES = 200
 _GLOB_MAX_FILES = 1_000
 
+# 搜索时单文件大小上限（原 1MB；2026-09-12 放宽，见 search_files 内注释）
+_SEARCH_MAX_BYTES = 8_000_000
+
 
 def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
     """安全遍历 root 下匹配 glob 的文件——逐项校验，越界即跳过。
@@ -74,6 +77,13 @@ def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
     except OSError:
         boundary = root_resolved
     seen: set[Path] = set()
+    # 噪声目录的判定基准是**起点**而不是工作区根（2026-09-12）：显式指定
+    # directory='output/spill' 时必须能搜到刚落盘的大输出，否则"量大不进
+    # 上下文"就变成了"永远找不到"——大输出可以不全加载，但必须能定位。
+    try:
+        root_scope = root.resolve()
+    except OSError:
+        root_scope = root
     for path in sorted(root.rglob(glob)):
         if not path.is_file():
             continue
@@ -84,8 +94,12 @@ def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
             relative = resolved.relative_to(boundary)
         except ValueError:
             continue
-        if any(part in _IGNORED_DIRS for part in relative.parts):
-            continue  # ② 噪声目录
+        try:
+            from_root = resolved.relative_to(root_scope)
+        except ValueError:
+            from_root = relative
+        if any(part in _IGNORED_DIRS for part in from_root.parts):
+            continue  # ② 噪声目录（相对起点判定：显式进 output/ 就照搜）
         if symlinks == _SYMLINK_SKIP and path.is_symlink():
             continue  # ③ 链接策略
         if resolved in seen:
@@ -143,10 +157,15 @@ def list_files(directory: str = ".") -> list[str]:
     return out
 
 
-def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
-    """按行读取项目内一个文本文件的内容片段。要通读整个文件时，
-    直接把 num_lines 放大一次读完（单次上限 20,000 行），
-    不要用小段反复读同一个文件。
+def read_file(path: str, start_line: int = 1, num_lines: int = 200,
+              pattern: str = "") -> str:
+    """按行读取项目内一个文本文件的内容片段。要通读整个文件时，直接把
+    num_lines 放大一次读完（单次上限 20,000 行），不要用小段反复读同一个文件。
+
+    文件很大而只要一个结果时（典型场景：工具输出落盘后的长日志），传
+    pattern='关键词'（正则）只返回匹配行与行号，不必全量加载；再用行号
+    配 start_line/num_lines 取上下文。不传 pattern 就是全量读取——
+    信息永远不丢，只是不必一次全进上下文。
 
     大文件请配合 search_files 先定位，再用 start_line/num_lines
     分段读取——返回值会标明文件总行数和继续读取的位置。
@@ -179,6 +198,32 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     total = len(lines)
     if total == 0:
         return f"{path} 是空文件"
+    if pattern:
+        # 定位模式（2026-09-12）：大输出可以不全加载，但必须能快速找到要的
+        # 那一段。只回匹配行 + 行号，再配 start_line 取上下文（全量读取的
+        # 权限不受影响——不传 pattern 就是全量）。
+        try:
+            regex = re.compile(pattern)
+        except re.error as error:
+            return f"正则表达式无效: {error}（pattern={pattern!r}）"
+        hits = [(i, line) for i, line in enumerate(lines, start=1) if regex.search(line)]
+        if not hits:
+            return (
+                f"{path} 共 {total} 行，无匹配 {pattern!r}。"
+                f"可换关键词，或直接全量读取（不带 pattern）。"
+            )
+        cap = limits.list_limit(_SEARCH_MAX_MATCHES)
+        shown = "\n".join(f"{i}: {line.strip()[:200]}" for i, line in hits[:cap])
+        more = (
+            f"\n…（共 {len(hits)} 行匹配，此处只显示前 {cap} 行）"
+            if len(hits) > cap else ""
+        )
+        first = hits[0][0]
+        return (
+            f"{path}（共 {total} 行，匹配 {len(hits)} 行）\n{shown}{more}\n"
+            f"...（取上下文：read_file('{path}', start_line={max(1, first - 10)}, "
+            f"num_lines=40)；要全文：不带 pattern 读）"
+        )
     start = max(1, start_line)
     if start > total:
         return f"{path} 共 {total} 行，start_line={start} 超出范围"
@@ -224,7 +269,10 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
         return f"directory 不存在: {directory}（解析为 {root}）。先确认目录路径。"
     matches: list[str] = []
     for path in _walk(root, glob):
-        if path.stat().st_size > 1_000_000:  # 跳过超大文件
+        # 超大文件上限（2026-09-12 由 1MB 放宽到 8MB）：超限落盘的 spill
+        # 文件动辄几 MB，原阈值把它挡在搜索之外——而定位恰恰是大输出最
+        # 需要的操作。文本 8MB 正则扫描成本可接受，真卡住还有超时兜底。
+        if path.stat().st_size > _SEARCH_MAX_BYTES:
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -258,7 +306,6 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
         )
         return limits.clip("\n".join(matches[:cap]) + note, "search", limit=10 ** 9)
     return limits.clip("\n".join(matches), "search")
-
 
 def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False) -> str:
     """按文件名通配模式查找文件（如 *.py、docs/**/*.md），返回相对路径。

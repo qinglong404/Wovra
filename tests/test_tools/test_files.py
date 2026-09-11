@@ -64,6 +64,36 @@ def test_read_file_supports_line_ranges(tmp_path, monkeypatch):
     assert "start_line=15 继续读取" in result  # 续读提示
 
 
+def test_read_file_locates_with_pattern(tmp_path, monkeypatch):
+    """大文件只要一个结果时：pattern 只回匹配行与行号，不必全量加载。
+
+    2026-09-12 用户口径：工具返回大量文本而只需要一个结果时，要能**快速
+    定位**；全量加载的权限同时保留（不传 pattern 就是全量）。
+    """
+    from wovra import tools
+
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
+    body = "\n".join(f"第{i}行 噪声" for i in range(1, 501))
+    (tmp_path / "log.txt").write_text(
+        body.replace("第300行 噪声", "第300行 ERROR 关键失败"), encoding="utf-8"
+    )
+
+    hit = read_file("log.txt", pattern="ERROR")
+    assert "共 500 行，匹配 1 行" in hit
+    assert "300: 第300行 ERROR 关键失败" in hit
+    assert "第1行" not in hit                     # 不是全量加载
+    assert "start_line=290" in hit                # 给出取上下文的位置
+
+    miss = read_file("log.txt", pattern="不存在的东西")
+    assert "无匹配" in miss and "共 500 行" in miss
+
+    bad = read_file("log.txt", pattern="([非法")
+    assert "正则表达式无效" in bad
+
+    full = read_file("log.txt", num_lines=5000)   # 全量权限保留
+    assert "第1行" in full and "第500行" in full
+
+
 def test_read_file_reports_binary_and_empty(tmp_path, monkeypatch):
     from wovra import tools
 

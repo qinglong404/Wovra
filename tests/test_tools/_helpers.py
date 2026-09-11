@@ -100,7 +100,7 @@ def workspace(tmp_path, monkeypatch):
     return SimpleNamespace(root=root, outside=outside)
 
 _TOOL_SURFACE_BASELINE = {
-    "read_file": ["path", "start_line", "num_lines"],
+    "read_file": ["path", "start_line", "num_lines", "pattern"],
     "write_file": ["path", "content", "force"],
     "edit_file": ["path", "old_text", "new_text", "replace_all"],
     "replace_lines": ["path", "start_line", "end_line", "new_content"],
