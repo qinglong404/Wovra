@@ -466,6 +466,85 @@ def test_org_unusable_product_twice_marks_failed(monkeypatch, tmp_path):
     assert "pending_org" not in task.rounds[-1]
 
 
+def test_org_failure_records_evidence(monkeypatch, tmp_path):
+    """整理失败必须留现场（worklog-20260911.md §11）。
+
+    19:43 那次失败只留下 `org=False` 一行：产物与原因都没留，事后定位
+    真因只能重跑一次 213K token 的输入。分裂阶段早有同类留痕，整理路
+    漏了——这里钉住"失败必须写清为什么"。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    # 复刻真凶：长中文叙述里混进未转义的双引号 → JSON 提前断串
+    broken = (
+        '{"rounds": [{"seq": 1, "normalized_user_input": "读源码", '
+        '"key_constraints": "", "block_summaries": [{"id": "R1-B1", '
+        '"summary": "于是"读到含\'不存在\'的文件"整块被打成幽灵"}]}], '
+        '"state_patch": {}}'
+    )
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c9", name="submit_organization", arguments=broken),
+    ]))
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk]]),
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+                  org_cooldown_rounds=0)
+
+    agent.run("问")
+
+    assert task.rounds[-1]["org_state"] == "failed"
+    records = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    evidence = [d for d in records if "org：无可用产物" in d]
+    assert evidence, f"失败现场未落 history：{records}"
+    text = evidence[0]
+    assert "submit_organization 参数" in text
+    assert "JSON 解析失败" in text and "位置" in text
+    assert "现场" in text  # 出错位置附近的原文片段
+
+
+def test_org_accepts_repairable_json(monkeypatch, tmp_path):
+    """轻量修复：尾随逗号、非法转义（\\'）、串内裸控制字符都该救回来。
+
+    这三类是模型产物的常见畸形，修它们零成本、无歧义（未转义引号有
+    歧义，不猜——按失败处理并留痕）。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    # 三类畸形同现：非法转义 \'、串内裸换行、尾随逗号
+    repairable = '''{"rounds": [{"seq": 1, "normalized_user_input": "意图\\'带单引号\\'", "key_constraints": "", "block_summaries": [{"id": "R1-B1", "summary": "第一行
+第二行"}]},], "state_patch": {},}'''
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c9", name="submit_organization", arguments=repairable),
+    ]))
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk]]),
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+                  org_cooldown_rounds=0)
+
+    agent.run("问")
+
+    assert task.rounds[-1]["org_state"] == "done"
+    pending = task.rounds[-1]["pending_org"]
+    assert pending["normalized"] == "意图'带单引号'"
+    assert "第二行" in pending["block_summaries"]["R1-B1"]
+
+
+def test_assembly_does_not_duplicate_last_closed_round(monkeypatch, tmp_path):
+    """闭合后装配不得把"刚闭合的轮"再算一遍（worklog-20260911.md §11）。
+
+    close_round 把 current_round 置空但不清理 self.messages，而
+    _current_round_messages() 原先会直接返回残留的 self.messages——于是
+    整理快照 497 条而非 422 条（实测差值恰为末轮事件数 75），每批白烧
+    ~18K tok，组织器还会把末轮看两遍。
+    """
+    agent = _round_agent(monkeypatch, tmp_path, n_events=5)
+    agent.messages = [{"role": "user", "content": "上一个轮的消息"}]
+    agent.close_round()  # current_round → None，self.messages 残留
+
+    assert agent.current_round is None
+    assert agent._current_round_messages() == []
+    assembled = agent._assemble_messages()
+    assert all(m.get("content") != "上一个轮的消息" for m in assembled)
+
+
 def test_protection_grace_and_cooldown(monkeypatch, tmp_path):
     """保护机制：会话前 N 轮硬豁免维护（宽限），两次维护之间最小轮距
     （冷却）——适配大项目起点，窗口保底紧急折叠不受豁免（另一条线）。"""

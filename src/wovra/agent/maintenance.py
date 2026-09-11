@@ -3,6 +3,7 @@
 纯追加延续。
 """
 import json
+import re
 import threading
 import time
 from typing import Optional
@@ -20,6 +21,13 @@ from .prompts import (
     _ORG_TAG_INSTRUCTIONS,
     _SPLIT_INSTRUCTIONS,
 )
+
+
+_ORG_SUBMIT_TOOL = "submit_organization"
+
+# 轻量 JSON 修复用（见 _MaintenanceMixin._repair_json_text）
+_BAD_ESCAPE = re.compile(r"\\(?![\\/\"bfnrtu])")
+_TRAILING_COMMA = re.compile(r",(\s*[}\]])")
 
 
 class _MaintenanceMixin:
@@ -345,6 +353,14 @@ class _MaintenanceMixin:
             # 等下次触发），原始层永远不受影响。2026-09-10 用户拍板：
             # 不重试——重试只是再付一遍完整生成，不能确定解决失败
             # （实测两次重试同因失败：输出预算/模型行为不因重试改变）。
+            # 2026-09-11 补：失败必须留现场（原先只留 org=False，事后
+            # 查因要重跑 213K token 的输入——见 §11）。
+            evidence = self._org_failure_evidence(content, ordered)
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"org：无可用产物（{len(rounds)} 轮批次；{evidence}）",
+                )
             for r in rounds:
                 r.pop("pending_org", None)
                 r["org_state"] = "failed"
@@ -907,19 +923,92 @@ class _MaintenanceMixin:
         return f"未找到事件: {event_id}"
 
     @staticmethod
+    def _repair_json_text(raw: str) -> str:
+        """轻量 JSON 修复：只修**确定性可判定**的模型畸形，零 LLM 成本。
+
+        实测（worklog-20260911.md §11）：30,740 字符的整理产物里出现
+        未转义的双引号，JSON 提前断串 → 整批整理失败。这里修两类可判定
+        的畸形（不是全解，但便宜且无副作用）：
+          * 非法转义（`\\'`、`\\.` 等 JSON 不认的 `\\X`）→ 去掉反斜杠；
+          * 尾随逗号（`[1,2,]`）→ 去掉。
+        未转义引号有歧义（无法确定哪一个是串边界），不做猜测——留给
+        调用方按"解析失败"处理并留痕（§11 的失败现场）。
+        """
+        text = _BAD_ESCAPE.sub("", raw)
+        prev = None
+        while prev != text:  # 反复到不动点：`[1,,,]` 这类连环要收敛
+            prev = text
+            text = _TRAILING_COMMA.sub(r"\1", text)
+        return text
+
+    @staticmethod
+    def _loads_lenient(raw: str) -> Optional[dict]:
+        """尽量解析模型给出的 JSON：严格 → 宽松 → 轻量修复后宽松。
+
+        宽松档用 `strict=False`：容忍字符串里的裸控制字符（长中文段落
+        夹裸换行是常见畸形）。
+        """
+        if not (raw or "").strip():
+            return None
+        for text, strict in (
+            (raw, True),
+            (raw, False),
+            (_MaintenanceMixin._repair_json_text(raw), False),
+        ):
+            try:
+                state = json.loads(text, strict=strict)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(state, dict):
+                return state
+        return None
+
+    @staticmethod
     def _extract_org_state(content: str, ordered: list) -> Optional[dict]:
         """从整理响应提取产物：优先 submit_organization 的调用参数，
         回退消息正文 JSON（自由文本输出兼容，主路径是工具出口）。"""
         for tc in ordered or []:
             if tc.get("name") != "submit_organization":
                 continue
-            try:
-                state = json.loads(tc.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                continue
+            state = _MaintenanceMixin._loads_lenient(tc.get("arguments") or "")
             if isinstance(state, dict):
                 return state
         return _MaintenanceMixin._parse_state_json(content)
+
+    @staticmethod
+    def _org_failure_evidence(content: str, ordered: list) -> str:
+        """整理失败现场（零 LLM）：把"为什么没产物"写清楚，进 history。
+
+        为什么必须有它（worklog-20260911.md §11）：19:43 那次失败只留下
+        `org=False` 一行，产物与原因都没留——事后只能靠重跑一次（213K
+        token 的输入）才查出来是 JSON 第 5069 字符处未转义引号。分裂阶段
+        早有同类留痕（"分裂无产物：失败现场留痕"），整理路漏了。
+        """
+        for tc in ordered or []:
+            if tc.get("name") != "submit_organization":
+                continue
+            args = tc.get("arguments") or ""
+            try:
+                json.loads(args, strict=False)
+            except json.JSONDecodeError as error:
+                pos = getattr(error, "pos", 0) or 0
+                window = args[max(0, pos - 80):pos + 80].replace("\n", "\\n")
+                return (
+                    f"submit_organization 参数 {len(args):,} 字符，JSON 解析失败"
+                    f"（位置 {pos:,}：{error.msg}）；现场 …{window}…"
+                )
+            state = _MaintenanceMixin._loads_lenient(args)
+            items = (state or {}).get("rounds") if isinstance(state, dict) else None
+            if isinstance(items, list):
+                return (
+                    f"submit_organization 参数 {len(args):,} 字符、JSON 合法，"
+                    f"但 rounds 有 {len(items)} 项却无法与批次轮匹配（seq 缺失/畸形）"
+                )
+            return (
+                f"submit_organization 参数 {len(args):,} 字符，JSON 合法但 "
+                f"rounds 字段缺失或非数组（值是 {type(items).__name__}）"
+            )
+        return f"无 submit_organization 调用；正文 {len(content or ''):,} 字符"
 
     @staticmethod
     def _parse_state_json(text: str) -> Optional[dict]:

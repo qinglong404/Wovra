@@ -194,9 +194,15 @@ class _AssemblyMixin:
         模型窗口本身：估算超过 context_limit 时，把最老的事件折叠
         为索引行直到回线——最后手段，正常任务永远碰不到。
         """
-        msgs = list(self.messages)
+        # 没有进行中的轮：当前轮消息为空。**不能**返回残留的
+        # self.messages——close_round 会把 current_round 置空但不清理
+        # self.messages（它要到下一轮开启才重置），于是"刚闭合的那一轮"
+        # 会同时以事件（历史）和残留消息（当前轮）出现两遍。实测
+        # （worklog-20260911.md §11）：整理快照因此 497 条而非 422 条，
+        # 每批白烧 ~18K tok，且组织器把最后一轮看两遍。
         if self.current_round is None:
-            return msgs
+            return []
+        msgs = list(self.messages)
         events = self.current_round["events"]
         if len(events) != len(msgs):
             return msgs  # 结构对不上时不动手（宁超限，不坏数据）
