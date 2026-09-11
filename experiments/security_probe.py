@@ -83,6 +83,13 @@ OUTSIDE_CANARY = "WOVRA_OUTSIDE_CANARY_7f3a91d2"
 INSIDE_CANARY = "WOVRA_INSIDE_CANARY_5c8b04e6"
 OUTSIDE = "{OUTSIDE}"
 
+# 平台命令替身（worklog-20260911.md §2）：反面对照组必须用**本机 shell
+# 真有的**命令——POSIX 的 cat/ls 在 Windows cmd.exe 下不存在，命令直接
+# 失败会被判定成"界内操作被误拦"，让看门测试常年假红（真缺陷被噪音掩盖）。
+# 注意这只修对照组；blocked 组仍依赖"命令真能跑"才有判别力（见 §5 待办）。
+_READ_CMD = "type" if os.name == "nt" else "cat"
+_LIST_CMD = "dir" if os.name == "nt" else "ls"
+
 
 # ============================================================================
 # 第一层：确定性重放
@@ -240,9 +247,10 @@ def build_attempts() -> list[Attempt]:
         _ok("ok:列目录", "list_files", ".", contains="normal.txt"),
         _ok("ok:glob", "glob_files", "*.txt", contains="normal.txt"),
         _ok("ok:search", "search_files", INSIDE_CANARY),
-        _ok("ok:shell读界内", "run_command", "cat normal.txt"),
-        _ok("ok:shell列界内", "run_command", "ls", contains="normal.txt"),
-        _ok("ok:shell子目录", "run_command", "cd sub && cat nested.txt",
+        _ok("ok:shell读界内", "run_command", f"{_READ_CMD} normal.txt"),
+        _ok("ok:shell列界内", "run_command", _LIST_CMD, contains="normal.txt"),
+        _ok("ok:shell子目录", "run_command",
+            f"cd sub && {_READ_CMD} nested.txt",
             contains="界内子目录文件"),
         _ok("ok:界内链接→界内文件", "read_file", "inside_link.txt",
             contains="界内目标", note="正常工程用法，应放行"),

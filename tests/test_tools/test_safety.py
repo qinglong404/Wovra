@@ -187,8 +187,12 @@ def test_run_background_rejects_workspace_escape(workspace):
 
 
 def test_run_command_allows_relative_work_inside_workspace(workspace):
-    """不误伤：界内的相对路径操作照常放行。"""
-    result = run_command("cd sub && pwd")
+    """不误伤：界内的相对路径操作照常放行。
+
+    命令平台自适应：`pwd` 是 POSIX 命令，cmd.exe 下不存在——硬编码
+    POSIX 命令会让"界内合法操作"假红（worklog-20260911.md §2）。
+    """
+    result = run_command("cd sub && cd" if _os.name == "nt" else "cd sub && pwd")
     assert "exit_code=0" in result
     assert "sub" in result
 
@@ -557,17 +561,19 @@ def test_escape_authorization_flow(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
 
     target = str(outside / "data.txt")
+    # 命令平台自适应：cmd.exe 没有 cat（worklog-20260911.md §2）
+    read_cmd = f"type {target}" if _os.name == "nt" else f"cat {target}"
 
     # 1) 非交互环境：安全拒绝（越界不是普通敏感操作，绝不自动放行）
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: False))
-    result = run_command(f"cat {target}")
+    result = run_command(read_cmd)
     assert "已拒绝执行" in result
     assert not tools_module.safety.is_authorized(target)
 
     # 2) 交互环境：用户授权一次 → 放行并落盘
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
     monkeypatch.setattr(builtins, "input", lambda prompt: "y")
-    result = run_command(f"cat {target}")
+    result = run_command(read_cmd)
     assert "已拒绝执行" not in result
     assert "outside data" in result
     store = ws / ".wovra" / "authorized-paths.json"
