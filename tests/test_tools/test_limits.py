@@ -54,32 +54,64 @@ def test_clip_is_passthrough_under_limit():
     assert limits.clip(text, "unit") == text
 
 
-def test_clip_spills_full_content(monkeypatch, tmp_path):
-    """超限时：首尾内联 + 完整内容落盘 + 路径可读回（不丢数据）。"""
+def test_clip_over_limit_is_preview_plus_pointer(monkeypatch, tmp_path):
+    """超限时：只内联短预览 + 体量 + 落盘路径，全文从盘上一字不差取回。
+
+    旧契约是「首尾各留一大段」（limit 那么多字符仍进上下文）；用户口径
+    （2026-09-11）是「量大可以不进上下文，返回截断内容但可以让你取回，
+    告诉它有多大就可以」。
+    """
     from wovra.tools import limits, safety
 
     monkeypatch.setattr(safety, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("WOVRA_PREVIEW_CHARS", raising=False)
     text = "头" * 300 + "中段唯一秘密" * 100 + "尾"
 
     out = limits.clip(text, "unit", limit=400)
 
-    assert "未内联" in out and "output/spill/" in out
+    assert len(out) < 3_000                      # 只留下预览量级，不是 limit 那么多
+    assert "未内联" not in out                   # 不再有"中段未内联"这种首尾拼接
+    assert "原文共" in out and f"{len(text):,}" in out   # 告诉模型它有多大
+    assert "output/spill/" in out                # 告诉模型去哪取
     assert out.startswith("头")
-    assert out.rstrip().endswith("尾")
     spilled = list((tmp_path / "output" / "spill").glob("*unit*.txt"))
     assert len(spilled) == 1
-    assert spilled[0].read_text(encoding="utf-8") == text  # 一字不差
+    assert spilled[0].read_text(encoding="utf-8") == text  # 一字不差，没丢文本
+
+
+def test_clip_preview_size_is_configurable(monkeypatch, tmp_path):
+    """预览量可调（WOVRA_PREVIEW_CHARS）；非法值退回默认。"""
+    from wovra.tools import limits, safety
+
+    monkeypatch.setattr(safety, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("WOVRA_PREVIEW_CHARS", "50")
+    out = limits.clip("甲" * 5_000, "unit", limit=100)
+    assert out.startswith("甲" * 50) and not out.startswith("甲" * 51)
+
+    monkeypatch.setenv("WOVRA_PREVIEW_CHARS", "abc")
+    assert limits.preview_chars() == 2_000
+
+
+def test_clip_source_skips_spill(monkeypatch, tmp_path):
+    """原文本就在磁盘上（read_file）时不落盘副本，只指明去哪取。"""
+    from wovra.tools import limits, safety
+
+    monkeypatch.setattr(safety, "PROJECT_ROOT", tmp_path)
+    out = limits.clip("甲" * 5_000, "read-x.py", limit=100, source="src/x.py")
+    assert "src/x.py" in out and "原文共 5,000 字符" in out
+    assert not list((tmp_path / "output" / "spill").glob("*.txt"))  # 没有副本
 
 
 def test_clip_survives_unwritable_dir(monkeypatch, tmp_path):
-    """落盘失败也不影响主流程：仍返回首尾，只是没有路径提示。"""
+    """落盘失败也不影响主流程：仍返回预览与体量，只是没有路径提示。"""
     from wovra.tools import limits, safety
 
     monkeypatch.setattr(safety, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(limits, "spill", lambda text, name: None)
 
     out = limits.clip("甲" * 500, "unit", limit=100)
-    assert "未内联" in out and "output/spill/" not in out
+    assert "原文共 500 字符" in out and "output/spill/" not in out
+    assert out.startswith("甲" * 100)
 
 
 @pytest.mark.parametrize("name", ["run_command", "search", "glob", "web_fetch"])

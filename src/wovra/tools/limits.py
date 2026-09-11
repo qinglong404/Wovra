@@ -7,12 +7,19 @@ check_background 2000 字符、web_fetch 8000 字符），命中即**丢内容**
 的不过几百 token。用户口径是「除压缩外，全面全量输入」——而压缩只属于
 整理侧（水位整理），不属于工具返回。
 
-现行规则：
+现行规则（2026-09-11 二次修订，用户口径：「不要截断丢失文本，量大可以
+不进上下文，返回截断内容但可以让你取回，告诉它有多大就可以」）：
 
 * 默认上限 200,000 字符（约 60K tok），`WOVRA_OUTPUT_LIMIT` 可调整。
-  正常命令根本碰不到它，它只防 `dir /s` 之类把上下文一次性炸掉。
-* 真超限时**不丢数据**：完整内容落盘到 `output/spill/`，返回文本给出
-  路径，模型可用 read_file 分段取回（或让命令只输出关键部分）。
+  未超限时**原样全量返回**——正常命令根本碰不到这条线。
+* 真超限时只内联开头一小段预览（默认 2,000 字符，`WOVRA_PREVIEW_CHARS`
+  可调），附上**原文体量**（字符数 / 行数）与**取回方式**。完整内容
+  落盘 `output/spill/`，模型按需用 read_file 取回——大输出不进上下文，
+  但一个字都不丢，而且模型知道它有多大、可以去哪拿。
+  这与「首尾各留一大段」的区别：后者仍把上限字符塞进上下文（默认
+  20 万字符 ≈ 60K tok），省不下任何东西，还让中段凭空消失。
+* 原文本来就在磁盘上的（read_file），不落盘副本，直接给继续读取的
+  位置提示（start_line），因为取回路径就是原文件。
 * 上限作用在**工具返回值**这一层，装配层零截断的纪律不受影响。
 """
 
@@ -24,8 +31,21 @@ from pathlib import Path
 
 _DEFAULT_LIMIT = 200_000
 
-# 首尾各保留多少（仅在真超限的兜底路径上用）
-_HEAD_RATIO = 2 / 3
+# 超限时内联多少（只有开头预览进上下文；其余靠落盘 + 按需取回）
+_DEFAULT_PREVIEW = 2_000
+
+
+def preview_chars() -> int:
+    """超限时内联的预览字符数。`WOVRA_PREVIEW_CHARS` 可调；非法值退回默认。"""
+    raw = os.environ.get("WOVRA_PREVIEW_CHARS", "")
+    if raw.strip():
+        try:
+            value = int(raw)
+        except ValueError:
+            return _DEFAULT_PREVIEW
+        if value > 0:
+            return value
+    return _DEFAULT_PREVIEW
 
 
 def output_limit() -> int:
@@ -85,23 +105,42 @@ def spill(text: str, name: str) -> str | None:
         return None
 
 
-def clip(text: str, name: str, limit: int | None = None) -> str:
-    """超限时保留首尾 + 完整内容落盘；未超限原样返回。
+def clip(text: str, name: str, limit: int | None = None,
+         source: str | None = None) -> str:
+    """超限时只内联开头预览 + 体量 + 取回方式；未超限原样返回。
 
-    name 用于落盘文件名（如 run_command / web_fetch），便于事后辨认。
+    2026-09-11 二次修订（worklog §26）：原实现超限时内联 limit 那么长
+    的首尾（默认 20 万字符）——既不省上下文，中段又凭空消失。现在超限
+    只内联 preview_chars() 字符的预览，把体量与取回方式告诉模型。
+
+    source：原文本来就在磁盘上的路径（read_file 传它），此时不落盘副本，
+    只在提示里指明去哪取。
+    name：落盘文件名用途前缀（run_command / web_fetch / search…）。
     """
     limit = limit if limit is not None else output_limit()
     if len(text) <= limit:
         return text
-    head = int(limit * _HEAD_RATIO)
-    tail = limit - head
-    omitted = len(text) - head - tail
-    saved = spill(text, name)
-    note = (
-        f"…（中间 {omitted:,} 字符未内联：原文共 {len(text):,} 字符。"
-        f"完整内容已落盘 {saved}，用 read_file 分段读取；"
-        f"也可调大 WOVRA_OUTPUT_LIMIT 或让命令只输出关键部分）"
-        if saved
-        else f"…（中间 {omitted:,} 字符未内联：原文共 {len(text):,} 字符）"
+    preview_n = min(preview_chars(), limit)  # 预览绝不比上限还多
+    saved = None if source else spill(text, name)
+    return f"{text[:preview_n]}\n{_overflow_note(text, preview_n, saved, source)}"
+
+
+def _overflow_note(text: str, preview_n: int, saved: str | None,
+                   source: str | None) -> str:
+    """超限提示：先说原文有多大，再说去哪取，最后给省事的替代做法。"""
+    lines = text.count("\n") + 1
+    size = f"原文共 {len(text):,} 字符 / {lines:,} 行"
+    if source:
+        return (
+            f"…（{size}；此处只内联开头 {preview_n:,} 字符。完整内容仍在原文件 "
+            f"{source}，用 read_file 按区间取回。）"
+        )
+    if saved:
+        return (
+            f"…（{size}；此处只内联开头 {preview_n:,} 字符。完整内容已落盘 "
+            f"{saved}，用 read_file 分段读取取回，或让命令只输出关键部分。）"
+        )
+    return (
+        f"…（{size}；此处只内联开头 {preview_n:,} 字符。落盘失败，"
+        f"请缩小范围重跑或让命令只输出关键部分。）"
     )
-    return f"{text[:head]}\n{note}\n{text[-tail:]}"

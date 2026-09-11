@@ -82,7 +82,12 @@ def test_run_command_returns_full_output_by_default(monkeypatch, tmp_path):
 
 
 def test_run_command_spills_instead_of_losing_output(monkeypatch, tmp_path):
-    """真超限时不丢数据：完整内容落盘 output/spill/ 并给出路径。"""
+    """真超限时：大输出不进上下文，但告知体量与取回路径，全文可一字不差取回。
+
+    2026-09-11 二次修订（worklog §26，用户口径：「量大可以不进上下文，
+    返回截断内容但可以让你取回，告诉它有多大就可以」）。旧实现是"首尾
+    各留 limit 那么多字符"——仍把上限体量塞进上下文，中段还凭空消失。
+    """
     from wovra import tools as tools_module
 
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
@@ -91,14 +96,14 @@ def test_run_command_spills_instead_of_losing_output(monkeypatch, tmp_path):
     cmd = "type big.txt" if _os.name == "nt" else "cat big.txt"
     result = run_command(cmd)
 
-    assert "未内联" in result and "3,0" in result       # 原文体量标出来
-    assert "output/spill/" in result                     # 给出落盘路径
-    # 首尾都在：尾部常有测试失败/报错结论，只留头部等于丢掉最有用的部分
-    assert result.count("乙") > 100
-    assert "尾部关键结论" in result
-    # 完整内容确实在盘上，可 read_file 取回
+    assert "原文共" in result and "3,0" in result   # 告诉模型它有多大
+    assert "output/spill/" in result                # 告诉模型去哪取
+    assert len(result) < 2_000                      # 只有预览量级，不是原文量级
+    assert result.count("乙") < 1_000               # 3000 字没有全塞进上下文
+    # 完整内容确实在盘上，可一字不差取回（不丢文本）
     spilled = list((tmp_path / "output" / "spill").glob("*.txt"))
-    assert spilled and "乙" * 3000 in spilled[0].read_text(encoding="utf-8")
+    body = spilled[0].read_text(encoding="utf-8")
+    assert "乙" * 3000 in body and "尾部关键结论" in body
 
 
 def test_confirm_pattern_matching():

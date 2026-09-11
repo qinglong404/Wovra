@@ -190,7 +190,8 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     header = f"{path}（共 {total} 行，以下为第 {start}-{end} 行）"
     if end < total:
         body += f"\n...（后续还有 {total - end} 行，用 start_line={end + 1} 继续读取）"
-    return limits.clip(f"{header}\n{body}", f"read-{Path(path).name}")
+    # 原文就在磁盘上：超限时只给预览与体量，取回路径是原文件本身（不落副本）
+    return limits.clip(f"{header}\n{body}", f"read-{Path(path).name}", source=path)
 
 
 def search_files(pattern: str, directory: str = ".", glob: str = "*",
@@ -198,7 +199,8 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
     """在项目内用正则表达式搜索文本文件（类似 grep）。
 
     返回 `路径:行号: 行内容` 格式的匹配，默认最多 200 条
-    （WOVRA_OUTPUT_LIMIT 可调大）；
+    （WOVRA_OUTPUT_LIMIT 可调大）；超出时完整清单落盘并报出总条数，
+    可用 read_file 取回（不丢结果）；
     自动跳过 .git/.venv 等噪声目录。找"某个函数在哪定义"、
     "哪个文件用了某配置" 都靠它。
     context：每个匹配额外附带前后 N 行上下文（类似 grep -C，单行内
@@ -242,14 +244,19 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
                     )
                     entry += f"  ｜上下文: {snippet}"
                 matches.append(entry)
-                if len(matches) >= limits.list_limit(_SEARCH_MAX_MATCHES):
-                    body = "\n".join(matches)
-                    return limits.clip(
-                        body + f"\n...(已达 {len(matches)} 条上限，可缩小搜索范围，"
-                        f"或调大 WOVRA_OUTPUT_LIMIT)", "search",
-                    )
     if not matches:
         return f"无匹配：pattern={pattern!r}, directory={directory!r}, glob={glob!r}"
+    cap = limits.list_limit(_SEARCH_MAX_MATCHES)
+    if len(matches) > cap:
+        # 超限不丢结果（2026-09-11 worklog §26 同批）：完整清单落盘可取回，
+        # 且明说一共多少条——否则模型不知道"才 200 条"还是"其实有 800 条"。
+        saved = limits.spill("\n".join(matches), "search")
+        note = (
+            f"\n…（共 {len(matches):,} 条匹配，此处只显示前 {cap:,} 条；"
+            + (f"完整清单已落盘 {saved}，用 read_file 取回" if saved else "落盘失败")
+            + "；也可缩小搜索范围或调大 WOVRA_OUTPUT_LIMIT）"
+        )
+        return limits.clip("\n".join(matches[:cap]) + note, "search", limit=10 ** 9)
     return limits.clip("\n".join(matches), "search")
 
 
@@ -259,7 +266,8 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
     模式递归匹配所有子目录（*.py 等价于 **/*.py）；与 search_files
     （搜内容）互补：找"有哪些文件"用本工具，找"哪些文件里有什么
     内容"用 search_files。自动跳过 .git/.venv 等噪声目录，默认最多
-    返回 1,000 条（WOVRA_OUTPUT_LIMIT 可调大）。
+    返回 1,000 条（WOVRA_OUTPUT_LIMIT 可调大）；超出时完整清单落盘并报出
+    总数，可用 read_file 取回（不丢结果）。
 
     include_hidden：是否把隐藏文件/目录（.env、.github 等）算进结果。
     注意标准的通配语义：`*.py` 不匹配 .a.py，`*` 也不匹配 .env——
@@ -284,8 +292,18 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
         return f"无匹配文件: {pattern}（directory={directory}）{hint}"
     cap = limits.list_limit(_GLOB_MAX_FILES)
     lines = [_display_rel(p).as_posix() for p in filtered[:cap]]
-    more = f"\n…(共 {len(filtered)} 个，已显示前 {cap})" if len(filtered) > cap else ""
-    return limits.clip("\n".join(lines) + more, "glob")
+    if len(filtered) > cap:
+        # 超限不丢结果（2026-09-11 worklog §26 同批）：完整清单落盘可取回，
+        # 并报出总条数——「一共 3,000 个」和「就这 1,000 个」对判断完全不同。
+        saved = limits.spill("\n".join(_display_rel(p).as_posix() for p in filtered), "glob")
+        more = (
+            f"\n…（共 {len(filtered):,} 个文件，此处只显示前 {cap:,} 个；"
+            + (f"完整清单已落盘 {saved}，用 read_file 取回" if saved else "落盘失败")
+            + "；也可缩小 pattern 或调大 WOVRA_OUTPUT_LIMIT）"
+        )
+    else:
+        more = ""
+    return limits.clip("\n".join(lines) + more, "glob", limit=10 ** 9)
 
 # ---- 文件观察注册表（过期保护） ---------------------------------------------
 # 本进程读/写过的文件 → (mtime_ns, size)。edit_file/write_file 前核对：

@@ -65,8 +65,9 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
 
     适合查 API 文档、技术资料。仅 http/https，拒绝内网地址（防 SSRF），
     30 秒超时。正文默认全量返回（2026-09-11 放开，worklog §25：原先
-    8000 字符硬上限，抓一份长文档要反复重试）；真超限时完整内容落盘
-    output/spill/ 并给出路径。max_chars>0 时才按该值截断。
+    8000 字符硬上限，抓一份长文档要反复重试）；真超限时只内联开头预览
+    并报出原文体量，完整内容落盘 output/spill/ 可随时取回（worklog §26）。
+    max_chars>0 时才按该值截断。
     找资料的入口用 web_search。
     """
     safety._audit(f"[web_fetch] {url}")
