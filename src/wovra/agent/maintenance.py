@@ -493,11 +493,26 @@ class _MaintenanceMixin:
                 r["org_state"] = "failed"
             self._persist_rounds()
             return False, None
+        # 逐轮判定（2026-09-11 实测修复）：只有**真拿到产物**的轮才算 done。
+        # 原先无条件对全批打 done —— 模型少输出一轮时（seq 匹配不上、位置
+        # 兜底又要求项数相等），那一轮既无描述又被标 done，视图降级渲染成
+        # 事件索引，且因 org_state=done 永不再整理：静默的质量损失，账面上
+        # 看不出来。实测：批次 3 轮、模型只回 2 项 → ok=True，R3 被标 done
+        # 但无任何块描述。现在缺产物的轮判 failed 回入水位（下批重做），
+        # 原始层不受影响。
+        staged_rounds = [r for r in rounds if r.get("pending_org")]
+        missing = [r["seq"] for r in rounds if not r.get("pending_org")]
         for r in rounds:
-            r["org_state"] = "done"
+            r["org_state"] = "done" if r.get("pending_org") else "failed"
+        if missing and self.task is not None:
+            self.task.record(
+                "maintenance",
+                f"org：产物只覆盖 {len(staged_rounds)}/{len(rounds)} 轮，"
+                f"R{missing} 未收到产物（判 failed，回入水位下批重做）",
+            )
         # 代次打标：最近 3 批视图保留，更早的按文件状态折叠（2026-09-10）
         self._org_generation += 1
-        for r in rounds:
+        for r in staged_rounds:
             r["org_generation"] = self._org_generation
         self._persist_rounds()
         # 交换记录（2026-09-10）：split 阶段纯追加这段对话——org 刚跑完

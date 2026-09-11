@@ -537,6 +537,51 @@ def test_org_tool_call_without_seq_matches_positionally(monkeypatch, tmp_path):
     assert "R1-B1" in task.rounds[-1]["pending_org"]["block_summaries"]
 
 
+def test_org_partial_coverage_marks_missing_rounds_failed(monkeypatch, tmp_path):
+    """产物只覆盖部分轮 → 缺产物的轮判 failed（回入水位），不得标 done。
+
+    真凶（2026-09-11 实测）：`_organize_rounds` 原先无条件对**全批**打
+    `org_state="done"`，而它只判 `staged == 0` 为失败。模型少输出一轮时
+    （seq 匹配不上，位置兜底又要求项数相等），那一轮既无块描述又被标 done
+    → 视图降级成事件索引，且因 done 永不再整理：**静默的质量损失**，
+    report/maint 上都看不出来（账面是 100% 已整理）。
+
+    这里复刻：批次 3 轮、模型只回 2 项 → R3 必须 failed（而非 done）。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    partial = json.dumps({
+        "rounds": [
+            {"seq": 1, "normalized_user_input": "意图1", "key_constraints": "",
+             "block_summaries": [{"id": "R1-B1", "summary": "描述1"}]},
+            {"seq": 2, "normalized_user_input": "意图2", "key_constraints": "",
+             "block_summaries": [{"id": "R2-B1", "summary": "描述2"}]},
+        ],
+        "state_patch": {},
+    }, ensure_ascii=False)
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c1", name="submit_organization", arguments=partial),
+    ]))
+    stub = _StubLLM([[org_chunk]])
+    task = Task.create(goal="部分覆盖")
+    task.rounds = [_mk_file_round(s, f"第{s}轮", [f"f{s}.py"]) for s in (1, 2, 3)]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(llm=stub, tools=[], task=task)
+
+    ok, _exchange = agent._organize_rounds(agent.rounds, base_messages=[])
+
+    assert ok is True                                  # 有产物，不是整批失败
+    states = {r["seq"]: r["org_state"] for r in agent.rounds}
+    assert states == {1: "done", 2: "done", 3: "failed"}, states
+    # 覆盖到的轮照常有产物（不因修复而丢）
+    assert agent.rounds[0]["pending_org"]["normalized"] == "意图1"
+    assert agent.rounds[2].get("pending_org") is None
+    # 代次只打给真生效的轮——failed 轮下一批重做时不该带旧代次
+    assert all("org_generation" not in r for r in agent.rounds if r["org_state"] == "failed")
+    records = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    assert any("产物只覆盖 2/3 轮" in d and "R[3]" in d for d in records), records
+
+
 def test_org_unusable_product_twice_marks_failed(monkeypatch, tmp_path):
     """两跳都拿不到可用产物（rounds 空）：整批 failed，不留半份暂存。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
