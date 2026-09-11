@@ -3,9 +3,9 @@
 用法：uv run python experiments/new_run.py --mode managed --index 1
 
 产出：
-* tasks/<task-id>/        —— 新会话（10 项功能写入 acceptance_criteria）
+* tasks/<task-id>/        —— 新会话（10 项功能写入 meta.json["criteria"]）
 * experiments/runs/<task-id>/chat.html   —— 冻结起始文件的独立副本
-* experiments/runs/<task-id>/meta.json   —— 运行元数据（模式/序号/文件哈希）
+* experiments/runs/<task-id>/meta.json   —— 运行元数据（模式/序号/文件哈希/功能清单）
 
 然后按输出提示启动 chat，按 README 的功能清单逐轮输入（每轮一个功能）。
 """
@@ -45,10 +45,10 @@ def main() -> None:
 
     fixture_sha = hashlib.sha256(FIXTURE.read_bytes()).hexdigest()[:12]
 
-    task = Task.create(
-        goal="受控实验：在 chat.html 上按清单逐轮实现 10 个功能",
-        acceptance_criteria=list(CRITERIA),
-    )
+    # 验收清单不再写进 Task.acceptance_criteria（该字段已随 2026-09-11
+    # 遗产整治删除：0/77 会话有数据、src 内 0 消费者，唯一使用者是本脚本）。
+    # 清单是**实验自己的元数据**，落进 meta.json 更合身（collect.py 从那里读）。
+    task = Task.create(goal="受控实验：在 chat.html 上按清单逐轮实现 10 个功能")
     task.mode = args.mode  # 会话记忆模式：恢复时自动沿用
     task.save()
 
@@ -63,6 +63,8 @@ def main() -> None:
         "fixture_sha256_12": fixture_sha,
         "created_at": datetime.now().isoformat(timespec="seconds"),
         "work_path": work_file.resolve().as_posix(),
+        # 功能清单（原先写进 Task.acceptance_criteria，该字段 2026-09-11 已删）
+        "criteria": list(CRITERIA),
     }
     (run_dir / "meta.json").write_text(
         json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"

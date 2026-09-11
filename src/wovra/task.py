@@ -26,6 +26,7 @@
 import json
 import uuid
 from dataclasses import asdict, dataclass, field
+from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
 
@@ -372,11 +373,14 @@ class Task:
 
     id: str
     goal: str
+    # ⚠ V1.2 遗迹·标废不删（2026-09-11 遗产整治，方案 A）：
+    # requirements 无生产者、无模型侧注入，实测 15/77 个历史会话有真实数据
+    # （读得到才保得住现场），故保留字段与渲染，随 Level 1/2 落地一并处置。
     requirements: list[str] = field(default_factory=list)
-    acceptance_criteria: list[str] = field(default_factory=list)
     status: str = "in_progress"
-    # summary 是 Agent 周期性生成的状态摘要（markdown 片段），
-    # 对应 README 里 "What happened? Where are we now? ..." 的那份报告
+    # ⚠ V1.2 遗迹·标废不删（同上）：summary 是 V1 时代 Agent 周期性写入的
+    # 状态摘要（`set_summary()` 已随本次整治删除，实测 0 处消费者、0/77 数据），
+    # 字段与渲染保留仅为兼容历史 task.json 与手改；现行机制下无生产者。
     summary: str = ""
     # history 只追加：每条是 {"time", "kind", "detail"}，
     # 追加式历史让"发生过什么"永远可追溯，这是可恢复性的基础
@@ -392,12 +396,15 @@ class Task:
     workspace: str = ""
     # 会话的上下文模式（managed/baseline）：恢复时沿用，防止实验数据串味
     mode: str = ""
-    # 组织运行时（organization-runtime-v1.md）：
-    # parent_id = 父任务 id（根任务为空）；org_context = 逐字下传的
-    # 意图快照（父目标原文 + 拆解上下文 + 本块所有权边界），每层只追加；
-    # pending_instruction = 父任务派发时带给子任务下一轮的指令
-    # （如用户拍板的决策），由 `wovra run` 读取并清空——指令走磁盘
-    # 而不走命令行参数，绕开 Windows 的引号转义地狱
+    # ⚠ V1.2 遗迹·标废不删（2026-09-11 遗产整治，方案 A）：
+    # 三件套来自组织运行时（organization-runtime-v1.md），而多 agent 编排已由
+    # 用户 09-07 拍板废除（提交 af40bc1 整体退场），现行机制下**都没有生产者**：
+    #   parent_id          —— 父任务 id（子任务扫描/报告仍读得到）
+    #   org_context        —— 逐字下传的意图快照（仅定义处，1 处引用）
+    #   pending_instruction—— 父任务派发的决策回传通道（cli/main.py 仍读并清空）
+    # 实测 15/77 个历史会话有真实数据，删字段会丢现场，故保留并随 Level 1/2
+    # 落地一并处置（Level 1 若要派发，parent_id 可能复用）。处置建议见
+    # worklog §20.5 与 §21。
     parent_id: str = ""
     org_context: str = ""
     pending_instruction: str = ""
@@ -515,16 +522,20 @@ class Task:
         cls,
         goal: str,
         requirements: list[str] | None = None,
-        acceptance_criteria: list[str] | None = None,
     ) -> "Task":
-        """新建一个任务。id 用日期 + 短随机串，保证可读又不冲突。"""
+        """新建一个任务。id 用日期 + 短随机串，保证可读又不冲突。
+
+        `acceptance_criteria` 参数已删除（2026-09-11 遗产整治）：实测
+        0/77 会话有数据、src 内 0 处消费者，唯一使用者是 experiments/
+        脚本（改为把验收清单写进自己的 meta.json）。现行验收口径是
+        大步的 `acceptance` 字段（见 `todo` 账本与 todo-milestone-tool.md）。
+        """
         now = datetime.now()
         task_id = now.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
         return cls(
             id=task_id,
             goal=goal,
             requirements=list(requirements or []),
-            acceptance_criteria=list(acceptance_criteria or []),
             workspace=str(tools_module.safety.PROJECT_ROOT),
             # 注册表默认只有主 agent；分裂执行时扩充（机制三/四）
             registry=[{
@@ -556,7 +567,25 @@ class Task:
 
         path = TASKS_ROOT / task_id / "task.json"
         data = json.loads(path.read_text(encoding="utf-8"))
+        # 已删字段的兼容过滤（2026-09-11 遗产整治）：`cls(**data)` 遇到未知键
+        # **直接抛 TypeError**，而字段一旦从 dataclass 里删掉，历史 task.json 里
+        # 的旧键就全成了未知键——实测 77/77 个会话都带 `acceptance_criteria`
+        # （值为 `[]`，故"非空计数"口径看不出它），不过滤则所有历史会话加载即崩。
+        # 这里统一丢弃任何不在当前 dataclass 字段里的键（不止本次删的那一个），
+        # 往后删字段/改字段都不必再回来改加载口。
+        known_fields = {f.name for f in dataclass_fields(cls)}
+        dropped = sorted(set(data) - known_fields)
+        for key in dropped:
+            data.pop(key, None)
         task = cls(**data)
+        if dropped:
+            task.record(
+                "maintenance",
+                "load：丢弃已删字段的遗留键（"
+                + "、".join(dropped)
+                + "）——字段已从 Task 删除，加载期兼容过滤",
+            )
+            task.save()
         # 注册表回填（2026-09-11，Level 1 视图分化第一步的补网）：注册表
         # 落实是本日才接上的下游，此前已 promote 的分裂产物不会再触发
         # promote——不补则历史会话的注册表永远只有主 agent。幂等，故可
@@ -611,12 +640,11 @@ class Task:
         task_id: str,
         goal: str,
         requirements: list[str] | None = None,
-        acceptance_criteria: list[str] | None = None,
     ) -> "Task":
         """已存在则加载（断点续做），否则新建。演示"停止-恢复"的入口。"""
         if (TASKS_ROOT / task_id / "task.json").exists():
             return cls.load(task_id)
-        task = cls.create(goal, requirements, acceptance_criteria)
+        task = cls.create(goal, requirements)
         task.id = task_id  # 固定 id，让第二次运行能找到同一个任务
         return task
 
@@ -633,30 +661,14 @@ class Task:
         )
         self.updated_at = datetime.now().isoformat(timespec="seconds")
 
-    def set_summary(self, text: str) -> None:
-        """更新状态摘要（由 Agent 周期性调用）。"""
-        self.summary = text.strip()
-        self.updated_at = datetime.now().isoformat(timespec="seconds")
-
-    def apply_state(
-        self,
-        goal: str | None = None,
-        status: str | None = None,
-        summary: str | None = None,
-    ) -> None:
-        """AI 每轮对任务状态的更新入口。
-
-        目标不是建任务时定死的，而是随对话逐步成形、也可能被修正——
-        所以 goal/status/summary 都是"谁最新谁说了算"。只有传入了
-        的字段才覆盖；status 只接受合法值，防止模型输出污染状态机。
-        """
-        if goal:
-            self.goal = goal
-        if status in ("in_progress", "done"):
-            self.status = status
-        if summary is not None:
-            self.summary = summary
-        self.updated_at = datetime.now().isoformat(timespec="seconds")
+    # 已删除（2026-09-11 遗产整治，方案 A，用户拍板）：
+    #   set_summary(text)  —— 实测 0 处消费者、0/77 会话有数据（V1 时代
+    #       Agent "周期性写状态摘要"的入口；现行机制下状态由整理产出的
+    #       state_patch 与 Round/Event 历史承担，摘要是多余的第三本账）
+    #   apply_state(goal/status/summary) —— 0 处消费者、被 apply_state_patch
+    #       取代（后者还能回传结案报告，见其 docstring）
+    # 两者都是"写时固化判断"的 V1 残留，删除不影响任何行为。summary 字段
+    # 本身保留（兼容历史 task.json 与手改），只是不再有生产入口。
 
     # ---- 持久化 ---------------------------------------------------------
 
@@ -683,7 +695,12 @@ class Task:
     def context(self, last_n: int = 10) -> str:
         """生成给模型看的任务上下文（作为 system prompt 的一部分）。
 
-        这里体现"上下文生命周期"的第一步：模型不需要整个 history，
+        ⚠ 遗产·待处置（2026-09-11 遗产整治残留）：src/ 内**已无消费者**——
+        现行装配由 `cli/prompt.py::_system_prompt` 与 agent/assembly.py 承担，
+        本方法只剩 tests 在用。保住不删是怕手改/外部脚本还在调；下一步
+        （Level 1 装配按域分化）一并裁定去留。
+
+        V1 原文：这里体现"上下文生命周期"的第一步：模型不需要整个 history，
         只需要目标、约束、当前摘要和最近几条事件就能继续工作。
         目标可能尚未成形（新会话）——明确告诉模型这一点，
         它的角色是"在对话中逐步澄清目标"，而不是硬套一个不存在的目标。
@@ -698,11 +715,6 @@ class Task:
             )
         if self.requirements:
             lines.append("\n## 需求\n" + "\n".join(f"- {r}" for r in self.requirements))
-        if self.acceptance_criteria:
-            lines.append(
-                "\n## 验收标准\n"
-                + "\n".join(f"- {c}" for c in self.acceptance_criteria)
-            )
         lines.append(f"\n状态：{self.status}")
         if self.summary:
             lines.append("\n## 之前的进展摘要\n" + self.summary)
@@ -731,9 +743,6 @@ class Task:
         if self.requirements:
             lines.append("\n## 需求\n")
             lines += [f"- {r}" for r in self.requirements]
-        if self.acceptance_criteria:
-            lines.append("\n## 验收标准\n")
-            lines += [f"- {c}" for c in self.acceptance_criteria]
         lines.append("\n## 当前阶段（大步 / 小步）\n")
         lines += self.todo_lines()
         lines.append("\n## 当前进展（AI 维护）\n")

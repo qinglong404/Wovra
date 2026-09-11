@@ -17,10 +17,9 @@ def test_create_and_save_load_roundtrip(monkeypatch, tmp_path):
     task = Task.create(
         goal="测试目标",
         requirements=["约束一"],
-        acceptance_criteria=["标准一"],
     )
     task.record("user_input", "你好")
-    task.set_summary("已完成一半")
+    task.summary = "已完成一半"  # 字段保留（标废），但 set_summary() 已删
     task.save()
 
     # 落盘产生两个文件：结构化状态 + 人类可读报告
@@ -59,15 +58,19 @@ def test_load_or_create_resumes(monkeypatch, tmp_path):
 
 
 def test_report_renders_goal_and_summary(monkeypatch, tmp_path):
+    """report.md 渲染目标与进展摘要。
+
+    `acceptance_criteria` 与 `set_summary()` 已随 2026-09-11 遗产整治删除
+    （实测 0/77 数据、0 消费者）；`summary` 字段标废保留，故这里直接赋值。
+    """
     _use_tmp_root(monkeypatch, tmp_path)
-    task = Task.create(goal="写报告的目标", acceptance_criteria=["A", "B"])
-    task.set_summary("进展摘要内容")
+    task = Task.create(goal="写报告的目标")
+    task.summary = "进展摘要内容"
     task.save()
 
     report = (tmp_path / task.id / "report.md").read_text(encoding="utf-8")
     assert "写报告的目标" in report
     assert "进展摘要内容" in report
-    assert "- A" in report and "- B" in report
 
 
 def test_report_merges_tool_call_and_result(monkeypatch, tmp_path):
@@ -189,7 +192,7 @@ def test_context_includes_goal_summary_and_recent_history(monkeypatch, tmp_path)
     _use_tmp_root(monkeypatch, tmp_path)
     task = Task.create(goal="给模型看的目标")
     task.record("user_input", "早期事件")
-    task.set_summary("模型该知道的进展")
+    task.summary = "模型该知道的进展"
     task.record("tool_call", "get_current_time({})")
 
     context = task.context()
@@ -566,3 +569,38 @@ def test_load_backfill_does_not_override_existing_goal(monkeypatch, tmp_path):
 
     loaded = Task.load(task.id)
     assert loaded.goal == "建任务时定的目标"
+
+
+def test_load_drops_removed_field_keys(monkeypatch, tmp_path):
+    """回归（2026-09-11 遗产整治）：加载期丢弃已删字段的遗留键。
+
+    `acceptance_criteria` 已从 Task 删除（0/77 数据、0 消费者），但**实测
+    77/77 个历史 task.json 都带这个键**（值为 `[]`，所以"非空计数"口径
+    看不出它）。`cls(**data)` 遇到未知键直接抛 TypeError，不过滤则所有
+    历史会话加载即崩——这正是"删字段必须配套加载口兼容"的现场证据。
+    """
+    import json as _json
+
+    from wovra.task import Task
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="g")
+    task.save()
+
+    # 手工往盘上的 JSON 塞回已删字段（模拟历史会话）+ 一个从未见过的键
+    path = tmp_path / task.id / "task.json"
+    data = _json.loads(path.read_text(encoding="utf-8"))
+    data["acceptance_criteria"] = []
+    data["some_future_field"] = {"x": 1}
+    path.write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    loaded = Task.load(task.id)  # 不抛 TypeError 即通过
+    assert loaded.goal == "g"
+    assert not hasattr(loaded, "acceptance_criteria")
+    assert any(
+        "丢弃已删字段" in e.get("detail", "")
+        for e in loaded.history if e.get("kind") == "maintenance"
+    )
+    # 落盘生效：重新读盘后 JSON 里不再有这些键
+    raw = _json.loads((tmp_path / task.id / "task.json").read_text(encoding="utf-8"))
+    assert "acceptance_criteria" not in raw and "some_future_field" not in raw

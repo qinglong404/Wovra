@@ -91,7 +91,10 @@ def session_metrics(run_dir: Path) -> dict | None:
         "expand_calls": expand_calls,
         "snapshots": snapshots,
         "final_passed": final_passed,
-        "criteria_total": len(task.acceptance_criteria),
+        # 功能总数来自实验自己的 meta.json["criteria"]（原先读
+        # Task.acceptance_criteria，该字段 2026-09-11 遗产整治已删；
+        # 旧运行记录没有 criteria 时回退为 10——当年的清单长度）
+        "criteria_total": len(meta.get("criteria") or []) or 10,
         "regressions": regressions,
         "cost_per_feature": (sum(p["effective"] for p in per_round) / final_passed
                              if final_passed else None),
