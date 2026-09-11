@@ -113,8 +113,8 @@ def test_answer_live_degrades_to_plain_stream_without_tty(monkeypatch, capsys):
 
 
 def test_answer_live_renders_once_on_capable_terminal(monkeypatch):
-    """支持原位刷新的终端：流式期间 Live 原位更新（transient），
-    段落结束时整段 Markdown 静态渲染一次——不再整页重打刷屏。"""
+    """支持原位刷新的终端：流式期间 Live 原位更新，段落结束时 Live
+    帧保留为最终渲染——同一段内容只渲染一遍（不再二次静态打印）。"""
     import io
 
     from rich.console import Console
@@ -147,6 +147,45 @@ def test_answer_live_renders_once_on_capable_terminal(monkeypatch):
     assert "\x1b[" in out  # Live 确实走了原位刷新（有控制序列）
     assert "第一段" in out and "第二段" in out
     assert ui._answer_live is None
+
+
+def test_answer_live_stop_does_not_reprint(monkeypatch, capsys):
+    """Live 结束后不再二次静态打印——那是"开头重复"的来源（transient
+    擦除 off-by-one 残留首行，再叠一份静态全文）。"""
+    from wovra import ui
+
+    class _FakeLive:
+        def __init__(self, *args, **kwargs):
+            self.stopped = False
+
+        def start(self):
+            pass
+
+        def update(self, renderable):
+            pass
+
+        def stop(self):
+            self.stopped = True
+
+    monkeypatch.setattr(ui, "Live", _FakeLive)
+    monkeypatch.setattr(ui, "_live_capable", lambda: True)
+    ui.answer_live_start()
+    ui.answer_live_append("你好")
+    ui.answer_live_append("，世界")
+    ui.answer_live_stop()
+    assert capsys.readouterr().out == "\n"  # 只补一个换行，不重打全文
+
+
+def test_answer_live_plain_path_prints_once(monkeypatch, capsys):
+    """无 Live 能力：增量直接流过终端（仅一遍），结束不补打印。"""
+    from wovra import ui
+
+    monkeypatch.setattr(ui, "_live_capable", lambda: False)
+    ui.answer_live_start()
+    ui.answer_live_append("你好")
+    ui.answer_live_append("，世界")
+    ui.answer_live_stop()
+    assert capsys.readouterr().out == "你好，世界"
 
 
 def test_report_view_renders_four_columns(monkeypatch, tmp_path):

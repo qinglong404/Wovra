@@ -166,7 +166,15 @@ def answer_live_append(text: str) -> None:
     global _answer_buffer, _answer_live
     _answer_buffer.append(text)
     if _answer_live is None and _live_capable():
-        _answer_live = Live(Markdown(""), refresh_per_second=4, transient=True)
+        # 不用 transient（2026-09-11 实测）：transient 结束时"擦掉实时帧
+        # 再静态重打一遍"，部分终端擦除 off-by-one 残留首行，与后面的
+        # 静态全文叠出"开头重复"（真实会话 R1 复现）。让 Live 帧自己
+        # 保留为最终渲染——同一段内容只渲染一遍，没有擦除就没有残留。
+        # console 必须显式传入：rich 默认用全局控制台，会绕过 _ENABLED
+        # 的着色开关、也让测试无法捕获。
+        _answer_live = Live(
+            Markdown(""), refresh_per_second=4, console=_console
+        )
         _answer_live.start()
     if _answer_live is not None:
         _answer_live.update(Markdown("".join(_answer_buffer)))
@@ -175,16 +183,13 @@ def answer_live_append(text: str) -> None:
 
 
 def answer_live_stop() -> None:
-    """段落结束：擦掉实时帧，把整段 Markdown 静态渲染一次
-    （与回放观感一致）；无 Live 能力时纯文本已流过，不重复输出。"""
+    """段落结束：Live 帧保留为最终渲染，不再二次静态打印（消除开头
+    重复）；无 Live 能力时纯文本增量已流过，同样不重复输出。"""
     global _answer_live, _answer_buffer
-    buffer_text = "".join(_answer_buffer)
     if _answer_live is not None:
-        _answer_live.stop()  # transient：擦掉实时帧
+        _answer_live.stop()
         _answer_live = None
-        if buffer_text.strip():
-            _console.print(Markdown(buffer_text))
-            print()
+        print()  # Live 帧末无换行，为后续状态行另起一行
     _answer_buffer = []
 
 
