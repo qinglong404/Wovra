@@ -362,3 +362,23 @@ def test_write_file_directory_gives_hint(monkeypatch, tmp_path):
     result = write_file("adir", "x")
     assert "是目录" in result and "list_files" in result
     assert not (tmp_path / "adir" / "x").exists()
+
+
+def test_edit_file_directory_gives_hint(monkeypatch, tmp_path):
+    """edit_file 传目录 → 友好提示，不是裸 IsADirectoryError。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "adir").mkdir()
+    result = edit_file("adir", "a", "b")
+    assert "是目录" in result and "list_files" in result
+
+
+def test_replace_lines_directory_gives_hint(monkeypatch, tmp_path):
+    """replace_lines 传目录 → 友好提示，不是裸 IsADirectoryError。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "adir").mkdir()
+    result = replace_lines("adir", 1, 2, "x")
+    assert "是目录" in result and "list_files" in result

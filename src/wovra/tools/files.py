@@ -565,6 +565,14 @@ def edit_file(path: str, old_text: str, new_text: str,
     stale = _stale_error(target)
     if stale:
         return stale
+    # 参数误用预检（2026-09-13 摩擦修复）：目标是目录 → 明确提示而不是裸 IsADirectoryError。
+    # 文案保留 "是目录" 子串：lifecycle/blocks 靠它判断编辑是否真发生（同 read/write 预检约定）。
+    if target.is_dir():
+        return (
+            f"路径是目录（而非文件），不能编辑：{path}。edit_file 只编辑文件；"
+            f"要列出该目录内容请用 list_files('{path}')，"
+            f"要新建其中的文件请用 write_file。"
+        )
     if not target.exists():
         return (
             f"文件不存在: {path}（解析为 {target}）。"
@@ -641,6 +649,14 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     stale = _stale_error(target)
     if stale:
         return stale
+    # 参数误用预检（2026-09-13 摩擦修复）：目标是目录 → 明确提示而不是裸 IsADirectoryError。
+    # 文案保留 "是目录" 子串：lifecycle/blocks 靠它判断替换是否真发生。
+    if target.is_dir():
+        return (
+            f"路径是目录（而非文件），不能按行替换：{path}。replace_lines 只编辑文件；"
+            f"要列出该目录内容请用 list_files('{path}')，"
+            f"要新建其中的文件请用 write_file。"
+        )
     if not target.exists():
         return (
             f"文件不存在: {path}（解析为 {target}）。"
