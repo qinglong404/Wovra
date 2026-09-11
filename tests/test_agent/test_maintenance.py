@@ -367,6 +367,36 @@ def test_baseline_compaction_ignores_billing_watermark(monkeypatch, tmp_path):
     assert not any(r.get("compacted") for r in task.rounds)
 
 
+def test_org_auto_repairs_unescaped_quotes(monkeypatch, tmp_path):
+    """未转义的英文双引号能被**自动修复**，不消耗重发机会（零 LLM 成本）。
+
+    2026-09-11 用户提问："这种转义，我不能用代码直接给替换了再解析吗？"
+    ——答案是可以：判据是结构性的（引号右侧若非 `: , } ]` 即内容引号），
+    并且**解析本身就是校验**，修不好就不采纳。这里钉住三件事：
+    修好了 → 不重发（只要 2 次 LLM 调用）、产物照常落地、且留痕说明修过。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    # 真凶同款：长中文叙述里混进未转义的双引号 → JSON 提前断串
+    broken = ('{"rounds": [{"seq": 1, "normalized_user_input": "于是"读到含'
+              '\'不存在\'的文件"整块"}], "state_patch": {}}')
+    org_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c1", name="submit_organization", arguments=broken),
+    ]))
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk]]),
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+                  org_cooldown_rounds=0)
+
+    agent.run("问")
+
+    assert len(agent.llm.calls) == 2, "自动修复成功就不该再触发重发"
+    assert task.rounds[-1]["org_state"] == "done"
+    assert (task.rounds[-1]["pending_org"]["normalized"]
+            == "于是\"读到含'不存在'的文件\"整块")   # 引号作为内容被保留
+    records = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    assert any("已自动修复" in d for d in records), f"修复未留痕：{records}"
+
+
 def test_organization_retries_once_with_diagnosis(monkeypatch, tmp_path):
     """整理产物不可用时：**带诊断**重发一次（且只一次）。
 
@@ -375,8 +405,11 @@ def test_organization_retries_once_with_diagnosis(monkeypatch, tmp_path):
     这里锁三件事：重发确实发生、重发输入里带着失败诊断、绝不无限重试。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    broken = ('{"rounds": [{"seq": 1, "normalized_user_input": "于是"读到含'
-              '\'不存在\'的文件"整块"}], "state_patch": {}}')
+    # 真·歧义畸形：内容引号后紧跟逗号（`他说"好",然后`）——结构引号与内容引号
+    # 在文本层面无法区分，自动修复修不了（见 _requote_json 的诚实边界），
+    # 因此必须走"带诊断重发"这条恢复路径。
+    broken = ('{"rounds": [{"seq": 1, "normalized_user_input": "他说"好",然后'
+              '没了"}], "state_patch": {}}')
     repair_chunk = _chunk(_delta(tool_calls=[
         _fragment(0, id="c2", name="submit_organization", arguments=json.dumps({
             "rounds": [{"seq": 1, "normalized_user_input": "修正后的意图",
@@ -529,11 +562,12 @@ def test_org_failure_records_evidence(monkeypatch, tmp_path):
     漏了——这里钉住"失败必须写清为什么"。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    # 复刻真凶：长中文叙述里混进未转义的双引号 → JSON 提前断串
+    # 复刻真凶这一类、但取**自动修复覆盖不到**的歧义样本（内容引号紧跟逗号）：
+    # 修不了 → 重发 → 仍失败，用于钉住"失败必须留现场"。
     broken = (
         '{"rounds": [{"seq": 1, "normalized_user_input": "读源码", '
         '"key_constraints": "", "block_summaries": [{"id": "R1-B1", '
-        '"summary": "于是"读到含\'不存在\'的文件"整块被打成幽灵"}]}], '
+        '"summary": "于是他说"对",然后没了整块被打成幽灵"}]}], '
         '"state_patch": {}}'
     )
     org_chunk = _chunk(_delta(tool_calls=[

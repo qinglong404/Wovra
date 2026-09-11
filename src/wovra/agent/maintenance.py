@@ -39,9 +39,89 @@ _ORG_REPAIR_HINT = (
     "3. 内容覆盖与上次一致（同样的轮次与块），只修正格式。"
 )
 
-# 轻量 JSON 修复用（见 _MaintenanceMixin._repair_json_text）
+# 轻量 JSON 修复用（见 _MaintenanceMixin._loads_lenient）
 _BAD_ESCAPE = re.compile(r"\\(?![\\/\"bfnrtu])")
 _TRAILING_COMMA = re.compile(r",(\s*[}\]])")
+# 结构引号（串边界/键边界）右侧第一个非空白字符必属于此集合
+_QUOTE_CLOSERS = frozenset(":,}]")
+
+
+def _requote_json(text: str) -> str:
+    """给 JSON 串里**未转义的英文双引号**补转义（零 LLM，纯结构判据）。
+
+    实测根因（worklog-20260911.md §11.2）：模型在长中文叙述里直接写英文
+    双引号（`于是"读到含'不存在'的文件"整块`），JSON 串提前结束 → 30,740
+    字符的整理产物整批作废。
+
+    判据（只看局部上下文，不需要理解语义）：一个引号若是**结构引号**，
+    它右侧第一个非空白字符必是 `:`、`,`、`}`、`]`（键结尾或值结尾）；
+    否则视为**内容引号**，补 `\\`。`\\` 开头的转义序列整体跳过。
+
+    诚实边界：正文里"引号紧跟逗号"（`他说"好",然后`）会误判为结构引号 →
+    修不好 → 解析失败 → 该候选被弃用（**解析就是校验**），退回带诊断重发。
+    所以本函数只提高命中率，不承担正确性。
+    """
+    out: list[str] = []
+    i, n = 0, len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            out.append(ch)
+            if ch == '"':
+                in_string = True
+            i += 1
+            continue
+        if ch == "\\":                      # 已有转义序列：整体复制
+            out.append(text[i:i + 2])
+            i += 2
+            continue
+        if ch == '"':
+            j = i + 1
+            while j < n and text[j] in " \t\r\n":
+                j += 1
+            nxt = text[j] if j < n else ""
+            if nxt in _QUOTE_CLOSERS or nxt == "":
+                out.append('"')             # 结构引号：正常收尾
+                in_string = False
+            else:
+                out.append('\\"')           # 内容引号：补转义
+            i += 1
+            continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
+def _strip_trailing_commas(text: str) -> str:
+    """去掉尾随逗号（反复到不动点：`[1,,,]` 这类连环要收敛）。"""
+    prev = None
+    while prev != text:
+        prev = text
+        text = _TRAILING_COMMA.sub(r"\1", text)
+    return text
+
+
+def _json_candidates(raw: str):
+    """按**最小干预优先**给出候选文本，逐个试解析（解析成功即止）。
+
+    顺序即优先级：原样 → 结构引号修复 → 非法转义修复 → 两者叠加 →
+    各自再加尾随逗号。先试干预最少的，避免"本来能解析却被改坏"。
+    """
+    requoted = _requote_json(raw)
+    unescaped = _BAD_ESCAPE.sub("", raw)
+    base = [
+        ("原样", raw),
+        ("结构引号修复", requoted),
+        ("非法转义修复", unescaped),
+        ("引号+转义修复", _requote_json(unescaped)),
+    ]
+    out = list(base)
+    for name, text in base:
+        fixed = _strip_trailing_commas(text)
+        if fixed != text:
+            out.append((name + "＋尾随逗号", fixed))
+    return out
 
 
 class _MaintenanceMixin:
@@ -358,11 +438,17 @@ class _MaintenanceMixin:
         content, ordered, _usage = self._stream_call(
             messages, tools=org_tools, purpose="organization",
         )
-        state = self._extract_org_state(content, ordered)
+        state, strategy = self._extract_org_state(content, ordered)
         staged = self._stage_org_state(
             state, rounds, round_blocks, merged_groups
         )
         retried = False
+        if staged and strategy not in ("", "原样", "正文 JSON") and self.task:
+            # 自动修复成功也留痕：模型产物有多脏、哪种修复在起作用，是
+            # "要不要加提示词护栏"的决策依据（§11.6）
+            self.task.record(
+                "maintenance", f"org：模型产物畸形，已自动修复（{strategy}）"
+            )
         if staged == 0:
             # 失败即"查因 → 调整 → 再试一次"（2026-09-11 用户澄清：当初的
             # "不重试"是测试期用来逼出原因的手段，不是机制）。但重试**必须
@@ -382,10 +468,15 @@ class _MaintenanceMixin:
                 content, ordered, _usage = self._stream_call(
                     repair, tools=org_tools, purpose="organization",
                 )
-                state = self._extract_org_state(content, ordered)
+                state, strategy = self._extract_org_state(content, ordered)
                 staged = self._stage_org_state(
                     state, rounds, round_blocks, merged_groups
                 )
+                if staged and strategy not in ("", "原样", "正文 JSON") and self.task:
+                    self.task.record(
+                        "maintenance",
+                        f"org：重发产物畸形，已自动修复（{strategy}）",
+                    )
         if staged == 0:
             # 无可用产物：保持 Runtime 视图（org_state=failed，回入水位
             # 等下次触发），原始层永远不受影响。失败现场必须留痕——原先
@@ -959,57 +1050,48 @@ class _MaintenanceMixin:
         return f"未找到事件: {event_id}"
 
     @staticmethod
-    def _repair_json_text(raw: str) -> str:
-        """轻量 JSON 修复：只修**确定性可判定**的模型畸形，零 LLM 成本。
+    def _loads_lenient(raw: str) -> tuple[Optional[dict], str]:
+        """尽量解析模型给出的 JSON，返回 (状态字典, 生效策略名)。
 
-        实测（worklog-20260911.md §11）：30,740 字符的整理产物里出现
-        未转义的双引号，JSON 提前断串 → 整批整理失败。这里修两类可判定
-        的畸形（不是全解，但便宜且无副作用）：
-          * 非法转义（`\\'`、`\\.` 等 JSON 不认的 `\\X`）→ 去掉反斜杠；
-          * 尾随逗号（`[1,2,]`）→ 去掉。
-        未转义引号有歧义（无法确定哪一个是串边界），不做猜测——留给
-        调用方按"解析失败"处理并留痕（§11 的失败现场）。
-        """
-        text = _BAD_ESCAPE.sub("", raw)
-        prev = None
-        while prev != text:  # 反复到不动点：`[1,,,]` 这类连环要收敛
-            prev = text
-            text = _TRAILING_COMMA.sub(r"\1", text)
-        return text
+        逐个试候选（最小干预优先，见 `_json_candidates`），每档再试
+        严格/宽松两种解析——宽松档 `strict=False` 容忍字符串里的裸控制
+        字符（长中文段落夹裸换行是常见畸形）。
 
-    @staticmethod
-    def _loads_lenient(raw: str) -> Optional[dict]:
-        """尽量解析模型给出的 JSON：严格 → 宽松 → 轻量修复后宽松。
-
-        宽松档用 `strict=False`：容忍字符串里的裸控制字符（长中文段落
-        夹裸换行是常见畸形）。
+        诚实边界：**不保证能修**（正文里"引号紧跟逗号"这类真歧义修不了），
+        但**保证不会误判成功**——解析通过才算数，这就是校验。修不了时
+        返回 (None, "")，由调用方带诊断重发（§11.5）。
+        策略名回传供留痕：能看出模型产物有多脏、哪种修复在起作用。
         """
         if not (raw or "").strip():
-            return None
-        for text, strict in (
-            (raw, True),
-            (raw, False),
-            (_MaintenanceMixin._repair_json_text(raw), False),
-        ):
-            try:
-                state = json.loads(text, strict=strict)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(state, dict):
-                return state
-        return None
+            return None, ""
+        for name, text in _json_candidates(raw):
+            for strict in (True, False):
+                try:
+                    state = json.loads(text, strict=strict)
+                except json.JSONDecodeError:
+                    continue
+                if isinstance(state, dict):
+                    return state, name
+        return None, ""
 
     @staticmethod
-    def _extract_org_state(content: str, ordered: list) -> Optional[dict]:
+    def _extract_org_state(content: str, ordered: list) -> tuple[Optional[dict], str]:
         """从整理响应提取产物：优先 submit_organization 的调用参数，
-        回退消息正文 JSON（自由文本输出兼容，主路径是工具出口）。"""
+        回退消息正文 JSON（自由文本输出兼容，主路径是工具出口）。
+
+        返回 (状态字典或 None, 生效策略名)；策略名非"原样"即说明模型产物
+        被自动修复过（供留痕与"要不要加提示词护栏"的决策依据）。
+        """
         for tc in ordered or []:
             if tc.get("name") != "submit_organization":
                 continue
-            state = _MaintenanceMixin._loads_lenient(tc.get("arguments") or "")
+            state, strategy = _MaintenanceMixin._loads_lenient(
+                tc.get("arguments") or ""
+            )
             if isinstance(state, dict):
-                return state
-        return _MaintenanceMixin._parse_state_json(content)
+                return state, strategy
+        state = _MaintenanceMixin._parse_state_json(content)
+        return (state, "正文 JSON" if isinstance(state, dict) else "")
 
     @staticmethod
     def _org_repair_messages(
@@ -1087,7 +1169,7 @@ class _MaintenanceMixin:
                     f"submit_organization 参数 {len(args):,} 字符，JSON 解析失败"
                     f"（位置 {pos:,}：{error.msg}）；现场 …{window}…"
                 )
-            state = _MaintenanceMixin._loads_lenient(args)
+            state = _MaintenanceMixin._loads_lenient(args)[0]
             items = (state or {}).get("rounds") if isinstance(state, dict) else None
             if isinstance(items, list):
                 return (
