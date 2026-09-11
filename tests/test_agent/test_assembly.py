@@ -175,6 +175,61 @@ def test_organized_rounds_render_block_details_view(monkeypatch):
     assert "细节" * 200 not in body                     # 回答原文不进上下文
 
 
+def test_compact_view_summaries_resolved_by_v3_blocks():
+    """回归（2026-09-11 实测）：视图块结构必须现场重算 v3，与整理产物同源。
+
+    真凶：`_render_compact` 曾遍历 `r["blocks"]`（close_round 落的 v1 粗分块：
+    以写/改为截止，无写轮整轮一块）去 summaries 里查描述，而 summaries 的键
+    是 v3 块号（按文件聚合）。两套分块器编号空间相同（R{n}-B{k}）但切法不同
+    ——编号对不上的描述被**静默丢弃**，不报错。
+
+    本用例复刻最吃亏的形状：**纯读轮**（无写操作）。v1 只切出 1 块，v3 按文件
+    切出 3 块。实测本会话 R1 正是此类（24 个文件块、0 次写）：v1=1，24 条描述
+    只有 1 条进上下文，另外 23 条永不显示——而"读源码调研"恰恰是最需要沉淀的
+    轮次类型，这个偏差是系统性的、不是偶发。
+    """
+    task = Task.create(goal="x")
+    events = [{"id": "R1-E01", "type": "user", "status": "", "truncated": "读三个文件",
+               "message": {"role": "user", "content": "读三个文件"}}]
+    for i, path in enumerate(("a.py", "b.py", "c.py"), start=2):
+        events.append({
+            "id": f"R1-E0{i}", "type": "tool_call", "status": "",
+            "truncated": "调用 read_file",
+            "message": {"role": "assistant", "tool_calls": [
+                {"id": f"c{i}", "type": "function",
+                 "function": {"name": "read_file",
+                              "arguments": json.dumps({"path": path})}}]},
+        })
+    events.append({"id": "R1-E05", "type": "final_answer", "status": "",
+                   "truncated": "读完了",
+                   "message": {"role": "assistant", "content": "读完了"}})
+    task.rounds = [{
+        "seq": 1,
+        "user_input": {"original": "读三个文件", "normalized": "通读三个模块"},
+        "events": events,
+        # v1 落盘：无写操作 → 整轮一块（这正是丢描述的成因）
+        "blocks": [{"id": "R1-B1", "kind": "work", "start": 0,
+                    "end": len(events) - 1,
+                    "start_event": "R1-E01", "end_event": "R1-E05"}],
+        # v3 产物：按文件聚合 → 三块，描述逐块给出
+        "block_summaries": {
+            "R1-B1": "通读 a.py，弄清入口与装配顺序",
+            "R1-B2": "通读 b.py，确认工具 schema 生成方式",
+            "R1-B3": "通读 c.py，理清维护管线的两阶段",
+        },
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    _make_open_round(agent, 2, "继续")
+
+    body = "\n".join(m.get("content", "") for m in agent._assemble_messages())
+
+    assert "▸ R1-B1: " in body
+    for bid, desc in (("R1-B2", "通读 b.py"), ("R1-B3", "通读 c.py")):
+        assert f"▸ {bid}: " in body, f"{bid} 的块细节未进上下文（v1/v3 编号错位）"
+    assert "通读 c.py，理清维护管线的两阶段" in body
+
+
 def test_organization_missing_blocks_get_fallback_route_lines(monkeypatch, tmp_path):
     """完整性兜底：LLM 漏标的块用确定性路由行补齐——视图里不允许出现
     没有描述的块（用户拍板：保证完整的细节描述）。"""

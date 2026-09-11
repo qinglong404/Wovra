@@ -277,7 +277,14 @@ class _AssemblyMixin:
         summaries = r.get("block_summaries") or {}
         if summaries:
             lines.append("块细节：")
-            blocks = r.get("blocks") or []
+            # 块结构**现场重算 v3**（segment_round_by_file）——与整理产物同源。
+            # 不能用 r["blocks"]：那是 close_round 落的 v1 粗分块，两套分块器
+            # 编号空间相同（R{n}-B{k}）但切法不同（v1 以写/改为截止，无写轮整轮
+            # 一块；v3 按文件聚合）。按 v1 遍历 + 用 v3 键查表会**静默丢描述**：
+            # 实测本会话 R1（纯读轮）v1=1 块 / v3=24 块，24 条描述只有 1 条进了
+            # 上下文，另外 23 条（逐个文件读完后的知识沉淀）永不显示。
+            # 这也让视图里的块 ID 与 expand_history 的重算口径一致（同 v3）。
+            blocks = blocks_module.segment_round_by_file(r)
             if blocks:
                 for b in blocks:
                     s = summaries.get(b["id"])
@@ -507,5 +514,4 @@ class _AssemblyMixin:
                     body = f"调用: {calls}" + (f"\n{body}" if body else "")
                 parts.append(f"--- {e['id']} ({e['type']}) ---\n{body}")
             return "\n".join(parts)
-        return f"未找到块: {block_id}"
         return f"未找到块: {block_id}"
