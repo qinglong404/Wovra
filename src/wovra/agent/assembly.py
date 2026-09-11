@@ -8,6 +8,7 @@ from .. import blocks as blocks_module
 from .. import lifecycle as lifecycle_module
 from .. import tokens as tokens
 from .. import truncate as truncate
+from ..task import _MODEL_SIDE_SECTIONS
 from .support import (
     MODE_BASELINE,
     _STATE_RENDER_BUDGET,
@@ -57,7 +58,13 @@ class _AssemblyMixin:
         if self.task is not None:
             # 传字符预算：TaskState 的 7 个列表上限合计 1400 条且每轮都进
             # 上下文，无预算即为无界常驻负担（2026-09-11 机制评审）
-            state_render = self.task.get_state().render(_STATE_RENDER_BUDGET)
+            # 传 sections：`completed` 退出模型侧（2026-09-11 用户拍板，
+            # 见 task._MODEL_SIDE_SECTIONS 注释）——它唯一无限增长且是
+            # verify 验收证据的副本（实测占条目文本 62.7%），而 R16 的
+            # 按节预算早把它压到 143 tok；人视图/report 不传此参照旧全量。
+            state_render = self.task.get_state().render(
+                _STATE_RENDER_BUDGET, sections=_MODEL_SIDE_SECTIONS
+            )
 
         msgs: list[dict] = []
         if self.system_prompt:

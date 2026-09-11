@@ -147,6 +147,32 @@ _ORG_SUBMIT_SCHEMA: dict = {
                                 "（写明做什么、看什么、什么算对）"
                             ),
                         },
+                        "closed": {
+                            "type": "array",
+                            "description": (
+                                "结案清单：把**已经解决**的旧条目从账本里移除"
+                                "（2026-09-11 用户拍板）。判据——escalations 已"
+                                "被人拍板、experiments 已验证完毕、已知问题已"
+                                "解决，都属结案：留在账本里会被下一轮的自己当"
+                                "成待办重问一遍。每条给 field（字段名，限 "
+                                "constraints/decisions/completed/known_issues/"
+                                "open_questions/escalations/experiments）与 "
+                                "match（**该条里的一小段原文**，20-40 字，"
+                                "须在账本里唯一）。机制要求子串唯一命中才移除，"
+                                "匹配不到或多条一律不动并在 history 记一行——"
+                                "所以片段要抄得够准。注意：decisions 只在"
+                                "**被推翻**时结案（正常决策是历史，留着）。"
+                                "没有可结案的给空数组。"
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field": {"type": "string"},
+                                    "match": {"type": "string"},
+                                },
+                                "required": ["field", "match"],
+                            },
+                        },
                         "current_status": {"type": "string"},
                         "goal": {"type": "string"},
                         "is_done": {"type": "boolean"},

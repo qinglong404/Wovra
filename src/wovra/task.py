@@ -47,6 +47,41 @@ _PATCH_LIST_FIELDS = (
     "open_questions", "escalations", "experiments",
 )
 
+# 模型侧注入的节（2026-09-11 用户拍板：账本适配分裂的第一步）。
+#
+# `completed` **退出模型侧**，理由三条实测依据：
+# 1. 它是唯一无限增长的节——活会话实测 49 条 / 19,582 字符 / 14,005 tok，
+#    占全部条目文本的 62.7%，而其内容几乎全是 `[大步] …（验收：…）`，
+#    即 verify_milestone 自动写入的**验收证据副本**，与 worklog、
+#    report.md、events 流三重冗余；
+# 2. R16 的按节预算已把它压到 143 tok——占着 62.7% 的存储，模型实际
+#    只看到一句片段，等于纯噪声；
+# 3. 档案的读取时刻是"人想知道"，不是"每轮都要"（人视图 `wovra report`
+#    与 task.py 的报告渲染仍全量输出，本节不删数据、只不注入模型）。
+#
+# 留下的是"边界与待办"：目标/现状（render 的 head）+ 决策升级与待办实验
+# （**没有第二个注入点**，分裂后更是子 agent 唯一的升级通道）+ 其余台账。
+# decisions/known_issues/open_questions 暂留，待"装配按域分化"时按
+# file_domains 分片到各域视图（一并动装配，避免对同一段代码改两次）。
+_MODEL_SIDE_SECTIONS = (
+    "decisions", "known_issues", "open_questions",
+    "escalations", "experiments", "constraints",
+)
+
+# 结案机制（2026-09-11 用户拍板）。状态账本此前**只增不减**——全链只有
+# 追加去重，没有任何删除/结案路径。实测代价：活会话 11 条 escalations 里
+# 8 条已结案仍挂着（400 已修并推送、幽灵误判已按 A 修完、v1/v3 双轨已废、
+# 分裂去留已拍板、旧定律清理已拍板、org 收窄已复议两次…），模型每轮都在
+# 读它们，随时可能把已经做完的事重新拿来问一遍——**"现状账本"在缺结案
+# 机制时会退化成"没清理的收件箱"，化石会直接污染行动判断**。
+#
+# 分工纪律（next-stage-intent.md §2「排除性判断不做，累积性整理可以做」）：
+# **语义判断归模型、机械匹配归机制**。模型在整理时（读取时刻）给出
+# "哪条已结案 + 用于识别的片段"，机制只做子串**唯一匹配**与移除；
+# 找不到或匹配到多条一律**不猜**（原样保留并把片段回报出去）。机制永不
+# 自行判断"这条看起来过期了"——那才是被禁的排除性判断。结案是删除操作，
+# 必须留痕可见（apply_state_patch 写 maintenance history）。
+
 # TaskState.render 的裁剪策略（2026-09-11 P0 修复）。
 # 旧实现是对整块文本做 `text[:budget]` 切片，而节的输出顺序是
 # 目标→现状→已完成→已决策→…→决策升级→待办实验→约束，切片保头部，
@@ -170,13 +205,41 @@ class TaskState:
     current_status: str = ""
     is_done: bool = False
 
-    def apply_patch(self, patch: dict) -> None:
+    def close_items(self, field: str, snippets: list[str]) -> tuple[list[str], list[str], list[str]]:
+        """按片段从某个列表字段里结案（移除）条目。
+
+        返回 `(存活条目, 已结案条目文本, 未匹配片段)`。机械匹配纪律：
+        **子串命中且唯一**才移除；命中 0 条或多条一律不动、原样列出片段，
+        交由调用方留痕——宁可留着化石，不可误删活账（错删比滞留危险：
+        滞留只是噪，误删会丢约束）。
+        """
+        items = list(getattr(self, field) or [])
+        closed: list[str] = []
+        unmatched: list[str] = []
+        for raw in snippets:
+            snippet = str(raw).strip()
+            if not snippet:
+                continue
+            hits = [x for x in items if snippet in x]
+            if len(hits) != 1:
+                unmatched.append(snippet)
+                continue
+            items.remove(hits[0])
+            closed.append(hits[0])
+        setattr(self, field, items)
+        return items, closed, unmatched
+
+    def apply_patch(self, patch: dict) -> dict:
         """应用一轮 Organization 产出的状态补丁。
 
         * 列表字段：追加去重，超出容量淘汰最旧
         * current_status / goal：直接覆盖
         * is_done：仅接受布尔
+        * closed：结案清单（模型给的片段，机制唯一匹配后移除，见常量注释）
         * 非法/缺失字段一律忽略，不让坏数据进状态
+
+        返回结案报告 `{"closed": [(field, text)], "unmatched": [(field, snippet)]}`，
+        供调用方留痕——**结案是删除操作，必须可见**。
         """
         if patch.get("goal"):
             self.goal = str(patch["goal"])
@@ -195,7 +258,24 @@ class TaskState:
                     merged.append(text)
             del merged[: max(0, len(merged) - STATE_LIST_CAP)]
 
-    def render(self, budget: int | None = None) -> str:
+        report: dict = {"closed": [], "unmatched": []}
+        for entry in patch.get("closed") or []:
+            if not isinstance(entry, dict):
+                continue
+            field = str(entry.get("field") or "").strip()
+            snippet = entry.get("match")
+            if field not in _PATCH_LIST_FIELDS or not snippet:
+                continue
+            # 先追加再结案：同一批里"新增即结案"（历史里已解决的问题
+            # 被重复提到）也应当能结掉，否则化石要等下一批
+            _items, closed, unmatched = self.close_items(field, [str(snippet)])
+            if closed:
+                report["closed"].append((field, closed[0]))
+            elif unmatched:
+                report["unmatched"].append((field, unmatched[0]))
+        return report
+
+    def render(self, budget: int | None = None, sections: tuple[str, ...] | None = None) -> str:
         """渲染成给模型看的文本块。
 
         空状态返回空串——新会话不给模型一个空的任务状态头
@@ -207,6 +287,10 @@ class TaskState:
         再出现旧实现那种"整块切片把整节吃掉"（实测只剩「已完成」一节，
         决策升级与待办实验全部不可见）。为保证每节至少留最新一条，极端
         情况下总长可能略超 budget——宁可略超，不可静默丢节。
+
+        sections：只渲染指定的节（模型侧注入用 `_MODEL_SIDE_SECTIONS`——
+        `completed` 是唯一无限增长且与人视图/report/events 三重冗余的节，
+        退出模型侧；**人视图与 report 不传此参，照旧全量**）。
         """
         head: list[str] = []
         if self.goal:
@@ -218,7 +302,7 @@ class TaskState:
         sections = [
             (label, name, getattr(self, name))
             for label, name in _STATE_SECTION_ORDER
-            if getattr(self, name)
+            if getattr(self, name) and (sections is None or name in sections)
         ]
         if not head and not sections:
             return ""
@@ -324,16 +408,30 @@ class Task:
     created_at: str = ""
     updated_at: str = ""
 
-    def apply_state_patch(self, patch: dict) -> None:
-        """把 Organization 的 state_patch 合并进任务状态（持久化字段）。"""
+    def apply_state_patch(self, patch: dict) -> dict:
+        """把 Organization 的 state_patch 合并进任务状态（持久化字段）。
+
+        返回结案报告（`{"closed": [...], "unmatched": [...]}`）供调用方
+        留痕——结案是删除操作，必须可见（见 _MODEL_SIDE_SECTIONS 上方注释）。
+        """
         state = TaskState(**(self.task_state or {}))
-        state.apply_patch(patch)
+        report = state.apply_patch(patch)
         self.task_state = asdict(state)
+        # goal 同步（2026-09-11 用户拍板，遗产整治）：`Task.goal` 是**人视图**
+        # 显示的目标（`wovra list`、report 的 head、启动横幅都读它），
+        # `TaskState.goal` 是整理产出的**权威**当前目标。此前两者各自为政，
+        # 实测活会话 `Task.goal` 为空而 `TaskState.goal` 写满了整段真实目标，
+        # 于是终端与报告一直显示"（目标待明确）"、模型侧却看得到完整目标。
+        # goal 是文档写明的"最慢层"——两本账必须指同一个：只要 state 里有
+        # goal 就镜像过来（不只是本批带了 goal 时，故历史遗留也能自愈）。
+        if state.goal:
+            self.goal = state.goal
         # is_done 与粗粒度状态机打通：整理判定完成 → status=done，
         # 避免 report 里"任务已完成"与 list 里"进行中"两本账打架
         if patch.get("is_done") is True and self.status != "done":
             self.status = "done"
             self.updated_at = datetime.now().isoformat(timespec="seconds")
+        return report
 
     def get_state(self) -> TaskState:
         """以 TaskState 对象的形式读取当前任务状态。"""
@@ -487,6 +585,18 @@ class Task:
                 "maintenance",
                 f"历史块结构迁移：{changed} 轮由 v1 粗分块重算为 v3 按文件聚合"
                 f"（{seqs}{'…' if changed > 12 else ''}）",
+            )
+            task.save()
+        # goal 回填（2026-09-11，遗产整治）：Task.goal 与 TaskState.goal 长期
+        # 分裂（前者是 V1 时代"建任务时定死"的字段，后者是整理产出的权威目标），
+        # 实测活会话前者为空、后者有值，人视图因此一直显示"（目标待明确）"。
+        # 与上方两处同一模式：幂等，故可随加载进行；不再整理的旧会话也能治好。
+        if not task.goal and (task.task_state or {}).get("goal"):
+            task.goal = task.task_state["goal"]
+            task.record(
+                "maintenance",
+                "state：Task.goal 与 TaskState.goal 分裂，已按后者回填"
+                "（人视图此前显示“目标待明确”）",
             )
             task.save()
         if task.workspace:

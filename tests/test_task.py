@@ -274,12 +274,17 @@ def test_state_render_keeps_critical_sections_under_tight_budget():
 
 def test_assembly_truncates_oversized_task_state(monkeypatch):
     """回归（2026-09-11）：装配上下文里的任务状态受预算约束，
-    不会随列表增长无限膨胀；且裁剪时关键节不被吃掉。"""
+    不会随列表增长无限膨胀；且裁剪时关键节不被吃掉。
+
+    2026-09-11 二次修订：`completed` 已退出模型侧（task._MODEL_SIDE_SECTIONS），
+    故改用仍在模型侧、同样会无限增长的 `decisions` 造超长状态；
+    completed 的退出由 test_assembly_excludes_completed_from_model_side 钉住。
+    """
     from wovra.agent import Agent
     from wovra.task import _STATE_TRIM_NOTE
 
     task = Task.create(goal="目标")
-    task.task_state["completed"] = [f"完成项{i}" * 20 for i in range(300)]
+    task.task_state["decisions"] = [f"决策{i}" * 20 for i in range(300)]
     task.task_state["escalations"] = ["需要人拍板的事项"]
     task.task_state["experiments"] = ["需要人当传感器的事项"]
     agent = Agent(llm=object(), tools=[], task=task)
@@ -291,6 +296,119 @@ def test_assembly_truncates_oversized_task_state(monkeypatch):
     # 关键节即使在被裁的装配里也必须可见（P0 病灶：旧实现只剩「已完成」）
     assert "需要人拍板的事项" in body
     assert "需要人当传感器的事项" in body
+
+
+def test_assembly_excludes_completed_from_model_side(monkeypatch):
+    """回归（2026-09-11 用户拍板）：`completed` 不注入模型侧，人侧全量。
+
+    依据（实测）：completed 是唯一无限增长的节——活会话 49 条 / 19,582
+    字符 / 14,005 tok，占全部条目文本 62.7%，内容几乎全是 verify_milestone
+    写入的验收证据副本（与 worklog / report.md / events 流三重冗余）；
+    而 R16 的按节预算早把它压到 143 tok，等于占 62.7% 存储只给一句片段。
+    档案的读取时刻是"人想知道"，不是"每轮都要"——故 render 不传 sections
+    时（人视图、report）照旧全量。
+    """
+    from wovra.agent import Agent
+
+    task = Task.create(goal="目标")
+    task.task_state["completed"] = ["[大步] 已验收的证据副本A", "[大步] 已验收的证据副本B"]
+    task.task_state["escalations"] = ["需要人拍板的事项"]
+    agent = Agent(llm=object(), tools=[], task=task)
+    agent.current_round = None
+    agent.messages = []
+    body = "\n".join(m.get("content", "") for m in agent._assemble_messages())
+    assert "已验收的证据副本A" not in body, "completed 仍在模型侧（每轮白付）"
+    assert "需要人拍板的事项" in body
+    # 人侧不传 sections：全量（report / 活文档要能看到已完成的档案）
+    human = task.get_state().render()
+    assert "已验收的证据副本A" in human
+    assert "已验收的证据副本B" in human
+
+
+def test_state_patch_closes_resolved_items():
+    """回归（2026-09-11 用户拍板）：结案机制——模型给片段、机制唯一匹配后移除。
+
+    依据（实测）：本会话 11 条 escalations 里 8 条已结案仍挂着（400 已修、
+    幽灵误判已修、v1/v3 双轨已废……），模型每轮读它们、随时可能把做完的事
+    重新拿来问一遍。分工纪律：语义判断归模型（读取时刻），机械匹配归机制。
+    """
+    task = Task.create(goal="g")
+    task.apply_state_patch({
+        "escalations": ["400 缺陷（需人拍板修法与时机）：预期是维护批次正常产出"],
+        "experiments": ["重启后裸跑安全探针"],
+    })
+    report = task.apply_state_patch({
+        "closed": [
+            {"field": "escalations", "match": "400 缺陷（需人拍板修法与时机）"},
+            {"field": "experiments", "match": "重启后裸跑安全探针"},
+        ],
+    })
+    state = task.get_state()
+    assert state.escalations == []
+    assert state.experiments == []
+    assert len(report["closed"]) == 2
+    assert report["unmatched"] == []
+
+
+def test_close_items_requires_unique_match_and_never_guesses():
+    """结案匹配纪律：命中 0 条或多条一律不动、原样回报（宁可留化石，不可错删活账）。
+
+    错删比滞留危险——滞留只是噪，误删会丢约束（决策/升升级队列丢一条，
+    模型就永久少一条边界）。
+    """
+    from wovra.task import TaskState
+
+    state = TaskState(goal="g")
+    state.escalations = ["端口冲突：换端口还是杀进程", "端口冲突：另一个上下文"]
+    _items, closed, unmatched = state.close_items("escalations", ["端口冲突"])
+    assert closed == [] and unmatched == ["端口冲突"]  # 命中 2 条 → 不猜
+    assert len(state.escalations) == 2
+    _items, closed, unmatched = state.close_items("escalations", ["根本不存在的片段"])
+    assert closed == [] and unmatched == ["根本不存在的片段"]  # 命中 0 条 → 不动
+    _items, closed, unmatched = state.close_items("escalations", ["换端口还是杀进程"])
+    assert len(closed) == 1  # 唯一命中 → 移除
+    assert state.escalations == ["端口冲突：另一个上下文"]
+
+
+def test_promote_records_close_report_in_history(monkeypatch, tmp_path):
+    """结案必须留痕：条目从账本删除后，history 是唯一能回答"谁在哪次整理结掉的"的地方。"""
+    from wovra.agent import Agent
+    from wovra import task as task_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.apply_state_patch({"escalations": ["400 缺陷（需人拍板）：待定"]})
+    agent = Agent(llm=object(), tools=[], task=task)
+    agent.rounds = [{"seq": 1, "events": [], "pending_org": {
+        "state_patch": {
+            "closed": [{"field": "escalations", "match": "400 缺陷（需人拍板）"}],
+            "current_status": "已修",
+        },
+    }}]
+    agent._promote_org_results()
+    state = task.get_state()
+    assert state.escalations == []
+    detail = " ".join(str(h.get("detail", "")) for h in task.history)
+    assert "结案" in detail
+    assert "400 缺陷（需人拍板）" in detail
+
+
+def test_promote_records_unmatched_close_snippet(monkeypatch, tmp_path):
+    """结案片段匹配不到时也留痕——它是提示词质量或片段表述的信号，不能静默丢。"""
+    from wovra.agent import Agent
+    from wovra import task as task_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.apply_state_patch({"escalations": ["真实的升级条目"]})
+    agent = Agent(llm=object(), tools=[], task=task)
+    agent.rounds = [{"seq": 1, "events": [], "pending_org": {
+        "state_patch": {"closed": [{"field": "escalations", "match": "抄错的片段"}]},
+    }}]
+    agent._promote_org_results()
+    assert task.get_state().escalations == ["真实的升级条目"]  # 不动活账
+    detail = " ".join(str(h.get("detail", "")) for h in task.history)
+    assert "未匹配" in detail
 
 
 def test_state_patch_done_syncs_task_status():
@@ -394,3 +512,57 @@ def test_task_binds_and_restores_workspace(monkeypatch, tmp_path):
     loaded = Task.load(task.id)
     assert loaded.workspace == str(ws)
     assert str(tools_module.safety.PROJECT_ROOT) == str(ws)
+
+
+def test_apply_state_patch_syncs_goal_to_task(monkeypatch, tmp_path):
+    """回归（2026-09-11 遗产整治）：TaskState.goal 变化同步到 Task.goal。
+
+    两处 goal 长期分裂：`Task.goal` 是 V1 时代"建任务时定死"的字段（人视图
+    显示它——`wovra list`、report head、启动横幅），`TaskState.goal` 是整理
+    产出的权威当前目标（模型侧 render 用它）。实测活会话前者为空、后者写满
+    了整段真实目标，于是**终端与报告一直显示"（目标待明确）"，模型侧却看得
+    到完整目标**。goal 是文档写明的"最慢层"，两本账必须指同一个。
+    """
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="")
+    task.apply_state_patch({"goal": "整理产出的真实目标"})
+    assert task.goal == "整理产出的真实目标"
+    # 人视图读的就是它
+    from wovra import ui
+
+    assert "整理产出的真实目标" in ui.report_view(task, [])
+
+
+def test_load_backfills_goal_from_state(monkeypatch, tmp_path):
+    """回归：旧会话的 goal 分裂在加载期自愈（不整理的会话也能治好）。
+
+    与 v1→v3 块迁移、注册表回填同一模式：幂等，故可随加载进行。
+    """
+    import json as _json
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="")
+    task.task_state["goal"] = "旧会话里只在 State 里的目标"
+    task.save()
+
+    loaded = Task.load(task.id)
+    assert loaded.goal == "旧会话里只在 State 里的目标"
+    assert any(
+        "goal" in e.get("detail", "") and "回填" in e.get("detail", "")
+        for e in loaded.history if e.get("kind") == "maintenance"
+    )
+    # 落盘生效 + 幂等（第二次加载不再留痕）
+    again = Task.load(task.id)
+    assert again.goal == "旧会话里只在 State 里的目标"
+    assert len(again.history) == len(loaded.history)
+
+
+def test_load_backfill_does_not_override_existing_goal(monkeypatch, tmp_path):
+    """反向对照：Task.goal 已有值时不被 State 覆盖（不夺权，只手补缺口）。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="建任务时定的目标")
+    task.task_state["goal"] = "State 里的目标"
+    task.save()
+
+    loaded = Task.load(task.id)
+    assert loaded.goal == "建任务时定的目标"

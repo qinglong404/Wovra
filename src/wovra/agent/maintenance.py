@@ -1164,9 +1164,36 @@ class _MaintenanceMixin:
                 r["split_assessment"] = pending["split_assessment"]
             patch = pending.get("state_patch")
             if patch and self.task is not None:
-                self.task.apply_state_patch(patch)
+                report = self.task.apply_state_patch(patch)
+                self._record_close_report(report)
         if changed:
             self._persist_rounds()
+
+    def _record_close_report(self, report: dict) -> None:
+        """结案报告的留痕（结案是删除操作，必须可见）。
+
+        为什么必须留痕：结案会把条目从状态账本里**删掉**——模型下一轮
+        就看不到了。history 是唯一能回答"这条什么时候、被谁（哪次整理）
+        结掉的"的地方；也是误删时人工恢复的唯一线索。
+        未匹配片段同样留痕——它说明模型认为该结案但机制找不到，
+        是提示词质量或片段表述的信号（找到 0 条或多条一律不动，见
+        `TaskState.close_items` 的注释：宁可留化石，不可错删活账）。
+        """
+        if self.task is None or not report:
+            return
+        closed = report.get("closed") or []
+        unmatched = report.get("unmatched") or []
+        if closed:
+            detail = "；".join(f"{field}：{_clip_quote(text, 60)}" for field, text in closed)
+            self.task.record(
+                "maintenance", f"state：结案 {len(closed)} 条——{detail}",
+            )
+        if unmatched:
+            detail = "；".join(f"{field}：{_clip_quote(text, 60)}" for field, text in unmatched)
+            self.task.record(
+                "maintenance",
+                f"state：结案片段未匹配（不动，原样保留）——{detail}",
+            )
 
     def _read_full_event(self, event_id: str) -> str:
         """按事件 ID 返回完整原文，不做内容截断。
