@@ -471,3 +471,51 @@ def test_maint_missing_task_fails_friendly(monkeypatch, tmp_path):
         assert "任务不存在" in str(e)
     else:
         raise AssertionError("应该以 SystemExit 报错")
+
+
+def test_local_command_maint_renders_progress(monkeypatch, tmp_path, capsys):
+    """会话内 \\maint（与 \\report/\\todo 同类本地命令）：渲染整理/分裂进度。
+
+    与独立 `wovra maint` 共用 ui.maint_view——同一份机械渲染，零模型成本。
+    """
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.rounds = [
+        {"seq": 1, "org_state": "done", "org_generation": 1, "end_state": "completed"},
+        {"seq": 2, "end_state": "completed"},  # 未触发
+    ]
+    task.history = [
+        {"time": "2026-09-11T15:02:10", "kind": "maintenance",
+         "detail": "启动：批次 R1-R5（5 轮，输入快照 353 条消息，硬上限 900s）"},
+    ]
+    task.save()
+
+    _local_command("\\maint", task)
+    out = capsys.readouterr().out
+    assert "维护进度" in out
+    assert "已整理 1" in out and "未触发 1" in out
+    assert "批次 R1-R5" in out
+
+
+def test_local_command_maint_slash_prefix_and_empty(monkeypatch, tmp_path, capsys):
+    """/maint 斜杠前缀等价；空任务（无轮次/无分裂/无批次）友好占位。"""
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+
+    _local_command("/maint", task)
+    out = capsys.readouterr().out
+    assert "维护进度" in out
+    assert "尚无轮次" in out and "无维护批次记录" in out
+
+
+def test_local_help_mentions_maint():
+    """\\help 帮助文本含 maint 条目（与 _LOCAL_HELP 同步）。"""
+    from wovra.cli import _LOCAL_HELP
+
+    assert "maint" in _LOCAL_HELP
+    assert "整理/分裂进度" in _LOCAL_HELP

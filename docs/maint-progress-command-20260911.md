@@ -46,12 +46,23 @@ wovra maint [task_id]
 - `src/wovra/cli/main.py`：新增 `cmd_maint` 子命令处理器；argparse 注册
   `maint` 子命令（task_id 可选）。
 - `src/wovra/cli/__init__.py`：导出 `cmd_maint`。
-- 交互模式不加本地命令：进度用独立命令看，会话内保持 `\report`/`\todo`
-  两个机械视图即可。
+- `src/wovra/cli/interactive.py`：`_local_command` 新增 `maint` 分支（与
+  `\report`/`\todo` 同类本地命令），会话内输入 `\maint`（或 `/maint`）
+  直接打印维护进度，零模型成本、不进对话；`_LOCAL_HELP` 与 `_chat_help`
+  同步补 `maint` 条目。
+
+## 会话内调用（交互模式）
+
+```
+\maint          # 会话内看整理/分裂进度（反斜杠或斜杠前缀均可）
+```
+
+与 `\report`/`\todo` 同为本地命令：纯本地机械渲染，零模型成本，不把命令
+作为对话发给模型。查看对象 = 当前会话自己的 task.json。
 
 ## 验证
 
-- 新增测试 6 个（tests/test_cli/test_commands.py）：
+- 新增 CLI 测试 6 个（tests/test_cli/test_commands.py）：
   - `test_maint_renders_org_distribution`：org_state 分布 + 代次 + 水位参考
     （usage 记账用真实格式 `context=129,611` 验证千分位解析）；
   - `test_maint_shows_split_product_and_batches`：分裂产物（可分裂性/域/
@@ -61,10 +72,16 @@ wovra maint [task_id]
   - `test_maint_defaults_to_most_recent_task`：省略 task_id 取最近会话；
   - `test_maint_no_tasks_friendly`：无任务友好提示；
   - `test_maint_missing_task_fails_friendly`：任务不存在友好报错。
+- 新增会话内本地命令测试 3 个：
+  - `test_local_command_maint_renders_progress`：`\maint` 渲染整理分布 +
+    批次记账；
+  - `test_local_command_maint_slash_prefix_and_empty`：`/maint` 斜杠等价 +
+    空任务友好占位；
+  - `test_local_help_mentions_maint`：`\help` 帮助文本含 maint 条目。
 - 真实任务实测：`wovra maint 20260911-135751-8ddad1` 渲染正确——24 轮
   88% 已整理、代次 3、水位参考 ≈21,315/100,000、R1 不可分裂（原因 +
   1 个域 + 2 块未归属）、8 条维护批次记账完整。
-- 全量测试 318 passed（309 + 9 新增）。
+- 全量测试 321 passed（309 + 9 新增 CLI + 3 新增本地命令）。
 
 ## 备注
 

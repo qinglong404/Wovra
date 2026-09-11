@@ -139,6 +139,9 @@ def _local_command(command: str, task: Task, agent=None) -> None:
         elif cmd in ("report", "报告"):
             # 与 `wovra report` 同一份机械渲染：会话内直接看，不用另开终端
             print(ui.report_view(task, _child_summaries(task.id)))
+        elif cmd in ("maint", "维护", "进度"):
+            # 与 `wovra maint` 同一份机械渲染：会话内看整理/分裂进度
+            print(ui.maint_view(task))
         elif cmd in ("todo", "阶段", "计划"):
             print("\n".join(task.todo_lines()))
         elif cmd in ("undo", "撤销"):
@@ -164,7 +167,7 @@ def _chat_help() -> None:
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
-    print(f"  {ui.paint('report / todo', 'bold')}  会话内看报告 / 当前大步小步（快捷键 F2 / F3）")
+    print(f"  {ui.paint('report / maint / todo', 'bold')}  会话内看报告 / 整理分裂进度 / 当前大步小步（快捷键 F2 / F3）")
     print(f"  {ui.paint('bg / undo / c', 'bold')}  本地命令（\\help 看全部；零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
@@ -284,6 +287,7 @@ _LOCAL_HELP = """\
   bg <任务id>          查看某后台进程的增量输出
   bg stop <任务id>     强制停止后台进程
   report              会话内看人视图报告（同 `wovra report`；快捷键 F2）
+  maint               会话内看整理/分裂进度（同 `wovra maint`）
   todo                会话内看当前大步/小步（快捷键 F3）
   undo                撤销最近一条开放轮（打错字/误发送的后悔药）
   help                本帮助
