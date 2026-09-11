@@ -35,6 +35,7 @@
 # `wovra.tools.safety.PROJECT_ROOT`（task.py / 测试 / 探针均如此）。
 
 # 子模块（可直接访问）
+from . import limits
 from . import safety, files, shell, background, web, interaction  # noqa: F401,E402
 
 # ---- 公开 API 再导出 ---------------------------------------------------------

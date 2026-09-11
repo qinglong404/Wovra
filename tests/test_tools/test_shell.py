@@ -63,19 +63,42 @@ def test_run_command_respects_custom_timeout(monkeypatch):
     assert "超时 1 秒被强制终止" in result
 
 
-def test_run_command_marks_truncated_output(monkeypatch, tmp_path):
-    """输出超限时显式标注并保留首尾——静默截断曾让模型误诊白跑一轮。"""
+def test_run_command_returns_full_output_by_default(monkeypatch, tmp_path):
+    """默认全量返回（2026-09-11 用户拍板，worklog §25）。
+
+    旧契约是 1500 字符硬上限（超限保留首尾）；实测代价是模型看不到中段
+    → 换方法重试 → 白烧数轮到数十轮往返，省下的不过几百 token。用户
+    口径是"除压缩外全量输入"，压缩只属于整理侧。
+    """
     from wovra import tools as tools_module
 
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("big.txt", "甲" * 4000 + "尾部关键结论")
     cmd = "type big.txt" if _os.name == "nt" else "cat big.txt"
     result = run_command(cmd)
-    assert "字符已省略" in result
-    assert "4,00" in result  # 原文体量（4,008 字符）标在省略说明里
-    # 首尾都在：尾部常有测试失败/报错结论，只留头部等于丢掉最有用的部分
-    assert result.count("甲") > 100
+    assert "字符已省略" not in result and "未内联" not in result  # 不再截断
+    assert result.count("甲") == 4000                            # 全量在内
     assert "尾部关键结论" in result
+
+
+def test_run_command_spills_instead_of_losing_output(monkeypatch, tmp_path):
+    """真超限时不丢数据：完整内容落盘 output/spill/ 并给出路径。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setenv("WOVRA_OUTPUT_LIMIT", "500")
+    write_file("big.txt", "乙" * 3000 + "尾部关键结论")
+    cmd = "type big.txt" if _os.name == "nt" else "cat big.txt"
+    result = run_command(cmd)
+
+    assert "未内联" in result and "3,0" in result       # 原文体量标出来
+    assert "output/spill/" in result                     # 给出落盘路径
+    # 首尾都在：尾部常有测试失败/报错结论，只留头部等于丢掉最有用的部分
+    assert result.count("乙") > 100
+    assert "尾部关键结论" in result
+    # 完整内容确实在盘上，可 read_file 取回
+    spilled = list((tmp_path / "output" / "spill").glob("*.txt"))
+    assert spilled and "乙" * 3000 in spilled[0].read_text(encoding="utf-8")
 
 
 def test_confirm_pattern_matching():

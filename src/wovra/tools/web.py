@@ -5,7 +5,7 @@ import re
 import urllib.parse
 import urllib.request
 
-from . import safety
+from . import limits, safety
 
 
 # ---- 网络与用户交互 ----------------------------------------------------------
@@ -60,30 +60,32 @@ def _html_to_text(raw: bytes) -> str:
     return "\n".join(line.strip() for line in text.splitlines() if line.strip())
 
 
-def web_fetch(url: str, max_chars: int = 8000) -> str:
+def web_fetch(url: str, max_chars: int = 0) -> str:
     """抓取一个 http(s) 网页，去除 HTML 标签后返回正文文本。
 
     适合查 API 文档、技术资料。仅 http/https，拒绝内网地址（防 SSRF），
-    30 秒超时，正文最多返回 max_chars 字符。找资料的入口用 web_search。
+    30 秒超时。正文默认全量返回（2026-09-11 放开，worklog §25：原先
+    8000 字符硬上限，抓一份长文档要反复重试）；真超限时完整内容落盘
+    output/spill/ 并给出路径。max_chars>0 时才按该值截断。
+    找资料的入口用 web_search。
     """
     safety._audit(f"[web_fetch] {url}")
     blocked = _assert_public_url(url)
     if blocked:
         return blocked
-    max_chars = max(200, min(int(max_chars), 50_000))
     request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
     try:
         with urllib.request.urlopen(request, timeout=30) as resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
-            raw = resp.read(2_000_000)
+            raw = resp.read(8_000_000)
     except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
         return f"抓取失败: {error!r}"
     text = _html_to_text(raw) if ("html" in ctype or not ctype) else raw.decode("utf-8", errors="replace")
     if not text.strip():
         return f"URL 无文本内容（Content-Type: {ctype}）。"
     head = f"[{url}] Content-Type: {ctype or '未知'}，抓取 {len(raw)} 字节\n\n"
-    tail = "\n…(正文已截断)" if len(text) > max_chars else ""
-    return head + text[:max_chars] + tail
+    body = text if max_chars <= 0 else text[:int(max_chars)]
+    return limits.clip(head + body, "web_fetch")
 
 
 def _search_ddg(query: str, max_results: int) -> str:

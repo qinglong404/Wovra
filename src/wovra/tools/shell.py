@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 
-from . import safety
+from . import limits, safety
 
 
 _COMMAND_TIMEOUT = 60  # 秒
@@ -37,9 +37,6 @@ def _kill_process_tree(pid: int) -> None:
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
-
-_OUTPUT_LIMIT = 1500
-
 
 def _oem_encoding() -> str:
     """Windows 控制台所用 OEM 代码页对应的 Python 编码名（非 Windows 回 utf-8）。
@@ -90,7 +87,8 @@ def run_command(command: str, timeout: int | None = None) -> str:
         * 工作目录固定在项目根：显式离开工作区的命令（`cd ..`、
           `cd /绝对路径`）会被拒绝——需要访问工作区外请说明理由
         * 超时强制终止整棵进程树，防止长命令卡死整个任务
-        * 输出各截断 1500 字符（带显式截断标记），防止超长输出撑爆上下文
+        * 输出默认全量返回（上限 200,000 字符，WOVRA_OUTPUT_LIMIT 可调）；
+          真超限时完整内容落盘 output/spill/ 并给出路径，不丢数据
     """
     safety._audit(f"[run_command] {command}")  # 无论执行与否，命令原文都进审计
     for pattern in safety._DENIED_PATTERNS:
@@ -201,27 +199,19 @@ def run_command(command: str, timeout: int | None = None) -> str:
     # 语义判断。重型验证（浏览器 E2E 等）的累计账由此可算。
 
     def _clip(text: str) -> str:
-        """超限时保留**头 + 尾**，明确标出中间丢了多少——静默截断曾让
-        模型把"输出被切"误诊为命令符号问题，白跑一整轮重试（2026-09-07
-        实测）。
+        """默认全量返回，只在超爆阀时降级（2026-09-11 用户拍板，worklog §25）。
 
-        2026-09-10 改为首尾保留（审计报告 §六 指名"丢中段"是最大痛点）：
-        原实现只留前 1500 字符，中段直接消失——测试失败信息、命令报错
-        往往出现在**末尾**，只留头部等于把最有用的部分丢掉，模型只能
-        换方法反复猜。现在头部给上下文、尾部给结论。
+        历史沿革与教训：原实现只留前 1500 字符（中段直接消失），改首尾
+        保留；两版共同的毛病是**上限太小**——正常 `dir /s`、跑一次测试
+        就能撞上，模型看不到中段就换方法反复猜、白烧数轮到数十轮往返，
+        省下的不过几百 token。真正的口径是"除压缩外全量输入"，而压缩只
+        属于整理侧（水位整理），不属于工具返回。
+
+        现在交给 `limits.clip`：默认上限 200,000 字符（WOVRA_OUTPUT_LIMIT
+        可调），真超限时**完整内容落盘 output/spill/** 并在返回文本里给出
+        路径——不再有"丢内容"这条路径。
         """
-        if len(text) <= _OUTPUT_LIMIT:
-            return text
-        head = _OUTPUT_LIMIT * 2 // 3
-        tail = _OUTPUT_LIMIT - head
-        omitted = len(text) - head - tail
-        return (
-            f"{text[:head]}\n"
-            f"…（中间 {omitted:,} 字符已省略：原文共 {len(text):,} 字符，"
-            f"此处保留开头 {head:,} + 结尾 {tail:,}——完整内容用 read_file "
-            f"分段读取，或让命令只输出关键部分）\n"
-            f"{text[-tail:]}"
-        )
+        return limits.clip(text, "run_command")
 
     return (
         f"{header}\n"

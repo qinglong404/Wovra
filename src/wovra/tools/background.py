@@ -8,7 +8,7 @@ import itertools
 import os
 import subprocess
 
-from . import safety
+from . import limits, safety
 from .shell import _decode_output, _kill_process_tree
 
 
@@ -141,7 +141,9 @@ def check_background(task_id: str) -> str:
         new_text = _decode_output(data)
     status = "运行中" if running else f"已退出（exit_code={proc.returncode}）"
     body = new_text.strip() or "（无新输出）"
-    return f"[{task_id}] {status}\n{body[-2000:]}"
+    # 增量输出默认全量返回（2026-09-11 放开，worklog §25）：原先切末 2000
+    # 字符，日志开头被静默丢掉——而"什么时候开始报错的"恰恰在开头。
+    return f"[{task_id}] {status}\n{limits.clip(body, f'bg-{task_id}')}"
 
 
 def _ownership_error(task_id: str, entry: dict) -> str | None:

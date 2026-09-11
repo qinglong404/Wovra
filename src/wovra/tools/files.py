@@ -16,7 +16,7 @@ import re
 import time
 from pathlib import Path
 
-from . import safety
+from . import limits, safety
 
 
 # 搜索时跳过的噪声目录（依赖、缓存、运行时数据——搜索它们只有噪音）
@@ -33,6 +33,16 @@ _IGNORED_DIRS = {
 
 _SYMLINK_IN_ROOT = "root"   # 只认指向界内的链接（默认，零误伤）
 _SYMLINK_SKIP = "skip"      # 一律跳过（不接受链接入参时使用）
+
+# 单次 read_file 的行数上限（2026-09-11 放开：原为 400 行硬上限，读一次
+# 800 行的文件要两次往返；真正的天花板由字符爆阀 limits.clip 兜底）。
+_READ_MAX_LINES = 20_000
+
+# 工具输出的条数上限（2026-09-11 放开，worklog §25）：原 50/200 条太小，
+# 正常一次搜索就能撞上，模型看不到后面的命中就得换关键词再搜一遍。
+# 现行值由 limits.list_limit() 统一裁决（WOVRA_OUTPUT_LIMIT 可调大）。
+_SEARCH_MAX_MATCHES = 200
+_GLOB_MAX_FILES = 1_000
 
 
 def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
@@ -138,8 +148,8 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     按 num_lines=400 连续分段读取，不要零碎小段反复读。
 
     大文件请配合 search_files 先定位，再用 start_line/num_lines
-    分段读取——单次最多 400 行，返回值会标明文件总行数和
-    继续读取的位置。
+    分段读取——单次最多 20,000 行（num_lines 可放大，2026-09-11 从
+    400 行放开），返回值会标明文件总行数和继续读取的位置。
 
     路径必须是工作区内的相对路径，不接受 `..` 上溯（含 `sub/../x`
     这种中间穿越）——绕路不产生歧义，直接拒掉。指向工作区之外的
@@ -172,19 +182,23 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     start = max(1, start_line)
     if start > total:
         return f"{path} 共 {total} 行，start_line={start} 超出范围"
-    end = min(total, start + min(max(1, num_lines), 400) - 1)
+    # 行数上限（2026-09-11 放开）：原先硬卡 400 行，读一个 800 行的文件
+    # 要两次往返；文件本来就在磁盘上，往返才是浪费。现在由 limits 统一
+    # 控制（默认一次可读 20,000 行），超长内容再由字符爆阀兜底落盘。
+    end = min(total, start + min(max(1, num_lines), _READ_MAX_LINES) - 1)
     body = "\n".join(lines[start - 1:end])
     header = f"{path}（共 {total} 行，以下为第 {start}-{end} 行）"
     if end < total:
         body += f"\n...（后续还有 {total - end} 行，用 start_line={end + 1} 继续读取）"
-    return f"{header}\n{body}"
+    return limits.clip(f"{header}\n{body}", f"read-{Path(path).name}")
 
 
 def search_files(pattern: str, directory: str = ".", glob: str = "*",
                  context: int = 0) -> str:
     """在项目内用正则表达式搜索文本文件（类似 grep）。
 
-    返回 `路径:行号: 行内容` 格式的匹配，最多 50 条；
+    返回 `路径:行号: 行内容` 格式的匹配，默认最多 200 条
+    （WOVRA_OUTPUT_LIMIT 可调大）；
     自动跳过 .git/.venv 等噪声目录。找"某个函数在哪定义"、
     "哪个文件用了某配置" 都靠它。
     context：每个匹配额外附带前后 N 行上下文（类似 grep -C，单行内
@@ -228,11 +242,15 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
                     )
                     entry += f"  ｜上下文: {snippet}"
                 matches.append(entry)
-                if len(matches) >= 50:
-                    return "\n".join(matches) + "\n...(已达 50 条上限，请缩小搜索范围)"
+                if len(matches) >= limits.list_limit(_SEARCH_MAX_MATCHES):
+                    body = "\n".join(matches)
+                    return limits.clip(
+                        body + f"\n...(已达 {len(matches)} 条上限，可缩小搜索范围，"
+                        f"或调大 WOVRA_OUTPUT_LIMIT)", "search",
+                    )
     if not matches:
         return f"无匹配：pattern={pattern!r}, directory={directory!r}, glob={glob!r}"
-    return "\n".join(matches)
+    return limits.clip("\n".join(matches), "search")
 
 
 def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False) -> str:
@@ -240,8 +258,8 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
 
     模式递归匹配所有子目录（*.py 等价于 **/*.py）；与 search_files
     （搜内容）互补：找"有哪些文件"用本工具，找"哪些文件里有什么
-    内容"用 search_files。自动跳过 .git/.venv 等噪声目录，最多
-    返回 200 条。
+    内容"用 search_files。自动跳过 .git/.venv 等噪声目录，默认最多
+    返回 1,000 条（WOVRA_OUTPUT_LIMIT 可调大）。
 
     include_hidden：是否把隐藏文件/目录（.env、.github 等）算进结果。
     注意标准的通配语义：`*.py` 不匹配 .a.py，`*` 也不匹配 .env——
@@ -264,9 +282,10 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
     if not filtered:
         hint = "" if include_hidden else "（隐藏文件未计入，需要时加 include_hidden=True）"
         return f"无匹配文件: {pattern}（directory={directory}）{hint}"
-    lines = [_display_rel(p).as_posix() for p in filtered[:200]]
-    more = f"\n…(共 {len(filtered)} 个，已显示前 200)" if len(filtered) > 200 else ""
-    return "\n".join(lines) + more
+    cap = limits.list_limit(_GLOB_MAX_FILES)
+    lines = [_display_rel(p).as_posix() for p in filtered[:cap]]
+    more = f"\n…(共 {len(filtered)} 个，已显示前 {cap})" if len(filtered) > cap else ""
+    return limits.clip("\n".join(lines) + more, "glob")
 
 # ---- 文件观察注册表（过期保护） ---------------------------------------------
 # 本进程读/写过的文件 → (mtime_ns, size)。edit_file/write_file 前核对：
