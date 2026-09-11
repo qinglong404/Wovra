@@ -414,3 +414,130 @@ def report_view(task, children: list[dict] | None = None) -> str:
         "> 未截断的记录见同目录 task.json。",
     ]
     return "\n".join(lines) + "\n"
+
+
+# ---- 维护进度视图（整理 / 分裂）---------------------------------------------
+
+
+def _org_watermark() -> int:
+    """整理触发线（与 agent/support.py 的 _ORG_WATERMARK_DEFAULT 同口径，
+    这里直接读环境变量，避免 ui → agent 的跨包引用）。"""
+    return int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
+
+
+def _last_context_estimate(task) -> int | None:
+    """从 usage 记账里取最近一次上下文体量（尽力而为，取不到返回 None）。
+
+    agent/core.py 每轮闭合时 record("usage", "... context={x:,} ...")，
+    x 带千分位逗号——解析时先去掉逗号。
+    """
+    for h in reversed(task.history or []):
+        if h.get("kind") != "usage":
+            continue
+        detail = str(h.get("detail") or "")
+        idx = detail.find("context=")
+        if idx == -1:
+            continue
+        rest = detail[idx + len("context="):].split()
+        if not rest:
+            continue
+        try:
+            return int(rest[0].replace(",", ""))
+        except ValueError:
+            continue
+    return None
+
+
+def maint_view(task) -> str:
+    """维护进度视图：整理（organization）与分裂（split）的机械渲染。
+
+    全部来自 Task.rounds 与 history 的确定性字段，零 LLM 成本：
+    * 整理 = 每轮 org_state（done/pending/failed/未触发）+ 整理代次 +
+      pending_org 暂存残留 + 水位参考（usage 记账里的最近一次上下文体量）；
+    * 分裂 = split_assessment（可分裂性/原因）+ 域归属（domains/unassigned）；
+    * 批次记账 = history 里 kind=="maintenance" 的启动/结束记录
+      （org/split 成败、批次范围、输入快照、硬上限）。
+    """
+    rounds = task.rounds or []
+    org_states: dict[str, int] = {}
+    generations: set[int] = set()
+    pending_count = 0
+    for r in rounds:
+        st = r.get("org_state") or ""
+        org_states[st] = org_states.get(st, 0) + 1
+        if r.get("org_generation"):
+            generations.add(int(r["org_generation"]))
+        if r.get("pending_org"):
+            pending_count += 1
+
+    lines = [f"# 维护进度：{task.id}", ""]
+    lines.append("## 整理（organization）")
+    total = len(rounds)
+    if total == 0:
+        lines.append("-（尚无轮次）")
+    else:
+        done = org_states.get("done", 0)
+        pending = org_states.get("pending", 0)
+        failed = org_states.get("failed", 0)
+        untouched = org_states.get("", 0)
+        lines.append(
+            f"- 轮次 {total}：已整理 {done}（{done / total * 100:.0f}%）"
+            f"／排队中 {pending}／失败 {failed}／未触发 {untouched}"
+        )
+        if generations:
+            lines.append(f"- 最新整理代次：{max(generations)}")
+        if pending_count:
+            lines.append(
+                f"- 有 {pending_count} 轮整理产物待生效（pending_org 暂存，"
+                "下一轮开启时 promote）"
+            )
+    ctx = _last_context_estimate(task)
+    if ctx is not None:
+        lines.append(
+            f"- 最近一次上下文体量 ≈ {ctx:,}（整理触发线 {_org_watermark():,}）"
+        )
+
+    lines += ["", "## 分裂（split）"]
+    split_rounds = [r for r in rounds if r.get("split_assessment")]
+    if not split_rounds:
+        lines.append("-（尚无分裂分析产物——整理批次完成后会附带分裂判定）")
+    else:
+        for r in split_rounds:
+            sa = r["split_assessment"] or {}
+            splittable = sa.get("splittable")
+            if splittable is True:
+                mark = "可分裂"
+            elif splittable is False:
+                mark = "不可分裂"
+            else:
+                mark = "（无判定）"
+            lines.append(f"- R{r.get('seq')}：{mark}")
+            reason = " ".join(str(sa.get("reason") or "").split())
+            if reason:
+                cut = reason[:120]
+                lines.append(f"  原因：{cut}{'…' if len(reason) > 120 else ''}")
+            domains = r.get("domains") or []
+            if domains:
+                names = [
+                    str(d.get("name") or "?") for d in domains if isinstance(d, dict)
+                ]
+                shown = "、".join(names[:5]) + ("…" if len(names) > 5 else "")
+                lines.append(f"  域：{len(domains)} 个（{shown}）")
+            unassigned = r.get("unassigned") or {}
+            un_ids = unassigned.get("block_ids") or []
+            if un_ids:
+                lines.append(f"  未归属（归主 agent）：{len(un_ids)} 块")
+
+    lines += ["", "## 维护批次（history 记账）"]
+    maint = [h for h in (task.history or []) if h.get("kind") == "maintenance"]
+    if not maint:
+        lines.append("-（无维护批次记录——尚未触发过水位整理）")
+    else:
+        for h in maint:
+            lines.append(f"- {h.get('time', '')} {h.get('detail', '')}")
+
+    lines += [
+        "",
+        "> task.json 的机械渲染，零模型成本；批次记账由维护管线自动写入 history。",
+    ]
+    return "\n".join(lines) + "\n"

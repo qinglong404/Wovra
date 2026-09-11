@@ -57,6 +57,24 @@ def cmd_report(args: argparse.Namespace) -> None:
     task = _load_task(args.task_id)
     print(ui.report_view(task, _child_summaries(task.id)))
 
+def cmd_maint(args: argparse.Namespace) -> None:
+    """wovra maint：查看整理（organization）与分裂（split）进度。
+
+    task.json 的机械渲染，零模型成本（与 report/list 同类）——整理
+    分布（org_state/代次/水位）、分裂产物（可分裂性/域归属）、维护
+    批次记账（history 里 kind==maintenance 的启动/结束记录）一览。
+    省略 task_id 时取最近更新的会话。
+    """
+    if args.task_id:
+        task = _load_task(args.task_id)
+    else:
+        tasks = _all_tasks()
+        if not tasks:
+            print(ui.info("还没有任何任务。直接 `wovra chat` 开始第一个会话。"))
+            return
+        task = _load_task(tasks[0]["id"])
+    print(ui.maint_view(task))
+
 def cmd_list(args: argparse.Namespace) -> None:
     """wovra list：列出所有任务（按更新时间倒序，带数字编号）。"""
     tasks = _all_tasks()
@@ -185,6 +203,11 @@ def main(argv: list[str] | None = None) -> None:
     p_report = sub.add_parser("report", help="人机协同报告（机械渲染，零模型成本）")
     p_report.add_argument("task_id", help="任务 id 或列表编号")
     p_report.set_defaults(func=cmd_report)
+
+    p_maint = sub.add_parser("maint", help="查看整理与分裂进度（机械渲染，零模型成本）")
+    p_maint.add_argument("task_id", nargs="?", default="",
+                         help="任务 id 或列表编号；省略取最近更新的会话")
+    p_maint.set_defaults(func=cmd_maint)
 
     sub.add_parser("help", help="显示帮助")
 

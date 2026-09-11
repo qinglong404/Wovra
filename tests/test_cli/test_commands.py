@@ -346,3 +346,128 @@ def test_local_command_bg_stop_numeric_id(monkeypatch, tmp_path, capsys):
         assert "已停止" in out and "bg-1" in out
     finally:
         tools_module.background._BACKGROUND_TASKS.clear()
+
+
+# ---- wovra maint：整理/分裂进度视图 -----------------------------------------
+
+
+def test_maint_renders_org_distribution(monkeypatch, tmp_path, capsys):
+    """maint：org_state 分布（已整理/排队/失败/未触发）+ 代次 + 水位。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import cmd_maint
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="维护进度")
+    task.rounds = [
+        {"seq": 1, "org_state": "done", "org_generation": 1, "end_state": "completed"},
+        {"seq": 2, "org_state": "done", "org_generation": 2, "end_state": "completed"},
+        {"seq": 3, "org_state": "pending", "end_state": "completed"},
+        {"seq": 4, "org_state": "failed", "end_state": "completed"},
+        {"seq": 5, "end_state": "completed"},  # 未触发（org_state 为空）
+    ]
+    # 与真实 usage 记账同格式（context= 带千分位逗号）——水位参考行读它
+    task.history = [
+        {"time": "2026-09-11T16:00:00", "kind": "usage",
+         "detail": "[managed] steps=15 context=129,611 working=1,812,969 "
+                   "org=136,336 compaction=0 prompt=1,803,023 completion=9,946 "
+                   "total=1,812,969（思考 5,723） 缓存命中 1,691,904 tok（93.3%）"},
+    ]
+    task.save()
+
+    cmd_maint(SimpleNamespace(task_id=task.id))
+    out = capsys.readouterr().out
+    assert "维护进度" in out
+    assert "已整理 2" in out and "排队中 1" in out
+    assert "失败 1" in out and "未触发 1" in out
+    assert "最新整理代次：2" in out
+    assert "整理触发线" in out and "129,611" in out  # 水位参考行 + 千分位解析
+
+
+def test_maint_shows_split_product_and_batches(monkeypatch, tmp_path, capsys):
+    """maint：分裂产物（可分裂性/域/未归属）+ 维护批次记账。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import cmd_maint
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="维护进度")
+    task.rounds = [{
+        "seq": 1, "org_state": "done",
+        "split_assessment": {
+            "splittable": True,
+            "reason": "顶层有 2 个独立域，可分裂",
+            "proposal": {"units": [{"name": "框架自改进域"}, {"name": "web 演示前端"}]},
+        },
+        "domains": [{"name": "框架自改进域"}, {"name": "web 演示前端"}],
+        "unassigned": {"block_ids": ["R1-B1"], "reason": "纯聊天"},
+    }]
+    task.history = [
+        {"time": "2026-09-11T15:02:10", "kind": "maintenance",
+         "detail": "启动：批次 R1-R5（5 轮，输入快照 353 条消息，硬上限 900s）"},
+        {"time": "2026-09-11T15:04:51", "kind": "maintenance",
+         "detail": "结束：org=True split=True"},
+    ]
+    task.save()
+
+    cmd_maint(SimpleNamespace(task_id=task.id))
+    out = capsys.readouterr().out
+    assert "可分裂" in out and "顶层有 2 个独立域" in out
+    assert "域：2 个" in out and "框架自改进域" in out
+    assert "未归属（归主 agent）：1 块" in out
+    assert "批次 R1-R5" in out and "org=True split=True" in out
+
+
+def test_maint_empty_rounds_friendly(monkeypatch, tmp_path, capsys):
+    """maint：空任务（无轮次/无分裂/无批次）也给出友好占位。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import cmd_maint
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+
+    cmd_maint(SimpleNamespace(task_id=task.id))
+    out = capsys.readouterr().out
+    assert "尚无轮次" in out
+    assert "尚无分裂分析产物" in out
+    assert "无维护批次记录" in out
+
+
+def test_maint_defaults_to_most_recent_task(monkeypatch, tmp_path, capsys):
+    """maint 省略 task_id：取最近更新的会话（与 list 的排序一致）。"""
+    from types import SimpleNamespace
+
+    from wovra.cli import cmd_maint
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    _seed_task("较早的任务", updated_at="2020-01-01T00:00:00")
+    newest = Task.create(goal="较新的任务")
+    newest.rounds = [{"seq": 1, "org_state": "done", "end_state": "completed"}]
+    newest.save()
+
+    cmd_maint(SimpleNamespace(task_id=""))
+    out = capsys.readouterr().out
+    assert newest.id in out
+    assert "已整理 1" in out
+
+
+def test_maint_no_tasks_friendly(monkeypatch, tmp_path, capsys):
+    """maint 无任何任务：友好提示而不是报错。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+
+    cli_main(["maint"])
+    assert "还没有任何任务" in capsys.readouterr().out
+
+
+def test_maint_missing_task_fails_friendly(monkeypatch, tmp_path):
+    """maint 指定不存在的任务：友好报错而不是堆栈。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+
+    try:
+        cli_main(["maint", "不存在的任务"])
+    except SystemExit as e:
+        assert "任务不存在" in str(e)
+    else:
+        raise AssertionError("应该以 SystemExit 报错")

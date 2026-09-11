@@ -13,6 +13,7 @@
 from .main import (  # noqa: F401
     cmd_delete,
     cmd_list,
+    cmd_maint,
     cmd_report,
     cmd_run,
     main,
