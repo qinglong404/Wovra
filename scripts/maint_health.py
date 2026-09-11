@@ -26,6 +26,8 @@ from types import SimpleNamespace
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from wovra import economics as economics_module  # noqa: E402
+from wovra import split_lifecycle as split_lifecycle_module  # noqa: E402
 from wovra import task as task_module  # noqa: E402
 from wovra import tokens as tokens_module  # noqa: E402
 from wovra import views as views_module  # noqa: E402
@@ -236,6 +238,37 @@ def report(task_id: str) -> None:
             print(f"域 {len(views)}　块 {len(built.get('index') or {})}　"
                   f"归属完整 {verify.get('ok')}　缺归属 {len(verify.get('missing') or [])}　"
                   f"视图体量 {span} tok")
+            # 逐层分裂的机械判据（各视图自身体量 + 是否到自己的水位）
+            marks = views_module.view_watermarks(
+                task.rounds, task.get_state(), registry=task.registry,
+                watermark=watermark,
+            )
+            over = [n for n, m in marks.items()
+                    if m.get("over") and n != views_module.MAIN_AGENT_ID]
+            print(f"视图水位（阈值 {watermark:,}）："
+                  f"{len(marks)} 个视图，到自身水位 {len(over)} 个"
+                  + (f"——{'、'.join(over)}（考虑在内部再裂一层）" if over else ""))
+            # 经济判据（零 LLM 机械算式，plan §13.3）
+            assessed = economics_module.assess_from_watermarks(total, marks)
+            for line in economics_module.format_lines(assessed):
+                print(line)
+            actions = split_lifecycle_module.plan(
+                views_module.latest_domains(task.rounds), task.registry, marks,
+                b_before=total,
+            )
+            for line in split_lifecycle_module.summary_lines(actions):
+                print(line)
+            # 路由粘滞率（active_view 落盘序列；开关关闭时全为 A，等于零信息）
+            seq_views = [
+                str(r.get("active_view") or views_module.MAIN_AGENT_ID)
+                for r in task.rounds
+            ]
+            switches = sum(
+                1 for a, b in zip(seq_views, seq_views[1:]) if a != b
+            )
+            sticky = (len(seq_views) - switches) / len(seq_views) if seq_views else 0.0
+            print(f"active_view 序列 {len(seq_views)} 轮　切换 {switches} 次　"
+                  f"粘滞率 {sticky:.1%}（目标 >80%）")
         except Exception as error:  # noqa: BLE001——体检不该因某节不可用而失败
             print(f"（域视图不可用：{error!r}）")
 

@@ -1218,6 +1218,76 @@ def test_split_skipped_when_org_fails(monkeypatch, tmp_path):
     assert not any(c.get("lane") == "split" for c in agent.llm.calls)
 
 
+def test_split_instruction_carries_view_watermarks(monkeypatch, tmp_path):
+    """逐层分裂硬数据（零 LLM）：分裂指令带上各视图自身体量与「是否到自身水位」。
+
+    判据归机制（Runtime 给体量事实）、语义归模型（这一摊活是否真已分成互不
+    相干的两条线）——plan §13.1。水位按**视图各自**计量，故判据只能由 Runtime
+    现算，不能由模型自述。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_domains_chunk()]],
+    )
+    task.rounds[0]["domains"] = [
+        {"name": "工具层", "description": "边界守卫",
+         "file_domains": ["src/wovra/tools/"]},
+    ]
+    # 注意：Agent 构造时会复制一份 rounds（agent.rounds 与 task.rounds 不同
+    # 对象）——分裂硬数据读的是 agent.rounds，故 domains 必须落在它上面。
+    agent.rounds[0]["domains"] = task.rounds[0]["domains"]
+    agent._maybe_organize_batch()
+
+    split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
+    assert split_calls
+    prompt = "\n".join(
+        str(m.get("content") or "") for m in split_calls[0]["messages"]
+    )
+    assert "各视图自身体量" in prompt            # 硬数据行
+    assert "工具层" in prompt
+    assert "考虑在其内部再裂一层" in prompt      # 到水位的提示语在判据里
+    assert "逐层分裂（正式机制" in prompt        # 判据第 4 条（不是可选项）
+
+
+def test_split_view_watermarks_skips_main_agent_and_empty_domains(monkeypatch, tmp_path):
+    """主 agent 是兜底桶（不参与"拆不拆自己"）；无域时不产生硬数据行。"""
+    agent = Agent(llm=_StubLLM(), tools=[])
+    agent.rounds = [_mk_file_round(1, "写文件", ["a.txt"])]
+    assert agent._split_view_watermarks() == []          # 无分裂产物 → 无行
+
+    agent.rounds[0]["domains"] = [{"name": "甲", "file_domains": ["a.txt"]}]
+    lines = agent._split_view_watermarks()
+    joined = "\n".join(lines)
+    assert "甲" in joined
+    assert "主agent" not in joined and "A：" not in joined
+
+
+def test_promote_records_economics_and_lifecycle(monkeypatch, tmp_path):
+    """promote 通路（步 3 接线）：产物生效时把经济判据与生命周期动作记进账本。
+
+    「发现职责 ≠ 创建 Agent」必须体现在留痕里：视图不由这里创建（装配层按
+    domains 机械派生），这里只算与记——判据为负者只记录不拆（plan §13.3）。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_domains_chunk()]],
+    )
+    agent._maybe_organize_batch()
+    agent._promote_org_results()
+
+    details = "\n".join(
+        str(h.get("detail")) for h in task.history if h.get("kind") == "maintenance"
+    )
+    assert "分裂经济判据" in details          # (B − B′) × N_future − C_split
+    assert "生命周期动作" in details
+    assert "发现职责≠创建 Agent" in details
+    assert "C_split" in details and "18,830" in details
+    # 域已进注册表（机械翻译仍走 registry.merge_into）
+    assert [e["id"] for e in task.registry] == ["A", "A-1"]
+
+
 def test_split_hard_data_lists_live_files(monkeypatch, tmp_path):
     """硬数据（零 LLM）：活性文件清单 + 数量；dead 文件不占上限。"""
     agent = Agent(llm=_StubLLM(), tools=[])

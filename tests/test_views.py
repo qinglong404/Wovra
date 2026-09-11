@@ -317,3 +317,77 @@ def test_human_report_reports_completeness():
     assert "域视图" in joined
     assert "归属完整：是" in joined
     assert "A-1（工具层）" in joined
+
+
+def test_view_watermarks_reports_per_view_tokens_rounds_and_over_flag():
+    """逐层分裂的机械判据（plan §13.1）：各视图自身体量 + 活跃轮数 + 是否到水位。
+
+    水位基准是**该视图自己**的量（分裂后水位按视图各自计量）——故判据只需要
+    体量事实，语义（这一摊活是否真分成两条线）仍归模型。
+    """
+    rounds = [
+        _block_round(1, ["src/wovra/tools/safety.py"]),
+        _block_round(2, ["index.html"]),
+        _block_round(3, ["src/wovra/tools/shell.py"]),
+    ]
+    domains = [
+        {"name": "工具层", "file_domains": ["src/wovra/tools/"]},
+        {"name": "前端", "file_domains": ["index.html"]},
+    ]
+    marks = views_module.view_watermarks(rounds, TaskState(), domains=domains)
+    assert set(marks) == {"工具层", "前端", views_module.MAIN_AGENT_ID}
+    tools = marks["工具层"]
+    assert tools["blocks"] >= 2                       # R1/R3 两个文件块
+    assert tools["rounds"] == 2                       # 命中两轮
+    assert tools["tokens"] > 0
+    assert marks["前端"]["rounds"] == 1
+    # 未给水位 → 不判"到线"（阈值口径随调用方，不在模块里硬编码）
+    assert tools["over"] is False
+    low = views_module.view_watermarks(
+        rounds, TaskState(), domains=domains, watermark=1
+    )
+    assert low["工具层"]["over"] is True
+
+
+def test_view_watermarks_survives_no_domains():
+    """无分裂产物时不炸：只有主 agent 一份，且不被当成"要拆的主 agent"。"""
+    rounds = [_block_round(1, ["a.py"])]
+    marks = views_module.view_watermarks(rounds, TaskState(), domains=[])
+    assert list(marks) == [views_module.MAIN_AGENT_ID]
+
+
+def test_subdomain_gets_its_own_view_and_watermark():
+    """逐层分裂（plan §13.1）：子域（parent）有**自己**的视图与水位。
+
+    A-1 到自身水位后在其内部再裂一层 → A-1-1；路径 ID 由 Runtime 机械生成
+    （注册表 build_entries），水位按各视图自己的量算——故子域的体量只含它
+    自己名下的块，不含父域其余部分。
+    """
+    rounds = [
+        _block_round(1, ["src/wovra/tools/safety.py"]),
+        _block_round(2, ["src/wovra/tools/detect/canary.py"]),
+    ]
+    domains = [
+        {"name": "工具层", "file_domains": ["src/wovra/tools/"]},
+        {"name": "检测加固", "parent": "工具层",
+         "file_domains": ["src/wovra/tools/detect/"]},
+    ]
+    marks = views_module.view_watermarks(rounds, TaskState(), domains=domains)
+    assert set(marks) >= {"工具层", "检测加固"}
+    # 归属是**最长前缀优先**：子域声明的 detect/ 更具体，那个块归子域；
+    # 父域只拿剩下的（R1 的 safety.py）。故父子各一轮，互不重叠。
+    assert marks["检测加固"]["rounds"] == 1
+    assert marks["工具层"]["rounds"] == 1
+    assert marks["检测加固"]["blocks"] == 1
+    assert marks["工具层"]["blocks"] == 1
+
+    # 路径 ID 是职责路径（A-1 → A-1-1），由注册表机械生成
+    from wovra import registry as registry_module
+    ids = {e["name"]: e["id"] for e in registry_module.build_entries(domains)}
+    assert ids == {"工具层": "A-1", "检测加固": "A-1-1"}
+    built = views_module.build_views(rounds, TaskState(), domains=domains)
+    assert built["views"]["检测加固"]["path_id"] == "A-1-1"
+    # 隔离不因层级而破例：子域视图里不含父域那一轮的内容
+    child_text = built["views"]["检测加固"]["text"]
+    assert "canary.py" in child_text
+    assert "safety.py" not in child_text

@@ -8,8 +8,11 @@ import threading
 import time
 from typing import Optional
 from .. import blocks as blocks_module
+from .. import economics as economics_module
 from .. import lifecycle as lifecycle_module
 from .. import registry as registry_module
+from .. import split_lifecycle as split_lifecycle_module
+from .. import views as views_module
 from .. import tokens as tokens
 from .. import truncate as truncate
 from .support import (
@@ -739,6 +742,12 @@ class _MaintenanceMixin:
         # 主 agent 残留桶占比（零 LLM 体量事实）：纯对话块合计占本批内容
         # 多少——顶层节点计数的门槛由它定（判据见 _SPLIT_INSTRUCTIONS）。
         chat_share = self._chat_block_share(rounds, round_blocks)
+        # 逐层分裂硬数据（零 LLM）：各视图自身体量与是否到自己的水位。
+        # 分裂后水位按视图各自计量（plan §13.1）——子视图到达自己的水位时
+        # 按同一套机制在它内部再裂一层（A-1 → A-1-1），终态「只操作单个
+        # 文件为止」。判据归机制、语义归模型：Runtime 给体量事实，模型判断
+        # 这一摊活是否真已分成互不相干的两条线。
+        view_lines = self._split_view_watermarks()
         all_ids = {
             b["id"] for blocks in round_blocks.values() for b in blocks
         }
@@ -751,6 +760,7 @@ class _MaintenanceMixin:
             + "\n".join(hard_lines)
             + f"\n- 活性文件数（分裂单元数上限）：{n_live}"
             + f"\n- 纯对话块（无文件交互，闲聊）内容占比：约 {chat_share * 100:.0f}%"
+            + ("\n" + "\n".join(view_lines) if view_lines else "")
             + "\n\n"
             "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
             + "\n".join(map_lines)
@@ -1165,6 +1175,7 @@ class _MaintenanceMixin:
                             "registry：分裂产物落实为注册表条目——"
                             + "，".join(detail),
                         )
+                    self._record_split_lifecycle(pending["domains"])
             if pending.get("unassigned"):
                 r["unassigned"] = pending["unassigned"]
             if pending.get("split_assessment"):
@@ -1175,6 +1186,93 @@ class _MaintenanceMixin:
                 self._record_close_report(report)
         if changed:
             self._persist_rounds()
+
+    def _split_view_watermarks(self) -> list[str]:
+        """逐层分裂的硬数据行（零 LLM）：各视图自身体量 + 是否到自己的水位。
+
+        水位口径（plan §13.1）：**分裂后水位按视图各自计量**——故子视图到达
+        自己的水位时按同一套机制在它内部再裂一层（`A-1` → `A-1-1`），终态
+        「只操作单个文件为止」。判据归机制（Runtime 给体量事实）、语义归模型
+        （这一摊活是否真已分成互不相干的两条线）。
+
+        体量口径与 `view_watermarks` 同源（该视图全部块的一行式重建，属上界，
+        偏保守）；主 agent 不出现在这里——它是兜底桶，不参与「拆不拆自己」。
+        """
+        domains = registry_module.latest_domains(self.rounds)
+        if not domains:
+            return []
+        try:
+            marks = views_module.view_watermarks(
+                self.rounds,
+                self.task.get_state() if self.task is not None else None,
+                domains=domains,
+                registry=(self.task.registry if self.task is not None else None),
+                watermark=self._org_watermark,
+            )
+        except Exception:  # noqa: BLE001——硬数据不可用不该让分裂分析失败
+            return []
+        lines = ["- 各视图自身体量（= 该域全部块的一行式重建，属上界）："]
+        for name, mark in sorted(
+            marks.items(), key=lambda kv: -int(kv[1].get("tokens") or 0)
+        ):
+            if name == views_module.MAIN_AGENT_ID:
+                continue
+            over = "**已到自身水位 → 考虑在其内部再裂一层**" if mark.get("over") \
+                else "未到水位（不拆）"
+            lines.append(
+                f"  - {name}：{int(mark.get('tokens') or 0):,} tok／"
+                f"{int(mark.get('blocks') or 0)} 块／活跃 {int(mark.get('rounds') or 0)} 轮"
+                f" → {over}"
+            )
+        if len(lines) == 1:
+            return []
+        return lines
+
+    def _record_split_lifecycle(self, domains: list) -> None:
+        """分裂生命周期动作 + 经济判据（机械算式，零 LLM，2026-09-12）。
+
+        依据 plan §13.2/§13.3：四动作里第一版只做 split / no split，
+        且「发现职责」与「创建 Agent」是两个动作——故这里只**算与记**：
+        * 每个域一个动作（注册表里没有 = 本批发现的职责 → split；
+          已有 = 延续 → no split）；
+        * status 按材料事实落（该域名下有命中轮 → active，否则 dormant）；
+        * 经济判据 `(B − B′) × N_future − C_split` 逐域给读数，
+          为负者只记录不拆（不是错误，是"现在还不值得拆"）。
+
+        `B` 取本轮装配体量实测值（`last_context_estimate`）；`B′` 取该域视图
+        材料体量（口径上界，见 views.view_watermarks 注释）；`N_future` 取该域
+        活跃轮数（保守下界：它已被用了这么多轮，未来至少还会用这么多）。
+        """
+        if self.task is None:
+            return
+        try:
+            marks = views_module.view_watermarks(
+                self.rounds, self.task.get_state(),
+                domains=domains, registry=self.task.registry,
+            )
+        except Exception as error:  # noqa: BLE001——记账失败不能拖垮 promote
+            self.task.record(
+                "maintenance", f"分裂生命周期：视图体量不可用（{error!r}），跳过记账"
+            )
+            return
+        actions = split_lifecycle_module.plan(
+            domains, self.task.registry, marks,
+            b_before=int(self.last_context_estimate or 0),
+        )
+        changed = split_lifecycle_module.apply_status(self.task.registry, actions)
+        if changed:
+            self.task.record(
+                "maintenance",
+                f"registry：运行时状态更新（{len(changed)} 条）——"
+                + "、".join(changed),
+            )
+        assessed = economics_module.assess_from_watermarks(
+            int(self.last_context_estimate or 0), marks
+        )
+        for line in economics_module.format_lines(assessed):
+            self.task.record("maintenance", line)
+        for line in split_lifecycle_module.summary_lines(actions):
+            self.task.record("maintenance", line)
 
     def _record_close_report(self, report: dict) -> None:
         """结案报告的留痕（结案是删除操作，必须可见）。

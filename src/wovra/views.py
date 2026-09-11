@@ -322,6 +322,46 @@ def files_by_domain(
     return out
 
 
+def view_watermarks(
+    rounds: Iterable[dict],
+    state=None,
+    domains: Iterable[dict] | None = None,
+    registry: Iterable[dict] | None = None,
+    watermark: int | None = None,
+) -> dict[str, dict]:
+    """每个视图自身的材料体量与「是否到自己的水位」（逐层分裂的机械判据）。
+
+    水位口径（plan §13.1 + 保护机制）：**分裂后水位按 agent 各自计量**——故
+    子视图到达自己的水位时，应按同一套机制在它内部再裂一层（`A-1` → `A-1-1`），
+    终态是「只操作单个文件为止」。
+
+    产物每项：`tokens`（该视图材料体量，与 `human_report` 同口径）、`blocks`、
+    `rounds`（该域活跃轮数＝命中轮数，同时是经济判据里 `N_future` 的保守下界）、
+    `over`（是否已达自身水位）。
+
+    口径提醒：`tokens` 是该视图**全部块的一行式重建**（尚未按自身整理代次分档），
+    属**上界**——用它做"要不要再裂"的判据是偏保守的（宁可晚裂，不早裂）；
+    分档落地后这个数会降下来，判据随之更准。
+    """
+    built = build_views(rounds, state, domains=domains, registry=registry)
+    out: dict[str, dict] = {}
+    for name, view in (built.get("views") or {}).items():
+        counts = view.get("counts") or {}
+        tokens_ = int(view.get("est_tokens") or 0)
+        out[str(name)] = {
+            "tokens": tokens_,
+            "blocks": int(counts.get("own") or 0),
+            "rounds": int(counts.get("rounds") or 0),
+            # `None` = 调用方没给水位（不判）；数字（含 0）都是合法阈值。
+            # 曾用 bool(watermark) 判，把 0 当成"未给"——而 0 在测试/调试里
+            # 是"全都算到线"的常用口径，会把判据静默关掉（实测踩到）。
+            "over": (
+                watermark is not None and tokens_ >= int(watermark)
+            ),
+        }
+    return out
+
+
 def view_for_domain(
     name: str,
     domains: Iterable[dict] | None,
