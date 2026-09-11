@@ -1224,3 +1224,117 @@ def test_split_orphans_auto_go_to_main_agent(monkeypatch, tmp_path):
     # R1-B1 进了域；没有其它块，无孤儿 → unassigned 不产生
     assert "R1-B1" in pending["domains"][0]["block_ids"]
     assert "unassigned" not in pending or not pending.get("unassigned")
+
+
+def _dangling(msgs: list[dict]) -> list[str]:
+    """协议校验助手：返回未被回复的 tool_call id（含被 user 消息打断的）。
+
+    整理调用是"整段装配 + 尾部追加指令（user）"的追加式对话——尾部一旦
+    挂着未回复的 tool_calls，追加的 user 指令就是非法序列（严格端点 400）。
+    """
+    pending: set = set()
+    bad: set = set()
+    for m in msgs:
+        role = m.get("role")
+        if role == "tool":
+            pending.discard(m.get("tool_call_id"))
+        elif role == "assistant":
+            for call in m.get("tool_calls") or []:
+                if call.get("id"):
+                    pending.add(call["id"])
+        elif role == "user" and pending:
+            bad |= pending
+            pending = set()
+    return sorted(bad | pending)
+
+
+def test_maint_snapshot_defers_when_protocol_incomplete(monkeypatch, tmp_path):
+    """协议闸门（2026-09-11 400 实测的修法）：闭合发生在**工具方法体内部**
+    时（todo→verify_milestone→close_round），调用方的 tool 结果尚未落盘，
+    装配尾部就是未回复的 tool_calls——此刻取快照、追加整理指令，严格端点
+    直接 400（实测 21:27 那批 1 秒失败、未计费，产物只能等下一批补上）。
+
+    修法：此刻不取快照，置 deferred；该调用的 tool 结果落盘后自动补做。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0, async_organization=False,
+    )
+    agent._open_or_reuse_round("干活")
+    agent._record_event("user", {"role": "user", "content": "干活"})
+    agent.todo(action="start_milestone", goal="大步甲", acceptance=["可跑"])
+    agent.todo(action="add_step", text="小步一")
+    agent.todo(action="check_step", text="小步一")
+    args = json.dumps({"action": "verify_milestone", "evidence": "测试全绿"})
+    # 主循环的真实形态：先记 assistant(tool_calls)，再执行工具
+    agent._record_event("tool_call", {
+        "role": "assistant", "content": "",
+        "tool_calls": [{"id": "call_1", "type": "function",
+                        "function": {"name": "todo", "arguments": args}}],
+    })
+    agent.last_context_estimate = 5000
+    # 闭合那一刻的装配：尾部正是这条未回复的 tool_call → 闸门拦下
+    assert agent._maint_snapshot() is None
+    assert _dangling(agent._assemble_messages()) == ["call_1"]
+
+    agent._execute("call_1", "todo", args)  # 内部 close_round → 水位检查
+
+    assert agent._maint_deferred is False  # 已补做，标记复位
+    org_calls = [c for c in agent.llm.calls
+                 if any("[整理指令]" in str(m.get("content") or "")
+                        for m in c["messages"])]
+    assert len(org_calls) == 1, "结果落盘后应补发起整理（不吞掉这次触发）"
+    assert _dangling(org_calls[0]["messages"]) == []  # 补做时输入协议完整
+    details = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    assert any("水位检查推迟" in d for d in details), details
+
+
+def test_maint_snapshot_taken_when_protocol_complete(monkeypatch, tmp_path):
+    """反向对照：协议完整时不推迟——水位检查照常在轮闭合那一刻发起。
+
+    闸门的代价必须是零：正常轮闭合（尾部无悬空 tool_calls）不容许多等
+    半拍，否则就是把一个协议修复变成全量的延迟。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setattr("wovra.tokens.estimate", lambda text: len(text or "") // 4)
+    task = Task.create(goal="x")
+    task.rounds = [_round(1, "甲" * 2400, "甲" * 2400)]
+    task.rounds[0]["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
+        tools=[], task=task, org_watermark=2000, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+
+    assert agent._maint_deferred is False  # 未推迟
+    assert len(agent.llm.calls) == 1       # 即时发起
+
+
+def test_backlog_skips_incomplete_protocol(monkeypatch, tmp_path):
+    """收尾整理（run 模式退出）同走协议闸门：装配不完整时宁可不整理，
+    也不发出必然 400 的请求——收尾整理失败不该由协议问题引起。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="x")
+    task.rounds = [{
+        "seq": 1, "user_input": {"original": "干活", "normalized": ""},
+        "events": [
+            {"id": "R1-E01", "type": "user",
+             "message": {"role": "user", "content": "干活"}},
+            {"id": "R1-E02", "type": "tool_call", "message": {
+                "role": "assistant", "content": "",
+                "tool_calls": [{"id": "call_9", "type": "function",
+                                "function": {"name": "todo", "arguments": "{}"}}]}},
+        ],
+        "end_state": "completed", "org_state": "",
+    }]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+
+    agent.organize_backlog()
+
+    assert agent.llm.calls == []              # 未发出必然 400 的请求
+    assert agent.rounds[0]["org_state"] == ""  # 也未标记成 pending/failed

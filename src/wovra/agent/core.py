@@ -97,6 +97,14 @@ class _CoreMixin:
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()
+        # 维护快照的推迟标记（2026-09-11 实测缺陷的落点）：里程碑闭合发生
+        # 在工具方法体**内部**（todo→verify_milestone→close_round），此刻
+        # 调用方的 assistant(tool_calls) 还没有 tool 结果。若在此刻取装配
+        # 快照，尾部就是"未被回复的 tool_calls"，紧接着追加的整理指令以
+        # user 角色出现——严格端点直接 400（实测 21:27 那批 1 秒失败、
+        # 未计费，靠下一批次补上）。置位后由 _finish_tool_result 在结果
+        # 落盘后补做水位检查。
+        self._maint_deferred = False
         # 整理代次（2026-09-10 用户拍板：视图只保留最近 3 批整理，更早的
         # 按文件状态折叠）：每次成功整理 +1，批次轮打 org_generation 落盘；
         # 旧轮无该字段视为第 1 代（最老，优先折叠）。计数在本类里就地
@@ -266,6 +274,33 @@ class _CoreMixin:
         self.current_round["events"].append(event)
         self.messages.append(event["message"])
         return event
+
+    def _maint_snapshot(self) -> Optional[list[dict]]:
+        """维护调用的输入快照；装配协议不完整时返回 None（不取快照）。
+
+        整理/分裂是一次**追加式对话**：整段装配原样 + 尾部追加指令（user
+        角色）。因此装配序列必须协议完整——一旦以"未被回复的
+        assistant tool_calls"收尾，追加的 user 消息就是非法序列，严格
+        端点直接 400。实测（worklog §16.4）：里程碑闭合撞水位维护时，
+        快照取在"工具方法体内闭合轮、结果尚未落盘"的瞬间，21:27 那批
+        1 秒失败、未计费，产物只能等下一批次补上。
+
+        这里只做机械校验（零 LLM）：assistant 声明的 tool_call 必须在
+        任何后续 user 消息之前拿到 tool 结果，且序列不能以悬空收尾。
+        """
+        msgs = self._assemble_messages()
+        pending: set[str] = set()
+        for m in msgs:
+            role = m.get("role")
+            if role == "tool":
+                pending.discard(m.get("tool_call_id"))
+            elif role == "assistant":
+                for call in m.get("tool_calls") or []:
+                    if call.get("id"):
+                        pending.add(call["id"])
+            elif role == "user" and pending:
+                return None  # user 消息打断了未被回复的 tool_calls
+        return None if pending else msgs
 
     def _emit_status(self, text: str) -> None:
         """后台线程往状态队列里投递一条消息（线程安全：list.append 原子）。"""
@@ -587,6 +622,14 @@ class _CoreMixin:
             self.task.record("tool_call", f"{name}({arguments})")
             self.task.record("tool_result", f"{name} -> {result_for_context[:500]}")
             self._persist_rounds()
+
+        # 补做被推迟的水位检查（2026-09-11 400 实测的收尾）：工具方法体内
+        # 闭合轮时（todo→verify_milestone→close_round）快照协议不全，检查
+        # 被置为 deferred；现在这条调用的 tool 结果已落盘、装配合法，正是
+        # 补取的时机——水位口径与触发条件都不变，只是晚了半拍。
+        if self._maint_deferred:
+            self._maint_deferred = False
+            self._maybe_organize_batch()
 
     def _run_tool_batch(self, ordered: list[dict]) -> None:
         """执行一批工具调用。

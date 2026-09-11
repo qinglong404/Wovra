@@ -199,19 +199,33 @@ class _MaintenanceMixin:
         unorganized = self._unorganized_rounds()
         if not unorganized:
             return
+        # 快照先取、且必须在改 org_state 之前：快照就是"活前缀"，维护调用
+        # 原样追加指令，生产环境里这次调用的输入端骑满前缀缓存。
+        # 协议不完整（以悬空 tool_calls 收尾）时不取：追加的 user 指令会
+        # 成为非法序列，严格端点直接 400。里程碑闭合发生在工具方法体内部
+        # 时正是这个形状——推迟到该调用的 tool 结果落盘后补做
+        # （core.py::_finish_tool_result 认领 _maint_deferred）。
+        snapshot = self._maint_snapshot()
+        if snapshot is None:
+            self._maint_deferred = True
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    "水位检查推迟：调用方 tool 结果尚未落盘，装配尾部是未回复的 "
+                    "tool_calls（追加整理指令会破坏协议）。结果落盘后自动补做。",
+                )
+            return
         batch = unorganized
         for r in batch:
             r["org_state"] = "pending"
             self._org_inflight.add(r["seq"])
         if self.async_organization:
-            # 快照在入队瞬间取：它就是"活前缀"——维护调用原样追加指令，
-            # 生产环境里这次调用的输入端骑满前缀缓存
-            self._org_queue.put((batch, self._assemble_messages()))
+            self._org_queue.put((batch, snapshot))
             self._ensure_worker()
         else:
             # 同步模式（run 命令/测试）：立即整理，结果随轮次落盘
             try:
-                self._parallel_maintenance(batch, self._assemble_messages())
+                self._parallel_maintenance(batch, snapshot)
             finally:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
@@ -229,14 +243,18 @@ class _MaintenanceMixin:
             unorganized = self._unorganized_rounds()
             if not unorganized:
                 return
+            # 收尾整理同走协议闸门：装配不完整（悬空 tool_calls）时宁可不整理，
+            # 也不能发出一条必然 400 的请求（run 模式退出路径，轮多已闭合，
+            # 正常情况下这里一定是干净快照）
+            snapshot = self._maint_snapshot()
+            if snapshot is None:
+                return
             batch = unorganized
             for r in batch:
                 r["org_state"] = "pending"
                 self._org_inflight.add(r["seq"])
             try:
-                org_ok, _split_ok = self._parallel_maintenance(
-                    batch, self._assemble_messages()
-                )
+                org_ok, _split_ok = self._parallel_maintenance(batch, snapshot)
             except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
                 for r in batch:
                     r["org_state"] = "failed"
