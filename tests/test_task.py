@@ -108,6 +108,83 @@ def test_report_history_stays_one_line_per_event(monkeypatch, tmp_path):
     assert len(event_lines) == 2
 
 
+def test_report_renders_todo_milestone_and_steps(monkeypatch, tmp_path):
+    """report.md 必须让人看到大步/小步——计划账本平时只在模型上下文里。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="阶段化任务")
+    task.todo = {
+        "milestone": {
+            "goal": "骨架可跑",
+            "acceptance": ["能移动", "能看见地形"],
+            "started_seq": 2,
+            "deferred": ["配色是否顺眼"],
+            "planned": True,
+        },
+        "steps": [
+            {"text": "渲染循环", "done": True},
+            {"text": "键盘移动", "done": False},
+        ],
+    }
+    task.save()
+
+    report = (tmp_path / task.id / "report.md").read_text(encoding="utf-8")
+    assert "## 当前阶段（大步 / 小步）" in report
+    assert "骨架可跑" in report and "小步 1/2" in report
+    assert "[x] 渲染循环" in report and "[ ] 键盘移动" in report
+    assert "配色是否顺眼" in report
+
+
+def test_todo_lines_explicit_when_no_milestone():
+    """无开启大步时人视图不留空——明说没有，并交代已验收历史。"""
+    task = Task.create(goal="空计划")
+    assert task.todo_lines() == ["-（无开启中的大步）"]
+
+    task.todo = {"history": [{"goal": "第一步"}, {"goal": "第二步"}]}
+    lines = task.todo_lines()
+    assert lines[0] == "-（无开启中的大步）"
+    assert "已验收 2 个大步" in lines[1] and "第二步" in lines[1]
+
+
+def test_todo_lines_flags_unplanned_milestone():
+    """结构闸门的提醒也要出现在人视图里：开大步却还没拆小步。"""
+    task = Task.create(goal="x")
+    task.todo = {
+        "milestone": {"goal": "还没拆", "acceptance": [], "planned": False},
+        "steps": [],
+    }
+    assert any("尚未拆小步" in l for l in task.todo_lines())
+
+
+def test_todo_summary_line_renders_stage_and_progress():
+    """底栏单行摘要：阶段 + 小步进度 + 待人工验收，且必须单行。"""
+    task = Task.create(goal="x")
+    task.todo = {
+        "milestone": {
+            "goal": "骨架可跑",
+            "acceptance": ["能移动"],
+            "started_seq": 1,
+            "deferred": ["配色是否顺眼"],
+            "planned": True,
+        },
+        "steps": [{"text": "a", "done": True}, {"text": "b", "done": False}],
+    }
+    line = task.todo_summary_line()
+    assert "阶段 骨架可跑" in line and "小步 1/2" in line and "待验收 1" in line
+    assert "\n" not in line
+
+
+def test_todo_summary_line_flags_unplanned_and_empty():
+    task = Task.create(goal="x")
+    task.todo = {"milestone": {"goal": "还没拆", "planned": False}, "steps": []}
+    assert "未拆小步" in task.todo_summary_line()
+
+    task.todo = {}
+    assert task.todo_summary_line() == "无开启大步"
+
+    task.todo = {"history": [{"goal": "一"}, {"goal": "二"}]}
+    assert "已验收 2 个" in task.todo_summary_line()
+
+
 def test_context_includes_goal_summary_and_recent_history(monkeypatch, tmp_path):
     _use_tmp_root(monkeypatch, tmp_path)
     task = Task.create(goal="给模型看的目标")

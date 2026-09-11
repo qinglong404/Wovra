@@ -47,6 +47,8 @@ from .interactive import (  # noqa: F401
     _chat_help,
     _flush_stdin,
     _local_command,
+    _make_prompt_session,
     _read_input,
+    _toolbar_text,
     cmd_chat,
 )

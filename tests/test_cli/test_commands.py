@@ -158,6 +158,87 @@ def test_local_command_help_and_unknown(monkeypatch, tmp_path, capsys):
     assert "未知本地命令" in capsys.readouterr().out
 
 
+def test_local_command_report_and_todo(monkeypatch, tmp_path, capsys):
+    """会话内 \\report / \\todo：与 `wovra report` 同一份机械渲染，零模型成本。"""
+    from wovra.cli import _local_command
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="复刻小游戏")
+    task.todo = {
+        "milestone": {
+            "goal": "骨架可跑",
+            "acceptance": ["能移动"],
+            "started_seq": 1,
+            "deferred": [],
+            "planned": True,
+        },
+        "steps": [{"text": "渲染循环", "done": False}],
+    }
+    task.save()
+
+    _local_command("\\todo", task)
+    out = capsys.readouterr().out
+    assert "骨架可跑" in out and "[ ] 渲染循环" in out
+
+    _local_command("/report", task)  # 斜杠前缀等价
+    out = capsys.readouterr().out
+    assert "任务报告" in out
+    assert "当前阶段（大步 / 小步）" in out and "骨架可跑" in out
+
+
+def test_toolbar_text_has_stage_and_hotkeys():
+    """底栏常驻文本：当前阶段 + F2/F3 提示，且必须是单行纯文本。"""
+    from wovra.cli import _toolbar_text
+
+    task = Task.create(goal="x")
+    task.todo = {
+        "milestone": {"goal": "骨架可跑", "started_seq": 1, "planned": True},
+        "steps": [{"text": "a", "done": True}],
+    }
+    text = _toolbar_text(task)
+    assert "骨架可跑" in text and "F2" in text and "F3" in text
+    assert "\n" not in text
+    assert "\x1b[" not in text  # bottom_toolbar 不解析裸 ANSI，着色码会露出来
+
+
+def test_make_prompt_session_none_when_not_tty(monkeypatch):
+    """非 TTY（管道/重定向）不建 PromptSession，静默退化到 input()。"""
+    from types import SimpleNamespace
+
+    import wovra.cli.interactive as interactive
+
+    monkeypatch.setattr(
+        interactive.sys, "stdin", SimpleNamespace(isatty=lambda: False)
+    )
+    assert interactive._make_prompt_session(Task.create(goal="x")) is None
+
+
+def test_prompt_hotkeys_return_local_commands(monkeypatch):
+    """F2/F3 通过 prompt() 返回本地命令（等价于提交 \\report / \\todo）。
+
+    用 prompt_toolkit 的管道输入驱动真实按键解析，不需要真终端。
+    """
+    from types import SimpleNamespace
+
+    from prompt_toolkit.input import create_pipe_input
+    from prompt_toolkit.output import DummyOutput
+
+    import wovra.cli.interactive as interactive
+
+    monkeypatch.setattr(
+        interactive.sys, "stdin", SimpleNamespace(isatty=lambda: True)
+    )
+    task = Task.create(goal="x")
+    # xterm 功能键序列：F2 = SS3 Q，F3 = CSI 13~
+    for sequence, expected in (("\x1bOQ", "\\report"), ("\x1b[13~", "\\todo")):
+        with create_pipe_input() as pipe:
+            session = interactive._make_prompt_session(
+                task, input=pipe, output=DummyOutput()
+            )
+            pipe.send_text(sequence)
+            assert session.prompt() == expected
+
+
 def test_local_command_bg_list_smoke(monkeypatch, tmp_path, capsys):
     from wovra.cli import _local_command
 

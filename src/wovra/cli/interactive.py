@@ -15,7 +15,7 @@ from ..tools import (
 )
 
 from .prompt import _build_agent
-from .session import _acquire_session_lock, _load_task, _record_leftover_maintenance, _release_session_lock, _resolve_mode, _resume_command
+from .session import _acquire_session_lock, _child_summaries, _load_task, _record_leftover_maintenance, _release_session_lock, _resolve_mode, _resume_command
 from .render import _drain_status, _replay_history, _run_turn
 
 def _flush_stdin() -> None:
@@ -42,24 +42,67 @@ def _flush_stdin() -> None:
     except Exception:  # noqa: BLE001——非 POSIX 平台没有 termios，跳过即可
         pass
 
-def _read_input() -> str:
+def _toolbar_text(task: Task) -> str:
+    """输入行底栏：当前大步/小步 + 快捷键提示。
+
+    纯文本——prompt_toolkit 的 bottom_toolbar 不解析裸 ANSI 转义，
+    ui.paint 的着色码会原样显示，所以这里不套颜色（着色归终端主题）。
+    """
+    return f" {task.todo_summary_line()}   ｜  F2 报告 · F3 阶段 · \\help 命令 "
+
+def _make_prompt_session(task: Task, input=None, output=None):  # noqa: A002
+    """构造带底栏与快捷键的输入会话；非 TTY 或无 prompt_toolkit 返回 None。
+
+    F2/F3 不在终端内直接打印，而是让 prompt() 返回对应本地命令——长
+    文本渲染仍走 cmd_chat 的打印路径，绕开在 PromptSession 内部打印
+    与 patch_stdout / 后台线程抢终端的坑。
+
+    input/output 仅供测试注入 prompt_toolkit 的管道输入/哑输出；
+    生产路径保持默认（真实终端）。
+    """
+    if not sys.stdin.isatty():
+        return None
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.formatted_text import HTML
+        from prompt_toolkit.key_binding import KeyBindings
+    except Exception:  # noqa: BLE001——缺依赖时静默退化
+        return None
+    bindings = KeyBindings()
+
+    @bindings.add("f2")
+    def _show_report(event) -> None:
+        event.app.exit(result="\\report")
+
+    @bindings.add("f3")
+    def _show_todo(event) -> None:
+        event.app.exit(result="\\todo")
+
+    return PromptSession(
+        message=HTML("<ansibrightcyan><b>你&gt; </b></ansibrightcyan>"),
+        bottom_toolbar=lambda: _toolbar_text(task),
+        key_bindings=bindings,
+        input=input,
+        output=output,
+    )
+
+def _read_input(session=None) -> str:
     """读取一行用户输入。
 
     交互终端用 prompt_toolkit：它按显示宽度（wcwidth）处理光标，
-    中文/emoji 的退格编辑不会错位；同时自带输入历史（上箭头翻历史）。
-    管道/重定向等非终端场景退化为普通 input()。
+    中文/emoji 的退格编辑不会错位；session 复用同一条输入历史
+    （上箭头翻历史），并在输入行下方常驻底栏。管道/重定向等非终端
+    场景退化为普通 input()。
     """
-    if not sys.stdin.isatty():
-        return input()
+    if session is None:
+        return input(ui.user_prompt()) if sys.stdin.isatty() else input()
     try:
-        from prompt_toolkit import prompt
-        from prompt_toolkit.formatted_text import HTML
         from prompt_toolkit.patch_stdout import patch_stdout
 
         # patch_stdout：任何系统侧打印（后台任务收尾提示等）都在
         # 用户半行输入的下方干净重绘，不打碎输入行
         with patch_stdout():
-            return prompt(HTML("<ansibrightcyan><b>你&gt; </b></ansibrightcyan>"))
+            return session.prompt()
     except KeyboardInterrupt:
         raise
     except Exception:  # noqa: BLE001——prompt_toolkit 不可用时退回 input()
@@ -90,6 +133,11 @@ def _local_command(command: str, task: Task, agent=None) -> None:
                 print(check_background(args_[0]))
             else:
                 print(list_background())
+        elif cmd in ("report", "报告"):
+            # 与 `wovra report` 同一份机械渲染：会话内直接看，不用另开终端
+            print(ui.report_view(task, _child_summaries(task.id)))
+        elif cmd in ("todo", "阶段", "计划"):
+            print("\n".join(task.todo_lines()))
         elif cmd in ("undo", "撤销"):
             if agent is None or not agent.rounds:
                 print("（没有可撤销的轮次）")
@@ -113,6 +161,7 @@ def _chat_help() -> None:
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
+    print(f"  {ui.paint('report / todo', 'bold')}  会话内看报告 / 当前大步小步（快捷键 F2 / F3）")
     print(f"  {ui.paint('bg / undo / c', 'bold')}  本地命令（\\help 看全部；零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
@@ -149,11 +198,13 @@ def cmd_chat(args: argparse.Namespace) -> None:
         _replay_history(task)
         print(ui.info("输入指令开始对话；\\help 看本地命令，help 查看帮助，exit 退出。\n"))
 
+        # 输入会话建一次：跨轮复用输入历史，底栏常驻显示当前大步/小步
+        prompt_session = _make_prompt_session(task)
         while True:
             try:
                 _drain_status(agent)  # 后台整理的状态行（出现在输入行上方）
                 _flush_stdin()  # 丢弃流式输出期间敲进缓冲的按键，防止误提交
-                user_input = _read_input().strip()
+                user_input = _read_input(prompt_session).strip()
             except (EOFError, KeyboardInterrupt):
                 # Ctrl+C / Ctrl+D：正常离开。状态在每轮结束时就已落盘
                 print(f"\n{ui.success(f'会话已保存。下次继续: {_resume_command(task)}')}")
@@ -229,6 +280,8 @@ _LOCAL_HELP = """\
   bg                  后台进程列表
   bg <任务id>          查看某后台进程的增量输出
   bg stop <任务id>     强制停止后台进程
+  report              会话内看人视图报告（同 `wovra report`；快捷键 F2）
+  todo                会话内看当前大步/小步（快捷键 F3）
   undo                撤销最近一条开放轮（打错字/误发送的后悔药）
   help                本帮助
 任务 id 可只写末尾短串或 bg 编号（如 bg 1）。

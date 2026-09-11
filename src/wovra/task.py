@@ -253,6 +253,75 @@ class Task:
         state.__dict__.update(self.task_state or {})
         return state
 
+    def todo_lines(self) -> list[str]:
+        """机械渲染当前大步/小步计划账本（人视图共用，零 LLM）。
+
+        大步 = 阶段（最小可行 → 逐步增加功能），小步 = 阶段内的拆解。
+        这份账本平时只进模型上下文，人看不到；这里把它变成可读文本。
+        """
+        todo = self.todo or {}
+        milestone = todo.get("milestone")
+        steps = todo.get("steps") or []
+        history = todo.get("history") or []
+        if not milestone:
+            lines = ["-（无开启中的大步）"]
+            if history:
+                # 历史 goal 可能是整段阶段描述，人视图只留一句摘要
+                last = _one_line(str(history[-1].get("goal", "")), 50)
+                lines.append(f"- 已验收 {len(history)} 个大步（最近：{last}）")
+            return lines
+        done_n = sum(1 for s in steps if s.get("done"))
+        detail = []
+        if milestone.get("started_seq") is not None:
+            detail.append(f"自 R{milestone['started_seq']}")
+        if steps or milestone.get("planned"):
+            detail.append(f"小步 {done_n}/{len(steps)}")
+        lines = [
+            f"- 大步：{_one_line(str(milestone.get('goal', '')), 80)}"
+            + (f"（{'；'.join(detail)}）" if detail else "")
+        ]
+        if not milestone.get("planned"):
+            lines.append("  - 尚未拆小步——先 add_step 拆出阶段内工作项")
+        acceptance = milestone.get("acceptance") or []
+        if acceptance:
+            lines.append(
+                "- 验收标准：" + "；".join(_one_line(str(a), 60) for a in acceptance)
+            )
+        for s in steps:
+            mark = "x" if s.get("done") else " "
+            lines.append(f"  - [{mark}] {_one_line(str(s.get('text', '')), 80)}")
+        for d in milestone.get("deferred") or []:
+            lines.append(f"  - [待人工验收] {_one_line(str(d), 60)}")
+        if history:
+            lines.append(f"- 已验收 {len(history)} 个大步")
+        return lines
+
+    def todo_summary_line(self) -> str:
+        """当前大步/小步的单行摘要（终端底栏用，无颜色）。
+
+        bottom_toolbar 不解析裸 ANSI，所以这里只给纯文本；着色与否
+        由调用方（终端）决定。
+        """
+        todo = self.todo or {}
+        milestone = todo.get("milestone")
+        history = todo.get("history") or []
+        if not milestone:
+            line = "无开启大步"
+            if history:
+                line += f" · 已验收 {len(history)} 个"
+            return line
+        steps = todo.get("steps") or []
+        line = f"阶段 {_one_line(str(milestone.get('goal', '')), 40)}"
+        if milestone.get("planned") or steps:
+            done_n = sum(1 for s in steps if s.get("done"))
+            line += f" · 小步 {done_n}/{len(steps)}"
+        else:
+            line += " · 未拆小步"
+        deferred = milestone.get("deferred") or []
+        if deferred:
+            line += f" · 待验收 {len(deferred)}"
+        return line
+
     # ---- 构造与加载 -----------------------------------------------------
 
     @classmethod
@@ -427,6 +496,8 @@ class Task:
         if self.acceptance_criteria:
             lines.append("\n## 验收标准\n")
             lines += [f"- {c}" for c in self.acceptance_criteria]
+        lines.append("\n## 当前阶段（大步 / 小步）\n")
+        lines += self.todo_lines()
         lines.append("\n## 当前进展（AI 维护）\n")
         lines.append(self.summary or "_尚无进展摘要。_")
         if self.history:

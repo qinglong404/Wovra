@@ -180,3 +180,27 @@ def test_report_view_renders_four_columns(monkeypatch, tmp_path):
     assert "打开页面验证行走" in out
     assert "R1✓ 开始做骨架" in out
     assert child.id in out
+
+
+def test_report_view_renders_todo(monkeypatch, tmp_path):
+    """终端报告里能看到大步/小步——此前只存在于模型上下文。"""
+    from wovra import ui
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="复刻小游戏")
+    task.todo = {
+        "milestone": {
+            "goal": "骨架可跑",
+            "acceptance": ["能移动"],
+            "started_seq": 1,
+            "deferred": [],
+            "planned": True,
+        },
+        "steps": [{"text": "渲染循环", "done": False}],
+    }
+    task.save()
+
+    out = ui.report_view(task)
+    assert "## 当前阶段（大步 / 小步）" in out
+    assert "骨架可跑" in out and "小步 0/1" in out
+    assert "[ ] 渲染循环" in out
