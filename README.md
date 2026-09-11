@@ -348,7 +348,11 @@ This makes it possible to experiment with different underlying agents without ch
 > **Mechanism baseline stage (V3).** The context management mechanism
 > has been validated by controlled multi-session experiments and frozen
 > (see [docs/context-management-v3.md](docs/context-management-v3.md)).
-> Next: responsibility-based agent organization and runtime governance.
+> Agent organization is now implemented as **context differentiation**:
+> watermark organization and split analysis run in one pass, and a
+> registry routes work inside a single runtime (one-way notify / two-way
+> consult). Next: real long-task validation, and a dedicated human-view
+> frontend (the terminal is a stopgap cockpit).
 
 * [x] Minimal agent runtime (25 tools: files / commands / background tasks / web / interactive confirmation / plan ledger / history expansion)
 * [x] Task representation and persistent task state (Task / TaskState / report.md / workspace-bound sessions)
@@ -357,9 +361,10 @@ This makes it possible to experiment with different underlying agents without ch
 * [x] Safety (deny-list + sensitive-command confirmation + staleness guard + audit + atomic persistence)
 * [x] Cost accounting (purpose-split / effective input / context occupancy / cache hits, persisted per round)
 * [x] Two controlled comparison experiments (managed vs baseline, see results below)
+* [x] Responsibility-based agent isolation, realized as context differentiation: the same organization pass yields responsibility domains, and a registry + one-way notify / two-way consult route work inside one runtime — a natural outgrowth of organization (single-agent branching, not synchronous agents)
 * [ ] Pre-flight planning gate for open-ended / large-scope work (intent archived, not implemented)
 * [ ] Heavy-load validation (synthetic long-trajectory replay + real long tasks)
-* [ ] Responsibility-based agent isolation (next stage)
+* [ ] Dedicated human-view frontend (the terminal is a stopgap cockpit)
 * [ ] Independent task evaluation
 
 ## Experiment Results

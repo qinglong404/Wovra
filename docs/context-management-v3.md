@@ -345,7 +345,7 @@ Runtime Governance 的系统化放下一阶段，解决真实踩出来的问题�
     ↓                 ↓                 ↓
 Context         Runtime            Agent
 Management      Governance         Organization
-（V3 已插旗）    （已踩出问题清单）  （下一站）
+（V3 已插旗）    （已踩出问题清单）  （已落地）
 ```
 
 三个区域与上下文的关系：
@@ -358,6 +358,12 @@ Management      Governance         Organization
 
 下一阶段沿地图推进：职责划分 → 最小 Multi-Agent 实验 → Runtime
 Governance 系统化。等新的实测把我们打脸了，再回来写 V4。
+
+> **现状更正（2026-09-11）**：Agent Organization 没有走"最小
+> Multi-Agent 实验"那条路，而是作为水位整理的副产品**自然落地**——
+> 组织与分裂一体（`context-differentiation-runtime.md`），注册表 +
+> notify / consult 在单运行时内分流，是单 Agent 分流而非同步多 Agent。
+> Runtime Governance 仍待系统化。
 
 ## 9. 封版清单
 
