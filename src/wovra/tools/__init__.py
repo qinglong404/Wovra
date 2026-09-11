@@ -60,12 +60,10 @@ from .files import (  # noqa: E402
 )
 from .shell import run_command  # noqa: E402
 from .background import (  # noqa: E402
-    background_find,
     check_background,
     list_background,
     run_background,
     set_current_session,
-    start_background_argv,
     stop_background,
     stop_session_backgrounds,
 )

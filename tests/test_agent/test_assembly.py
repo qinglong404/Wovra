@@ -419,3 +419,65 @@ def test_expand_round_summary_shows_block_view():
     # 第二级：full 档取回原文
     full = agent.expand_history("R1", level="full")
     assert "写文件" in full
+
+
+# ---- expand_history 展开通道（2026-09-11 实测修复：此前从未真实展开过） ----
+
+
+def test_expand_block_uses_live_v3_not_stale_persisted():
+    """块展开认现场 v3 块号，不认持久化的旧 v1 编号。
+
+    实测 103 轮里 42 轮两者编号不一致（v3 按文件聚合、v1 按写操作截止）：
+    用持久化编号会"块号不存在"或取到别的块。整理产物的块号来自 v3，
+    所以展开也必须以 v3 为准。
+    """
+    r = _mk_file_round(1, "写两个文件", ["a.txt", "b.txt"])
+    # 持久化 blocks 是旧 v1 编号：只有 B1（模拟错位轮）
+    r["blocks"] = [{
+        "id": "R1-B1", "kind": "work", "start": 0, "end": 1,
+        "start_event": "R1-E01", "end_event": "R1-E02",
+        "touched_files": ["a.txt"], "wrote_files": ["a.txt"],
+        "command_types": [],
+    }]
+    agent = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="x"))
+    agent.rounds = [r]
+
+    # v3 现场算出 a.txt / b.txt 两个块 → R1-B2 必须能展开
+    out = agent.expand_history("R1-B2")
+    assert "未找到块" not in out
+    assert "b.txt" in out
+
+
+def test_expand_merged_group_anchor_expands_all_members():
+    """合并组锚点（紧凑视图里的 [R1-2]）可直接展开——逐轮拼出组内轮次。"""
+    r1 = _round(1, "甲问题", "甲回答")
+    r2 = _round(2, "乙问题", "乙回答")
+    r1["merged_anchor"] = "R1-2"
+    r2["merged_skip"] = "R1-2"
+    agent = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="x"))
+    agent.rounds = [r1, r2]
+
+    out = agent.expand_history("R1-2", level="full")
+    assert "甲问题" in out and "乙问题" in out
+    out_summary = agent.expand_history("R1-2", level="summary")
+    assert "甲问题" in out_summary and "乙问题" in out_summary
+
+
+def test_expand_levels_are_distinct_for_organized_round():
+    """三档确有区分：truncated=事件索引、summary=块视图、full=原文。"""
+    r = _round(1, "写文件", "写好了")
+    r["org_state"] = "done"
+    r["block_summaries"] = {"R1-B1": "创建 a.txt：写入测试内容"}
+    agent = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="x"))
+    agent.rounds = [r]
+
+    trunc = agent.expand_history("R1", level="truncated")
+    summ = agent.expand_history("R1", level="summary")
+    full = agent.expand_history("R1", level="full")
+
+    assert "块视图" not in trunc and "[R1-E01]" in trunc      # 最粗：索引行
+    assert "块视图" in summ and "创建 a.txt" in summ          # 中：块视图
+    # 细：原文（user 事件在轮头已给，正文只列非 user 事件）
+    assert "R1-E02" in full and "写好了" in full
+    # 三档内容互不相同
+    assert len({trunc, summ, full}) == 3

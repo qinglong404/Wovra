@@ -2,6 +2,7 @@
 expand_history 两级展开、紧急折叠。
 """
 import json
+import re
 from typing import Optional
 from .. import blocks as blocks_module
 from .. import lifecycle as lifecycle_module
@@ -404,6 +405,17 @@ class _AssemblyMixin:
         return f"未找到事件: {event_id}"
 
     def _expand_round(self, round_id: str, level: str) -> str:
+        # 合并组锚点（如 "R1-2"）：紧凑视图里整组显示为一个锚点，模型会
+        # 自然地按这个 ID 展开——逐轮拼出组内全部轮次。
+        group = re.match(r"^[Rr](\d+)-(\d+)$", round_id.strip())
+        if group:
+            lo, hi = int(group.group(1)), int(group.group(2))
+            members = [r for r in self.rounds if lo <= r["seq"] <= hi]
+            if not members:
+                return f"未找到轮次: {round_id}"
+            return "\n\n".join(
+                self._expand_round(f"R{r['seq']}", level) for r in members
+            )
         try:
             seq = int(round_id.lstrip("Rr"))
         except ValueError:
@@ -411,22 +423,23 @@ class _AssemblyMixin:
         for r in self.rounds:
             if r["seq"] != seq:
                 continue
+            lines = [f"[R{seq}] 用户：{r['user_input']['original']}"]
+            if r["user_input"].get("normalized"):
+                lines.append(f"意图：{r['user_input']['normalized']}")
             if level in ("summary", "truncated"):
-                lines = [f"[R{seq}] 用户：{r['user_input']['original']}"]
-                if r["user_input"].get("normalized"):
-                    lines.append(f"意图：{r['user_input']['normalized']}")
                 summaries = r.get("block_summaries") or {}
-                if summaries:
-                    # 视图优先（2026-09-10 折叠行的两级展开：行→视图→原文）
+                if summaries and level == "summary":
+                    # 视图档（2026-09-10 折叠行的两级展开：行→视图→原文）
                     lines.append("块视图：")
                     for bid in sorted(
                         summaries, key=lambda x: int(x.rsplit("-B", 1)[-1])
                     ):
                         lines.append(f"▸ {bid}: {summaries[bid]}")
                 else:
+                    # 截断档：只给事件索引行；未整理轮无块视图也用索引
                     lines += self._round_index_lines(r)
                 return "\n".join(lines)
-            parts = [f"[R{seq}] 用户：{r['user_input']['original']}"]
+            parts = lines
             for e in r["events"]:
                 if e["type"] == "user":
                     continue
@@ -442,6 +455,13 @@ class _AssemblyMixin:
 
         紧凑视图 2026-09-08 起以块描述为主索引、事件行退场，块 ID 是
         视图里唯一保留的定位锚——expand_history 必须认得它。
+
+        块结构**现场重算 v3**（segment_round_by_file）：整理产物里的块号
+        来自同一函数，而持久化的 `r["blocks"]` 是旧的 v1 编号——实测
+        103 轮里 42 轮两者编号不一致（v3 按文件聚合、v1 按写操作截止），
+        用持久化编号会出现"块号不存在"或取到别的块。事件按块自带的
+        `events` 列表取（v3 块的 index 区间会重叠：一次并行写多文件时
+        同一个 tool_call 事件属多个块）。
         """
         head = block_id.lstrip("Rr").split("-B")[0]
         try:
@@ -452,16 +472,28 @@ class _AssemblyMixin:
             if r["seq"] != seq:
                 continue
             block = next(
-                (b for b in r.get("blocks") or [] if b["id"] == block_id), None
+                (b for b in blocks_module.segment_round_by_file(r)
+                 if b["id"] == block_id), None
             )
             if block is None:
+                # 极老数据回退：仍认持久化的 v1 块
+                block = next(
+                    (b for b in r.get("blocks") or [] if b["id"] == block_id),
+                    None,
+                )
+            if block is None:
                 return f"未找到块: {block_id}（该轮无分块结构或块号不存在）"
+            target = block.get("file") or ", ".join(block.get("wrote_files") or [])
             parts = [
                 f"[{block_id}] {block['start_event']}~{block['end_event']}"
-                f"（写: {', '.join(block['wrote_files']) or '无'}）"
+                f"（{target or '无文件'}）"
             ]
-            for i in range(block["start"], block["end"] + 1):
-                e = r["events"][i]
+            if block.get("events"):
+                by_id = {e["id"]: e for e in r["events"]}
+                selected = [by_id[i] for i in block["events"] if i in by_id]
+            else:
+                selected = r["events"][block["start"]:block["end"] + 1]
+            for e in selected:
                 message = e["message"]
                 body = message.get("content") or ""
                 if message.get("tool_calls"):
@@ -469,4 +501,5 @@ class _AssemblyMixin:
                     body = f"调用: {calls}" + (f"\n{body}" if body else "")
                 parts.append(f"--- {e['id']} ({e['type']}) ---\n{body}")
             return "\n".join(parts)
+        return f"未找到块: {block_id}"
         return f"未找到块: {block_id}"
