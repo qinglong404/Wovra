@@ -313,3 +313,52 @@ def test_list_files_annotates_size_and_mtime(monkeypatch, tmp_path):
     out = tools_module.list_files(".")
     entry = next(e for e in out if e.startswith("app.py"))
     assert "（" in entry and "B" in entry
+
+
+def test_read_file_directory_gives_friendly_hint(monkeypatch, tmp_path):
+    """read_file 传目录 → 友好提示（不是裸 IsADirectoryError），指路 list_files/glob_files。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "adir").mkdir()
+    result = read_file("adir")
+    assert "是目录" in result and "list_files" in result and "glob_files" in result
+
+
+def test_read_file_missing_gives_friendly_hint(monkeypatch, tmp_path):
+    """read_file 传不存在文件 → 友好提示带解析路径与 glob_files 出路。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    result = read_file("no-such.md")
+    assert "文件不存在" in result and "no-such.md" in result and "glob_files" in result
+
+
+def test_list_files_missing_directory_gives_hint(monkeypatch, tmp_path):
+    """list_files 传不存在目录 → 友好提示，不是裸 FileNotFoundError。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    result = tools_module.list_files("no-such-dir")
+    assert "目录不存在" in result and "glob_files" in result
+
+
+def test_list_files_file_target_gives_hint(monkeypatch, tmp_path):
+    """list_files 传文件路径 → 提示用 read_file，不是裸 NotADirectoryError。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "x")
+    result = tools_module.list_files("app.py")
+    assert "文件而非目录" in result and "read_file" in result
+
+
+def test_write_file_directory_gives_hint(monkeypatch, tmp_path):
+    """write_file 传目录 → 友好提示，不是裸 IsADirectoryError。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "adir").mkdir()
+    result = write_file("adir", "x")
+    assert "是目录" in result and "list_files" in result
+    assert not (tmp_path / "adir" / "x").exists()

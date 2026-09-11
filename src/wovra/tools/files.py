@@ -110,6 +110,14 @@ def list_files(directory: str = ".") -> list[str]:
     文件附带大小与修改时间——帮模型决定分段读取策略、判断内容新鲜度。
     """
     path = safety._safe_directory(directory)
+    # 参数误用预检（2026-09-13 摩擦修复）：目录不存在/目标是文件 → 明确提示而不是裸 OSError
+    if not path.exists():
+        return f"目录不存在: {directory}（解析为 {path}）。先确认目录路径，可用 glob_files('*') 看看现有目录。"
+    if path.is_file():
+        return (
+            f"目标是一个文件而非目录：{directory}。list_files 列目录内容；"
+            f"读该文件请用 read_file('{directory}')。"
+        )
     out = []
     for p in sorted(path.iterdir()):
         if p.is_dir():
@@ -138,6 +146,20 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     符号链接也读不到。
     """
     target = safety._safe_write_path(path)  # 与写入类同一套判定：不接受 .. 与界外链接
+    # 参数误用预检（2026-09-13 摩擦修复）：把裸 OSError 转成可行动的提示。
+    # 模型看到的是工具返回文本而不是异常栈——目标类型不对/不存在要一次说清怎么办。
+    # 文案保留 "不存在"/"是目录" 子串：lifecycle/blocks 靠它们判断读是否真发生。
+    if target.is_dir():
+        return (
+            f"路径是目录（而非文本文件）：{path}。read_file 只读文件；"
+            f"要列出该目录内容请用 list_files('{path}')，"
+            f"要找其中的文件请用 glob_files('*', directory='{path}')。"
+        )
+    if not target.exists():
+        return (
+            f"文件不存在: {path}（解析为 {target}）。"
+            f"先用 glob_files('*') 确认路径拼写与所在目录，再重试 read_file。"
+        )
     try:
         text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -174,6 +196,16 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
         raise ValueError(f"正则表达式无效: {error}") from error
 
     root = safety._safe_directory(directory)
+    # 参数误用预检（2026-09-13 摩擦修复）：directory 指向文件时不再静默"无匹配"，
+    # 那会误导模型以为目录里真的没内容（实测踩过）。明确指路。
+    if root.is_file():
+        return (
+            f"directory 指向一个文件而非目录：{directory}。search_files 在目录内搜内容；"
+            f"读该文件请用 read_file('{directory}')，"
+            f"或在它所在目录内搜索（directory=其父目录）。"
+        )
+    if not root.exists():
+        return f"directory 不存在: {directory}（解析为 {root}）。先确认目录路径。"
     matches: list[str] = []
     for path in _walk(root, glob):
         if path.stat().st_size > 1_000_000:  # 跳过超大文件
@@ -217,6 +249,13 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
     排障时找不到配置就打开它。
     """
     root = safety._safe_directory(directory)
+    if root.is_file():
+        return (
+            f"directory 指向一个文件而非目录：{directory}。glob_files 按文件名在目录内查找；"
+            f"该文件已存在，读它请用 read_file('{directory}')。"
+        )
+    if not root.exists():
+        return f"directory 不存在: {directory}（解析为 {root}）。先确认目录路径。"
     filtered = [
         p for p in _walk(root, pattern)
         if include_hidden or not _is_hidden(_display_rel(p))
@@ -429,6 +468,13 @@ def write_file(path: str, content: str, force: bool = False) -> str:
     与有意重写一模一样，只有大小差异可查（实测教训）。
     """
     target = safety._safe_write_path(path)
+    # 参数误用预检（2026-09-13 摩擦修复）：目标是目录 → 明确提示而不是裸 IsADirectoryError
+    if target.is_dir():
+        return (
+            f"路径是目录（而非文件），不能写入：{path}。write_file 只写文件；"
+            f"要在该目录下新建文件请给出完整路径（如 {path}/新文件名），"
+            f"或先用 list_files('{path}') 查看目录内容。"
+        )
     stale = _stale_error(target)
     if stale:
         return stale

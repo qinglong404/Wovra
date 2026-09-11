@@ -69,3 +69,32 @@ def test_glob_files_matches_and_filters_noise(monkeypatch, tmp_path):
     assert "a.py" in result and "docs/b.py" in result
     assert ".venv" not in result
     assert "无匹配文件" in glob_files("*.rs")
+
+
+def test_search_files_directory_is_file_gives_hint(monkeypatch, tmp_path):
+    """search_files 的 directory 指向文件 → 提示用 read_file（不再静默"无匹配"）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "def foo(): pass")
+    result = tools_module.search_files("foo", directory="app.py")
+    assert "文件而非目录" in result and "read_file" in result
+
+
+def test_search_files_directory_missing_gives_hint(monkeypatch, tmp_path):
+    """search_files 的 directory 不存在 → 提示路径，不再静默"无匹配"。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    result = tools_module.search_files("foo", directory="no-such-dir")
+    assert "directory 不存在" in result and "no-such-dir" in result
+
+
+def test_glob_files_directory_is_file_gives_hint(monkeypatch, tmp_path):
+    """glob_files 的 directory 指向文件 → 提示用 read_file（不再静默"无匹配文件"）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "x")
+    result = tools_module.glob_files("*.py", directory="app.py")
+    assert "文件而非目录" in result and "read_file" in result
