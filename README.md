@@ -250,6 +250,44 @@ Wovra is intended to focus on the **organization and lifecycle of AI work**, rat
 
 Existing agent runtimes and mature tool implementations can be used underneath it.
 
+### Code layout
+
+The runtime is organized by responsibility; each module has a single job.
+
+```text
+src/wovra/
+  agent/          Agent runtime (assembled from four mixins)
+    core.py         run loop, round lifecycle, tool dispatch, usage accounting
+    assembly.py     per-step context assembly, compact/collapsed views, expand
+    maintenance.py  watermark-triggered organization → split, promote, baseline
+    ledger.py       todo (milestone/step), notify/consult, submit guards
+    prompts.py      model-visible prompts and tool schemas (pure data)
+    support.py      run constants and stateless helpers (schema generation …)
+  tools/          Built-in toolbox
+    safety.py       workspace root, audit hook, path guards, command-escape checks
+    files.py        read/write/edit/delete/move/restore, search, checkpoints
+    shell.py        run_command, process-tree kill
+    background.py   background task registry and lifecycle
+    web.py          web_search / web_fetch (with SSRF guard)
+    interaction.py  ask_user, user hooks, current time
+  cli/            Terminal entry point
+    main.py         argparse, subcommand dispatch
+    session.py      session lock, task/mode resolution
+    prompt.py       system prompt assembly, Agent construction
+    render.py       streaming turn rendering, replay
+    interactive.py  chat loop, local commands
+  blocks/         Zero-LLM block structure
+    segment.py      round → blocks (per-file aggregation)
+    labels.py       lifecycle labels → label line
+    digest.py       block digests / inspection view
+  task.py         persistent task tree (Task, TaskState)
+  lifecycle.py    file lifecycle ledger
+  llm.py          LLM client (single funnel for all model calls)
+  tokens.py       token estimation
+  ui.py           terminal rendering
+  truncate.py     event indexing
+```
+
 ---
 
 ## Design Philosophy

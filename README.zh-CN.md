@@ -250,6 +250,44 @@ Wovra 旨在专注于 **AI 工作的组织与生命周期**，而不是重新发
 
 现有的智能体运行时和成熟的工具实现都可以作为它的底层来使用。
 
+### 代码结构
+
+运行时按职责组织，每个模块只做一件事。
+
+```text
+src/wovra/
+  agent/          Agent 运行时（由四个 mixin 组装）
+    core.py         运行循环、轮生命周期、工具分发、用量记账
+    assembly.py     每步上下文装配、紧凑/折叠视图、expand_history
+    maintenance.py  水位整理 → 分裂、promote、baseline 压缩
+    ledger.py       todo（大步/小步）、notify/consult、提交守卫
+    prompts.py      模型可见的提示词与工具 schema（纯数据）
+    support.py      运行常量与无状态工具函数（schema 生成等）
+  tools/          内置工具箱
+    safety.py       工作区属主、审计挂钩、路径防护、命令越界判定
+    files.py        读/写/改/删/移/回滚、搜索、检查点
+    shell.py        run_command、进程树强杀
+    background.py   后台任务注册表与生命周期
+    web.py          web_search / web_fetch（含 SSRF 防护）
+    interaction.py  ask_user、用户 Hooks、当前时间
+  cli/            终端入口
+    main.py         argparse、子命令分发
+    session.py      会话锁、任务/模式解析
+    prompt.py       系统提示词组装、Agent 构造
+    render.py       流式轮次渲染、历史回放
+    interactive.py  chat 主循环、本地命令
+  blocks/         零 LLM 的块结构
+    segment.py      轮 → 块（按文件聚合）
+    labels.py       生命周期标签 → 标签行
+    digest.py       块摘要 / 检视视图
+  task.py         持久任务树（Task、TaskState）
+  lifecycle.py    文件生命周期账本
+  llm.py          模型客户端（所有模型调用的唯一出口）
+  tokens.py       token 估算
+  ui.py           终端渲染
+  truncate.py     事件索引
+```
+
 ---
 
 ## 设计哲学

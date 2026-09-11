@@ -209,7 +209,7 @@ class Task:
     # history 只追加：每条是 {"time", "kind", "detail"}，
     # 追加式历史让"发生过什么"永远可追溯，这是可恢复性的基础
     history: list[dict] = field(default_factory=list)
-    # V1 Context Runtime：Round/Event 结构化历史与任务状态（见 agent.py）
+    # V1 Context Runtime：Round/Event 结构化历史与任务状态（见 agent/ 包）
     rounds: list[dict] = field(default_factory=list)
     task_state: dict = field(default_factory=dict)
     # baseline 记账：累计输入 token（用于 80% 阈值压缩触发）与压缩摘要

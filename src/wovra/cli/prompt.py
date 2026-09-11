@@ -128,7 +128,7 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
     """为任务构造一个带默认工具集的 Agent（展示回调在 _run_turn 注入）。
 
     工具分两类：只读（时间/列目录/读文件/搜索）与变更类
-    （写文件/改文件/执行命令，均有审计记录与破坏性防护，见 tools.py）。
+    （写文件/改文件/执行命令，均有审计记录与破坏性防护，见 tools/ 包）。
     mode 决定上下文策略：managed（分层上下文，默认）或
     baseline（全量回放 + 阈值压缩的对照组）。
     async_organization：整理是否后台异步执行（chat 模式开，
