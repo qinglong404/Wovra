@@ -367,23 +367,78 @@ def test_baseline_compaction_ignores_billing_watermark(monkeypatch, tmp_path):
     assert not any(r.get("compacted") for r in task.rounds)
 
 
-def test_organization_no_retry_on_invalid_json(monkeypatch, tmp_path):
-    """整理输出非法 JSON 时整批失败，不重试（2026-09-10 用户拍板：
-    重试只是再付一遍完整生成，不能确定解决失败）。"""
+def test_organization_retries_once_with_diagnosis(monkeypatch, tmp_path):
+    """整理产物不可用时：**带诊断**重发一次（且只一次）。
+
+    2026-09-11 用户澄清：当初的"不重试"是测试期用来逼出原因的手段，不是
+    机制——失败应当"找原因、调整后再试"，而不是原封不动重发整份产物。
+    这里锁三件事：重发确实发生、重发输入里带着失败诊断、绝不无限重试。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    broken = ('{"rounds": [{"seq": 1, "normalized_user_input": "于是"读到含'
+              '\'不存在\'的文件"整块"}], "state_patch": {}}')
+    repair_chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="c2", name="submit_organization", arguments=json.dumps({
+            "rounds": [{"seq": 1, "normalized_user_input": "修正后的意图",
+                        "key_constraints": "", "block_summaries": []}],
+            "state_patch": {},
+        }, ensure_ascii=False)),
+    ]))
+    responses = [
+        [_chunk(_delta(content="干完了"))],
+        [_chunk(_delta(tool_calls=[
+            _fragment(0, id="c1", name="submit_organization", arguments=broken),
+        ]))],
+        [repair_chunk],  # 第二跳（带诊断）给出修正后的合法产物
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task,
+                  org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
+
+    agent.run("问")
+
+    assert task.rounds[-1]["org_state"] == "done"
+    assert task.rounds[-1]["pending_org"]["normalized"] == "修正后的意图"
+
+    # 注意：StubLLM 的 lane 只是"非分裂/非咨询"的默认值，干活调用也是 org——
+    # 真正的整理调用按"消息里带 [整理指令]"识别
+    org_calls = [
+        c for c in agent.llm.calls
+        if any("[整理指令]" in str(m.get("content") or "") for m in c["messages"])
+    ]
+    assert len(org_calls) == 2, "应恰好重发一次"
+    repair_msgs = org_calls[1]["messages"]
+    # 重发输入 = 原 messages 一字不动 + assistant(失败调用) + tool(诊断)
+    assert repair_msgs[: len(org_calls[0]["messages"])] == org_calls[0]["messages"]
+    hint = repair_msgs[-1]
+    assert hint["role"] == "tool"
+    assert "不是合法 JSON" in hint["content"]
+    assert "位置" in hint["content"]          # 带出错位置
+    assert "中文引号" in hint["content"]      # 带上防复发的具体调整
+    history = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    assert any("带诊断重发一次" in d for d in history)
+
+
+def test_organization_retry_is_bounded(monkeypatch, tmp_path):
+    """重发仍失败 → 整批 failed，绝不无限重试（只重发一次）。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     responses = [
         [_chunk(_delta(content="干完了"))],
         [_chunk(_delta(content="我觉得应该这样：blahblah"))],  # 非法产物
+        [_chunk(_delta(content="还是 blahblah"))],             # 重发仍非法
     ]
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM(responses), tools=[], task=task, org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
+    agent = Agent(llm=_StubLLM(responses), tools=[], task=task,
+                  org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0)
 
     agent.run("问")
 
-    assert len(agent.llm.calls) == 2          # 只有干活 + 整理各一次，无重试
+    assert len(agent.llm.calls) == 3  # 干活 1 + 整理 1 + 带诊断重发 1，到此为止
     assert task.rounds[-1]["org_state"] == "failed"   # 整批失败，回入水位
-    assert task.task_state == {}              # 补丁未应用
+    assert task.task_state == {}                      # 补丁未应用
     assert task.rounds[-1]["user_input"]["normalized"] == ""
+    history = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    assert any("已带诊断重发一次仍失败" in d for d in history)
 
 
 def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
@@ -485,7 +540,7 @@ def test_org_failure_records_evidence(monkeypatch, tmp_path):
         _fragment(0, id="c9", name="submit_organization", arguments=broken),
     ]))
     task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk]]),
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))], [org_chunk], [org_chunk]]),
                   tools=[], task=task, org_watermark=0, org_grace_rounds=0,
                   org_cooldown_rounds=0)
 
@@ -493,12 +548,15 @@ def test_org_failure_records_evidence(monkeypatch, tmp_path):
 
     assert task.rounds[-1]["org_state"] == "failed"
     records = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
-    evidence = [d for d in records if "org：无可用产物" in d]
+    evidence = [d for d in records if "无可用产物" in d]
     assert evidence, f"失败现场未落 history：{records}"
     text = evidence[0]
     assert "submit_organization 参数" in text
     assert "JSON 解析失败" in text and "位置" in text
-    assert "现场" in text  # 出错位置附近的原文片段
+    assert "现场" in text          # 出错位置附近的原文片段
+    assert "已带诊断重发一次仍失败" in text  # 重发过、仍失败
+    # 重发前那一次也要留痕（为什么触发了重发）
+    assert any("带诊断重发一次" in d for d in records)
 
 
 def test_org_accepts_repairable_json(monkeypatch, tmp_path):

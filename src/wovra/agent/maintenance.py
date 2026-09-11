@@ -25,6 +25,20 @@ from .prompts import (
 
 _ORG_SUBMIT_TOOL = "submit_organization"
 
+# 带诊断重发的修正要求（见 _MaintenanceMixin._org_repair_messages）。
+# 第 2 条直接针对实测根因：长中文叙述里混进未转义 ASCII 双引号会截断
+# JSON 串（worklog-20260911.md §11.2）。
+_ORG_REPAIR_HINT = (
+    "上一条 submit_organization 的参数不是合法 JSON，无法解析，本次提交被拒。\n"
+    "诊断：{evidence}\n\n"
+    "请重新调用 submit_organization 提交（唯一出口，正文说明不采纳）。要求：\n"
+    "1. 参数必须是**单个合法 JSON 对象**：严格双引号、无尾随逗号、无未转义"
+    "控制字符，反斜杠只用于 \\\" \\\\ \\/ \\b \\f \\n \\r \\t \\uXXXX 这些合法转义；\n"
+    "2. 描述等文本里**不要使用英文双引号**——需要引用时用中文引号「」或“”，"
+    "英文双引号会截断 JSON 字符串（本次失败即由此引起）；\n"
+    "3. 内容覆盖与上次一致（同样的轮次与块），只修正格式。"
+)
+
 # 轻量 JSON 修复用（见 _MaintenanceMixin._repair_json_text）
 _BAD_ESCAPE = re.compile(r"\\(?![\\/\"bfnrtu])")
 _TRAILING_COMMA = re.compile(r",(\s*[}\]])")
@@ -348,18 +362,40 @@ class _MaintenanceMixin:
         staged = self._stage_org_state(
             state, rounds, round_blocks, merged_groups
         )
+        retried = False
+        if staged == 0:
+            # 失败即"查因 → 调整 → 再试一次"（2026-09-11 用户澄清：当初的
+            # "不重试"是测试期用来逼出原因的手段，不是机制）。但重试**必须
+            # 带诊断**——把"JSON 第 N 字符处不合法"回给模型让它就地修正，
+            # 而不是原封不动重发整份产物（那才是 09-10 被否掉的做法，实测
+            # 同因失败）。messages 一字不动、只在尾部追加失败现场，所以
+            # 这次调用骑满前缀缓存，比重新整理便宜得多。
+            evidence = self._org_failure_evidence(content, ordered)
+            repair = self._org_repair_messages(messages, content, ordered, evidence)
+            if repair is not None:
+                retried = True
+                if self.task is not None:
+                    self.task.record(
+                        "maintenance",
+                        f"org：产物不可用，带诊断重发一次（{evidence}）",
+                    )
+                content, ordered, _usage = self._stream_call(
+                    repair, tools=org_tools, purpose="organization",
+                )
+                state = self._extract_org_state(content, ordered)
+                staged = self._stage_org_state(
+                    state, rounds, round_blocks, merged_groups
+                )
         if staged == 0:
             # 无可用产物：保持 Runtime 视图（org_state=failed，回入水位
-            # 等下次触发），原始层永远不受影响。2026-09-10 用户拍板：
-            # 不重试——重试只是再付一遍完整生成，不能确定解决失败
-            # （实测两次重试同因失败：输出预算/模型行为不因重试改变）。
-            # 2026-09-11 补：失败必须留现场（原先只留 org=False，事后
-            # 查因要重跑 213K token 的输入——见 §11）。
+            # 等下次触发），原始层永远不受影响。失败现场必须留痕——原先
+            # 只留 org=False，事后查因要重跑 213K token 的输入（见 §11）。
             evidence = self._org_failure_evidence(content, ordered)
             if self.task is not None:
                 self.task.record(
                     "maintenance",
-                    f"org：无可用产物（{len(rounds)} 轮批次；{evidence}）",
+                    f"org：无可用产物（{len(rounds)} 轮批次；"
+                    f"{'已带诊断重发一次仍失败；' if retried else ''}{evidence}）",
                 )
             for r in rounds:
                 r.pop("pending_org", None)
@@ -974,6 +1010,60 @@ class _MaintenanceMixin:
             if isinstance(state, dict):
                 return state
         return _MaintenanceMixin._parse_state_json(content)
+
+    @staticmethod
+    def _org_repair_messages(
+        messages: list[dict], content: str, ordered: list, evidence: str
+    ) -> Optional[list]:
+        """构造"带诊断的重发"输入：把失败原因回给模型，只让它重发修正后的提交。
+
+        两条路（取决于上一跳有没有工具调用可回复）：
+          * 有 submit_organization 调用（主路）→ 重建 assistant(tool_call) +
+            tool 结果（内容 = 失败现场 + 修正要求）。严格端点要求 tool 消息
+            必须紧跟其 assistant 调用，不能插别的消息。
+          * 模型压根没调工具（跑偏/只写正文）→ assistant 正文 + user 追问
+            （没有 tool_call_id 可回，只能走 user 角色）。
+
+        messages 一字不动，只在其后追加——这次调用因此骑满前缀缓存。
+        """
+        fixed = list(messages)
+        submit = next(
+            (tc for tc in (ordered or [])
+             if tc.get("name") == _ORG_SUBMIT_TOOL),
+            None,
+        )
+        if submit is not None:
+            call_id = submit.get("id") or "org_repair"
+            fixed.append({
+                "role": "assistant",
+                "content": content or None,
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": _ORG_SUBMIT_TOOL,
+                        "arguments": submit.get("arguments") or "{}",
+                    },
+                }],
+            })
+            fixed.append({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": _ORG_REPAIR_HINT.format(evidence=evidence),
+            })
+            return fixed
+        if content:
+            fixed.append({"role": "assistant", "content": content})
+        fixed.append({
+            "role": "user",
+            "content": (
+                "你刚才没有调用 submit_organization 提交整理产物（它是唯一出口，"
+                "正文里的说明不会被采纳）。\n"
+                f"诊断：{evidence}\n"
+                + _ORG_REPAIR_HINT.format(evidence="（同上）")
+            ),
+        })
+        return fixed
 
     @staticmethod
     def _org_failure_evidence(content: str, ordered: list) -> str:
