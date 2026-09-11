@@ -12,7 +12,8 @@ from types import SimpleNamespace
 import pytest
 
 from wovra import task as task_module
-from wovra.agent import Agent, _schema_of, read_file
+from wovra.agent import Agent, _schema_of
+from wovra.tools import read_file
 from wovra.task import Task, TaskState
 
 
@@ -2312,3 +2313,34 @@ def test_split_orphans_auto_go_to_main_agent(monkeypatch, tmp_path):
     # R1-B1 进了域；没有其它块，无孤儿 → unassigned 不产生
     assert "R1-B1" in pending["domains"][0]["block_ids"]
     assert "unassigned" not in pending or not pending.get("unassigned")
+
+
+# ---- 包结构：mixin 组装（重构 Step 3 的结构保护） ---------------------------
+
+
+def test_agent_mixins_have_no_method_name_collisions():
+    """四个 mixin 的方法名互不重叠——防静默遮蔽。
+
+    Agent 由 _CoreMixin / _LedgerMixin / _AssemblyMixin / _MaintenanceMixin
+    组装（agent/ 包）。若两个 mixin 定义了同名方法，MRO 会静默取前者，
+    后者的实现成为死代码且无任何报错——这条测试把它变成显式失败。
+    """
+    from wovra.agent.core import _CoreMixin
+    from wovra.agent.ledger import _LedgerMixin
+    from wovra.agent.assembly import _AssemblyMixin
+    from wovra.agent.maintenance import _MaintenanceMixin
+
+    seen: dict = {}
+    for mixin in (_CoreMixin, _LedgerMixin, _AssemblyMixin, _MaintenanceMixin):
+        for name, value in vars(mixin).items():
+            if name.startswith("__") or not callable(value):
+                continue
+            assert name not in seen, (
+                f"方法名冲突: {name!r} 同时定义于 "
+                f"{seen[name].__name__} 与 {mixin.__name__}——MRO 会静默遮蔽"
+            )
+            seen[name] = mixin
+    # 组装后的 Agent 确实覆盖了全部方法（不是只挂了个空壳）
+    from wovra.agent import Agent
+    for name in seen:
+        assert getattr(Agent, name) is getattr(seen[name], name)

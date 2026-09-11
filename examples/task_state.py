@@ -17,7 +17,8 @@
 
 import sys
 
-from wovra.agent import Agent, get_current_time, list_files, read_file
+from wovra.agent import Agent
+from wovra.tools import get_current_time, list_files, read_file
 from wovra.llm import LLM
 from wovra.task import Task
 

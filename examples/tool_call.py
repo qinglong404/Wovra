@@ -8,7 +8,8 @@
 "LLM → tool call → 工具执行 → 结果回传 → LLM" 循环。
 """
 
-from wovra.agent import Agent, get_current_time, list_files, read_file
+from wovra.agent import Agent
+from wovra.tools import get_current_time, list_files, read_file
 from wovra.llm import LLM
 
 
