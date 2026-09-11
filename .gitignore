@@ -44,6 +44,10 @@ tasks/*
 !tasks/20260906-203403-6c39b8/
 !tasks/20260908-201257-dccb41/
 !tasks/20260908-231729-6d526e/
+# 代次折叠的验收样本：同一会话的前后两份记录（643355 无 org_generation
+# 字段，orgtest 有），scripts/acceptance_long_session.py 依赖它们复现
+!tasks/20260909-181052-643355/
+!tasks/20260909-181052-orgtest/
 
 # Agent 产出的工作产物
 output/
@@ -59,3 +63,23 @@ logs/
 experiments/runs/
 .wovra-background/
 .wovra/
+
+# 实验与工具产物：保留在磁盘，不进版本库
+# agent-test/  组织化实验的历史记录与审计产物
+# mc-f/        Minecraft 复刻实验运行目录（含 node_modules / .shots）
+# web/ webchat/ 早期前端实验目录（当前已不在磁盘，留条目防复活）
+# .zcode/      ZCode 会话与规划状态
+agent-test/
+mc-f/
+web/
+webchat/
+.zcode/
+
+# 上述实验目录内的通用产物（防漏网）
+node_modules/
+.shots/
+
+# 临时讨论/样例文档：留在磁盘，未纳入版本库
+# （若要入库：git add -f "docs/结构化.md" "docs/讨论v2.md"）
+docs/结构化.md
+docs/讨论v2.md
