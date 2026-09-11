@@ -643,6 +643,92 @@ def test_chat_block_share_counts_fallback_only():
     assert 0.0 < share_work < 0.15
 
 
+def test_extract_domains_accepts_empty_domains():
+    """判不可分时空 domains 是合法结果，不能被当无产物丢弃（2026-09-11
+    实测：合法的"不可分"响应被当失败，分裂静默落空）。"""
+    agent = Agent(llm=_StubLLM(), tools=[])
+    args = json.dumps({
+        "domains": [],
+        "unassigned": {"block_ids": ["R1-B1"], "reason": "纯聊天"},
+        "split_assessment": {"splittable": False, "reason": "全链单子"},
+    })
+    product = agent._extract_domains(
+        "", [{"name": "submit_domains", "arguments": args}]
+    )
+    assert product is not None
+    domains, unassigned, split = product
+    assert domains == [] and split["splittable"] is False
+    assert unassigned["block_ids"] == ["R1-B1"]
+
+
+def test_split_degraded_fallback_when_product_unusable(monkeypatch, tmp_path):
+    """submit_domains 参数解析失败：不静默落空——保守"不可分"落档 + 留痕。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    bad = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains",
+                  arguments='{"domains": [{"name": "x"'),
+    ]))
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[bad]],
+    )
+    agent._maybe_organize_batch()
+    sa = task.rounds[0]["pending_org"]["split_assessment"]
+    assert sa["splittable"] is False
+    assert "无可用产物" in sa["reason"]
+    assert any(
+        "无可用产物" in e.get("detail", "") for e in task.history
+        if e.get("kind") == "maintenance"
+    )
+
+
+def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):
+    """块的文件 ∈ 域 file_domains → Runtime 机械归入（模型可省 block_ids，
+    大幅缩小输出防截断）。纯聊天块不自动归域。"""
+    from wovra import blocks as blocks_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "后端",
+            "description": "服务端逻辑",
+            "file_domains": ["src/a.py"],
+            "block_ids": [],
+        }],
+        "unassigned": {"block_ids": [], "reason": ""},
+        "split_assessment": {"splittable": True, "reason": "可拆"},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    task = Task.create(goal="目标")
+    # 文件轮（src/a.py 的 file 块）+ 纯聊天轮（fallback 块，轮头外的
+    # 最终回答承载）——用户事件不入块（轮头承载，见 segment_round_by_file）
+    task.rounds = [
+        _mk_file_round(1, "写文件", ["src/a.py"]),
+        _round(2, "闲聊", "好"),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json()))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+
+    blocks = blocks_module.segment_round_by_file(task.rounds[0])
+    file_bid = next(b["id"] for b in blocks if b.get("file") == "src/a.py")
+    chat_bid = blocks_module.segment_round_by_file(task.rounds[1])[0]["id"]
+    doms = task.rounds[0]["pending_org"]["domains"]
+    assert file_bid in doms[0]["block_ids"]       # 文件块自动归域
+    assert chat_bid not in doms[0]["block_ids"]   # 纯聊天块不自动归域
+    assert chat_bid in task.rounds[0]["pending_org"]["unassigned"]["block_ids"]
+
+
 def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
     """机制二：一次调用为全部块产出路由式摘要 + 大类归类。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)

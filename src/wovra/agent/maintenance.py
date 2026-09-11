@@ -558,9 +558,29 @@ class _MaintenanceMixin:
         )
         product = self._extract_domains(content, ordered)
         if product is None:
-            # 与 org 同策略：不重试（2026-09-10 用户拍板）
+            # 与 org 同策略：不重试（2026-09-10 用户拍板）。但不静默落空
+            # （2026-09-11 实测：submit_domains 参数截断/解析失败 → 分裂
+            # 无任何痕迹）——落一个保守的"不可分"判定并留痕，账本可查。
+            pending = rounds[0].setdefault("pending_org", {})
+            pending["split_assessment"] = {
+                "splittable": False,
+                "reason": "分裂分析无可用产物（submit_domains 参数解析失败/"
+                          "截断），保守按不可分处理，不重试",
+            }
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：无可用产物（{len(rounds)} 轮批次），"
+                    "已按不可分落档",
+                )
+            self._persist_rounds()
             return False
         domains, unassigned, split = product
+        # 文件域自动归属（2026-09-11）：块的 file ∈ 某域 file_domains 时，
+        # Runtime 机械归入该域——模型不必逐块列 block_ids（大幅缩小输出，
+        # 防超长截断令分析作废）。模型显式声明的 block_ids 优先（跨域/
+        # 例外仍可写）。
+        self._auto_assign_domains(domains, round_blocks)
         # 主 agent 兜底（2026-09-10，thoughts 字段收敛后）：没被任何域
         # 认领的块 = 独立思想/零散块 → Runtime 自动归 unassigned（主
         # agent 剩余集合）。模型忘了填 unassigned 也不丢块——语义上
@@ -595,6 +615,48 @@ class _MaintenanceMixin:
             pending["split_assessment"] = split
         self._persist_rounds()
         return True
+
+    def _auto_assign_domains(
+        self, domains: list[dict], round_blocks: dict[int, list[dict]]
+    ) -> None:
+        """把文件块按文件归属机械归入对应域（零 LLM，原地修改 domains）。
+
+        匹配规则：块的文件 == 域 file_domains 条目（精确文件），或在该
+        条目前缀下（目录形态 "js/" → 其下全部文件）。已显式出现在任何
+        域 block_ids 里的块不覆盖（尊重模型的跨域/例外声明）。
+        """
+        if not domains:
+            return
+        block_file = {
+            b["id"]: b.get("file")
+            for blocks in round_blocks.values() for b in blocks
+            if b.get("kind") == "file" and b.get("file")
+        }
+        if not block_file:
+            return
+        claimed = {
+            b for d in domains if isinstance(d, dict)
+            for b in (d.get("block_ids") or [])
+        }
+        file_domains: list[tuple[str, str]] = []
+        domain_by_name: dict[str, dict] = {}
+        for d in domains:
+            if not isinstance(d, dict) or not d.get("name"):
+                continue
+            domain_by_name[d["name"]] = d
+            for fd in d.get("file_domains") or []:
+                file_domains.append((str(fd).rstrip("/"), d["name"]))
+        if not file_domains:
+            return
+        for bid, f in block_file.items():
+            if bid in claimed:
+                continue
+            for prefix, name in file_domains:
+                if f == prefix or f.startswith(prefix + "/"):
+                    target = domain_by_name.get(name)
+                    if target is not None:
+                        target.setdefault("block_ids", []).append(bid)
+                    break
 
     def _chat_block_share(
         self, rounds: list[dict], round_blocks: dict[int, list[dict]]
@@ -649,7 +711,12 @@ class _MaintenanceMixin:
     @staticmethod
     def _extract_domains(content: str, ordered: list):
         """从分裂分析响应提取产物：优先 submit_domains 调用参数，回退
-        正文 JSON。返回 (domains, unassigned, split_assessment) 或 None。"""
+        正文 JSON。返回 (domains, unassigned, split_assessment) 或 None。
+
+        空 domains 是合法结果（判不可分/全链单子时域列表为空），不能当
+        失败丢弃——2026-09-11 实测：合法的"不可分"响应被当无产物，分裂
+        静默落空。只有解析不出任何 dict 状态才算无产物。
+        """
         state = None
         for tc in ordered or []:
             if tc.get("name") != "submit_domains":
@@ -663,7 +730,7 @@ class _MaintenanceMixin:
             state = None
         if state is None:
             state = _MaintenanceMixin._parse_state_json(content)
-        if not isinstance(state, dict) or not state.get("domains"):
+        if not isinstance(state, dict):
             return None
         domains = _MaintenanceMixin._dedupe_domains(state.get("domains") or [])
         return (
