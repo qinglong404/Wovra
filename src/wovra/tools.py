@@ -8,8 +8,16 @@
     * 破坏性操作不做"确认弹窗"（CLI 场景做不到良好交互），
       而是直接硬拒绝——宁可让模型换一种做法，也不赌运气。
 
-所有路径类工具都通过 _safe_path 限制在项目根目录内，
-防止模型读写项目之外的任何东西。
+所有路径类工具都通过统一的路径安全层限制在项目根目录内，
+防止模型读写项目之外的任何东西。安全层两个入口，各工具按语义选用：
+
+    * `_safe_path_lexical`  —— 词法拒绝 `..`，不跟随末段链接
+                              （需要操作链接本身的工具用：delete/move）
+    * `_safe_write_path` / `_safe_directory` —— 上述 + 拒绝指向界外的链接
+
+遍历通道（search_files / glob_files）额外走 `_walk` 做**逐项**校验：
+起点校验不等于遍历逐项校验，rglob 会跟随符号链接穿出工作区——这条
+是 agent-test/tool-layer-audit-20260909.md 问题 #1 的教训。
 """
 
 import ipaddress
@@ -24,7 +32,7 @@ import tempfile
 import time
 import urllib.parse
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 # 项目根目录（工作区）：所有文件与命令都限定在这里。
 # 解析顺序：
@@ -80,7 +88,180 @@ _DENIED_PATTERNS = (
     "| sh;",
     "curl ",          # 下载外部内容（配合管道执行是常见攻击面），一律拒绝
     "wget ",
+    # 2026-09-10 补齐（审计问题 #4 的建议清单）：这些与 rm -r 同级危险，
+    # 此前只拦了 rm -r——删除动作请走 delete_file（有归档可回滚）
+    "unlink ",
+    "truncate ",
+    "shred ",
+    "fdisk",
+    "parted ",
+    "mkswap",
+    "init 0",
+    "init 6",
+    "halt",
+    "poweroff",
+    "kill -9 -1",
+    "killall ",
+    "> /dev/sd",
+    "of=/dev/sd",
 )
+
+# 工作区约束（审计问题 #4）：run_command 是裸 shell，此前 `cd ..` 就能
+# 进出工作区自由读写——文件工具全有路径校验，唯独 shell 通道没有。
+# 注意审计只测了 `cd ..`，真跑起来才发现**绝对路径**才是更大的口子：
+# `cat /etc/passwd`、`cp /etc/hostname ./x` 都畅通（09-10 用真实模型
+# 端到端复测时，模型自己报了这条）。故本层拦两类：
+#   ① cd 到界外（含 shell 包装）
+#   ② 命令行里出现指向界外的**绝对路径**字面量
+# 仍是粗筛：变量拼接、python -c 里的 os.chdir、base64 编码等绕得过，
+# 完整隔离需要容器/低权限用户，见 agent-test/security-hardening-20260910.md §5。
+
+# 系统路径白名单：这些绝对路径是**读**系统信息用的，误拦会挡掉正常排障。
+# 注意 /proc/self 被移出白名单——它是可用的旁路：
+# `cat /proc/self/cwd/../outside/secret.txt` 能绕过绝对路径检测（探针实测）。
+_ALLOWED_ABS_PREFIXES = (
+    "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty",
+)
+_ALLOWED_ABS_EXACT = (
+    "/etc/hosts", "/etc/resolv.conf",     # 网络排障高频（DNS 解析失败必看）
+    "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty",
+)
+
+# 解释器/工具路径放行：`/usr/bin/python3 script.py` 是正常调用，不该拦。
+# 只放行**指向可执行文件本体**的形式（末段是文件名），不放行目录列举
+# （`ls /usr/bin` 会暴露系统全貌，仍拦）。
+_INTERPRETER_PATH = re.compile(
+    r"^/(?:usr/)?(?:local/)?(?:s?bin)/[\w.+-]+\.?(?:exe)?$"
+)
+
+# 界内链接穿透（探针实测的洞）：`cat escape.txt` 里没有绝对路径、
+# 也没有 `..`，但 escape.txt 是指向界外的链接——shell 会顺着读到界外。
+# 静态分析无法判断"命令里哪个 token 是路径"，只能对**疑似路径的 token**
+# 逐个做工作区内的链接解析：token 在工作区内存在、且解析后落在界外 → 拦。
+_TOKEN_STOP = set(" \t\n'\"|;&<>=()$`")
+
+
+def _linked_outside(command: str) -> str | None:
+    """命令里出现"界内指向界外的链接"时返回该 token。
+
+    这是对绝对路径检测的补充：`cat escape.txt` 不含任何绝对路径，
+    但 escape.txt 是界外链接。只解析**像文件名的 token**（含 `.` 或 `/`、
+    且不是选项/URL），逐个查它在工作区内是否为指向界外的链接。
+    """
+    root = PROJECT_ROOT.resolve()
+    for raw in re.findall(r"[^\s'\"|;&<>=()$`]+", command):
+        token = raw.strip(",;:")
+        if not token or token.startswith("-"):
+            continue
+        if "://" in token:                      # URL
+            continue
+        if token in (".", "..") or set(token) <= {".", "/"}:
+            continue  # 纯当前目录/上溯：由 cd 判定负责，这里不重复报
+        if "/" not in token and "." not in token:  # 裸词（命令名/子命令）
+            continue
+        # 只处理相对路径 token；绝对路径由 _outside_absolute_paths 负责
+        if token.startswith("/") or re.match(r"^[A-Za-z]:", token):
+            continue
+        if ".." in Path(token).parts:
+            continue  # 上溯路径同理：交给上溯规则，避免重复归因
+        candidate = root / token
+        try:
+            if not candidate.is_symlink() and not candidate.exists():
+                continue
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if not resolved.is_relative_to(root):
+            return token
+    return None
+
+
+# 相对上溯：`cat ../outside/secret.txt`、`cat sub/../../x`。这类 token
+# 既不以 / 开头（绝对路径规则看不见），也不是链接（链接规则看不见），
+# 必须单独判。判定用**归一化后是否落在界外**，而不是"出现 .. 就拦"——
+# `cat a/../b.txt` 归一回界内属正常写法，不该误伤。
+def _traverses_outside(command: str) -> str | None:
+    """命令里的相对路径 token 经归一化后落在界外 → 返回该 token。"""
+    root = PROJECT_ROOT.resolve()
+    for raw in re.findall(r"[^\s'\"|;&<>=()$`]+", command):
+        token = raw.strip(",;:")
+        if not token or token.startswith("-") or "://" in token:
+            continue
+        if token.startswith("/") or re.match(r"^[A-Za-z]:", token):
+            continue  # 绝对路径：由 _outside_absolute_paths 负责
+        if token in (".", "..") or set(token) <= {".", "/"}:
+            continue  # 光秃秃的 `..`：cd 判定的辖区；且它常出现在引号文本里
+        if ".." not in Path(token).parts:
+            continue  # 不含上溯：链接规则/常规路径，不在此判
+        normalized = Path(os.path.normpath(root / token))
+        if not normalized.is_relative_to(root):
+            return token
+    return None
+
+
+def _outside_absolute_paths(command: str) -> list[str]:
+    """找出命令行里指向工作区之外的绝对路径字面量。
+
+    只认"像路径"的 token：以 / 开头、不是命令行选项、不是 URL。
+    """
+    root = str(PROJECT_ROOT.resolve())
+    found: list[str] = []
+    # 单独一个 `/`（如 `find / -name x`）也是界外目标；用词边界匹配，
+    # 避免把 `a/b` 里的斜杠或除法当路径。
+    if re.search(r"(?:^|[\s'\"=])/(?=\s|$)", command):
+        found.append("/")
+    # 前导断言必须排除 `.` 和 `-`：`./x`、`../x`、`a/../b` 都是**相对**
+    # 路径，把其中的 `/x` 当绝对路径会误拦（自我测试抓到的：一条
+    # `cat ./t1.txt` 被报成"访问工作区之外的绝对路径 /t1.txt"）。
+    for raw in re.findall(r"(?<![\w:/.\-])/[^\s'\"|;&><)]*", command):
+        token = raw.rstrip(",;")
+        if not token or token == "/":
+            continue
+        if token.startswith(root):          # 工作区内的绝对路径：放行
+            continue
+        if any(token == p or token.startswith(p + "/")
+               for p in _ALLOWED_ABS_PREFIXES):
+            continue
+        if any(token == p for p in _ALLOWED_ABS_EXACT):
+            continue
+        if _INTERPRETER_PATH.match(token):  # 解释器本体：放行
+            continue
+        found.append(token)
+    return found
+
+
+def _command_escape(command: str) -> str | None:
+    """检测命令里"离开工作区"的意图，返回原因；没有则 None。
+
+    两类：
+    * `cd` 到界外（`cd ..`、`cd /tmp`、`cd ~`、`bash -c 'cd /tmp'`）；
+    * 出现指向界外的绝对路径字面量（`cat /etc/passwd`）。
+
+    判定的是 **cd 处于命令位置**的上溯，而不是"出现 cd 二字"：
+
+        cd ..                    → 拦（段首命令）
+        x; cd ..                 → 拦（分隔符后）
+        bash -c 'cd /tmp && pwd' → 拦（shell 包装）
+        echo 'cd ..' > note.txt  → 放行（cd 是 echo 的参数，只是文本）
+        grep -rn 'cd ' docs/     → 放行（同上）
+
+    写文档/测试断言时经常要引用 "cd .." 这个字符串，误伤它们得不偿失。
+    """
+    command_word = r"(?:^|[;&|(])\s*"          # 段首、分隔符或子 shell
+    wrapper = r"(?:[A-Za-z0-9_./-]+\s+-c\s+['\"]?\s*)?"  # bash -c '…'
+    target = r"['\"]?(?:\.\.|/|~|\$HOME|\$\{HOME\})"      # 界外目标（可带引号）
+    if re.search(command_word + wrapper + r"cd\s+" + target, command):
+        return "cd 到工作区之外"
+    outside = _outside_absolute_paths(command)
+    if outside:
+        return f"访问工作区之外的绝对路径（{outside[0]}）"
+    traversal = _traverses_outside(command)
+    if traversal:
+        return f"用相对路径上溯到工作区之外（{traversal}）"
+    linked = _linked_outside(command)
+    if linked:
+        return f"经由指向工作区之外的链接（{linked}）"
+    return None
 
 _COMMAND_TIMEOUT = 60  # 秒
 
@@ -103,12 +284,130 @@ def _audit(text: str) -> None:
         _audit_recorder(text)
 
 
-def _safe_path(relative: str) -> Path:
-    """把相对路径解析到项目根目录内，越界直接报错。"""
-    path = (PROJECT_ROOT / relative).resolve()
-    if not path.is_relative_to(PROJECT_ROOT):
-        raise ValueError(f"路径越界，只允许访问项目目录内的文件: {relative}")
-    return path
+def _within_root(path: Path) -> bool:
+    """path 解析后是否落在工作区内（不抛错，供遍历循环逐项过滤用）。
+
+    对不存在的路径也能判定：resolve() 在 strict=False 下依然归一化
+    `..` 与已存在的链接前缀。
+    """
+    try:
+        return path.resolve().is_relative_to(PROJECT_ROOT.resolve())
+    except OSError:  # 链接成环等病态路径：一律视为界外
+        return False
+
+
+def _safe_path_lexical(relative: str) -> Path:
+    """词法解析路径——不跟随末段符号链接，且词法拒绝任何 `..` 上溯。
+
+    两个用途：
+    * 拒绝 `sub/../x` 这类中间穿越（起点校验漏掉的那类）——注意这里
+      是**拒绝**而不是归一化：`sub/../t1.txt` 虽然能归一化回界内，
+      但归一化等于承认"随便绕、落地在界内就行"，规则一复杂就守不住。
+      简单规则才可审计：工作区内就用工作区内的相对路径。
+    * 让 delete_file/move_file 能操作链接**本身**而不是它的目标。
+    """
+    pure = PurePosixPath(relative.replace("\\", "/"))
+    if pure.is_absolute() or re.match(r"^[A-Za-z]:", relative):
+        raise ValueError(
+            f"路径越界，只允许访问项目目录内的文件: {relative}"
+            f"（允许的根目录: {PROJECT_ROOT}）"
+        )
+    if ".." in pure.parts:
+        raise ValueError(
+            f"路径越界，只允许访问项目目录内的文件: {relative}"
+            f"（不接受 `..` 上溯，请直接用工作区内的相对路径；"
+            f"允许的根目录: {PROJECT_ROOT}）"
+        )
+    cleaned = [part for part in pure.parts if part not in ("", ".")]
+    if not cleaned:
+        return PROJECT_ROOT
+    parent = (PROJECT_ROOT / Path(*cleaned[:-1])).resolve() if len(cleaned) > 1 else PROJECT_ROOT
+    if not parent.is_relative_to(PROJECT_ROOT):
+        raise ValueError(
+            f"路径越界，只允许访问项目目录内的文件: {relative}"
+            f"（允许的根目录: {PROJECT_ROOT}）"
+        )
+    return parent / cleaned[-1]
+
+
+def _safe_write_path(relative: str) -> Path:
+    """写入类工具的统一入口：词法拒绝 `..`，且不允许写到界外链接上。
+
+    write/edit/replace/restore 都会**改动内容**，所以除了不接受
+    中间穿越，也不能顺着一个指向界外的链接去写——那等于从工作区
+    内部改写外部文件。读类工具同理（read_file 也走这套判定）。
+    """
+    target = _safe_path_lexical(relative)
+    if not _within_root(target):
+        raise ValueError(
+            f"路径越界，只允许访问项目目录内的文件: {relative}"
+            f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}）"
+        )
+    return target
+
+
+def _safe_directory(directory: str) -> Path:
+    """目录类参数（list_files/search_files/glob_files）的统一入口。
+
+    与 _safe_path_lexical 同规则（拒绝 `..`），额外要求解析后仍在
+    界内——遍历的起点不能是一个指向界外的链接。
+    """
+    target = _safe_path_lexical(directory)
+    if not _within_root(target):
+        raise ValueError(
+            f"路径越界，只允许访问项目目录内的文件: {directory}"
+            f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}）"
+        )
+    return target
+
+
+# ---- 遍历通道（统一逐项校验） -------------------------------------------------
+# 审计教训（agent-test/tool-layer-audit-20260909.md 问题 #1）：
+# 起点校验 ≠ 遍历逐项校验。rglob 会跟随符号链接、会走进界外目录，
+# 只有对**每一个**候选路径二次判定，遍历才是安全的。search_files 与
+# glob_files 共用这一个实现，防护不再逐工具手写。
+
+_SYMLINK_IN_ROOT = "root"   # 只认指向界内的链接（默认，零误伤）
+_SYMLINK_SKIP = "skip"      # 一律跳过（不接受链接入参时使用）
+
+
+def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
+    """安全遍历 root 下匹配 glob 的文件——逐项校验，越界即跳过。
+
+    三层防护：
+    1. root 本身已由 _safe_directory 校验（起点）；
+    2. 每个候选路径按 resolve 后是否仍在界内过滤——rglob 跟随
+       symlink 到界外时，这里把它挡在读取之前（问题 #1 的正解）；
+    3. 链接直接指向界外文件时 resolve 落在界外，同样被 2 拦下。
+
+    symlinks="root"（默认）额外放行**指向界内**的链接——界内做别名
+    是正常工程行为，不该误伤；"skip" 则一律跳过链接。
+
+    去重：链接与其目标都命中时只产出一次（按真实路径判重）——
+    否则 `glob *.txt` 会把同一个文件列两遍，模型会以为有两份。
+    """
+    root_resolved = PROJECT_ROOT.resolve()
+    seen: set[Path] = set()
+    for path in sorted(root.rglob(glob)):
+        if not path.is_file():
+            continue
+        resolved = path.resolve()
+        if not resolved.is_relative_to(root_resolved):
+            continue  # ① 遍历穿出工作区（含跟随 symlink 到界外）
+        relative = resolved.relative_to(root_resolved)
+        if any(part in _IGNORED_DIRS for part in relative.parts):
+            continue  # ② 噪声目录
+        if symlinks == _SYMLINK_SKIP and path.is_symlink():
+            continue  # ③ 链接策略
+        if resolved in seen:
+            continue  # ④ 链接与目标同体：只算一次
+        seen.add(resolved)
+        yield resolved
+
+
+def _is_hidden(relative: Path) -> bool:
+    """相对路径的任一段以 . 开头（隐藏文件/目录）。"""
+    return any(part.startswith(".") for part in relative.parts)
 
 
 # ---- 只读工具 -------------------------------------------------------------
@@ -119,7 +418,7 @@ def list_files(directory: str = ".") -> list[str]:
 
     文件附带大小与修改时间——帮模型决定分段读取策略、判断内容新鲜度。
     """
-    path = _safe_path(directory)
+    path = _safe_directory(directory)
     out = []
     for p in sorted(path.iterdir()):
         if p.is_dir():
@@ -142,8 +441,12 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200) -> str:
     大文件请配合 search_files 先定位，再用 start_line/num_lines
     分段读取——单次最多 400 行，返回值会标明文件总行数和
     继续读取的位置。
+
+    路径必须是工作区内的相对路径，不接受 `..` 上溯（含 `sub/../x`
+    这种中间穿越）——绕路不产生歧义，直接拒掉。指向工作区之外的
+    符号链接也读不到。
     """
-    target = _safe_path(path)
+    target = _safe_write_path(path)  # 与写入类同一套判定：不接受 .. 与界外链接
     try:
         text = target.read_text(encoding="utf-8")
     except UnicodeDecodeError:
@@ -179,13 +482,9 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
     except re.error as error:
         raise ValueError(f"正则表达式无效: {error}") from error
 
-    root = _safe_path(directory)
+    root = _safe_directory(directory)
     matches: list[str] = []
-    for path in sorted(root.rglob(glob)):
-        if not path.is_file():
-            continue
-        if any(part in _IGNORED_DIRS for part in path.parts):
-            continue
+    for path in _walk(root, glob):
         if path.stat().st_size > 1_000_000:  # 跳过超大文件
             continue
         try:
@@ -213,22 +512,28 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
     return "\n".join(matches)
 
 
-def glob_files(pattern: str, directory: str = ".") -> str:
+def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False) -> str:
     """按文件名通配模式查找文件（如 *.py、docs/**/*.md），返回相对路径。
 
     模式递归匹配所有子目录（*.py 等价于 **/*.py）；与 search_files
     （搜内容）互补：找"有哪些文件"用本工具，找"哪些文件里有什么
     内容"用 search_files。自动跳过 .git/.venv 等噪声目录，最多
     返回 200 条。
+
+    include_hidden：是否把隐藏文件/目录（.env、.github 等）算进结果。
+    注意标准的通配语义：`*.py` 不匹配 .a.py，`*` 也不匹配 .env——
+    要找隐藏文件除了开这个开关，模式本身也要能匹配（如 `.*`）。
+    排障时找不到配置就打开它。
     """
-    root = _safe_path(directory)
+    root = _safe_directory(directory)
     filtered = [
-        p for p in root.rglob(pattern) if p.is_file()
-        and not any(part in _IGNORED_DIRS for part in p.relative_to(PROJECT_ROOT).parts)
+        p for p in _walk(root, pattern)
+        if include_hidden or not _is_hidden(p.relative_to(PROJECT_ROOT))
     ]
     filtered.sort(key=lambda p: p.as_posix())
     if not filtered:
-        return f"无匹配文件: {pattern}（directory={directory}）"
+        hint = "" if include_hidden else "（隐藏文件未计入，需要时加 include_hidden=True）"
+        return f"无匹配文件: {pattern}（directory={directory}）{hint}"
     lines = [p.relative_to(PROJECT_ROOT).as_posix() for p in filtered[:200]]
     more = f"\n…(共 {len(filtered)} 个，已显示前 200)" if len(filtered) > 200 else ""
     return "\n".join(lines) + more
@@ -662,7 +967,7 @@ def restore_file(path: str, version: str = "") -> str:
     会先归档——回滚本身可再回滚。文件被外部修改过会拒绝（防覆盖用户
     的新改动）。
     """
-    target = _safe_path(path)
+    target = _safe_write_path(path)
     stale = _stale_error(target)
     if stale:
         return stale
@@ -696,8 +1001,25 @@ def delete_file(path: str) -> str:
 
     删除是破坏性操作：交互环境 y/N 确认（默认拒绝），非交互环境放行
     并留审计标记。只处理文件——空目录请用 run_command 的 rmdir。
+
+    符号链接的语义（2026-09-10 修正，审计问题 #3）：路径用词法解析，
+    删的永远是**链接本身**，绝不顺着链接删掉它指向的文件。链接指向
+    工作区外时也照删不误——删链接不碰目标，是界内操作（旧实现会报
+    "路径越界"，用户只能绕 shell 的 unlink）。
     """
-    target = _safe_path(path)
+    target = _safe_path_lexical(path)
+    if target.is_symlink():
+        link_to = os.readlink(target)
+        dangling = not target.exists()
+        _archive_version(target) if not dangling else None
+        target.unlink()  # unlink 作用于链接名本身，不触碰目标
+        _file_registry.pop(target, None)
+        _audit(f"[delete_file] {path} → {link_to}（仅删链接）")
+        # 文案避开"不存在"——lifecycle/blocks 用子串判定操作失败
+        # （读/删"没真发生"才是失败）。删悬空链接是**成功**的删除，
+        # 写成"目标不存在"会被误判成幽灵（从未存在），状态就错了。
+        tail = "（链接指向的目标未受影响）" if not dangling else "（该链接原本已失效）"
+        return f"已删除符号链接 {path} → {link_to}{tail}"
     if not target.exists():
         return f"文件不存在: {path}（解析为 {target}）"
     if not target.is_file():
@@ -717,13 +1039,23 @@ def move_file(path: str, new_path: str) -> str:
 
     new_path 已存在时拒绝——move 永不静默覆盖。移动后文件观察注册表
     同步更新，后续 edit_file/write_file 以新路径为准。
+
+    路径用词法解析：移动符号链接时移动的是链接本身（目标不动）。
     """
-    src = _safe_path(path)
-    dst = _safe_path(new_path)
-    if not src.exists():
-        return f"文件不存在: {path}（解析为 {src}）"
-    if dst.exists():
+    src = _safe_path_lexical(path)
+    dst = _safe_path_lexical(new_path)
+    if dst.is_symlink() or dst.exists():
         return f"目标已存在: {new_path}（解析为 {dst}）——move 不覆盖，先删除或换名"
+    if not src.is_symlink() and not src.exists():
+        return f"文件不存在: {path}（解析为 {src}）"
+    if src.is_symlink() and not src.exists():
+        # 悬空链接：可以移动（移动的是链接名），但要说清
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        src.rename(dst)
+        _file_registry.pop(src, None)
+        _audit(f"[move_file] {path} → {new_path}（悬空链接）")
+        # 同样避开"不存在"：移动悬空链接是成功的（见 delete_file 注释）
+        return f"已移动悬空符号链接 {path} → {new_path}（该链接原本已失效）"
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
     _file_registry.pop(src, None)
@@ -746,7 +1078,7 @@ def write_file(path: str, content: str, force: bool = False) -> str:
     确认是有意覆盖用 force=true 重试——失误的"整体薄壳化"在结果上
     与有意重写一模一样，只有大小差异可查（实测教训）。
     """
-    target = _safe_path(path)
+    target = _safe_write_path(path)
     stale = _stale_error(target)
     if stale:
         return stale
@@ -833,7 +1165,7 @@ def edit_file(path: str, old_text: str, new_text: str,
     不必整文件重读。
     若文件在你上次读取后被外部修改过，会拒绝执行并要求重新确认。
     """
-    target = _safe_path(path)
+    target = _safe_write_path(path)
     stale = _stale_error(target)
     if stale:
         return stale
@@ -909,7 +1241,7 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     纪律：行号必须以最近一次 read_file 回显为准；你中间执行过任何
     写操作后请重新读取，否则行号已经漂移。文件被外部修改过会拒绝。
     """
-    target = _safe_path(path)
+    target = _safe_write_path(path)
     stale = _stale_error(target)
     if stale:
         return stale
@@ -981,6 +1313,8 @@ def run_command(command: str, timeout: int | None = None) -> str:
     防护：
         * 黑名单匹配到破坏性模式时直接拒绝，不执行；
           拒绝文本会回传给模型（它能看到原因并换方案）
+        * 工作目录固定在项目根：显式离开工作区的命令（`cd ..`、
+          `cd /绝对路径`）会被拒绝——需要访问工作区外请说明理由
         * 超时强制终止整棵进程树，防止长命令卡死整个任务
         * 输出各截断 1500 字符（带显式截断标记），防止超长输出撑爆上下文
     """
@@ -991,6 +1325,13 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    escape = _command_escape(command)
+    if escape:
+        return (
+            f"已拒绝执行：命令试图{escape}（{command[:120]}）。"
+            f"所有命令都限定在工作区 {PROJECT_ROOT} 内运行。"
+            f"如果确实需要访问工作区之外，请向用户说明理由并请其自行操作。"
+        )
     reason = _confirm_reason(command)
     if reason and not _ask_yes_no(
         f"命令包含敏感操作（命中 `{reason}`），是否允许执行？\n  {command[:200]}"
@@ -1051,13 +1392,26 @@ def run_command(command: str, timeout: int | None = None) -> str:
     # 语义判断。重型验证（浏览器 E2E 等）的累计账由此可算。
 
     def _clip(text: str) -> str:
-        """1500 字符上限 + 显式截断标记：静默截断曾让模型把"输出被切"
-        误诊为命令符号问题，白跑一整轮重试（2026-09-07 实测）。"""
+        """超限时保留**头 + 尾**，明确标出中间丢了多少——静默截断曾让
+        模型把"输出被切"误诊为命令符号问题，白跑一整轮重试（2026-09-07
+        实测）。
+
+        2026-09-10 改为首尾保留（审计报告 §六 指名"丢中段"是最大痛点）：
+        原实现只留前 1500 字符，中段直接消失——测试失败信息、命令报错
+        往往出现在**末尾**，只留头部等于把最有用的部分丢掉，模型只能
+        换方法反复猜。现在头部给上下文、尾部给结论。
+        """
         if len(text) <= _OUTPUT_LIMIT:
             return text
+        head = _OUTPUT_LIMIT * 2 // 3
+        tail = _OUTPUT_LIMIT - head
+        omitted = len(text) - head - tail
         return (
-            f"{text[:_OUTPUT_LIMIT]}\n"
-            f"…（输出超限已截断：原文共 {len(text):,} 字符，这里只保留前 {_OUTPUT_LIMIT:,}）"
+            f"{text[:head]}\n"
+            f"…（中间 {omitted:,} 字符已省略：原文共 {len(text):,} 字符，"
+            f"此处保留开头 {head:,} + 结尾 {tail:,}——完整内容用 read_file "
+            f"分段读取，或让命令只输出关键部分）\n"
+            f"{text[-tail:]}"
         )
 
     return (
@@ -1099,6 +1453,12 @@ def run_background(command: str, keep_alive: bool = False) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    escape = _command_escape(command)
+    if escape:
+        return (
+            f"已拒绝执行：命令试图{escape}（{command[:120]}）。"
+            f"后台命令同样限定在工作区 {PROJECT_ROOT} 内运行。"
+        )
     reason = _confirm_reason(command)
     if reason and not _ask_yes_no(
         f"后台命令包含敏感操作（命中 `{reason}`），是否允许启动？\n  {command[:200]}"
