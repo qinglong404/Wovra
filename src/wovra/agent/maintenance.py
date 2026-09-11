@@ -561,17 +561,30 @@ class _MaintenanceMixin:
             # 与 org 同策略：不重试（2026-09-10 用户拍板）。但不静默落空
             # （2026-09-11 实测：submit_domains 参数截断/解析失败 → 分裂
             # 无任何痕迹）——落一个保守的"不可分"判定并留痕，账本可查。
+            # 失败现场一并记录（arguments 长度+头部 / 正文长度），下次
+            # 直接能看出是截断还是空壳还是模型没走工具出口。
+            evidence = ""
+            for tc in ordered or []:
+                if tc.get("name") == "submit_domains":
+                    args = tc.get("arguments") or ""
+                    evidence = (f"submit_domains 参数 {len(args)} 字符："
+                                f"{args[:120]!r}")
+                    break
+            if not evidence:
+                evidence = f"无 submit_domains 调用；正文 {len(content or '')} 字符"
+            reason = (
+                "分裂分析无可用产物（" + evidence + "），"
+                "保守按不可分处理，不重试"
+            )
             pending = rounds[0].setdefault("pending_org", {})
             pending["split_assessment"] = {
                 "splittable": False,
-                "reason": "分裂分析无可用产物（submit_domains 参数解析失败/"
-                          "截断），保守按不可分处理，不重试",
+                "reason": reason,
             }
             if self.task is not None:
                 self.task.record(
                     "maintenance",
-                    f"split：无可用产物（{len(rounds)} 轮批次），"
-                    "已按不可分落档",
+                    f"split：无可用产物（{len(rounds)} 轮批次；{evidence}）",
                 )
             self._persist_rounds()
             return False
@@ -731,6 +744,12 @@ class _MaintenanceMixin:
         if state is None:
             state = _MaintenanceMixin._parse_state_json(content)
         if not isinstance(state, dict):
+            return None
+        # 空壳判定（2026-09-11）：截断到只剩 {} 的 arguments 能解析成功，
+        # 但三个产物键一个都没有——那不算"空域合法"，是无产物。
+        if not any(
+            k in state for k in ("domains", "unassigned", "split_assessment")
+        ):
             return None
         domains = _MaintenanceMixin._dedupe_domains(state.get("domains") or [])
         return (

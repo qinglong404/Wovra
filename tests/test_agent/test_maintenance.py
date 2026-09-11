@@ -659,6 +659,10 @@ def test_extract_domains_accepts_empty_domains():
     domains, unassigned, split = product
     assert domains == [] and split["splittable"] is False
     assert unassigned["block_ids"] == ["R1-B1"]
+    # 截断到空壳 {} 能解析成功，但三键全无——那是无产物，不是空域合法
+    assert agent._extract_domains(
+        "", [{"name": "submit_domains", "arguments": "{}"}]
+    ) is None
 
 
 def test_split_degraded_fallback_when_product_unusable(monkeypatch, tmp_path):
