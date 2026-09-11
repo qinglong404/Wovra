@@ -1,7 +1,8 @@
 """Agent 支撑层：运行常量、无状态工具函数（schema 生成/信封/JSON 解析）。
 
-零逻辑搬运（自 agent.py 原样切出）。所有名字对包内各 mixin 公开；
-`_schema_of` 亦经包 __init__ 再导出（测试与 scripts 直接引用）。
+零逻辑搬运（2026-09-11 自原单文件 agent.py 切出，拆分后归属本模块）。
+所有名字对包内各 mixin 公开；`_schema_of` 亦经包 __init__ 再导出
+（测试与 scripts 直接引用）。
 """
 
 import inspect

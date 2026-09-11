@@ -100,6 +100,9 @@ _DENIED_PATTERNS = (
 # 系统路径白名单：这些绝对路径是**读**系统信息用的，误拦会挡掉正常排障。
 # 注意 /proc/self 被移出白名单——它是可用的旁路：
 # `cat /proc/self/cwd/../outside/secret.txt` 能绕过绝对路径检测（探针实测）。
+# 注：本项目自己的 .venv/bin/python 也命中"指向界外的链接"被拦
+# （uv 建的 venv 解释器是指向系统 Python 的符号链接）——这是有意行为，
+# 正确用法是 `uv run ...`；shell.run_command 会给出该提示。
 _ALLOWED_ABS_PREFIXES = (
     "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty",
 )

@@ -4,6 +4,7 @@
 
 import os as _os
 import re
+import sys as _sys
 import pytest
 from wovra.tools import (
     FAILURE_MARKERS,
@@ -323,6 +324,36 @@ def test_run_command_blocks_symlink_to_outside(workspace):
         result = run_command(command)
         assert "已拒绝" in result, f"{command} 应被拒绝：{result[:120]}"
         assert "链接" in result
+
+
+def test_run_command_venv_python_gets_uv_hint(workspace):
+    """可用性改进（2026-09-11 运行者实测）：`.venv/bin/python` 被拦时给出
+    正确用法提示。
+
+    uv 建的 .venv/bin/python 是指向工作区外系统解释器的符号链接，命中
+    "经由指向工作区之外的链接"被拦——这是安全层的有意行为，但第一次撞上
+    的人会以为工具坏了。拦是硬行为，但提示要把出路（uv run）直接给出来，
+    省一轮试错。
+    """
+    import os as _os
+
+    import pytest
+
+    from wovra import tools as tools_module
+
+    venv_bin = workspace.root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    try:
+        _os.symlink(_sys.executable, venv_bin / "python")
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不支持创建符号链接")
+
+    result = tools_module.run_command(".venv/bin/python --version")
+    assert "已拒绝执行" in result
+    assert "uv run" in result  # 提示直接给出出路
+    # 非 .venv 的界外链接不给 venv 提示（避免干扰普通越界信息）
+    plain = tools_module.run_command("cat escape_link.txt")
+    assert "uv run" not in plain
 
 
 def test_run_command_blocks_proc_self_bypass(workspace):

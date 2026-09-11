@@ -65,9 +65,19 @@ def run_command(command: str, timeout: int | None = None) -> str:
             )
     escape = safety._command_escape(command)
     if escape:
+        # venv 可用性提示（2026-09-11 运行者实测）：uv 建的 .venv/bin/python
+        # 是指向工作区外系统解释器的符号链接，命中 _linked_outside 被拦——
+        # 这是安全层的有意行为，但第一次撞上的人会以为工具坏了。识别出
+        # `.venv/` 时把正确用法（uv run）直接给出来，省一轮试错。
+        hint = (
+            "提示：`.venv/bin/...` 被拦是因为 venv 解释器是指向工作区之外"
+            "的符号链接——请改用 `uv run ...`（如 `uv run python -m pytest`）。"
+            if ".venv/" in command else ""
+        )
         return (
             f"已拒绝执行：命令试图{escape}（{command[:120]}）。"
             f"所有命令都限定在工作区 {safety.PROJECT_ROOT} 内运行。"
+            f"{hint}"
             f"如果确实需要访问工作区之外，请向用户说明理由并请其自行操作。"
         )
     reason = safety._confirm_reason(command)

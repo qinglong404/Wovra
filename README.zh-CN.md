@@ -399,9 +399,28 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 | [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | 观察性对照数据 |
 | [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | 三代机制对照实验 |
 | [docs/preflight-planning-intent.md](docs/preflight-planning-intent.md) | 开放/大范围任务的开工前规划闸门（意图存档，未实现） |
+| [docs/venv-usability-prompt-reconcile-20260911.md](docs/venv-usability-prompt-reconcile-20260911.md) | 运行者体验改进：venv 可用性 + 提示词对账（2026-09-11） |
 | [experiments/README.md](experiments/README.md) | 受控实验协议与工具 |
 
-架构将随着实际使用和实验而演进。
+## 开发者须知
+
+**安全层 vs venv（2026-09-11）。** `run_command` 会拒绝"离开工作区"的命令，
+包括**界内指向界外的符号链接**（`_linked_outside`）。uv 创建的
+`.venv/bin/python` 恰恰是这种链接——它指向系统解释器——所以
+`.venv/bin/python -m pytest` **按设计会被拦**。请改用 `uv run`：
+
+```bash
+uv run python -m pytest        # 跑测试
+uv run python -m wovra --help  # CLI 冒烟
+```
+
+当这类命令被拦时，`run_command` 现在会附带一条指向 `uv run` 的提示；
+系统提示词也要求模型优先用 `uv run`，不要直接调 `.venv/bin/...`。
+如果确实需要访问工作区之外，请说明理由并请人代为操作——沙箱不会替你越界。
+
+完整的安全设计见
+[docs/context-management-v3.md](docs/context-management-v3.md) 与
+[agent-test/security-hardening-20260910.md](agent-test/security-hardening-20260910.md)。
 
 ---
 

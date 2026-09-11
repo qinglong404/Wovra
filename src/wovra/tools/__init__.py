@@ -31,15 +31,15 @@
 #     interaction.py  ask_user / 用户 Hooks / 当前时间
 #
 # 注意：`PROJECT_ROOT` 的**属主是 safety.py**；本包这一份是 import 时的
-# 值快照（cli.py 依赖这份快照语义）。要重定向工作区请改
+# 值快照（cli/ 依赖这份快照语义）。要重定向工作区请改
 # `wovra.tools.safety.PROJECT_ROOT`（task.py / 测试 / 探针均如此）。
 
 # 子模块（可直接访问）
 from . import safety, files, shell, background, web, interaction  # noqa: F401,E402
 
 # ---- 公开 API 再导出 ---------------------------------------------------------
-# cli.py / agent.py 的工具注册清单、实验探针的 getattr(tools_module, name)
-# 都依赖这层形态：名字与重写前完全一致。
+# cli/prompt.py 与 agent/core.py 的工具注册清单、实验探针的
+# getattr(tools_module, name) 都依赖这层形态：名字与重写前完全一致。
 from .safety import (  # noqa: E402
     FAILURE_MARKERS,
     PROJECT_ROOT,

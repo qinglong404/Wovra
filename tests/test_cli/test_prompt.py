@@ -36,6 +36,10 @@ def test_system_prompt_matches_mode_and_environment(monkeypatch):
         assert "cmd.exe" in managed and "Windows" in managed
     else:
         assert "Linux" in managed
+    # 可用性改进（2026-09-11）：提示词直接告诉模型本项目用 uv run，
+    # 不直接调 .venv/bin/...（会被安全层拦，见 test_safety venv 用例）
+    assert "uv run" in managed and "uv run" in baseline
+    assert ".venv/bin" in managed
 
 
 def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):

@@ -409,9 +409,33 @@ Full data and derivation:
 | [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | Observational comparison data |
 | [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | Three-generation mechanism experiment |
 | [docs/preflight-planning-intent.md](docs/preflight-planning-intent.md) | Pre-flight planning gate for open-ended / large-scope work (intent archive, not implemented) |
+| [docs/venv-usability-prompt-reconcile-20260911.md](docs/venv-usability-prompt-reconcile-20260911.md) | Runner-experience fix: venv usability + system-prompt reconciliation (2026-09-11) |
 | [experiments/README.md](experiments/README.md) | Controlled experiment protocol and tooling |
 
 The architecture will evolve through actual usage and experiments.
+
+## Developer Notes
+
+**Safety layer vs. the venv (2026-09-11).** `run_command` refuses commands
+that traverse out of the workspace, including *in-root symlinks that point
+outside it* (`_linked_outside`). An uv-created `.venv/bin/python` is exactly
+such a link — it points at the system interpreter — so `.venv/bin/python
+-m pytest` is *rejected by design*. Use `uv run` instead:
+
+```bash
+uv run python -m pytest        # tests
+uv run python -m wovra --help  # CLI
+```
+
+When such a command is blocked, `run_command` now adds a hint pointing to
+`uv run`. The system prompt also instructs the model to prefer `uv run`
+over direct `.venv/bin/...` calls. If you genuinely need to reach something
+outside the workspace, explain why and ask a human to do it — the sandbox
+will not do it for you.
+
+The full file-map / security design lives in
+[docs/context-management-v3.md](docs/context-management-v3.md) and
+[agent-test/security-hardening-20260910.md](agent-test/security-hardening-20260910.md).
 
 ---
 
