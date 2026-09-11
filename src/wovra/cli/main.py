@@ -4,43 +4,13 @@
 """
 import argparse
 import json
-import os
 import shutil
-import sys
-import threading
-import time
-from pathlib import Path
 
 from .. import task as task_module
-from .. import tools as tools_module
 from .. import ui
-from ..agent import Agent, MODE_BASELINE, MODE_MANAGED
+from ..agent import MODE_BASELINE, MODE_MANAGED
 from ..llm import LLMConfigError
-from ..task import Task
-from ..tools import (
-    PROJECT_ROOT,
-    ask_user,
-    check_background,
-    delete_file,
-    edit_file,
-    get_current_time,
-    glob_files,
-    list_background,
-    list_files,
-    move_file,
-    read_file,
-    replace_lines,
-    restore_file,
-    run_background,
-    run_command,
-    search_files,
-    stop_background,
-    stop_session_backgrounds,
-    user_input_pending,
-    web_fetch,
-    web_search,
-    write_file,
-)
+from ..tools import stop_session_backgrounds
 
 from .prompt import _build_agent
 from .session import _acquire_session_lock, _all_tasks, _child_summaries, _load_task, _process_alive, _record_leftover_maintenance, _release_session_lock, _resolve_mode, _resolve_task_id

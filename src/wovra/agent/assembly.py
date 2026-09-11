@@ -370,11 +370,6 @@ class _AssemblyMixin:
             lines.append(f"- {path}（{'；'.join(parts)}）")
         return lines
 
-    @staticmethod
-    def _head_text(text: str, limit: int) -> str:
-        text = " ".join((text or "").split())
-        return text if len(text) <= limit else text[:limit] + "…"
-
     def expand_history(self, ids: list[str] | str, level: str = "full") -> str:
         """按需展开历史：Truncated → Summary（意图+索引）→ Full 三档读取。
 

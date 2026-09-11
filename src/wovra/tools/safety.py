@@ -16,7 +16,6 @@ interaction 各模块依赖；它自身不 import 包内其它模块。
     * `_safe_write_path` / `_safe_directory` —— 上述 + 拒绝指向界外的链接
 """
 
-import locale  # noqa: F401 —— 历史遗留（全仓无引用），清理见重构 Step 6
 import os
 import re
 from pathlib import Path, PurePosixPath
@@ -120,7 +119,6 @@ _INTERPRETER_PATH = re.compile(
 # 也没有 `..`，但 escape.txt 是指向界外的链接——shell 会顺着读到界外。
 # 静态分析无法判断"命令里哪个 token 是路径"，只能对**疑似路径的 token**
 # 逐个做工作区内的链接解析：token 在工作区内存在、且解析后落在界外 → 拦。
-_TOKEN_STOP = set(" \t\n'\"|;&<>=()$`")
 
 def _linked_outside(command: str) -> str | None:
     """命令里出现"界内指向界外的链接"时返回该 token。

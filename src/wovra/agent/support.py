@@ -6,8 +6,7 @@
 
 import inspect
 import os
-import re
-from typing import Any, Callable, Optional
+from typing import Callable
 
 from ..task import sanitize_surrogates
 

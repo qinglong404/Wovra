@@ -7,7 +7,6 @@
 import itertools
 import os
 import subprocess
-from pathlib import Path
 
 from . import safety
 from .shell import _kill_process_tree
@@ -25,9 +24,6 @@ def list_background() -> str:
         alive = " [常驻]" if entry.get("keep_alive") else ""
         lines.append(f"{tid}  [{owner}] {state}{alive}  {entry['command'][:60]}")
     return "后台任务：\n" + "\n".join(lines)
-
-
-    return "\n".join(lines) + more
 
 # ---- 后台任务 ----------------------------------------------------------------
 # 长驻进程（开发服务器、watcher、长安装）的后台运行与控制：启动即返回，

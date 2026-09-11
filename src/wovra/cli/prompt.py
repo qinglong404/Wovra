@@ -1,20 +1,8 @@
 """系统提示词组装与 Agent 构造：模式化提示词、AGENTS.md 工作区指令、
 工具清单装配（_build_agent 是组合根）。
 """
-import argparse
-import json
-import os
-import shutil
-import sys
-import threading
-import time
-from pathlib import Path
 
-from .. import task as task_module
-from .. import tools as tools_module
-from .. import ui
-from ..agent import Agent, MODE_BASELINE, MODE_MANAGED
-from ..llm import LLMConfigError
+from ..agent import Agent, MODE_MANAGED
 from ..task import Task
 from ..tools import (
     PROJECT_ROOT,
@@ -34,8 +22,6 @@ from ..tools import (
     run_command,
     search_files,
     stop_background,
-    stop_session_backgrounds,
-    user_input_pending,
     web_fetch,
     web_search,
     write_file,
