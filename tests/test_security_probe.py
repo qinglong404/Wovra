@@ -92,10 +92,32 @@ def test_probe_can_actually_detect_leaks(probe_env, monkeypatch):
             return f"文件不存在: {path}"
 
     def fake_run(command, timeout=None):
+        import os
         import subprocess
-        proc = subprocess.run(command, shell=True, capture_output=True,
-                              cwd=workspace, text=True)
-        return f"exit_code={proc.returncode}\nstdout:\n{proc.stdout}"
+        import tempfile
+
+        from wovra.tools.shell import _kill_process_tree
+        # 与 tools.py 同款纪律：输出去临时文件而不是 PIPE——PIPE 会被
+        # 孙进程攥住写端导致清理永久挂起（该教训已在 run_command 记录
+        # 在案）；timeout 必给：语料含 `find /` 这类重量级命令，Windows
+        # 下 PATH 里的 GNU find 会全盘扫描，探针执行任何命令都必须有界。
+        with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
+            proc = subprocess.Popen(
+                command, shell=True, stdout=out_f, stderr=err_f,
+                stdin=subprocess.DEVNULL, cwd=workspace,
+                start_new_session=os.name != "nt",
+                creationflags=(
+                    subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
+                ),
+            )
+            try:
+                proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                _kill_process_tree(proc.pid)
+                return "exit_code=-1（超出假工具层 15s 上限）\nstdout:\n(无输出)"
+            out_f.seek(0)
+            out = out_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
+        return f"exit_code={proc.returncode}\nstdout:\n{out}"
 
     monkeypatch.setattr(tools_module, "read_file", fake_read)
     monkeypatch.setattr(tools_module, "run_command", fake_run)
