@@ -147,6 +147,27 @@ def test_confirm_ctrl_c_interrupts_instead_of_refusing(monkeypatch):
         _ask_yes_no("确认？")
 
 
+def test_run_command_decodes_native_output():
+    """原生程序的非 UTF-8 输出要可读（worklog-20260911.md §9.6-P3/P4）。
+
+    PYTHONUTF8 只约束 Python 自己；cmd.exe 内建报错按 OEM 代码页输出。
+    中文 Windows 上此前按 utf-8 解码 → 模型看到的报错是一堆乱码，
+    既没法诊断，也让探针按文本判定"命令不存在"失效。
+    """
+    from wovra.tools import shell as shell_module
+
+    gbk = "不是内部或外部命令".encode("cp936")  # cmd 的真实字节
+    assert shell_module._decode_output(gbk) == "不是内部或外部命令"
+    assert shell_module._decode_output("中文 utf-8".encode("utf-8")) == "中文 utf-8"
+    assert shell_module._decode_output(b"") == ""
+    assert shell_module._decode_output(b"\xff\xfe\x00bad") != ""  # 兜底不抛
+
+    if _os.name != "nt":
+        pytest.skip("OEM 代码页解码是 Windows 侧问题")
+    result = run_command("definitely-not-a-command-wovra-xyz")
+    assert "不是内部或外部命令" in result, f"报错不可读：{result[:200]!r}"
+
+
 def test_run_command_child_stdin_is_devnull(monkeypatch):
     """子进程 stdin 必须接 DEVNULL（worklog-20260911.md §5-P2）。
 

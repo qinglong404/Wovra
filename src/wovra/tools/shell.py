@@ -41,6 +41,42 @@ def _kill_process_tree(pid: int) -> None:
 _OUTPUT_LIMIT = 1500
 
 
+def _oem_encoding() -> str:
+    """Windows 控制台所用 OEM 代码页对应的 Python 编码名（非 Windows 回 utf-8）。
+
+    为什么不能只靠 utf-8（2026-09-11 实测，worklog-20260911.md §9.6-P3）：
+    本项目已给子进程设 PYTHONUTF8=1，但那只约束 Python 自己；cmd.exe 的
+    内建报错、以及大量原生程序（git for windows 之外的工具链）按**OEM
+    代码页**输出。中文 Windows 上 cmd 说 `'x' 不是内部或外部命令` 时给出
+    的是 GBK 字节 → 按 utf-8 解码成乱码回传模型（模型看不到真实原因，
+    也让探针无法按文本判定"命令不存在"）。
+    """
+    if os.name != "nt":
+        return "utf-8"
+    try:
+        import ctypes
+
+        return f"cp{ctypes.windll.kernel32.GetOEMCP()}"
+    except Exception:  # noqa: BLE001——拿不到代码页时退回 utf-8
+        return "utf-8"
+
+
+def _decode_output(raw: bytes) -> str:
+    """解码子进程输出：先按 UTF-8 严格试，失败再用 OEM 代码页。
+
+    严格 utf-8 失败即说明不是 UTF-8 字节（合法 UTF-8 与 GBK 混淆的概率
+    极低，且这是"先到先得"的确定性规则）；两者都不行才退回替换解码。
+    """
+    if not raw:
+        return ""
+    for encoding in ("utf-8", _oem_encoding()):
+        try:
+            return raw.decode(encoding)
+        except (UnicodeDecodeError, LookupError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
 def run_command(command: str, timeout: int | None = None) -> str:
     """在项目根目录运行一条 shell 命令，返回退出码与输出。默认 60 秒
     超时整树强杀（timeout 可调，1-600 秒）；不要运行前台常驻服务
@@ -151,8 +187,8 @@ def run_command(command: str, timeout: int | None = None) -> str:
 
         out_f.seek(0)
         err_f.seek(0)
-        stdout = out_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
-        stderr = err_f.read().decode("utf-8", errors="replace").strip() or "(无输出)"
+        stdout = _decode_output(out_f.read()).strip() or "(无输出)"
+        stderr = _decode_output(err_f.read()).strip() or "(无输出)"
 
     elapsed = time.monotonic() - started
     header = (

@@ -9,7 +9,7 @@ import os
 import subprocess
 
 from . import safety
-from .shell import _kill_process_tree
+from .shell import _decode_output, _kill_process_tree
 
 
 def list_background() -> str:
@@ -138,7 +138,7 @@ def check_background(task_id: str) -> str:
             f.seek(entry["pos"])
             data = f.read()
         entry["pos"] += len(data)
-        new_text = data.decode("utf-8", errors="replace")
+        new_text = _decode_output(data)
     status = "运行中" if running else f"已退出（exit_code={proc.returncode}）"
     body = new_text.strip() or "（无新输出）"
     return f"[{task_id}] {status}\n{body[-2000:]}"

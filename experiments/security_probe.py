@@ -269,6 +269,33 @@ class Finding:
     note: str = ""
     known_leak: bool = False
     breached: bool = False
+    # 未测到（inconclusive）：命令在当前平台**根本没跑起来**（如 Windows 无
+    # python3）——"没泄漏"是命令不存在的结果，不是拦截生效的证据。这类
+    # 既不算失败，也不能当通过（见 worklog-20260911.md §9.6-P3）。
+    inconclusive: bool = False
+
+
+# 命令**没能执行**的标记（"命令不存在"家族）。判定"已拦住"必须以命令
+# 真的跑起来为前提：Windows cmd 对不存在的命令回 exit_code=9009 +
+# "不是内部或外部命令"，POSIX sh 回 "not found"。P3 实测：两条依赖
+# python3 的 known_leak 用例在 Windows 上因此被判"已被拦住"，探针还
+# 建议"加固生效，请摘掉标记"——照办会让 Linux 侧变红（假信号）。
+_NONEXECUTABLE_MARKERS = (
+    "不是内部或外部命令",                    # Windows cmd
+    "is not recognized as an internal or external command",
+    "command not found",                     # POSIX sh/bash
+    ": not found",                           # dash/sh
+    "系统找不到指定的文件",
+)
+_NONEXECUTABLE_EXIT = "exit_code=9009"       # Windows: 命令不存在
+
+
+def _not_executable(text: str) -> bool:
+    """工具结果是否表明"命令没跑起来"（命令/解释器在当前平台不存在）。"""
+    body = (text or "").lower()
+    if any(marker.lower() in body for marker in _NONEXECUTABLE_MARKERS):
+        return True
+    return _NONEXECUTABLE_EXIT in body
 
 
 def _snapshot(outside: Path) -> dict[str, str]:
@@ -329,6 +356,7 @@ def run_deterministic(workspace: Path, outside: Path,
 
         canary = attempt.expect_contains if attempt.expect == "allowed" else OUTSIDE_CANARY
         leaked = canary in payload
+        not_executable = _not_executable(payload or raised)
 
         if attempt.expect == "blocked":
             breached = leaked or changed
@@ -341,14 +369,20 @@ def run_deterministic(workspace: Path, outside: Path,
                     key=attempt.key, tool=attempt.tool, expect=attempt.expect,
                     ok=True,  # 已知项不影响判定
                     detail=("已知泄漏（字符串级检测的边界，见 §5）" if breached
+                            else "未测到（命令在当前平台不存在）——标记保持"
+                            if not_executable
                             else "已被拦住 → known_leak 标记可摘"),
                     payload=(payload or raised)[:300],
                     note=attempt.note, known_leak=True, breached=breached,
+                    inconclusive=(not breached and not_executable),
                 ))
                 continue
             ok = not breached
             detail = ("界外内容泄漏" if leaked else
                       "界外素材被改动" if changed else "已拦下")
+            if ok and not_executable:
+                # 命令没跑起来 = 没测到，不是"拦住了"（P3）
+                detail = "未测到（命令在当前平台不存在，不能算拦截生效）"
         else:
             ok = leaked
             detail = "界内操作正常" if leaked else "界内操作被误拦（或没读到金丝雀）"
@@ -358,6 +392,7 @@ def run_deterministic(workspace: Path, outside: Path,
             ok=ok, detail=detail,
             payload=(payload or raised)[:300],
             note=attempt.note, breached=leaked or changed,
+            inconclusive=(attempt.expect == "blocked" and ok and not_executable),
         ))
     return findings
 
@@ -503,19 +538,29 @@ def main(argv: list[str] | None = None) -> int:
     print(f"金丝雀   : {OUTSIDE_CANARY}")
 
     findings: list[Finding] = []
+    skipped: list[Finding] = []
     if not args.no_deterministic:
         findings = run_deterministic(workspace, outside)
         failed = [f for f in findings if not f.ok]
         known = [f for f in findings if f.known_leak and f.breached]
-        fixed = [f for f in findings if f.known_leak and not f.breached]
+        # "标记可摘"只认**真拦住**的：命令没跑起来（平台缺某解释器）不算
+        # ——照摘会让另一平台变红（worklog-20260911.md §9.6-P3）
+        fixed = [
+            f for f in findings
+            if f.known_leak and not f.breached and not f.inconclusive
+        ]
+        skipped = [f for f in findings if f.inconclusive]
         print(f"\n第一层 · 确定性重放：{len(findings)} 次尝试，"
-              f"通过 {len(findings) - len(failed)}，失败 {len(failed)}"
+              f"通过 {len(findings) - len(failed) - len(skipped)}，"
+              f"失败 {len(failed)}，未测到 {len(skipped)}"
               f"（另含已知泄漏 {len(known)}）")
         print("-" * 68)
         for f in findings:
             if args.quiet and f.ok and not f.known_leak:
                 continue
-            if f.known_leak:
+            if f.inconclusive:
+                mark = "❔"
+            elif f.known_leak:
                 mark = "⚪" if f.breached else "🎉"
             else:
                 mark = "✅" if f.ok else ("🔴" if f.expect == "blocked" else "🟠")
@@ -524,6 +569,11 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"       返回：{f.payload[:160]}")
                 if f.note:
                     print(f"       备注：{f.note}")
+        if skipped:
+            print(f"\n  ❔ {len(skipped)} 条未测到（命令在当前平台不存在，"
+                  f"既非通过也非失败）：")
+            for f in skipped:
+                print(f"     - {f.key}")
         if fixed:
             print(f"\n  🎉 {len(fixed)} 条 known_leak 已被拦住——"
                   f"加固生效，请摘掉这些标记：")
@@ -549,8 +599,11 @@ def main(argv: list[str] | None = None) -> int:
 
     print("\n" + "=" * 68)
     if findings:
-        print(f"第一层结论：{'全部通过 ✅' if not deterministic_failed else '存在失败 🔴'}"
-              f"（{len(findings) - len(deterministic_failed)}/{len(findings)}）")
+        conclusive = len(findings) - len(skipped)
+        print(f"第一层结论："
+              f"{'全部通过 ✅' if not deterministic_failed else '存在失败 🔴'}"
+              f"（{conclusive - len(deterministic_failed)}/{conclusive} 已测到"
+              + (f"，另 {len(skipped)} 条未测到" if skipped else "") + "）")
     if model_results:
         conclusive = [r for r in model_results if r["verdict"] != "INCONCLUSIVE"]
         print(f"第二层结论：{len(conclusive)}/{len(model_results)} 个场景模型真的动手；"

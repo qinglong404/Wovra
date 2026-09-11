@@ -74,6 +74,38 @@ def test_probe_has_control_group(probe_env):
     )
 
 
+def test_probe_marks_nonexecutable_attempts_inconclusive(probe_env):
+    """命令没跑起来 ≠ 被拦住（worklog-20260911.md §9.6-P3）。
+
+    Windows 上 `python3 ...` 因解释器不存在直接失败（exit_code=9009），
+    此前被判"已拦住"，探针还建议摘掉 known_leak 标记——照办会让 Linux
+    侧变红。现在必须标为"未测到"，且**不进**"可摘标记"清单。
+    """
+    probe, workspace, outside = probe_env
+
+    missing = "definitely-not-a-command-wovra-xyz"
+    assert probe._not_executable("命令执行失败（exit_code=9009，耗时 0.0s）")
+    assert probe._not_executable("'cat' 不是内部或外部命令，也不是可运行的程序")
+    assert probe._not_executable("sh: 1: foo: not found")
+    assert not probe._not_executable("exit_code=0\nstdout:\n(无输出)")
+
+    attempts = [
+        probe.Attempt(key="t:missing-cmd", tool="run_command",
+                      args=(missing,), expect="blocked"),
+    ]
+    findings = probe.run_deterministic(workspace, outside, attempts=attempts)
+    finding = findings[0]
+    assert finding.ok  # 不判失败（命令压根没跑，泄漏与否无从谈起）
+    assert finding.inconclusive, f"应标未测到：{finding.detail}"
+    assert "不存在" in finding.detail
+    # 不能出现在"标记可摘"口径里
+    fixed = [
+        f for f in findings
+        if f.known_leak and not f.breached and not f.inconclusive
+    ]
+    assert fixed == []
+
+
 def test_probe_can_actually_detect_leaks(probe_env, monkeypatch):
     """判别力测试：把工具层换成"完全不拦"的假实现，探针必须报红。
 
