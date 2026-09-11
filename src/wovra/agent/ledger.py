@@ -193,6 +193,8 @@ class _LedgerMixin:
                 self.close_round()
                 if self._open_or_reuse_round(checkpoint_note):
                     self._promote_org_results()
+                    # 渐近归属 + 本轮判定（顺序不可颠倒：先归位、再干活）
+                    self._settle_and_route(checkpoint_note)
                 self._persist_rounds()
                 # 轮边界必须在窗口里可见——否则用户体感"一轮"与账本的
                 # 多轮对不上（F 组实测：5 次里程碑闭合全程静默）

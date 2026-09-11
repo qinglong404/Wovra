@@ -269,12 +269,29 @@ class _CoreMixin:
             # 本轮归谁（Level 1 第三步路由，2026-09-12）：路由只在**轮开启**
             # 这一个切换点做一次，结果随轮持久化（冻结——同一视图连续两轮
             # 除尾部追加外字节不变）；开关关闭或缺省时恒为主 agent，装配
-            # 与今天逐字节相同。
-            "active_view": self._route_view(user_input),
+            # 与今天逐字节相同。若紧接着有分裂产物生效，`_settle_views`
+            # 会按新职责表补判（渐近归属：先归位、再干活）。
+            "active_view": "",
+            # 显式转交的原始意志（switch_view / notify 写明的那次）——补判时
+            # 复用，使"转交"不会因为中间插了一次 promote 而丢失。
+            "route_explicit": self._take_pending_view(),
         }
         self.rounds.append(self.current_round)
         self.messages = []
+        # 暂判一次（产物若恰好在此刻生效，由调用方在 promote 之后用
+        # `_settle_and_route` 重判——先归位、再干活；此刻的判是纯函数，
+        # 覆盖代价为零，且让"没有待生效产物"的常规路径一次到位）
+        self._route_view(user_input)
         return True
+
+    def _take_pending_view(self) -> str:
+        """取走并清空显式转交意志（一次性；放在轮上以便补判复用）。"""
+        if self.task is None:
+            return ""
+        pending = str(getattr(self.task, "pending_view", "") or "")
+        if pending:
+            self.task.pending_view = ""
+        return pending
 
     def _view_file_hints(self) -> dict[str, list[str]]:
         """域 → 该域真实出现过的文件（路由的文件名命中判据；机械、带缓存）。
@@ -295,47 +312,116 @@ class _CoreMixin:
         self._hints_cache = (key, hints)
         return hints
 
-    def _route_view(self, user_input: str) -> str:
-        """给新一轮定视图（纯函数路由；开关关闭时恒为主 agent）。
+    def _route_view(
+        self, user_input: str, round_: Optional[dict] = None, *, record: bool = True
+    ) -> str:
+        """给某一轮定视图（纯函数路由；开关关闭时恒为主 agent）。
 
         隔离生效后主 agent 看不到子域内容，路由的输入只有**职责表**
         （注册表的 name/description/file_domains）。判定顺序见 routing.route：
         显式转交 → 文件命中（多命中交主 agent）→ 粘滞上一视图 → 主 agent。
         误路由可纠正：接活方用 switch_view/notify 转出去，下一轮即切换。
+
+        调用点两处：新轮开启（**产物生效之后**，见 `_settle_and_route`）
+        与渐近归属补判（`_settle_views`，record=False 时只补判不逐条留痕）。
         """
         from .. import routing as routing_module
 
+        target = round_ if round_ is not None else self.current_round
+        if target is None:
+            return views_module.MAIN_AGENT_ID
         if self.task is None:
+            target["active_view"] = views_module.MAIN_AGENT_ID
             return views_module.MAIN_AGENT_ID
-        # 显式转交（switch_view 写下的 pending_view）**无论开关如何都消费掉**
-        # ——它是一次性意志，留着会一直悬在账上。
-        pending = str(getattr(self.task, "pending_view", "") or "")
-        if pending:
-            self.task.pending_view = ""
+        explicit = str(target.get("route_explicit") or "") or self._take_pending_view()
         if not routing_module.active_view_enabled():
+            target["active_view"] = views_module.MAIN_AGENT_ID
             return views_module.MAIN_AGENT_ID
-        # 新轮此刻尚未 append 进 rounds，故最后一个即上一轮（粘滞判据）
-        previous = ""
-        for r in reversed(self.rounds):
-            if r is self.current_round:
-                continue
-            previous = str(r.get("active_view") or "")
-            break
         result = routing_module.route(
             user_input,
             self.task.registry,
-            sticky=previous,
-            explicit=pending,
+            sticky=self._sticky_view_before(target),
+            explicit=explicit,
             file_hints=self._view_file_hints(),
         )
-        if self.task is not None and result["view"] != views_module.MAIN_AGENT_ID:
+        target["active_view"] = str(result["view"])
+        if record and (result["view"] != views_module.MAIN_AGENT_ID or explicit):
             self.task.record(
                 "route",
-                f"R{len(self.rounds) + 1} → {result['view']}（{result['reason']}）",
+                f"R{target.get('seq')} → {result['view']}（{result['reason']}）",
             )
-        elif self.task is not None and pending:
-            self.task.record("route", f"R{len(self.rounds) + 1} → A（{result['reason']}）")
-        return str(result["view"])
+        return target["active_view"]
+
+    def _sticky_view_before(self, target: dict) -> str:
+        """target 之前最近一个已归域的轮（粘滞判据；时序号为准）。"""
+        try:
+            seq = int(target.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        sticky = ""
+        for r in self.rounds:
+            if r is target:
+                continue
+            try:
+                if int(r.get("seq") or 0) >= seq:
+                    continue
+            except (TypeError, ValueError):
+                continue
+            view = str(r.get("active_view") or "")
+            if view:
+                sticky = view
+        return sticky
+
+    def _settle_and_route(self, user_input: str) -> int:
+        """产物生效之后：先给未归域的轮补判（渐近归属），再判本轮。
+
+        顺序不能颠倒（2026-09-12 用户口径）：维护窗口内到达的几轮是用**旧**
+        注册表判的（那时分裂产物还没生效），必须先按同一套逻辑补判归位，
+        本轮才能"粘"到补判结果上——否则新一轮会按主 agent 起头，接不上
+        那几轮的归属。
+        """
+        settled = self._settle_views()
+        self._route_view(user_input, self.current_round)
+        return settled
+
+    def _settle_views(self) -> int:
+        """渐近归属：分裂产物生效后，给尚未归域的轮补判视图（只归位、不重做活）。
+
+        为什么需要：整理/分裂在后台跑的那段时间里，用户可能又发了几轮输入；
+        它们到达时活跃域树还是空的，路由只能判给主 agent。产物一生效就必须
+        按同一套路由逻辑补判——把属于某域的上下文归过去（那几轮此后由该域
+        视图承载），归完才处理新一轮输入。
+
+        补判是**纯函数、零 LLM、不改任何消息字节、不重做活**：只写轮上的
+        `active_view` 这一个标记，故不会带来任何模型成本，也不会打断正在
+        进行的活。已归域的轮不反复推翻（归属只随新产物前进）；判定结果不变
+        时不写盘，故反复 promote 无抖动。
+        """
+        from .. import routing as routing_module
+
+        if self.task is None or not routing_module.active_view_enabled():
+            return 0
+        if not views_module.latest_domains(self.rounds):
+            return 0
+        changed: list[str] = []
+        for r in self.rounds:
+            if r is self.current_round:
+                continue  # 本轮由 _settle_and_route 在补判之后单独判（顺序要求）
+            if str(r.get("active_view") or "") not in ("", views_module.MAIN_AGENT_ID):
+                continue  # 已归域：不推翻
+            text = str((r.get("user_input") or {}).get("original") or "")
+            before = str(r.get("active_view") or "")
+            after = self._route_view(text, r, record=False)
+            if after != before:
+                changed.append(f"R{r.get('seq')}→{after}")
+        if changed:
+            self.task.record(
+                "route",
+                "渐近归属：产物生效后补判 " + "、".join(changed[:12])
+                + ("…" if len(changed) > 12 else "") + "（只归位，不重做活）",
+            )
+            self._persist_rounds()
+        return len(changed)
 
     def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
         """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。"""
@@ -448,6 +534,11 @@ class _CoreMixin:
             # Normalized/状态补丁）；续上开放轮则不动——本轮对话期间
             # 装配必须保持原样（连贯性 + 缓存前缀稳定）
             self._promote_org_results()
+            # 顺序（2026-09-12 用户口径）：产物生效后**先**给维护窗口内到达
+            # 的轮补判归属（渐近归属——那几轮到达时还没有域树，只能判给主
+            # agent），**再**判本轮，本轮才能粘到补判结果上。补判是纯函数、
+            # 零 LLM、不改消息字节，只归位不重做活。
+            self._settle_and_route(user_input)
         # 轮次与会话绑定（rounds 的 seq 随会话持久化）——进程内计数会在
         # 退出重开后归零，长会话的"第 N 轮"就错了（实测教训）
         self.turn_count = self.current_round["seq"]

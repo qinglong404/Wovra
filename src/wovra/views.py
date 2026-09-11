@@ -118,21 +118,39 @@ def ownership(
 ) -> dict[str, str]:
     """块 → 域名 的归属映射（机械、确定性；每个块恰有一个归宿）。
 
-    纯集合判断（见模块 docstring 的重组规则）：块的 `file` 落在某域
-    `file_domains` 下即归它（最长前缀优先）；无文件的块（环境块、保底块、
-    用户块）恒定归主 agent。返回的映射覆盖 `index` 里**每一个**块——兜底归
-    主 agent（`MAIN_AGENT_ID`），不丢块。
+    判据四条（按序）：
+    1. **环境块 → 主 agent**（用户口径：环境准备不是任何域的活）；
+    2. **文件块**：`file` 落在某域 `file_domains` 下即归它（最长前缀优先）；
+    3. **保底块（纯聊天/结论）→ 跟本轮 `active_view` 走**（渐近归属，
+       2026-09-12 用户口径）：维护窗口内到达的轮次补判归域之后，它的聊天
+       块随轮一起进那个域的视图——"只把上下文归过去"；
+    4. 其余（用户块、不属于任何域的文件块）→ 主 agent（unassigned 残留桶）。
+
+    用户块虽然记在主 agent 名下，但**渲染时随命中轮进域视图**（R68 口径：
+    用户块和最上面的用户输入规则一样）——见 `view_for_domain` 的逐轮归堆。
 
     注意：产物里的 `block_ids` 不参与判据（v2 命名式指派的遗留）；判据只有
-    文件集合本身，这样重组与分裂两边共用同一套口径。
+    文件集合 + 轮上的视图标记，这样重组与分裂两边共用同一套口径。
     """
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     entries = _file_domain_entries(domains)
     out: dict[str, str] = {}
     for bid, item in index.items():
-        path = str(item["block"].get("file") or "")
+        block = item["block"]
+        kind = str(block.get("kind") or "")
+        if kind == "environment":
+            out[bid] = MAIN_AGENT_ID
+            continue
+        path = str(block.get("file") or "")
         name = _match_domain(path, entries) if path else None
-        out[bid] = name or MAIN_AGENT_ID
+        if name:
+            out[bid] = name
+            continue
+        if kind == "fallback":
+            round_view = str((item.get("round") or {}).get("active_view") or "")
+            out[bid] = round_view or MAIN_AGENT_ID
+            continue
+        out[bid] = MAIN_AGENT_ID
     return out
 
 
