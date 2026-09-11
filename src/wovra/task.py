@@ -412,6 +412,9 @@ class Task:
     # agent 注册表（机制三）：路径 ID / 类别描述 / 所有权文件域 / 状态 /
     # 收件箱（单向通信的落信处）。默认只有主 agent；分裂执行时扩充
     registry: list[dict] = field(default_factory=list)
+    # 显式转交的落点（2026-09-12，Level 1 第三步路由）：`switch_view` 工具
+    # 与接活视图的 notify 都写这里，路由时作为最高优先判定，消费后清空。
+    pending_view: str = ""
     created_at: str = ""
     updated_at: str = ""
 

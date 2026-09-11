@@ -537,6 +537,43 @@ _TODO_SCHEMA: dict = {
     },
 }
 
+_LIST_AGENTS_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "list_agents",
+        "description": (
+            "拉取当前所有 agent 的职责划分（注册表机械渲染，零成本）："
+            "id、名字、一句话职责、所有权文件域、状态。这是**跨 agent 的"
+            "唯一公共信息**——隔离生效后你看不到其他职责域的内容，只"
+            "看得到谁负责什么；路由与转交都以此为依据。"
+        ),
+        "parameters": {"type": "object", "properties": {}},
+    },
+}
+
+_SWITCH_VIEW_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "switch_view",
+        "description": (
+            "把下一轮交给另一个 agent（显式转交）。用于「这一轮给我的活其实"
+            "是 X 的」这类纠正——本轮上下文不改写，从下一轮起由目标 agent"
+            "接手，并在它的收件箱里留一条交接说明。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "目标 agent 的 id 或名称"},
+                "reason": {
+                    "type": "string",
+                    "description": "转交理由（会随交接说明送达目标 agent）",
+                },
+            },
+            "required": ["agent", "reason"],
+        },
+    },
+}
+
 _NOTIFY_SCHEMA: dict = {
     "type": "function",
     "function": {

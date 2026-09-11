@@ -221,6 +221,89 @@ def _bnum(bid: str) -> int:
         return 0
 
 
+def view_blocks_by_round(
+    rounds: Iterable[dict],
+    domains: Iterable[dict] | None,
+    view_name: str,
+    index: Optional[dict[str, dict]] = None,
+    owners: Optional[dict[str, str]] = None,
+) -> dict[int, dict]:
+    """某视图的「命中轮」归堆（供装配用；与 `view_for_domain` 同一套筛法）。
+
+    这是「块作筛子、轮作单位」的可复用形态：返回
+    `{seq: {"round", "own_ids", "user_ids"}}`，**只含命中轮**——一块都没
+    命中的轮不进返回（整轮不出现，不留占位）。装配按轮取本域块 ID 渲染，
+    故与 `view_for_domain` 的文字形态不可能各说各话（同一判据、同一 index）。
+
+    主 agent（`MAIN_AGENT_ID`）返回空字典——它的装配是"今天的装配"
+    （全量），不需要筛。
+    """
+    if str(view_name) == MAIN_AGENT_ID:
+        return {}
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    index = index if index is not None else block_index(rounds)
+    owners = owners if owners is not None else ownership(domains, index)
+    out: dict[int, dict] = {}
+    for bid, owner in owners.items():
+        item = index.get(bid)
+        if item is None or owner != view_name:
+            continue
+        try:
+            seq = int(item["seq"] or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        rec = out.setdefault(
+            seq, {"round": item["round"], "own_ids": [], "user_ids": []}
+        )
+        rec["round"] = item["round"]
+        rec["own_ids"].append(str(bid))
+    # 用户块随命中轮进（口径：与轮头用户原文同规则）——故第二遍扫块类型，
+    # 只把**已在命中轮**里的用户块收进来（非命中轮仍然整轮不出现）。
+    for bid, item in index.items():
+        if str(item["block"].get("kind") or "") != "user":
+            continue
+        try:
+            seq = int(item["seq"] or 0)
+        except (TypeError, ValueError):
+            seq = 0
+        rec = out.get(seq)
+        if rec is not None:
+            rec["user_ids"].append(str(bid))
+    for rec in out.values():
+        rec["own_ids"].sort(key=_bnum)
+        rec["user_ids"].sort(key=_bnum)
+    return out
+
+
+def files_by_domain(
+    rounds: Iterable[dict],
+    domains: Iterable[dict] | None,
+    index: Optional[dict[str, dict]] = None,
+    owners: Optional[dict[str, str]] = None,
+) -> dict[str, list[str]]:
+    """域名 → 该域名下**真实出现过**的文件（机械统计，零 LLM）。
+
+    用途：路由的文件命中判据。职责表里的 `file_domains` 常写目录
+    （`src/wovra/tools/`），而用户提问常只提文件名（「safety.py 加个白名单」）
+    ——把材料里真实归属过该域的文件收进来，路由才不至于只有写全路径时才命中。
+    """
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    index = index if index is not None else block_index(rounds)
+    owners = owners if owners is not None else ownership(domains, index)
+    out: dict[str, list[str]] = {}
+    for bid, owner in owners.items():
+        item = index.get(bid)
+        if item is None:
+            continue
+        path = str(item["block"].get("file") or "")
+        if not path:
+            continue
+        bucket = out.setdefault(str(owner), [])
+        if path not in bucket:
+            bucket.append(path)
+    return out
+
+
 def view_for_domain(
     name: str,
     domains: Iterable[dict] | None,

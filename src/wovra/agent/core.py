@@ -17,6 +17,7 @@ from .. import truncate as truncate
 from ..llm import LLM, LLMStreamError, cached_tokens_of, reasoning_of
 from ..llm import APIError as _llm_APIError
 from ..task import Task, sanitize_surrogates
+from .. import views as views_module
 from .support import (
     MODE_BASELINE,
     MODE_MANAGED,
@@ -35,9 +36,11 @@ from .support import (
 )
 from .prompts import (
     _CONSULT_SCHEMA,
+    _LIST_AGENTS_SCHEMA,
     _NOTIFY_SCHEMA,
     _ORG_DOMAINS_SCHEMA,
     _ORG_SUBMIT_SCHEMA,
+    _SWITCH_VIEW_SCHEMA,
     _TODO_SCHEMA,
 )
 
@@ -188,6 +191,11 @@ class _CoreMixin:
             # 跨 agent 通信（机制五）：单向 notify / 双向 consult
             self.register(self.notify, schema=_NOTIFY_SCHEMA)
             self.register(self.consult, schema=_CONSULT_SCHEMA)
+            # 路由（Level 1 第三步）：拉职责表 + 显式转交
+            # （2026-09-12 用户拍板「可以加工具」——隔离后这是唯一的
+            # 跨 agent 公共信息面与纠错通道）
+            self.register(self.list_agents, schema=_LIST_AGENTS_SCHEMA)
+            self.register(self.switch_view, schema=_SWITCH_VIEW_SCHEMA)
 
     def _bind_globals(self) -> None:
         """把进程级全局绑定对准本会话（审计记录器、后台任务归属）。
@@ -258,10 +266,76 @@ class _CoreMixin:
             "refined_index": {},
             "end_state": "open",
             "org_state": "",
+            # 本轮归谁（Level 1 第三步路由，2026-09-12）：路由只在**轮开启**
+            # 这一个切换点做一次，结果随轮持久化（冻结——同一视图连续两轮
+            # 除尾部追加外字节不变）；开关关闭或缺省时恒为主 agent，装配
+            # 与今天逐字节相同。
+            "active_view": self._route_view(user_input),
         }
         self.rounds.append(self.current_round)
         self.messages = []
         return True
+
+    def _view_file_hints(self) -> dict[str, list[str]]:
+        """域 → 该域真实出现过的文件（路由的文件名命中判据；机械、带缓存）。
+
+        职责表里的 `file_domains` 常写目录，而用户提问常只提文件名——把材料
+        里真实归属过该域的文件收进来，路由才不至于"只有写全路径时才命中"。
+        惰性缓存按（轮数, 注册表条目数）失效：轮内多次调用只算一次，
+        而分块是现场重算（有成本），故不放在每步路径上。
+        """
+        from .. import views as views_module
+
+        key = (len(self.rounds), len((self.task.registry if self.task else None) or []))
+        cache = getattr(self, "_hints_cache", None)
+        if cache is not None and cache[0] == key:
+            return cache[1]
+        domains = views_module.latest_domains(self.rounds)
+        hints = views_module.files_by_domain(self.rounds, domains) if domains else {}
+        self._hints_cache = (key, hints)
+        return hints
+
+    def _route_view(self, user_input: str) -> str:
+        """给新一轮定视图（纯函数路由；开关关闭时恒为主 agent）。
+
+        隔离生效后主 agent 看不到子域内容，路由的输入只有**职责表**
+        （注册表的 name/description/file_domains）。判定顺序见 routing.route：
+        显式转交 → 文件命中（多命中交主 agent）→ 粘滞上一视图 → 主 agent。
+        误路由可纠正：接活方用 switch_view/notify 转出去，下一轮即切换。
+        """
+        from .. import routing as routing_module
+
+        if self.task is None:
+            return views_module.MAIN_AGENT_ID
+        # 显式转交（switch_view 写下的 pending_view）**无论开关如何都消费掉**
+        # ——它是一次性意志，留着会一直悬在账上。
+        pending = str(getattr(self.task, "pending_view", "") or "")
+        if pending:
+            self.task.pending_view = ""
+        if not routing_module.active_view_enabled():
+            return views_module.MAIN_AGENT_ID
+        # 新轮此刻尚未 append 进 rounds，故最后一个即上一轮（粘滞判据）
+        previous = ""
+        for r in reversed(self.rounds):
+            if r is self.current_round:
+                continue
+            previous = str(r.get("active_view") or "")
+            break
+        result = routing_module.route(
+            user_input,
+            self.task.registry,
+            sticky=previous,
+            explicit=pending,
+            file_hints=self._view_file_hints(),
+        )
+        if self.task is not None and result["view"] != views_module.MAIN_AGENT_ID:
+            self.task.record(
+                "route",
+                f"R{len(self.rounds) + 1} → {result['view']}（{result['reason']}）",
+            )
+        elif self.task is not None and pending:
+            self.task.record("route", f"R{len(self.rounds) + 1} → A（{result['reason']}）")
+        return str(result["view"])
 
     def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
         """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。"""

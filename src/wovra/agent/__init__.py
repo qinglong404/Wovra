@@ -24,7 +24,9 @@ from .support import _JSON_TYPES  # noqa: F401
 # `from wovra.agent import _TODO_SCHEMA` 引用），保持原访问路径
 from .prompts import (  # noqa: F401
     _CONSULT_SCHEMA,
+    _LIST_AGENTS_SCHEMA,
     _NOTIFY_SCHEMA,
+    _SWITCH_VIEW_SCHEMA,
     _ORG_DOMAINS_SCHEMA,
     _ORG_META_INFO,
     _ORG_SUBMIT_SCHEMA,

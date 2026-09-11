@@ -259,6 +259,50 @@ class _LedgerMixin:
                 return entry
         return None
 
+    def list_agents(self) -> str:
+        """拉取全部 agent 的职责划分（注册表机械渲染，零 LLM）。
+
+        隔离生效后，这是唯一的跨 agent 公共信息面——主 agent 与任何子
+        agent 都只看得到"谁负责什么"，看不到彼此的内容。
+        """
+        if self.task is None:
+            return "list_agents：当前无任务绑定。"
+        from ..routing import responsibility_lines
+
+        lines = responsibility_lines(self.task.registry)
+        if not lines:
+            return "注册表为空（尚未分裂）。当前只有主 agent 承担全部工作。"
+        return "[agent 职责表]\n" + "\n".join(lines)
+
+    def switch_view(self, agent: str, reason: str) -> str:
+        """显式转交：让**下一轮**由目标 agent 接手（本轮上下文不改写）。
+
+        与 notify 的分工：notify 是往对方收件箱塞一条消息（对方激活时
+        收到），switch_view 是连"下一轮归谁"一起定下来——路由的最高优先
+        判据（`routing.route` 的第一步）。走轮开启时刻这一个切换点，
+        故本轮装配纹丝不动（缓存前缀与连贯性都不受影响）。
+        """
+        if self.task is None:
+            return "switch_view：当前无任务绑定。"
+        entry = self._registry_entry(agent)
+        if entry is None:
+            known = "、".join(
+                f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
+            )
+            return f"未找到 agent：{agent}。现存：{known}"
+        note = str(reason or "").strip()
+        self.task.pending_view = str(entry.get("name") or entry.get("id"))
+        entry.setdefault("inbox", []).append({
+            "from": "上一轮接手方", "message": f"[转交] {note or '（未给理由）'}",
+        })
+        self.task.save()
+        if self.on_progress:
+            self.on_progress(f"🔀 转交 → {entry.get('name')}：{note[:60]}")
+        return (
+            f"已转交：下一轮起由 {entry.get('id')}（{entry.get('name')}）接活"
+            "（本轮上下文不改写）。交接说明已放进它的收件箱。"
+        )
+
     def notify(self, agent: str, message: str) -> str:
         """单向通信（机制五）：转交/通知/交接，只发不等——落目标收件箱，
         对方下次被激活（consult/路由）时送达。"""

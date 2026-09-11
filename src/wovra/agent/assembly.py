@@ -8,6 +8,7 @@ from .. import blocks as blocks_module
 from .. import lifecycle as lifecycle_module
 from .. import tokens as tokens
 from .. import truncate as truncate
+from .. import views as views_module
 from ..task import _MODEL_SIDE_SECTIONS
 from .support import (
     MODE_BASELINE,
@@ -47,6 +48,18 @@ class _AssemblyMixin:
                 msgs.extend(e["message"] for e in r["events"])
             msgs.extend(self._current_round_messages())
             return msgs
+
+        # ---- 视图分化（Level 1 第二/三步，2026-09-12）----------------
+        # 开关（默认关）打开**且**本轮有非主 agent 的 active_view 时，走
+        # 视图装配：四段布局 [system 人设 + 全局职责表] → [本视图历史] →
+        # [本视图身份与域卡] → [运行时信封]。隔离第一：非本视图的轮整轮
+        # 不出现（不留轮号、文件名、块 ID），故每个视图各自积累长链。
+        # 开关关闭或缺省（= 主 agent）时，下面的旧路径**逐字节不变**。
+        view_name = self._active_view()
+        if view_name and view_name != views_module.MAIN_AGENT_ID:
+            msgs = self._assemble_view_messages(view_name, past)
+            if msgs is not None:
+                return msgs
 
         # ---- managed：未整理全量，已整理紧凑视图 --------------------
         # 前缀纪律（2026-09-07 用户拍板）：**只有整理生效才破坏前缀**。
@@ -132,6 +145,157 @@ class _AssemblyMixin:
             # 分得清"用户要的"和"机制给的"（系统提示词里声明该约定）
             msgs.append(_runtime_reminder("\n\n".join(block)))
         return msgs
+
+    def _active_view(self) -> str:
+        """本轮生效的视图名（无标记或开关关闭时返回主 agent）。
+
+        缺省 = 主 agent = 今天的装配——这是"步 1 行为零变化"的实现点。
+        """
+        from .. import routing as routing_module
+
+        if not routing_module.active_view_enabled():
+            return views_module.MAIN_AGENT_ID
+        if self.current_round is None:
+            return views_module.MAIN_AGENT_ID
+        name = str(self.current_round.get("active_view") or "").strip()
+        return name or views_module.MAIN_AGENT_ID
+
+    def _assemble_view_messages(
+        self, view_name: str, past: list[dict]
+    ) -> Optional[list[dict]]:
+        """按视图装配（纯函数派生，零 LLM）。返回 None 表示降级回旧路径。
+
+        这是"视图物化"的读取侧：视图字节不单独落盘，而是**从材料层确定性
+        派生**（同一份 rounds+registry 必得同一串字节，故可随时重建、不会
+        损坏），随轮持久化的只有 `active_view` 这一个标记。冻结性来自材料
+        的性质——本视图只含自己名下的块，别的域整理生效不会改到它的字节。
+        """
+        from .. import routing as routing_module
+
+        if self.task is None:
+            return None
+        domains = views_module.latest_domains(past)
+        if not domains:
+            return None  # 还没有分裂产物：无机可用，降级回全量装配
+        index = views_module.block_index(past)
+        owners = views_module.ownership(domains, index)
+        hits = views_module.view_blocks_by_round(past, domains, view_name, index, owners)
+
+        msgs: list[dict] = []
+        resp = routing_module.responsibility_lines(self.task.registry)
+        head = self.system_prompt
+        if resp:
+            head = (head + "\n\n[全局职责表]（跨 agent 唯一公共信息；"
+                    "路由与转交都以此为依据）\n" + "\n".join(resp)).strip()
+        if head:
+            msgs.append({"role": "system", "content": head})
+
+        # [2] 本视图历史：命中轮才成段（轮头 + 用户块 → user；本域块 → assistant）
+        for seq in sorted(hits):
+            rec = hits[seq]
+            r = rec["round"]
+            msgs.append({
+                "role": "user",
+                "content": "\n".join(self._view_round_head(r, rec, index)),
+            })
+            msgs.append({
+                "role": "assistant",
+                "content": "\n".join(self._view_round_detail(r, rec, index)),
+            })
+        if not hits:
+            msgs.append({
+                "role": "user",
+                "content": "[本视图历史]（无——本域尚无命中轮）",
+            })
+
+        # [3] 身份与域卡
+        identity = routing_module.identity_card(view_name, self.task.registry)
+        if identity:
+            msgs.append({"role": "user", "content": "\n".join(identity)})
+
+        # [4] 运行时信封（绝对尾部）
+        block: list[str] = []
+        lines = self._todo_tail_lines()
+        if lines:
+            block = list(lines)
+        state = self.task.get_state()
+        node = next(
+            (d for d in domains if str(d.get("name")) == view_name), None
+        )
+        sharded = views_module.slice_state(
+            state, (node or {}).get("file_domains") or []
+        )
+        if sharded:
+            labels = {
+                "goal": "目标", "current_status": "现状", "escalations": "决策升级",
+                "experiments": "待办实验", "decisions": "已决策",
+                "known_issues": "已知问题", "open_questions": "待解决问题",
+            }
+            block.append("[本域账本]（按文件域切片；全局节永不切）")
+            for field, items in sharded.items():
+                block.append(
+                    f"{labels.get(field, field)}：" + "；".join(str(x) for x in items)
+                )
+        if block:
+            msgs.append(_runtime_reminder("\n\n".join(block)))
+        msgs.extend(self._current_round_messages())
+        return msgs
+
+    def _view_round_head(self, r: dict, rec: dict, index: dict) -> list[str]:
+        """本视图里一轮的轮头（用户原文/意图/约束）+ 该轮用户块。"""
+        lines: list[str] = []
+        ui = r.get("user_input") or {}
+        anchor = r.get("merged_anchor")
+        lines.append(f"[{anchor}]" if anchor else f"[R{r.get('seq')}]")
+        if ui.get("original"):
+            lines.append(f"👤 用户: \"{ui['original']}\"")
+        if ui.get("normalized"):
+            lines.append(f"🎯 意图: {ui['normalized']}")
+        if ui.get("key_constraints"):
+            lines.append(f"📌 关键约束: {ui['key_constraints']}")
+        for bid in rec.get("user_ids") or []:
+            item = index.get(bid)
+            if item is None:
+                continue
+            text = self._block_user_text(item)
+            lines.append(f"▸ {bid}（用户补充输入）: {text}" if text else f"▸ {bid}（用户补充输入）")
+        return lines
+
+    def _view_round_detail(self, r: dict, rec: dict, index: dict) -> list[str]:
+        """本域块：已整理的给一行全分辨率描述，未整理的给原文（可 expand 取回）。
+
+        分辨率损失只允许来自整理，不来自装配——未整理的块在这里直接摊开
+        原文，与今天的装配口径一致。
+        """
+        summaries = r.get("block_summaries") or {}
+        lines: list[str] = []
+        for bid in rec.get("own_ids") or []:
+            item = index.get(bid)
+            if item is None:
+                continue
+            if summaries.get(bid):
+                lines.append(f"▸ {bid}: {summaries[bid]}")
+            else:
+                lines.append(self._expand_block(bid))
+        return lines or ["（本视图无本域块）"]
+
+    def _block_user_text(self, item: dict) -> str:
+        """块内的用户输入原文（user 块用；取块自带 events 的内容）。"""
+        r = item.get("round") or {}
+        by_id = {e.get("id"): e for e in (r.get("events") or [])}
+        block = item["block"]
+        chosen = block.get("events") or [
+            e.get("id") for e in (r.get("events") or [])
+        ][block.get("start", 0): block.get("end", 0) + 1]
+        parts: list[str] = []
+        for eid in chosen:
+            e = by_id.get(eid)
+            if not e:
+                continue
+            body = str((e.get("message") or {}).get("content") or "").strip()
+            if body:
+                parts.append(body)
+        return " ".join(parts).strip()
 
     def _todo_tail_lines(self) -> list[str]:
         """当前大步/小步进度的尾部展示（跨轮续跑的工作记忆；空则不占位）。"""
