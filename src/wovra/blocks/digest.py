@@ -1,9 +1,28 @@
 """块摘要与检视渲染：喂给语义标注的路由摘要（block_digest）+ 人工
 检视用的可读视图（render_round）。
+
+两种块结构并存（2026-09-11 收口：落盘口径已是 v3，v1 仅作兼容/离线
+对比）：
+* v3（`segment_round_by_file`）——按文件聚合，带 `file`/`ops`/`events`；
+  块的 index 区间**会重叠**（一次并行写多文件时同一 tool_call 属多个块），
+  所以块内事件必须按自带的 `events` 列表取；
+* v1（`segment_round`）——以写/改为截止的粗分块，只有连续区间与
+  `wrote_files`/`touched_files`。
+本模块对两者都做适配（`_block_event_indices` + 字段 `.get` 兜底）。
 """
 from typing import Optional
 from .common import WRITE_TOOLS, _call_info, _head, tag_command
-from .segment import segment_round
+from .segment import segment_round, segment_round_by_file
+
+
+def _block_event_indices(r: dict, b: dict) -> list[int]:
+    """块内事件在轮事件流里的下标（v3 优先按 ID 取，v1 回退连续区间）。"""
+    events = r.get("events") or []
+    ids = b.get("events")
+    if ids:
+        wanted = set(ids)
+        return [i for i, e in enumerate(events) if e.get("id") in wanted]
+    return list(range(b["start"], b["end"] + 1))
 
 def block_digest(r: dict, b: dict) -> str:
     """块的确定性摘要（机制二 LLM 标注的输入）：路由式信息，零 LLM。
@@ -16,7 +35,7 @@ def block_digest(r: dict, b: dict) -> str:
     ui_head = _head(str((r.get("user_input") or {}).get("original") or ""), 80)
     if ui_head:
         lines.append(f"本轮用户输入: {ui_head}")
-    for i in range(b["start"], b["end"] + 1):
+    for i in _block_event_indices(r, b):
         e = events[i]
         if e.get("type") != "tool_call":
             continue
@@ -45,29 +64,38 @@ def block_digest(r: dict, b: dict) -> str:
 def render_round(r: dict, blocks: Optional[list[dict]] = None) -> str:
     """把一个 Round 的分块渲染成人读视图（检查用；不改任何数据）。
 
-    blocks 缺省时现场计算——历史 task.json 不需要迁移。
+    blocks 缺省时现场计算（v3 主线，与落盘口径一致）——历史 task.json
+    不需要迁移。也接受 v1 块（离线对比用）：字段访问对两套结构都容错。
     """
     events = r.get("events") or []
     if not events:
         return ""
     if blocks is None:
-        blocks = segment_round(r)
+        blocks = segment_round_by_file(r)
     state = "" if r.get("end_state") == "completed" else "（进行中）"
     lines = [f"R{r.get('seq', 0)} · {len(events)} 事件 · {len(blocks)} 块{state}"]
     for b in blocks:
         parts = [b["id"], f"{b['start_event']}~{b['end_event']}"]
-        if b["wrote_files"]:
-            parts.append("写: " + ", ".join(b["wrote_files"]))
-        reads = [f for f in b["touched_files"] if f not in b["wrote_files"]]
+        wrote = list(b.get("wrote_files") or [])
+        touched = list(b.get("touched_files") or [])
+        if b.get("file"):  # v3：一个文件一块（写/读由 ops 推）
+            ops = {o.get("op") for o in b.get("ops") or []}
+            if ops & {"write", "edit"}:
+                wrote = [b["file"]]
+            else:
+                touched = [b["file"]]
+        if wrote:
+            parts.append("写: " + ", ".join(wrote))
+        reads = [f for f in touched if f not in wrote]
         if reads:
             parts.append("读: " + ", ".join(reads))
-        if b["command_types"]:
+        if b.get("command_types"):
             parts.append("[" + ", ".join(b["command_types"]) + "]")
         if b["kind"] == "environment":
             parts.append("环境块")
         lines.append("  " + " · ".join(parts))
         # 块内的命令原文与写/改动作摘出来，肉眼核对切块质量用
-        for i in range(b["start"], b["end"] + 1):
+        for i in _block_event_indices(r, b):
             e = events[i]
             if e.get("type") != "tool_call":
                 continue

@@ -231,10 +231,10 @@ def test_escape_detection_covers_wrappers_but_not_plain_text(workspace):
 
 
 def test_symlink_messages_do_not_trip_failure_markers(workspace):
-    """新文案不能撞上"操作失败"的子串判定。
+    """新文案不能撞上"操作失败"的判定。
 
-    lifecycle/blocks 靠子串判断读/删是否"真发生"（`不存在`→幽灵、
-    `路径越界`→越界）。删悬空链接是**成功**的删除，文案里写"目标不
+    lifecycle/blocks 判断读/删是否"真发生"（`文件不存在:` → 幽灵、
+    `路径越界，` → 越界）。删悬空链接是**成功**的删除，文案里写"目标不
     存在"会被误判成幽灵（从未存在），块的生死状态就错了——实施中
     真踩到过，这条锁住它。
     """
@@ -251,13 +251,13 @@ def test_symlink_messages_do_not_trip_failure_markers(workspace):
     result = delete_file("dangling.txt")
     assert "已删除符号链接" in result          # 是成功删除
     assert "不存在" not in result              # 不撞失败标记
-    assert not any(m in result for m in lifecycle_module._OP_FAIL_MARKERS)
+    assert not lifecycle_module.op_failed(result)
 
     moving = workspace.root / "dangling2.txt"
     _os.symlink(workspace.root / "nowhere.txt", moving)
     moved = move_file("dangling2.txt", "dangling3.txt")
     assert "已移动" in moved
-    assert not any(m in moved for m in lifecycle_module._OP_FAIL_MARKERS)
+    assert not lifecycle_module.op_failed(moved)
 
     # 对照：真正的不存在仍必须被判为失败（幽灵分类依赖它）
     missing = delete_file("never_existed.txt")

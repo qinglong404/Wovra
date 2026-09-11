@@ -33,12 +33,41 @@ _OP_OF = {
     **{t: "delete" for t in DELETE_TOOLS},
 }
 
-# 文件操作的失败返回标记（读/删没真发生）：文件不存在、越界拦截、
-# 用户拒绝、目标是目录——命中任一即不按成功计（幽灵文件不产生状态）。
-_OP_FAIL_MARKERS = (
-    "不存在", "FileNotFoundError", "No such file",
-    "路径越界", "工具执行出错", "拒绝", "是目录",
+# 文件操作的失败判定（读/删"没真发生"）：文件不存在、越界拦截、用户拒绝、
+# 目标是目录——命中即不按成功计（幽灵文件不产生状态）。
+#
+# 判定口径 = **只看返回文本的首行**（2026-09-11 机制评审修复）。旧实现按
+# 全文子串匹配"不存在"，而 read_file 的成功返回是
+# `{path}（共 N 行，以下为第 a-b 行）\n<正文>`——正文里完全可能出现"不存在"
+# 三个字（本项目 src/wovra/tools/files.py 自己的失败文案就是），于是**一次
+# 成功的读取被判成失败**：实测当次会话 10/81 块被打上"幽灵"标签（R1 纯读轮
+# 独占 8 个）。该标签是整理指令的输入（"标签 = 写多细、写什么的指令"），
+# 会让组织器把 live 文件当成 DEAD。首行判定从根上消除这类误伤。
+_OP_FAIL_PREFIXES = (
+    "文件不存在:",     # read_file / delete_file / move_file
+    "目录不存在:",     # list_files / search_files / glob_files
+    "工具执行出错:",   # 工具抛异常（agent/core._invoke_tool）
+    "路径越界，",      # safety 拦截（读/删界外路径）
+    "用户拒绝",        # 确认门被拒
 )
+
+# 首行中缀判定（前缀是路径本身，无法做 startswith）
+_OP_FAIL_INFIXES = (
+    "是目录",          # read/write/delete 对目录的参数误用预检
+)
+
+
+def op_failed(content: str) -> bool:
+    """读/删操作的返回文本是否表示"没真发生"（失败）。
+
+    只看**首行**：前缀命中，或首行含 `是目录`。正文中出现"不存在"不构成
+    失败（那是一次成功的读取）。与 blocks.segment._op_failure 同源口径，
+    保证块标签与文件账本对同一份事实的判断一致。
+    """
+    head = (content or "").split("\n", 1)[0]
+    if head.startswith(_OP_FAIL_PREFIXES):
+        return True
+    return any(m in head for m in _OP_FAIL_INFIXES)
 
 STATE_LIVE = "live"
 STATE_DEAD = "dead"
@@ -88,8 +117,10 @@ class FileLedger:
 
         blocks 可选：segment_round_by_file 的产物，用于登记 block_refs
         （文件 → 块 的跨轮索引，分裂拼装时直接用）。
-        读/删按结果判定：文件不存在、越界拦截、被拒绝时不算成功——
-        幽灵文件（从未存在的 nope.txt）不产生 read_only/dead 状态。
+        读/删按结果判定（`op_failed`，只看首行）：文件不存在、越界拦截、
+        被拒绝、目标是目录时不算成功——幽灵文件（从未存在的 nope.txt）
+        不产生 read_only/dead 状态；而**读取成功**（哪怕正文里含"不存在"
+        字面量）照常计入。
         """
         touched: list[str] = []
         pending_ops: dict[str, dict] = {}  # call_id → {path, event, op}
@@ -123,7 +154,7 @@ class FileLedger:
 
         for call_id, info in pending_ops.items():
             content = results.get(call_id) or ""
-            if not any(m in content for m in _OP_FAIL_MARKERS):
+            if not op_failed(content):
                 self._apply(info["path"], info["op"], info["event"])
 
         if blocks:

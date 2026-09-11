@@ -207,6 +207,48 @@ def test_empty_task_state_renders_nothing():
     assert "[任务状态]" in TaskState(goal="有目标").render()
 
 
+def test_state_render_respects_budget():
+    """回归（2026-09-11 机制评审）：render 的 budget 必须真的截断。
+
+    TaskState 的 7 个列表各有 200 条上限（STATE_LIST_CAP），理论最坏
+    1400 条，且状态是**每轮都进上下文**的（信封尾部）——不设预算就是
+    一条无界常驻负担。render 早就支持 budget，但装配处此前没传，
+    截断保护形同虚设。
+    """
+    from wovra import task as task_module
+    from wovra.task import TaskState, STATE_LIST_CAP
+
+    state = TaskState(goal="目标")
+    state.completed = [f"完成项{i}" for i in range(STATE_LIST_CAP)]
+    full = state.render()
+    assert "完成项0" in full and len(full) > 500
+
+    cut = state.render(budget=200)
+    assert len(cut) <= 200 + 30          # 截断 + 提示行
+    assert cut.endswith("(任务状态过长已截断)")
+    assert "完成项0" in cut               # 保头部（最旧条目在头部）
+    assert "完成项最后" not in cut
+
+    # 装配处的预算常量存在且被默认使用
+    from wovra.agent.support import _STATE_RENDER_BUDGET
+    assert _STATE_RENDER_BUDGET > 0
+
+
+def test_assembly_truncates_oversized_task_state(monkeypatch):
+    """回归（2026-09-11）：装配上下文里的任务状态受预算约束，
+    不会随列表增长无限膨胀。"""
+    from wovra.agent import Agent
+
+    task = Task.create(goal="目标")
+    task.task_state["completed"] = [f"完成项{i}" * 20 for i in range(300)]
+    agent = Agent(llm=object(), tools=[], task=task)
+    agent.current_round = None
+    agent.messages = []
+    msgs = agent._assemble_messages()
+    body = "\n".join(m.get("content", "") for m in msgs)
+    assert "任务状态过长已截断" in body
+
+
 def test_state_patch_done_syncs_task_status():
     """整理判定 is_done=true → Task.status 同步为 done，两本账不打架。"""
     task = Task.create(goal="g")

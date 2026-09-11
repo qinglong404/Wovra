@@ -882,7 +882,8 @@ def test_extract_domains_accepts_empty_domains():
 
 
 def test_split_degraded_fallback_when_product_unusable(monkeypatch, tmp_path):
-    """submit_domains 参数解析失败：不静默落空——保守"不可分"落档 + 留痕。"""
+    """submit_domains 参数解析失败（两跳都坏）：不静默落空——保守"不可分"
+    落档 + 留痕，并写明已带诊断重发一次仍失败。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     bad = _chunk(_delta(tool_calls=[
         _fragment(0, id="d1", name="submit_domains",
@@ -891,16 +892,100 @@ def test_split_degraded_fallback_when_product_unusable(monkeypatch, tmp_path):
     agent, task = _split_fixture(
         monkeypatch, tmp_path,
         org_pool=[[_chunk(_delta(content=_org_json()))]],
-        split_pool=[[bad]],
+        split_pool=[[bad], [bad]],   # 首次 + 带诊断重发，两次都坏
     )
     agent._maybe_organize_batch()
     sa = task.rounds[0]["pending_org"]["split_assessment"]
     assert sa["splittable"] is False
     assert "无可用产物" in sa["reason"]
+    assert "已带诊断重发一次仍失败" in sa["reason"]
     assert any(
-        "无可用产物" in e.get("detail", "") for e in task.history
+        "带诊断重发一次" in e.get("detail", "") for e in task.history
         if e.get("kind") == "maintenance"
     )
+    assert any(
+        "无可用产物" in e.get("detail", "") and "重发一次仍失败" in e.get("detail", "")
+        for e in task.history if e.get("kind") == "maintenance"
+    )
+
+
+def test_split_retries_once_with_diagnosis(monkeypatch, tmp_path):
+    """分裂阶段的带诊断重发（与 org 对称，2026-09-11）：首次产物不可用 →
+    尾部追加失败现场重发一次；成功则分析继续，且**只重发一次**。
+
+    重发输入必须是首次输入的**严格追加**（前缀逐字一致）——否则这次调用
+    骑不到任何缓存，第二跳比重新整理还贵。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    bad = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains",
+                  arguments='{"domains": [{"name": "x"'),
+    ]))
+    good = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d2", name="submit_domains",
+                  arguments=_DOMAINS_ARGS),
+    ]))
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[bad], [good]],
+    )
+    agent._maybe_organize_batch()
+
+    # 产物生效（重发成功 → 分析继续）
+    assert task.rounds[0]["pending_org"]["domains"][0]["name"] == "web 演示"
+    # 恰好两次 split 调用（首次 + 重发一次，不多不少）
+    split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
+    assert len(split_calls) == 2
+    # 重发输入 = 首次输入 + 尾部追加（前缀逐字一致 → 骑满缓存）
+    first, second = split_calls[0]["messages"], split_calls[1]["messages"]
+    assert second[:len(first)] == first
+    assert len(second) > len(first)
+    # 诊断里带失败现场与"重发"要求
+    tail = second[-1]
+    assert "submit_domains 参数" in tail["content"]
+    assert "不要使用英文双引号" in tail["content"]
+    # 工具集仍是收窄的唯一出口
+    assert [t["function"]["name"] for t in split_calls[1]["tools"]] == [
+        "submit_domains"
+    ]
+    # 留痕：发起重发 + 重发可用
+    details = [e.get("detail", "") for e in task.history
+               if e.get("kind") == "maintenance"]
+    assert any("split：产物不可用，带诊断重发一次" in d for d in details)
+    assert any("split：重发产物可用" in d for d in details)
+
+
+def test_org_instruction_carries_format_discipline(monkeypatch, tmp_path):
+    """护栏前移（2026-09-11 机制评审）：英文双引号约束写进**常规**整理
+    指令（从"治"变"防"），而不只在失败后的重发提示里。
+
+    实测根因（worklog §11.2）：长中文叙述里混进未转义 ASCII 双引号会截断
+    JSON 串。此前只在重发时提示——防的成本只有一行，能少一次畸形产物。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    org_json = _org_json()
+    task = Task.create(goal="目标")
+    # async_organization=False：同步整理，调用记录确定（便于断言）
+    agent = Agent(llm=_StubLLM([[_chunk(_delta(content="好"))],
+                                [_chunk(_delta(content=org_json))]]),
+                  tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+                  org_cooldown_rounds=0, async_organization=False)
+
+    agent.run("问")
+
+    # 注意：替身 LLM 的 lane 字段只是"非分裂非咨询"的默认值，不能当整理
+    # 调用的判据——必须按消息内容（[整理指令]）识别。
+    org_calls = [
+        c for c in agent.llm.calls
+        if any("[整理指令]" in str(m.get("content") or "")
+               for m in c["messages"])
+    ]
+    assert org_calls, "应有一次整理调用"
+    instruction = org_calls[0]["messages"][-1]["content"]
+    assert "[格式纪律]" in instruction
+    assert "不要使用英文双引号" in instruction
+    assert "中文引号" in instruction
 
 
 def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):

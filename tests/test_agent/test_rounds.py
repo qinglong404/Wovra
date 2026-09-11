@@ -131,7 +131,12 @@ def test_resume_without_open_round_raises(monkeypatch, tmp_path):
 
 
 def test_close_round_computes_blocks(monkeypatch, tmp_path):
-    """轮闭合时零 LLM 计算 Block 结构并随轮次落盘（机制一挂钩）。"""
+    """轮闭合时零 LLM 计算 Block 结构并随轮次落盘（机制一挂钩）。
+
+    落盘口径 = v3（segment_round_by_file，按文件聚合）。2026-09-11 收口
+    前落的是 v1（以写/改为截止的粗分块），两者的块号空间相同而切法不同，
+    是"按 ID 查表静默错位"的根因——现在统一到 v3，编号空间唯一。
+    """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     responses = [
         [_chunk(_delta(tool_calls=[_fragment(0, id="c1", name="edit_file",
@@ -147,8 +152,9 @@ def test_close_round_computes_blocks(monkeypatch, tmp_path):
 
     bs = task.rounds[-1]["blocks"]
     assert len(bs) == 1
-    assert bs[0]["wrote_files"] == ["app.py"]
-    assert bs[0]["kind"] == "work"
+    assert bs[0]["kind"] == "file"       # v3：块类 file（v1 是 work）
+    assert bs[0]["file"] == "app.py"
+    assert bs[0]["ops"][0]["op"] == "edit"
     assert "_idx" not in bs[0]
     assert len(agent.llm.calls) == 2  # 干活本身 2 次（工具轮+回答轮）；分块零 LLM 不增加
 

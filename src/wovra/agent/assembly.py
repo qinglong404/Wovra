@@ -10,6 +10,7 @@ from .. import tokens as tokens
 from .. import truncate as truncate
 from .support import (
     MODE_BASELINE,
+    _STATE_RENDER_BUDGET,
     _runtime_reminder,
 )
 
@@ -54,7 +55,9 @@ class _AssemblyMixin:
         # 实测把命中率从 83.7% 砸到 49.9%（R7→R8）。
         state_render = ""
         if self.task is not None:
-            state_render = self.task.get_state().render()
+            # 传字符预算：TaskState 的 7 个列表上限合计 1400 条且每轮都进
+            # 上下文，无预算即为无界常驻负担（2026-09-11 机制评审）
+            state_render = self.task.get_state().render(_STATE_RENDER_BUDGET)
 
         msgs: list[dict] = []
         if self.system_prompt:

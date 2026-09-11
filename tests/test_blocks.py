@@ -207,7 +207,8 @@ def test_block_digest_routes_not_reproduces():
 def test_render_round_shows_commands_and_writes():
     """人读视图：块行带事件区间/文件/标签，命令原文缩进可核对。
 
-    切块语义顺带验证：改文件截止 → 测试命令另起一块。
+    切块语义顺带验证（v3 主线，2026-09-11 起 render_round 缺省用
+    segment_round_by_file）：验证类命令被吸收进被验证的文件块，不另起块。
     """
     r = _round(2, [
         _event(2, 1, "user", content="修一下"),
@@ -219,7 +220,7 @@ def test_render_round_shows_commands_and_writes():
         _event(2, 5, "tool_result", content="1 passed"),
     ])
     out = blocks.render_round(r)
-    assert "R2 · 5 事件 · 2 块" in out
+    assert "R2 · 5 事件 · 1 块" in out
     assert "写: app.py" in out
     assert "[test]" in out
     assert "▸ [test] pytest -q tests/" in out
@@ -393,6 +394,45 @@ def test_segment_by_file_ghost_and_escape_blocks():
     boom = [b for b in bs if b.get("file") == "boom.txt"][0]
     assert not boom.get("fail_tags")  # 通用工具出错：不用管，不作分类
 
+
+
+def test_segment_by_file_read_success_is_not_ghost():
+    """回归（2026-09-11 机制评审）：读成功、正文含"不存在"字面量 → 不标幽灵。
+
+    旧判定是全文子串匹配（`"不存在" in content`），读本项目
+    src/wovra/tools/files.py 这类文件时正文里就有 `文件不存在: {path}`
+    文案，于是整块被打成【(DEAD)：幽灵】。该标签是整理指令的输入，会让
+    组织器把 live 文件当成从未存在的幽灵。修法 = 只看首行。
+    """
+    r = _round(11, [
+        _event(11, 1, "user", content="读源码"),
+        _event(11, 2, "tool_call", tool="read_file",
+               args={"path": "src/wovra/tools/files.py"}),
+        _event(11, 3, "tool_result",
+               content="src/wovra/tools/files.py（共 704 行，以下为第 1-200 行）\n"
+                       '    return f"文件不存在: {path}（解析为 {target}）。"'),
+        _event(11, 4, "final_answer", content="读完"),
+    ])
+    blk = [b for b in blocks.segment_round_by_file(r)
+           if b.get("file") == "src/wovra/tools/files.py"][0]
+    assert not blk.get("fail_tags"), "读成功的块不该被打成幽灵"
+    # 标签行给出 LIVE 与"只读"，而不是 DEAD/幽灵
+    label = blocks.label_line(blk, {}, "live")
+    assert label.startswith("【src/wovra/tools/files.py(live)】")
+    assert "幽灵" not in label
+
+    # 对照：真失败仍必须分类（不能因为改口径就漏判）
+    assert blocks._op_failure(
+        {"op": "read", "c": "c1"},
+        {"c1": "文件不存在: nope.txt（解析为 /x）"},
+    ) == "幽灵"
+    assert blocks._op_failure(
+        {"op": "read", "c": "c2"},
+        {"c2": "工具执行出错: ValueError('路径越界，只允许访问项目目录内的文件: ../x')"},
+    ) == "越界"
+    assert blocks._op_failure(
+        {"op": "read", "c": "c3"}, {"c3": "工具执行出错: 编码错误"},
+    ) is None  # 通用工具出错：不作分类
 
 
 def test_segment_by_file_user_supplement_block():

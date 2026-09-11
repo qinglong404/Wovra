@@ -135,21 +135,34 @@ def _block_kind(name: str, args: dict) -> str:
         return "environment"
     return "tool"
 
-_NOT_FOUND_MARKERS = ("不存在", "FileNotFoundError", "No such file")
+_NOT_FOUND_MARKERS = ("文件不存在:", "目录不存在:", "FileNotFoundError", "No such file")
 
-_ESCAPE_MARKERS = ("路径越界",)
+_ESCAPE_MARKERS = ("路径越界，",)
 
 _VERIFY_TAGS = ("test", "build", "run")
 
 def _op_failure(op: dict, results: dict) -> Optional[str]:
-    """读/删操作的结果失败分类：幽灵 / 越界 / None（成功或通用工具出错）。"""
+    """读/删操作的结果失败分类：幽灵 / 越界 / None（成功或通用工具出错）。
+
+    判定只看返回文本的**首行**（2026-09-11 机制评审修复）。旧实现按全文
+    子串匹配"不存在"，于是读到正文含该字面量的文件（如 files.py 自己的
+    `文件不存在: {path}` 文案）会被误判成幽灵——实测当次会话 10/81 块
+    中招、R1 纯读轮独占 8 个，而该标签是整理指令的输入，会让组织器把
+    live 文件当成 DEAD。
+
+    幽灵与越界都要求"首行命中"：safety 抛的 ValueError 经工具层包装后
+    首行形如 `工具执行出错: ValueError('路径越界，…')`，故越界按首行
+    中缀判定即可；而通用工具出错（如 `工具执行出错: 编码错误`）不属于
+    这两类，仍返回 None（不作分类）。
+    """
     if op["op"] in ("write", "edit"):
         return None
     content = results.get(op.get("c", "")) or ""
-    if any(m in content for m in _NOT_FOUND_MARKERS):
-        return "幽灵"
-    if any(m in content for m in _ESCAPE_MARKERS):
+    head = content.split("\n", 1)[0]
+    if any(m in head for m in _ESCAPE_MARKERS):
         return "越界"
+    if any(m in head for m in _NOT_FOUND_MARKERS):
+        return "幽灵"
     return None
 
 def _fblock(kind: str, idx: int) -> dict:

@@ -40,6 +40,13 @@ _SPLIT_CHAT_MERGE_RATIO = float(os.environ.get("WOVRA_SPLIT_CHAT_RATIO", "0.15")
 
 _ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 
+# 任务状态渲染的字符预算（2026-09-11 机制评审）：TaskState 的 7 个列表
+# 各有 200 条上限（STATE_LIST_CAP），理论最坏 1400 条；它是**每轮都进
+# 上下文**的（信封尾部），不设预算就是一条无界常驻负担。实测当前 36 条
+# ≈2,674 tok 尚健康，但上限高一个量级——给装配处传预算，把 render 里
+# 早就写好、却因没传参而形同虚设的截断保护真正激活。
+_STATE_RENDER_BUDGET = int(os.environ.get("WOVRA_STATE_BUDGET", "8000"))
+
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "200"))
 
 _ACTION_WORDS = {

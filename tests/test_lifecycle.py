@@ -151,3 +151,41 @@ def test_rejected_delete_does_not_kill():
         _event(3, 3, "tool_result", content="已删除 keep.js（删除前内容已归档）"),
     ]))
     assert ledger.state_of("keep.js") == lifecycle.STATE_DEAD
+
+
+def test_read_success_with_not_found_literal_in_body():
+    """回归（2026-09-11 机制评审）：读取成功但**正文含"不存在"字面量**时，
+    账本必须按成功计。
+
+    真凶：失败判定曾是全文子串匹配（`"不存在" in content`），而 read_file
+    的成功返回是 `{path}（共 N 行…）\\n<正文>`——读本项目自己的
+    src/wovra/tools/files.py 时，正文里就有 `文件不存在: {path}` 这句文案，
+    于是"读成功"被判成"读失败"，文件不产生 read_only 状态。实测当次会话
+    10/81 块被打成幽灵，R1 纯读轮独占 8 个。修法 = 只看首行。
+    """
+    # 判定口径本身
+    assert lifecycle.op_failed("文件不存在: nope.txt（解析为 /x）") is True
+    assert lifecycle.op_failed(
+        "工具执行出错: ValueError('路径越界，只允许访问项目目录内的文件: ../x')"
+    ) is True
+    assert lifecycle.op_failed("用户拒绝了删除操作。") is True
+    assert lifecycle.op_failed("路径是目录（而非文本文件）：x。") is True
+    # 成功读取，正文里带"不存在"字面量 → 不算失败
+    assert lifecycle.op_failed(
+        "src/wovra/tools/files.py（共 704 行，以下为第 1-200 行）\n"
+        '    return f"文件不存在: {path}（解析为 {target}）。"'
+    ) is False
+
+    # 端到端：账本把这次读取记为成功（read_only）
+    ledger = lifecycle.FileLedger()
+    ledger.update(_round(1, [
+        _event(1, 1, "user", content="读源码"),
+        _event(1, 2, "tool_call", tool="read_file",
+               args={"path": "src/wovra/tools/files.py"}),
+        _event(1, 3, "tool_result",
+               content="src/wovra/tools/files.py（共 704 行，以下为第 1-200 行）\n"
+                       '    return f"文件不存在: {path}（解析为 {target}）。"'),
+        _event(1, 4, "final_answer", content="读完"),
+    ]))
+    assert ledger.state_of("src/wovra/tools/files.py") == lifecycle.STATE_READ_ONLY
+    assert ledger.entries()["src/wovra/tools/files.py"]["read_count"] == 1

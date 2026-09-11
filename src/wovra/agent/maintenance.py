@@ -18,12 +18,15 @@ from .support import (
 )
 from .prompts import (
     _ORG_META_INFO,
+    _ORG_FORMAT_DISCIPLINE,
     _ORG_TAG_INSTRUCTIONS,
     _SPLIT_INSTRUCTIONS,
 )
 
 
 _ORG_SUBMIT_TOOL = "submit_organization"
+
+_SPLIT_SUBMIT_TOOL = "submit_domains"
 
 # 带诊断重发的修正要求（见 _MaintenanceMixin._org_repair_messages）。
 # 第 2 条直接针对实测根因：长中文叙述里混进未转义 ASCII 双引号会截断
@@ -37,6 +40,21 @@ _ORG_REPAIR_HINT = (
     "2. 描述等文本里**不要使用英文双引号**——需要引用时用中文引号「」或“”，"
     "英文双引号会截断 JSON 字符串（本次失败即由此引起）；\n"
     "3. 内容覆盖与上次一致（同样的轮次与块），只修正格式。"
+)
+
+# 分裂阶段的同类修正要求（2026-09-11 对称补齐）：submit_domains 同样
+# 面临超长截断（指令里明确写了"必须在单次响应内完整输出"），此前失败
+# 只留痕、无恢复路径——已知风险却没有第二跳，与 org 不对称。
+_SPLIT_REPAIR_HINT = (
+    "上一条 submit_domains 的参数不是可用产物（不是合法 JSON，或截断成空壳），"
+    "本次分裂分析作废，已保守按不可分处理。\n"
+    "诊断：{evidence}\n\n"
+    "请重新调用 submit_domains 提交（唯一出口，正文说明不采纳）。要求：\n"
+    "1. 参数必须是**单个合法 JSON 对象**：严格双引号、无尾随逗号、无未转义"
+    "控制字符；\n"
+    "2. 文本里不要使用英文双引号——需要引用时用中文引号「」或“”；\n"
+    "3. 内容与上次一致（同样的域与块归属），只修正格式；"
+    "参数必须在**单次响应内完整输出**，超长截断会令整个分析作废。"
 )
 
 # 轻量 JSON 修复用（见 _MaintenanceMixin._loads_lenient）
@@ -419,6 +437,7 @@ class _MaintenanceMixin:
             + "\n".join(map_lines)
             + "\n\n"
             + ("\n".join(ms_lines) + "\n\n" if ms_lines else "")
+            + _ORG_FORMAT_DISCIPLINE
             + _ORG_TAG_INSTRUCTIONS
             + "\n完成后调用 submit_organization 工具提交结果（唯一出口，不要"
             "在正文中输出 JSON）。字段语义以工具定义为准；块 ID 逐字取自"
@@ -715,24 +734,50 @@ class _MaintenanceMixin:
             messages, tools=split_tools, purpose="split",
         )
         product = self._extract_domains(content, ordered)
+        evidence = ""
+        for tc in ordered or []:
+            if tc.get("name") == _SPLIT_SUBMIT_TOOL:
+                args = tc.get("arguments") or ""
+                evidence = (f"submit_domains 参数 {len(args)} 字符："
+                            f"{args[:120]!r}")
+                break
         if product is None:
-            # 与 org 同策略：不重试（2026-09-10 用户拍板）。但不静默落空
-            # （2026-09-11 实测：submit_domains 参数截断/解析失败 → 分裂
-            # 无任何痕迹）——落一个保守的"不可分"判定并留痕，账本可查。
-            # 失败现场一并记录（arguments 长度+头部 / 正文长度），下次
-            # 直接能看出是截断还是空壳还是模型没走工具出口。
-            evidence = ""
-            for tc in ordered or []:
-                if tc.get("name") == "submit_domains":
-                    args = tc.get("arguments") or ""
-                    evidence = (f"submit_domains 参数 {len(args)} 字符："
-                                f"{args[:120]!r}")
-                    break
+            # 失败即"查因 → 调整 → 再试一次"（2026-09-11：与 org 对称补齐）。
+            # 此前分裂只有留痕、无恢复路径，而 submit_domains 同样面临超长
+            # 截断（指令明说"必须在单次响应内完整输出"）——已知风险却没有
+            # 第二跳。messages 一字不动、尾部追加失败现场，只重发一次。
+            if not evidence:
+                evidence = f"无 submit_domains 调用；正文 {len(content or '')} 字符"
+            repair = self._split_repair_messages(
+                messages, content, ordered, evidence
+            )
+            retried = False
+            if repair is not None:
+                retried = True
+                if self.task is not None:
+                    self.task.record(
+                        "maintenance",
+                        f"split：产物不可用，带诊断重发一次（{evidence}）",
+                    )
+                content, ordered, _usage = self._stream_call(
+                    repair, tools=split_tools, purpose="split",
+                )
+                product = self._extract_domains(content, ordered)
+                if product is not None and self.task is not None:
+                    self.task.record(
+                        "maintenance", "split：重发产物可用，分析继续"
+                    )
+        if product is None:
+            # 仍无可用产物：不静默落空（2026-09-11 实测：submit_domains
+            # 参数截断/解析失败 → 分裂无任何痕迹）——落一个保守的"不可分"
+            # 判定并留痕，账本可查。失败现场一并记录（arguments 长度+头部 /
+            # 正文长度），下次直接能看出是截断还是空壳还是模型没走工具出口。
             if not evidence:
                 evidence = f"无 submit_domains 调用；正文 {len(content or '')} 字符"
             reason = (
                 "分裂分析无可用产物（" + evidence + "），"
-                "保守按不可分处理，不重试"
+                "保守按不可分处理"
+                + ("，已带诊断重发一次仍失败" if retried else "，不重试")
             )
             pending = rounds[0].setdefault("pending_org", {})
             pending["split_assessment"] = {
@@ -742,7 +787,9 @@ class _MaintenanceMixin:
             if self.task is not None:
                 self.task.record(
                     "maintenance",
-                    f"split：无可用产物（{len(rounds)} 轮批次；{evidence}）",
+                    f"split：无可用产物（{len(rounds)} 轮批次；"
+                    f"{'已带诊断重发一次仍失败；' if retried else ''}"
+                    f"{evidence}）",
                 )
             self._persist_rounds()
             return False
@@ -942,9 +989,19 @@ class _MaintenanceMixin:
 
         原并行双路（各自骑 base 快照）改为串行追加：分裂作为整理对话的
         纯追加延续——org 刚跑完 KV 全热，分裂白得完整整理产物（12K+），
-        只付自己的指令 ~1.5K（实测 org cached=83,968/命中 95%，tools
-        收窄不影响 messages 前缀缓存）。**org 失败则 split 跳过**（分裂
-        依赖整理质量，失败批次不产出）。
+        只付自己的指令 ~1.5K。**org 失败则 split 跳过**（分裂依赖整理
+        质量，失败批次不产出）。
+
+        缓存代价（2026-09-11 实测裁决，本会话 history 的 llm_call 对账）：
+        把 tools 从常驻数组收窄为单一出口**确实会打破 messages 前缀缓存**
+        ——org 首跳 prompt=215,940 / cached=896（命中 0.4%）、split 首跳
+        290,142 / 896（0.3%）；org 第二跳 273,148 / 198,144（72.5%）是因为
+        带诊断重发骑上了**首跳自己建立**的缓存，不是骑上了工作对话的。
+        原注释"cached=83,968/命中 95%、收窄不影响前缀缓存"是错的（那是
+        工作调用在调 tools 数组未变时的读数），worklog §11.6(d) 的 ≈0 命中
+        才对。这个价（≈0.65 元/批）继续付的理由只剩"硬约束防跑偏"，属
+        待复议项；本注释只记录事实，不改行为。
+
         **硬上限 WOVRA_MAINT_TIMEOUT**：两阶段总预算（F 组实测大基座
         深度思考 23 分钟不完成，读超时不触发——token 在流；到点判
         failed 解锁管线）。守护线程化保证进程退出不被挂起调用拖住。
@@ -1112,25 +1169,46 @@ class _MaintenanceMixin:
     def _org_repair_messages(
         messages: list[dict], content: str, ordered: list, evidence: str
     ) -> Optional[list]:
+        """整理阶段的"带诊断重发"输入（薄壳，通用实现见 _repair_messages）。"""
+        return _MaintenanceMixin._repair_messages(
+            messages, content, ordered, evidence, _ORG_SUBMIT_TOOL, _ORG_REPAIR_HINT
+        )
+
+    @staticmethod
+    def _split_repair_messages(
+        messages: list[dict], content: str, ordered: list, evidence: str
+    ) -> Optional[list]:
+        """分裂阶段的"带诊断重发"输入（与 org 对称，2026-09-11 补齐）。"""
+        return _MaintenanceMixin._repair_messages(
+            messages, content, ordered, evidence,
+            _SPLIT_SUBMIT_TOOL, _SPLIT_REPAIR_HINT,
+        )
+
+    @staticmethod
+    def _repair_messages(
+        messages: list[dict], content: str, ordered: list, evidence: str,
+        tool_name: str, hint: str,
+    ) -> Optional[list]:
         """构造"带诊断的重发"输入：把失败原因回给模型，只让它重发修正后的提交。
 
         两条路（取决于上一跳有没有工具调用可回复）：
-          * 有 submit_organization 调用（主路）→ 重建 assistant(tool_call) +
-            tool 结果（内容 = 失败现场 + 修正要求）。严格端点要求 tool 消息
-            必须紧跟其 assistant 调用，不能插别的消息。
+          * 有该工具的调用（主路）→ 重建 assistant(tool_call) + tool 结果
+            （内容 = 失败现场 + 修正要求）。严格端点要求 tool 消息必须紧跟
+            其 assistant 调用，不能插别的消息。
           * 模型压根没调工具（跑偏/只写正文）→ assistant 正文 + user 追问
             （没有 tool_call_id 可回，只能走 user 角色）。
 
         messages 一字不动，只在其后追加——这次调用因此骑满前缀缓存。
+        org/split 两阶段共用本实现（2026-09-11 泛化：分裂此前只有留痕、
+        无恢复路径，与 org 不对称）。
         """
         fixed = list(messages)
         submit = next(
-            (tc for tc in (ordered or [])
-             if tc.get("name") == _ORG_SUBMIT_TOOL),
+            (tc for tc in (ordered or []) if tc.get("name") == tool_name),
             None,
         )
         if submit is not None:
-            call_id = submit.get("id") or "org_repair"
+            call_id = submit.get("id") or "repair"
             fixed.append({
                 "role": "assistant",
                 "content": content or None,
@@ -1138,7 +1216,7 @@ class _MaintenanceMixin:
                     "id": call_id,
                     "type": "function",
                     "function": {
-                        "name": _ORG_SUBMIT_TOOL,
+                        "name": tool_name,
                         "arguments": submit.get("arguments") or "{}",
                     },
                 }],
@@ -1146,7 +1224,7 @@ class _MaintenanceMixin:
             fixed.append({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": _ORG_REPAIR_HINT.format(evidence=evidence),
+                "content": hint.format(evidence=evidence),
             })
             return fixed
         if content:
@@ -1154,10 +1232,10 @@ class _MaintenanceMixin:
         fixed.append({
             "role": "user",
             "content": (
-                "你刚才没有调用 submit_organization 提交整理产物（它是唯一出口，"
+                f"你刚才没有调用 {tool_name} 提交产物（它是唯一出口，"
                 "正文里的说明不会被采纳）。\n"
                 f"诊断：{evidence}\n"
-                + _ORG_REPAIR_HINT.format(evidence="（同上）")
+                + hint.format(evidence="（同上）")
             ),
         })
         return fixed

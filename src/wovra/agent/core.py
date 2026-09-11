@@ -295,9 +295,19 @@ class _CoreMixin:
         if self.current_round is None:
             return
         self.current_round["end_state"] = "completed"
-        # Block 结构化（机制一，零 LLM）：以写/改为截止的确定性分块，
-        # 随轮次落盘——整理输入、文件地图、追溯导航都吃这份结构
-        self.current_round["blocks"] = blocks_module.segment_round(self.current_round)
+        # Block 结构化（机制一，零 LLM）：**按文件聚合**的确定性分块（v3，
+        # segment_round_by_file），随轮次落盘——整理输入、文件地图、追溯
+        # 导航都吃这份结构。
+        #
+        # 2026-09-11 收口（废双轨）：此前这里落 v1（以写/改为截止的粗分块），
+        # 而整理产物/紧凑视图/expand_history 用的是 v3。两套分块器编号空间
+        # 相同（R{n}-B{k}）但切法不同——实测全会话 45 个同 ID 块的覆盖区间
+        # **零一致**，任何"按 ID 查表"的地方都会静默错位或丢描述（R1 纯读轮
+        # 曾因此丢掉 23/24 条块描述）。落盘口径统一到 v3 后，编号空间唯一。
+        # v1（segment_round）保留为兼容/离线检视用途，不再是落盘主线。
+        self.current_round["blocks"] = blocks_module.segment_round_by_file(
+            self.current_round
+        )
         self.current_round = None
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:
