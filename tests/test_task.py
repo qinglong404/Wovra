@@ -161,14 +161,14 @@ def test_task_binds_and_restores_workspace(monkeypatch, tmp_path):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
     ws = tmp_path / "ws"
     ws.mkdir()
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", ws)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", ws)
 
     task = Task.create(goal="g")
     assert task.workspace == str(ws)
     task.save()
 
     # 模拟从别处启动：PROJECT_ROOT 已变，但加载旧会话会恢复其绑定的工作区
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     loaded = Task.load(task.id)
     assert loaded.workspace == str(ws)
-    assert str(tools_module.PROJECT_ROOT) == str(ws)
+    assert str(tools_module.safety.PROJECT_ROOT) == str(ws)

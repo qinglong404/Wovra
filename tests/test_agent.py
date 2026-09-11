@@ -1937,7 +1937,7 @@ def test_readonly_batch_runs_in_order(monkeypatch, tmp_path):
     """纯只读批次并发执行，结果仍按调用顺序记录（顺序是正确性契约）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     for name, text in (("a.txt", "内容A"), ("b.txt", "内容B"), ("c.txt", "内容C")):
         (tmp_path / name).write_text(text, encoding="utf-8")
     calls = [

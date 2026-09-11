@@ -43,9 +43,9 @@ def probe_env(tmp_path, monkeypatch):
 
     probe = _load_probe()
     workspace, outside = probe._build_workspace(tmp_path)
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", workspace)
-    monkeypatch.setattr(tools_module, "_audit", lambda text: None)
-    monkeypatch.setattr(tools_module, "_ask_yes_no", lambda question: True)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", workspace)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda text: None)
+    monkeypatch.setattr(tools_module.safety, "_ask_yes_no", lambda question: True)
     return probe, workspace, outside
 
 

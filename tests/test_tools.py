@@ -12,8 +12,6 @@ from wovra.agent import Agent
 from wovra.task import Task
 from wovra.tools import (
     FAILURE_MARKERS,
-    _ask_yes_no,
-    _confirm_reason,
     ask_user,
     user_input_pending,
     check_background,
@@ -32,6 +30,7 @@ from wovra.tools import (
     web_fetch,
     write_file,
 )
+from wovra.tools.safety import _ask_yes_no, _confirm_reason
 
 
 class _StubLLM:
@@ -64,7 +63,7 @@ def test_edit_file_rejects_escape_from_project_root():
 def test_write_file_creates_then_reports_action(tmp_path, monkeypatch):
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
     first = write_file("reports/demo.txt", "第一版")
     assert "创建" in first
     assert (tmp_path / "reports/demo.txt").read_text(encoding="utf-8") == "第一版"
@@ -77,7 +76,7 @@ def test_write_file_creates_then_reports_action(tmp_path, monkeypatch):
 def test_edit_file_requires_unique_match(tmp_path, monkeypatch):
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
     write_file("code.txt", "alpha beta alpha")
 
     # 出现两次 → 拒绝，要求补充上下文
@@ -133,7 +132,7 @@ def test_run_command_blocks_destructive_patterns():
 def test_read_file_supports_line_ranges(tmp_path, monkeypatch):
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
     (tmp_path / "big.txt").write_text(
         "\n".join(f"第{i}行" for i in range(1, 51)), encoding="utf-8"
     )
@@ -148,7 +147,7 @@ def test_read_file_supports_line_ranges(tmp_path, monkeypatch):
 def test_read_file_reports_binary_and_empty(tmp_path, monkeypatch):
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
     (tmp_path / "bin.dat").write_bytes(b"\x00\x01\xff\xfe")
     (tmp_path / "empty.txt").write_text("", encoding="utf-8")
 
@@ -159,7 +158,7 @@ def test_read_file_reports_binary_and_empty(tmp_path, monkeypatch):
 def test_search_files_finds_matches_with_line_numbers(tmp_path, monkeypatch):
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
     (tmp_path / "a.py").write_text("def foo():\n    pass\n", encoding="utf-8")
     sub = tmp_path / "sub"
     sub.mkdir()
@@ -181,7 +180,7 @@ def test_search_files_finds_matches_with_line_numbers(tmp_path, monkeypatch):
 def test_search_files_rejects_invalid_regex(tmp_path, monkeypatch):
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
     with pytest.raises(ValueError, match="正则表达式无效"):
         tools.search_files("([非法")
 
@@ -194,7 +193,7 @@ def test_agent_audits_overwrite_with_old_content_backup(monkeypatch, tmp_path):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
 
     # 旧文件先存在，随后被 agent 覆盖
     (tmp_path / "note.txt").write_text("这是旧内容", encoding="utf-8")
@@ -215,7 +214,7 @@ def test_first_creation_has_no_backup_but_tool_call_recorded(monkeypatch, tmp_pa
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
 
     task = Task.create(goal="审计测试")
     agent = Agent(llm=_StubLLM(), tools=[write_file], task=task)
@@ -231,7 +230,7 @@ def test_dangerous_command_is_audited_and_not_executed(monkeypatch, tmp_path):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     from wovra import tools
 
-    monkeypatch.setattr(tools, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
 
     task = Task.create(goal="拒绝测试")
     agent = Agent(llm=_StubLLM(), tools=[run_command], task=task)
@@ -253,7 +252,7 @@ def test_run_command_timeout_kills_whole_tree(monkeypatch):
 
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "_COMMAND_TIMEOUT", 1)
+    monkeypatch.setattr(tools_module.shell, "_COMMAND_TIMEOUT", 1)
     # 前台常驻命令：shell 外壳下跑一个远超超时时间的休眠子进程
     sleeper = "ping -n 11 127.0.0.1" if _os.name == "nt" else "sleep 10"
 
@@ -297,7 +296,7 @@ def test_edit_file_rejects_externally_modified_file(monkeypatch, tmp_path):
     """过期保护：文件在观察后被外部改动 → 拒绝编辑并要求重读。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("note.md", "v1")
     (tmp_path / "note.md").write_text("用户改过的 v2", encoding="utf-8")  # 外部修改
 
@@ -315,7 +314,7 @@ def test_write_file_rejects_stale_overwrite(monkeypatch, tmp_path):
     """整体覆盖同样受过期保护：外部改过的文件不能被盲写覆盖。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("note.md", "v1")
     (tmp_path / "note.md").write_text("用户改过的 v2", encoding="utf-8")
 
@@ -367,7 +366,7 @@ def test_glob_files_matches_and_filters_noise(monkeypatch, tmp_path):
     """glob 按文件名模式查找，跳过噪声目录，忽略目录过滤。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
     sub = tmp_path / "docs"
     sub.mkdir()
@@ -387,7 +386,7 @@ def test_web_fetch_rejects_non_http_and_internal_hosts(monkeypatch):
     """SSRF 防护：非 http/https 与内网/回环地址一律拒绝（不发真实请求）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
     assert "仅支持 http/https" in web_fetch("ftp://example.com/file")
     assert "拒绝访问内网" in web_fetch("http://127.0.0.1:8000/secret")
     assert "拒绝访问内网" in web_fetch("http://192.168.1.1/admin")
@@ -405,7 +404,7 @@ def test_list_background_reports_empty_or_tasks():
 
     from wovra import tools as tools_module
 
-    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.background._BACKGROUND_TASKS.clear()
     assert "当前没有后台任务" in list_background()
     started = run_background("echo bg-list-marker")
     task_id = _re_search_id(started)
@@ -416,7 +415,7 @@ def test_list_background_reports_empty_or_tasks():
             break
         time.sleep(0.1)
     assert task_id in listing and "已退出" in listing
-    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.background._BACKGROUND_TASKS.clear()
 
 
 def _re_search_id(started: str) -> str:
@@ -446,7 +445,7 @@ def test_run_command_confirm_rejected_by_user(monkeypatch, tmp_path):
 
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
     monkeypatch.setattr(builtins, "input", lambda prompt: "n")
 
@@ -462,7 +461,7 @@ def test_run_command_confirm_allowed_by_user(monkeypatch, tmp_path):
 
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
     monkeypatch.setattr(builtins, "input", lambda prompt: "y")
 
@@ -556,20 +555,20 @@ def test_assert_public_url_fake_ip_is_proxy_artifact(monkeypatch):
     import socket as _socket
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
     # Fake-IP：字面地址与解析结果都放行
-    assert tools_module._assert_public_url("http://198.18.0.1/") is None
+    assert tools_module.web._assert_public_url("http://198.18.0.1/") is None
     monkeypatch.setattr(
         _socket, "getaddrinfo",
         lambda host, port, **kw: [(None, None, None, "", ("198.18.5.5", 0))])
-    assert tools_module._assert_public_url("https://example.com/doc") is None
+    assert tools_module.web._assert_public_url("https://example.com/doc") is None
     # 真实内网解析仍然拒绝
     monkeypatch.setattr(
         _socket, "getaddrinfo",
         lambda host, port, **kw: [(None, None, None, "", ("10.0.0.5", 0))])
-    assert "拒绝访问内网" in tools_module._assert_public_url("https://example.com/doc")
-    assert "拒绝访问内网" in tools_module._assert_public_url("http://192.168.1.1/")
-    assert "拒绝访问内网" in tools_module._assert_public_url("http://169.254.169.254/meta")
+    assert "拒绝访问内网" in tools_module.web._assert_public_url("https://example.com/doc")
+    assert "拒绝访问内网" in tools_module.web._assert_public_url("http://192.168.1.1/")
+    assert "拒绝访问内网" in tools_module.web._assert_public_url("http://169.254.169.254/meta")
 
 
 def test_search_engines_parse_canned_html(monkeypatch):
@@ -580,16 +579,16 @@ def test_search_engines_parse_canned_html(monkeypatch):
 
     ddg = ('<div><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com">'
            'Docs <b>Home</b></a><a class="result__snippet">All about docs</a></div>')
-    monkeypatch.setattr(tools_module.urllib.request, "urlopen",
+    monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeUrllib._Resp(ddg))
-    result = tools_module._search_ddg("docs", 5)
+    result = tools_module.web._search_ddg("docs", 5)
     assert "https://docs.example.com" in result and "Docs Home" in result
 
     bing = ('<li class="b_algo"><h2><a href="https://bing.example.com/x">Bing Result</a></h2>'
             '<p>Bing snippet</p></li>')
-    monkeypatch.setattr(tools_module.urllib.request, "urlopen",
+    monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeUrllib._Resp(bing))
-    result = tools_module._search_bing("x", 5)
+    result = tools_module.web._search_bing("x", 5)
     assert "Bing Result" in result and "Bing snippet" in result
 
 
@@ -597,12 +596,12 @@ def test_web_search_falls_back_to_second_engine(monkeypatch):
     """DDG 失败自动换 Bing；全失败时回传各引擎原因。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
-    monkeypatch.setattr(tools_module, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
-    monkeypatch.setattr(tools_module, "_search_bing", lambda q, n: "搜索 'q' 的结果：\n1. 命中")
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.web, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
+    monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "搜索 'q' 的结果：\n1. 命中")
     assert "命中" in tools_module.web_search("q")
 
-    monkeypatch.setattr(tools_module, "_search_bing", lambda q, n: "bing 失败: 限流")
+    monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "bing 失败: 限流")
     result = tools_module.web_search("q")
     assert "所有搜索通道都失败了" in result and "bing 失败" in result
 
@@ -611,7 +610,7 @@ def test_edit_file_reports_missing_path_friendly(monkeypatch, tmp_path):
     """文件不存在 → 友好消息带解析路径（参数装填错误一眼可见）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     result = edit_file("edit_file", "a", "b")
     assert "文件不存在" in result and "glob_files" in result
 
@@ -620,7 +619,7 @@ def test_edit_file_anchor_miss_gives_closest_hint(monkeypatch, tmp_path):
     """锚点未命中 → 给出最接近内容的行号，模型一次修正。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     body = "第一行\n" + "\n".join(f"def func_{i}(x): return x + {i}" for i in range(20)) + "\n尾行"
     write_file("app.py", body)
 
@@ -634,7 +633,7 @@ def test_edit_file_anchor_miss_gives_closest_hint(monkeypatch, tmp_path):
 def test_edit_file_success_reports_line_number(monkeypatch, tmp_path):
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "第一行\n第二行\n第三行")
     result = edit_file("app.py", "第二行", "第二行（改）")
     assert "位于第 2 行" in result
@@ -644,7 +643,7 @@ def test_edit_file_replace_all_replaces_every_occurrence(monkeypatch, tmp_path):
     """count>1 默认拒绝并提示 replace_all；传 True 替换全部并在结果里报数。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "todo\n中间\ntodo\n尾部\ntodo")
     with pytest.raises(ValueError) as excinfo:
         edit_file("app.py", "todo", "done")
@@ -659,7 +658,7 @@ def test_edit_file_zero_match_shows_provided_vs_actual_diff(monkeypatch, tmp_pat
     """未命中 → 「你提供的 vs 文件实际」差异反馈：照着改一次就中。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "def func_7(x):\n    return x + 7")
     with pytest.raises(ValueError) as excinfo:
         edit_file("app.py", "def func_7(x):\n    return x + 8", "换掉")
@@ -672,7 +671,7 @@ def test_replace_lines_replaces_range_and_reports(monkeypatch, tmp_path):
     """行号替换：区间含两端、报告行数变化、结果正确。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "一\n二\n三\n四\n五")
     result = replace_lines("app.py", 2, 3, "两半\n两半半")
     assert "第 2-3 行" in result and "2 行 → 2 行" in result
@@ -683,7 +682,7 @@ def test_replace_lines_empty_content_removes_range(monkeypatch, tmp_path):
     """new_content 传空串 = 删除行区间（行数收缩正确）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "一\n二\n三")
     replace_lines("app.py", 2, 2, "")
     assert (tmp_path / "app.py").read_text(encoding="utf-8") == "一\n三"
@@ -693,7 +692,7 @@ def test_replace_lines_rejects_out_of_range_and_stale(monkeypatch, tmp_path):
     """行号越界给出行数提示；文件被外部修改后拒绝（行号整体失效）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "一\n二\n三")
     out = replace_lines("app.py", 2, 9, "x")
     assert "行号越界" in out and "共 3 行" in out
@@ -707,7 +706,7 @@ def test_run_command_marks_truncated_output(monkeypatch, tmp_path):
     """输出超限时显式标注并保留首尾——静默截断曾让模型误诊白跑一轮。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("big.txt", "甲" * 4000 + "尾部关键结论")
     cmd = "type big.txt" if _os.name == "nt" else "cat big.txt"
     result = run_command(cmd)
@@ -722,7 +721,7 @@ def test_checkpoint_archives_and_restores_roundtrip(monkeypatch, tmp_path):
     """checkpoint：覆盖/编辑自动归档旧版本，restore_file 列出并回滚。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "版本一")
     write_file("app.py", "版本二")          # 覆盖前自动归档"版本一"
 
@@ -744,18 +743,18 @@ def test_history_prunes_to_keep_limit(monkeypatch, tmp_path):
     """每文件只保留最近 _HISTORY_KEEP 份，超出淘汰最旧。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     for i in range(13):
         write_file("app.py", f"v{i}")
     versions = sorted((tmp_path / ".wovra" / "history" / "app.py").glob("*.bak"))
-    assert len(versions) == tools_module._HISTORY_KEEP
+    assert len(versions) == tools_module.files._HISTORY_KEEP
 
 
 def test_write_file_shrink_guard_blocks_and_force_bypasses(monkeypatch, tmp_path):
     """覆盖写缩水过半 → 防呆拦截；force=true 显式确认后放行。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("page.html", "甲" * 3000)
     result = write_file("page.html", "薄壳")
     assert "防呆拦截" in result and "force" in result
@@ -768,13 +767,13 @@ def test_delete_file_confirms_archives_and_deletes(monkeypatch, tmp_path):
     """删除走确认门：拒绝则保留；确认则归档后删除、可回滚。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "要被删的内容")
-    monkeypatch.setattr(tools_module, "_ask_yes_no", lambda q: False)
+    monkeypatch.setattr(tools_module.safety, "_ask_yes_no", lambda q: False)
     assert "用户拒绝" in delete_file("app.py")
     assert (tmp_path / "app.py").exists()
 
-    monkeypatch.setattr(tools_module, "_ask_yes_no", lambda q: True)
+    monkeypatch.setattr(tools_module.safety, "_ask_yes_no", lambda q: True)
     result = delete_file("app.py")
     assert "已删除" in result and "归档" in result
     assert not (tmp_path / "app.py").exists()
@@ -787,7 +786,7 @@ def test_delete_file_confirms_archives_and_deletes(monkeypatch, tmp_path):
 def test_move_file_moves_and_refuses_overwrite(monkeypatch, tmp_path):
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("a.py", "内容")
     write_file("b.py", "占位")
     assert "目标已存在" in move_file("a.py", "b.py")
@@ -800,7 +799,7 @@ def test_edit_file_multi_match_lists_all_line_numbers(monkeypatch, tmp_path):
     """多匹配报错列出全部行号：模型扩写上下文消歧不必盲猜。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "todo\n中间\ntodo\n尾部\ntodo")
     with pytest.raises(ValueError) as excinfo:
         edit_file("app.py", "todo", "done")
@@ -812,7 +811,7 @@ def test_edit_file_success_shows_persistent_anchor(monkeypatch, tmp_path):
     """成功回显持久锚点（最近的注释/函数行）——行号漂移后仍可定位。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     body = "// 配置区：以下为超时参数\nconst TIMEOUT = 30;\nconst RETRY = 3;\nconst BACKOFF = 5;"
     write_file("app.js", body)
     result = edit_file("app.js", "const BACKOFF = 5;", "const BACKOFF = 8;")
@@ -843,7 +842,7 @@ def test_search_files_context_lines(monkeypatch, tmp_path):
     """search_files 的 context 参数：匹配行附带前后 N 行（单行内 ⏎ 连接）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "头部\n目标行\n尾部")
     out = tools_module.search_files("目标", context=1)
     assert "app.py:2:" in out
@@ -856,7 +855,7 @@ def test_list_files_annotates_size_and_mtime(monkeypatch, tmp_path):
     """list_files 附带大小与修改时间（读段策略与新鲜度判断用）。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     write_file("app.py", "内容")
     out = tools_module.list_files(".")
     entry = next(e for e in out if e.startswith("app.py"))
@@ -869,7 +868,7 @@ def test_hooks_block_and_feedback(monkeypatch, tmp_path):
 
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     hooks = tmp_path / ".wovra" / "hooks"
     hooks.mkdir(parents=True)
     (hooks / "pre_tool.py").write_text(
@@ -900,7 +899,7 @@ def test_hooks_silent_when_absent(monkeypatch, tmp_path):
     """没有钩子文件：放行、无反馈——扩展机制缺席时不留痕迹。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     assert tools_module.run_pre_hook("write_file", {}) is None
     assert tools_module.run_post_hook("write_file", {}, "结果") is None
 
@@ -911,7 +910,7 @@ def test_invoke_tool_wires_hooks_end_to_end(monkeypatch, tmp_path):
     from wovra.agent import Agent
 
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     hooks = tmp_path / ".wovra" / "hooks"
     hooks.mkdir(parents=True)
     (hooks / "pre_tool.py").write_text(
@@ -937,7 +936,7 @@ def test_background_ownership_prevents_cross_session_management():
     """后台任务归属会话：跨会话查看/停止都被拒，并列出归属。"""
     from wovra import tools as tools_module
 
-    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.background._BACKGROUND_TASKS.clear()
     tools_module.set_current_session("session-A")
     started = run_background("echo owned-by-A")
     task_id = _re_search_id(started)
@@ -950,7 +949,7 @@ def test_background_ownership_prevents_cross_session_management():
     # 回到启动会话 → 可以管理
     tools_module.set_current_session("session-A")
     assert "已退出" in check_background(task_id) or "运行中" in check_background(task_id)
-    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.background._BACKGROUND_TASKS.clear()
     tools_module.set_current_session(None)
 
 
@@ -962,7 +961,7 @@ def test_stop_session_backgrounds_kills_owned_but_spares_keep_alive(monkeypatch)
     from wovra import tools as tools_module
 
     tools_module.set_current_session("session-A")
-    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.background._BACKGROUND_TASKS.clear()
     sleeper = "ping -n 30 127.0.0.1" if _os.name == "nt" else "sleep 30"
     normal = run_background(sleeper)
     resident = run_background(sleeper, keep_alive=True)
@@ -979,7 +978,7 @@ def test_stop_session_backgrounds_kills_owned_but_spares_keep_alive(monkeypatch)
     # 清理测试残留
     tools_module.set_current_session("session-A")
     stop_background(id_resident)
-    tools_module._BACKGROUND_TASKS.clear()
+    tools_module.background._BACKGROUND_TASKS.clear()
 
 
 def test_confirm_ctrl_c_interrupts_instead_of_refusing(monkeypatch):
@@ -1036,9 +1035,9 @@ def workspace(tmp_path, monkeypatch):
     except (OSError, NotImplementedError):  # Windows 无权限建链接
         pytest.skip("当前环境不支持创建符号链接")
 
-    monkeypatch.setattr(tools_module, "PROJECT_ROOT", root)
-    monkeypatch.setattr(tools_module, "_audit", lambda detail: None)
-    monkeypatch.setattr(tools_module, "_ask_yes_no", lambda question: True)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", root)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "_ask_yes_no", lambda question: True)
     return SimpleNamespace(root=root, outside=outside)
 
 
@@ -1227,7 +1226,7 @@ def test_escape_detection_covers_wrappers_but_not_plain_text(workspace):
         "cd '..'", 'cd "/tmp"', "cd ~/x", "cd $HOME", "cd ${HOME}/x",
     ]
     for command in escapes:
-        assert tools_module._command_escape(command), f"{command} 应判为越界"
+        assert tools_module.safety._command_escape(command), f"{command} 应判为越界"
 
     allowed = [
         "cd sub && ls", "cd docs && make html", "pytest -q",
@@ -1236,7 +1235,7 @@ def test_escape_detection_covers_wrappers_but_not_plain_text(workspace):
         "grep -rn 'cd ' docs/", "git add docs/",
     ]
     for command in allowed:
-        assert not tools_module._command_escape(command), f"{command} 不该被拦"
+        assert not tools_module.safety._command_escape(command), f"{command} 不该被拦"
 
 
 def test_symlink_messages_do_not_trip_failure_markers(workspace):
@@ -1380,11 +1379,11 @@ def test_outside_absolute_paths_helper(workspace):
     from wovra import tools as tools_module
 
     root = str(workspace.root)
-    assert tools_module._outside_absolute_paths(f"cat {root}/t1.txt") == []
-    assert tools_module._outside_absolute_paths("ls -la docs/") == []
-    assert tools_module._outside_absolute_paths("curl https://example.com/a") == []
-    assert tools_module._outside_absolute_paths("cat /etc/shadow") == ["/etc/shadow"]
-    assert tools_module._outside_absolute_paths("find / -name x") == ["/"]
+    assert tools_module.safety._outside_absolute_paths(f"cat {root}/t1.txt") == []
+    assert tools_module.safety._outside_absolute_paths("ls -la docs/") == []
+    assert tools_module.safety._outside_absolute_paths("curl https://example.com/a") == []
+    assert tools_module.safety._outside_absolute_paths("cat /etc/shadow") == ["/etc/shadow"]
+    assert tools_module.safety._outside_absolute_paths("find / -name x") == ["/"]
 
 
 # ---- 探针发现的补充漏洞（09-10，确定性重放第一层抓出） ------------------------

@@ -270,7 +270,7 @@ class Task:
             goal=goal,
             requirements=list(requirements or []),
             acceptance_criteria=list(acceptance_criteria or []),
-            workspace=str(tools_module.PROJECT_ROOT),
+            workspace=str(tools_module.safety.PROJECT_ROOT),
             # 注册表默认只有主 agent；分裂执行时扩充（机制三/四）
             registry=[{
                 "id": "A", "name": "主agent",
@@ -295,7 +295,7 @@ class Task:
         if task.workspace:
             workspace = Path(task.workspace)
             if workspace.is_dir():
-                tools_module.PROJECT_ROOT = workspace
+                tools_module.safety.PROJECT_ROOT = workspace
         return task
 
     @classmethod

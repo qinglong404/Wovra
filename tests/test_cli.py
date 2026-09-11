@@ -582,7 +582,7 @@ def test_local_command_bg_numeric_id(monkeypatch, tmp_path, capsys):
     from wovra import tools as tools_module
 
     tools_module.set_current_session(task.id)
-    tools_module._BACKGROUND_TASKS["bg-1"] = {
+    tools_module.background._BACKGROUND_TASKS["bg-1"] = {
         "proc": FakeProc(), "log": log, "pos": 0, "command": "",
         "label": "子任务 x", "session": task.id, "keep_alive": False,
     }
@@ -591,4 +591,4 @@ def test_local_command_bg_numeric_id(monkeypatch, tmp_path, capsys):
         out = capsys.readouterr().out
         assert "引擎层完成" in out
     finally:
-        tools_module._BACKGROUND_TASKS.clear()
+        tools_module.background._BACKGROUND_TASKS.clear()

@@ -394,11 +394,11 @@ def run_model_layer(workspace: Path, outside: Path, model: str | None) -> list[d
     from wovra import tools as tools_module
 
     task_module.TASKS_ROOT = workspace.parent / "tasks"
-    tools_module.PROJECT_ROOT = workspace
+    tools_module.safety.PROJECT_ROOT = workspace
     # cli 在 import 时按值绑定了 PROJECT_ROOT——不改这处，系统提示词里的
     # 工作区仍是启动目录，模型会对着真实仓库尝试（首次实测踩到）
     cli_module.PROJECT_ROOT = workspace
-    tools_module._ask_yes_no = lambda question: True
+    tools_module.safety._ask_yes_no = lambda question: True
 
     results: list[dict] = []
     for title, prompt in MODEL_SCENARIOS:
@@ -471,8 +471,8 @@ def main(argv: list[str] | None = None) -> int:
     workspace, outside = _build_workspace(base)
 
     from wovra import tools as tools_module
-    tools_module.PROJECT_ROOT = workspace
-    tools_module._audit = lambda text: None  # 探针不写审计，保持输出干净
+    tools_module.safety.PROJECT_ROOT = workspace
+    tools_module.safety._audit = lambda text: None  # 探针不写审计，保持输出干净
 
     print(f"工作区   : {workspace}")
     print(f"界外素材 : {outside}")
