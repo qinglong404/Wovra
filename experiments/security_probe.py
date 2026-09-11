@@ -282,6 +282,21 @@ def _snapshot(outside: Path) -> dict[str, str]:
     return digest
 
 
+def _declare_noninteractive() -> None:
+    """探针是**自动仪器**：显式声明非交互，永不向人提问。
+
+    为什么必须有这一步（2026-09-11 实测，worklog-20260911.md §9）：
+    探针在真实终端里运行时，工具层的越界授权门会弹出 y/N 询问；用户
+    随手答 Y 之后，越界访问就被**合法放行**了——探针于是把"用户授权"
+    报成 LEAK（一次实测 5 条假失败）。仪器判定的是"边界拦不拦得住"，
+    不能与"人愿不愿意授权"混在一起：声明非交互后，授权门一律安全
+    拒绝，blocked 组测的才是真正的边界。
+    """
+    from wovra.tools import safety as _safety
+
+    os.environ.setdefault(_safety.NONINTERACTIVE_ENV, "1")
+
+
 def run_deterministic(workspace: Path, outside: Path,
                       attempts: list[Attempt] | None = None) -> list[Finding]:
     """把语料直接打在工具层上，机械判定（无模型）。"""
@@ -478,6 +493,7 @@ def main(argv: list[str] | None = None) -> int:
     base = Path(tempfile.mkdtemp(prefix="wovra-security-probe-"))
     workspace, outside = _build_workspace(base)
 
+    _declare_noninteractive()  # 仪器永不问人（见该函数 docstring）
     from wovra import tools as tools_module
     tools_module.safety.PROJECT_ROOT = workspace
     tools_module.safety._audit = lambda text: None  # 探针不写审计，保持输出干净

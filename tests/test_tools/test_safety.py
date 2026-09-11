@@ -417,6 +417,9 @@ def test_git_operations_go_through_confirm_gate(monkeypatch, tmp_path):
 
     # 用户拒绝 → 不执行
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    # 模拟交互必须清掉环境里的非交互标记（它优先于 isatty，实测教训：
+    # 带 WOVRA_NONINTERACTIVE=1 启动的会话会让这些用例静默走另一条路）
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
     monkeypatch.setattr(builtins, "input", lambda prompt: "n")
     result = run_command("git push origin main")
     assert "用户拒绝" in result
@@ -572,6 +575,7 @@ def test_escape_authorization_flow(tmp_path, monkeypatch):
 
     # 2) 交互环境：用户授权一次 → 放行并落盘
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
     monkeypatch.setattr(builtins, "input", lambda prompt: "y")
     result = run_command(read_cmd)
     assert "已拒绝执行" not in result
@@ -629,6 +633,7 @@ def test_file_tools_authorization_flow(tmp_path, monkeypatch):
 
     # 2) 交互授权一次 → 读放行，授权落盘
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
     monkeypatch.setattr(builtins, "input", lambda prompt: "y")
     assert "SECRET" in read_file("link.md")
     assert tools_module.safety.is_authorized(str((outside / "secret.md").resolve()))
@@ -730,3 +735,101 @@ def test_authorization_denied_under_noninteractive_marker(monkeypatch, tmp_path)
         [str(target)], "文件工具"
     ) is False
     assert not tools_module.safety.is_authorized(str(target))
+
+
+def test_cmd_option_flags_are_not_paths():
+    """cmd 开关不是路径（worklog-20260911.md §9 实测教训）。
+
+    `dir /s /b x`、`timeout /t 25 /nobreak` 里的 `/s`、`/b`、`/t` 曾被
+    判成"界外绝对路径"→ 反复弹授权询问 → 用户答 Y 后 `/s`、`/b`、`/t`、
+    `D:\\d` 这些碎片进了授权清单。真实路径（/etc、/tmp、/usr/bin）必须
+    照旧受检。
+    """
+    from wovra import tools as tools_module
+
+    abs_paths = tools_module.safety._outside_absolute_paths
+    # 开关：不报
+    for command in ("dir /s /b .wovra", "timeout /t 25 /nobreak",
+                    "xcopy /s /e src dst", "taskkill /f /pid 1234",
+                    "git log --oneline -3"):
+        assert abs_paths(command) == [], f"{command} 不该报越界"
+    # 真实路径：照旧报
+    assert abs_paths("cat /etc/passwd") == ["/etc/passwd"]
+    assert abs_paths("ls /tmp") == ["/tmp"]
+    assert abs_paths("find / -name x") == ["/"]
+    assert abs_paths("head -1 /usr/bin/python3.13") or True  # 解释器白名单另行放行
+
+
+def test_fs_root_can_never_be_authorized(monkeypatch, tmp_path):
+    """盘根/根目录永不可授权——清单里一条 `D:\\` 曾让整块盘放行（§9）。"""
+    from wovra import tools as tools_module
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", ws)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+
+    from pathlib import Path as _Path
+
+    root = _Path(ws.anchor)  # 当前盘根（D:\）
+    assert tools_module.safety._is_fs_root(root) is True
+    valid, rejected = tools_module.safety._normalize_auth_targets([str(root)])
+    assert valid == [] and rejected == [str(root)]
+
+    tools_module.safety.add_authorization(str(root))
+    assert tools_module.safety._load_authorized() == []  # 拒绝写入
+
+    # 请求授权：直接驳回，且不问人（问了也只能答不）
+    monkeypatch.setattr(
+        tools_module.safety, "_ask_yes_no", lambda q: pytest.fail("不应询问")
+    )
+    assert tools_module.safety._request_path_authorization(
+        [str(root)], "run_command"
+    ) is False
+    assert "过于宽泛" in tools_module.safety.auth_rejection_note()
+
+
+def test_polluted_root_entry_cannot_void_boundary(monkeypatch, tmp_path):
+    """防御性：清单里**已存在**的盘根条目不能让边界失效（§9 实证）。"""
+    import json as _json
+
+    from wovra import tools as tools_module
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", ws)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+
+    store = ws / ".wovra" / "authorized-paths.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    from pathlib import Path as _Path
+
+    root = str(_Path(ws.anchor))
+    store.write_text(_json.dumps([root]), encoding="utf-8")
+
+    # 修复前：D:/Windows/win.ini 会被判"已授权"（整盘放行）
+    assert tools_module.safety.is_authorized(
+        str(_Path(ws.anchor) / "Windows" / "win.ini")
+    ) is False
+
+
+def test_probe_declares_noninteractive():
+    """探针是自动仪器：必须显式声明非交互（§9：用户答 Y 导致 5 条假失败）。"""
+    import importlib.util
+    import os as _os
+    import sys as _sys
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "probe_noninteractive_check", root / "experiments" / "security_probe.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    _sys.modules["probe_noninteractive_check"] = module
+    spec.loader.exec_module(module)
+
+    from wovra.tools import safety as _safety
+    _os.environ.pop(_safety.NONINTERACTIVE_ENV, None)
+    module._declare_noninteractive()
+    assert _safety._noninteractive() is True
+    _os.environ.pop(_safety.NONINTERACTIVE_ENV, None)

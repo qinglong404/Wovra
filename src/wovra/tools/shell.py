@@ -80,12 +80,17 @@ def run_command(command: str, timeout: int | None = None) -> str:
         if targets and safety._request_path_authorization(targets, "run_command"):
             safety._audit(f"[run_command][越界已授权] {command}")
         else:
+            note = safety.auth_rejection_note()
+            tail = (
+                f"{note}。"
+                if note else
+                "越界访问需用户授权：授权一次后该路径自动放行"
+                f"（授权清单: {safety.PROJECT_ROOT / '.wovra' / 'authorized-paths.json'}）。"
+            )
             return (
                 f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
                 f"所有命令默认限定在工作区 {safety.PROJECT_ROOT} 内运行。"
-                f"{hint}"
-                f"越界访问需用户授权：授权一次后该路径自动放行"
-                f"（授权清单: {safety.PROJECT_ROOT / '.wovra' / 'authorized-paths.json'}）。"
+                f"{hint}{tail}"
             )
     reason = safety._confirm_reason(command)
     if reason and not safety._ask_yes_no(

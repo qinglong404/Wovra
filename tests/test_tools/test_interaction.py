@@ -27,6 +27,9 @@ def test_ask_yes_no_marks_user_input_pending(monkeypatch):
     from wovra import tools as tools_module
 
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    # 交互模拟要自足：环境里的非交互标记优先于 isatty（实测教训——
+    # 带 WOVRA_NONINTERACTIVE=1 启动的会话里该用例会静默走另一条路）
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
     seen = {}
 
     def fake_input(prompt):

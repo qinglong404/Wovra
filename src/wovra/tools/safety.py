@@ -187,6 +187,34 @@ _ROOT_TARGET_COMMANDS = frozenset({
     "top", "ps", "kill", "tee", "dd", "mount", "umount", "open", "xdg-open",
 })
 
+# cmd 多字母开关（Windows 工具常用；单字母开关见 _is_cmd_option 的规则）。
+# 白名单而非黑名单：只有**确认是开关**的名字才跳过，真实路径（/etc、
+# /tmp、/usr…长度≥3 且不在表内）照旧受检。
+_CMD_OPTION_WORDS = frozenset({
+    "nobreak", "recurse", "pid", "im", "ad", "aa", "ar", "ah", "fs",
+    "wait", "interactive", "force", "quiet", "verbose", "dry-run",
+    "exclude", "include", "user", "system", "help", "version", "list",
+})
+
+
+def _is_cmd_option(token: str) -> bool:
+    """`/x` 形态的 token 是否是**命令开关**而不是路径。
+
+    2026-09-11 实测（worklog-20260911.md §9）：cmd 世界大量使用 `/s`
+    `/b` `/t` `/nobreak` `/r` `/d` 这类开关，守卫把它们当成"界外绝对
+    路径"——`dir /s /b x`、`timeout /t 25` 这类**完全合法的 Windows
+    命令被反复弹授权询问**，用户随手答 Y 之后 `/s`、`/b`、`/t`、`D:\\d`
+    这些碎片进了授权清单（其中 `D:\\` 一条即让整块 D 盘放行）。
+
+    判据（保守）：单字母 `/X`（几乎所有单字母开关都在用，而单字母根
+    目录极罕见）或已知多字母开关名。其余（`/etc`、`/tmp`、`/usr/bin`）
+    照旧按路径处理。
+    """
+    if not token.startswith("/") or token == "/":
+        return False
+    body = token[1:].split("/")[0]
+    return len(body) == 1 or body.lower() in _CMD_OPTION_WORDS
+
 
 def _has_root_slash_target(masked: str) -> bool:
     """孤立 `/` 是否指向根目录：前面必须是命令词、选项或赋值。
@@ -299,6 +327,8 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
         token = raw.rstrip(",;")
         if not token or token == "/":
             continue
+        if _is_cmd_option(token):
+            continue  # `/s`、`/b`、`/t`、`/nobreak` 是命令开关，不是路径
         if token.startswith(root):          # 工作区内的绝对路径：放行
             continue
         if any(token == p or token.startswith(p + "/")
@@ -551,6 +581,9 @@ def _confirm_reason(command: str) -> str | None:
 
 NONINTERACTIVE_ENV = "WOVRA_NONINTERACTIVE"
 
+# 最近一次授权请求的驳回说明（根目录等不可授权目标），由调用方取用
+_auth_reject_note = ""
+
 
 def _noninteractive() -> bool:
     """当前进程是否按**非交互**处理：显式标记优先，其次 stdin.isatty()。
@@ -601,6 +634,42 @@ def _authorized_store() -> Path:
     return PROJECT_ROOT / ".wovra" / "authorized-paths.json"
 
 
+def _is_fs_root(path: Path) -> bool:
+    """文件系统根 / 盘根（`D:\\`、`/`）——授权它等于放行**整块盘**。
+
+    实测（worklog-20260911.md §9）：清单里出现过一条 `D:\\`，此后
+    `is_authorized("D:/任何东西")` 全返回 True——工作区边界实质失效。
+    根目录因此永不可授权。
+    """
+    try:
+        return path.parent == path
+    except (OSError, ValueError):
+        return False
+
+
+def _normalize_auth_targets(targets: list[str]) -> tuple[list[str], list[str]]:
+    """授权目标规范化：一律解析为绝对路径，并剔除过于宽泛的根目录。
+
+    返回 (可用目标, 被驳回目标)。被驳回的进不了清单——`/t`、`/b` 这类
+    开关碎片与 `D:\\` 这类盘根都在此拦下。
+    """
+    valid: list[str] = []
+    rejected: list[str] = []
+    for raw in targets:
+        try:
+            resolved = Path(str(raw)).resolve()
+        except (OSError, ValueError):
+            rejected.append(str(raw))
+            continue
+        if _is_fs_root(resolved):
+            rejected.append(str(resolved))
+            continue
+        text = str(resolved)
+        if text not in valid:
+            valid.append(text)
+    return valid, rejected
+
+
 def _load_authorized() -> list[str]:
     store = _authorized_store()
     try:
@@ -618,22 +687,41 @@ def _save_authorized(paths: list[str]) -> None:
 
 
 def is_authorized(target: str) -> bool:
-    """target（绝对路径）是否已被授权：自身精确匹配或位于某授权目录下。"""
+    """target（绝对路径）是否已被授权：自身精确匹配或位于某授权目录下。
+
+    防御性过滤（§9 教训）：清单里的**根目录条目一律不作数**——手工编辑、
+    历史遗留或旧版本写入的 `D:\\` 不能让整块盘放行。边界不能因为一条
+    脏条目就失效。
+    """
     t = Path(target).resolve()
     for p in _load_authorized():
-        ap = Path(p)
+        try:
+            ap = Path(str(p)).resolve()
+        except (OSError, ValueError):
+            continue
+        if _is_fs_root(ap):
+            continue
         if t == ap or t.is_relative_to(ap):
             return True
     return False
 
 
 def add_authorization(target: str) -> None:
-    """把目标绝对路径写入授权清单（幂等，重复授权不产生重复条目）。"""
+    """把目标绝对路径写入授权清单（幂等；规范化后写入，根目录拒绝）。"""
+    valid, rejected = _normalize_auth_targets([target])
+    if rejected or not valid:
+        _audit(f"[授权] 拒绝写入过于宽泛/非法的目标: {rejected or target}")
+        return
     paths = _load_authorized()
-    if target not in paths:
-        paths.append(target)
+    if valid[0] not in paths:
+        paths.append(valid[0])
         _save_authorized(paths)
-    _audit(f"[授权] {target}")
+    _audit(f"[授权] {valid[0]}")
+
+
+def auth_rejection_note() -> str:
+    """最近一次授权请求的驳回说明（供调用方拼进拒绝文本，空串表示无）。"""
+    return _auth_reject_note
 
 
 def _request_path_authorization(targets: list[str], tool: str) -> bool:
@@ -642,8 +730,22 @@ def _request_path_authorization(targets: list[str], tool: str) -> bool:
     交互环境 y/N（默认拒绝）；非交互环境**安全拒绝**——越界不是普通
     敏感操作（_ask_yes_no 对脚本自动放行是怕阻塞实验），授权自动放行
     等于静默打开工作区边界。授权成功 → 写入持久化清单并返回 True。
+
+    目标先规范化（`_normalize_auth_targets`）：根目录/盘根直接驳回且
+    **不询问**（问了也只能答"不"，那是全盘放行），驳回理由经
+    `auth_rejection_note()` 交给调用方展示。
     """
-    new = [t for t in targets if not is_authorized(t)]
+    global _auth_reject_note
+    _auth_reject_note = ""
+    valid, rejected = _normalize_auth_targets(targets)
+    if rejected:
+        _audit(f"[授权] 驳回过于宽泛的目标: {rejected}")
+        _auth_reject_note = (
+            "该目标过于宽泛（文件系统根/盘根），不能作为授权对象："
+            + "、".join(rejected)
+        )
+        return False
+    new = [t for t in valid if not is_authorized(t)]
     if not new:
         return True
     if _noninteractive():

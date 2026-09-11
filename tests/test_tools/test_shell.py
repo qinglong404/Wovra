@@ -101,6 +101,8 @@ def test_run_command_confirm_rejected_by_user(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    # 交互模拟要自足：环境里的非交互标记优先于 isatty（实测教训）
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
     monkeypatch.setattr(builtins, "input", lambda prompt: "n")
 
     result = run_command("git commit -m 'x'")
@@ -117,6 +119,7 @@ def test_run_command_confirm_allowed_by_user(monkeypatch, tmp_path):
 
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
     monkeypatch.setattr(builtins, "input", lambda prompt: "y")
 
     result = run_command("git commit -m 'x'")
@@ -134,6 +137,7 @@ def test_confirm_ctrl_c_interrupts_instead_of_refusing(monkeypatch):
     from wovra import tools as tools_module
 
     monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.delenv(tools_module.safety.NONINTERACTIVE_ENV, raising=False)
 
     def fake_input(prompt):
         raise KeyboardInterrupt
