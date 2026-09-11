@@ -355,12 +355,30 @@ class Task:
         """从磁盘加载任务。task.json 是唯一的事实来源（source of truth）。
 
         会话绑定的工作区随加载恢复：无论从哪个目录启动 wovra，
-        该会话的文件世界都回到它创建时的位置。"""
+        该会话的文件世界都回到它创建时的位置。
+
+        加载期自愈（2026-09-11）：历史会话落盘的 `blocks` 可能是旧的 v1
+        粗分块（`close_round` 曾落 v1，而整理/视图/展开一律按 v3 取块；
+        两者编号空间相同而切法不同，任何按 ID 查表处都会静默错位）。加载
+        时按事件流重算为 v3 并落盘——迁移是**确定性、幂等**的（同一份事件
+        流重算结果恒定），故可无风险随加载进行；活跃会话也因此不必手动
+        迁移（旧进程会用内存里的旧数据覆盖回去，只有重启后的新进程能治）。
+        """
         from . import tools as tools_module
+        from .blocks import migrate as migrate_module
 
         path = TASKS_ROOT / task_id / "task.json"
         data = json.loads(path.read_text(encoding="utf-8"))
         task = cls(**data)
+        changed, report = migrate_module.migrate_rounds(task.rounds)
+        if changed:
+            seqs = "、".join(f"R{seq}" for seq, _b, _a in report[:12])
+            task.record(
+                "maintenance",
+                f"历史块结构迁移：{changed} 轮由 v1 粗分块重算为 v3 按文件聚合"
+                f"（{seqs}{'…' if changed > 12 else ''}）",
+            )
+            task.save()
         if task.workspace:
             workspace = Path(task.workspace)
             if workspace.is_dir():

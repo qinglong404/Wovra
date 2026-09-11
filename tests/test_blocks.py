@@ -589,3 +589,110 @@ def test_symlink_security_messages_classify_correctly():
     assert segments["link_escape.md"].get("fail_tags") == ["越界"]
     assert "fail_tags" not in segments["dangling.txt"], "删悬空链接是成功，不该被标幽灵"
     assert label_line(segments["dangling.txt"], {}, "live").startswith("【dangling.txt(live)】")
+
+
+# ---- 历史数据迁移：v1 落盘块 → v3（2026-09-11 收尾） ------------------------
+
+
+def _legacy_v1_round(seq: int) -> dict:
+    """复刻历史会话里落盘的样子：blocks 是 v1（kind=work，无 events 键）。"""
+    r = _round(seq, [
+        _event(seq, 1, "user", content="读两个文件"),
+        _event(seq, 2, "tool_call", tool="read_file", args={"path": "a.py"}),
+        _event(seq, 3, "tool_result", content="a.py 内容"),
+        _event(seq, 4, "tool_call", tool="read_file", args={"path": "b.py"}),
+        _event(seq, 5, "tool_result", content="b.py 内容"),
+        _event(seq, 6, "final_answer", content="读完"),
+    ])
+    # v1 纯读轮：整轮一块（kind=work），带旧字段
+    r["blocks"] = [{
+        "id": f"R{seq}-B1", "kind": "work", "start": 0, "end": 5,
+        "start_event": f"R{seq}-E01", "end_event": f"R{seq}-E06",
+        "touched_files": ["a.py", "b.py"], "wrote_files": [],
+        "command_types": [],
+    }]
+    return r
+
+
+def test_migrate_rounds_v1_to_v3():
+    """历史收尾：落盘的 v1 粗分块迁移为 v3（按文件聚合）。
+
+    根因（§11.9/§12.2）：v1 与 v3 编号空间相同（R{n}-B{k}）而切法不同——
+    实测全会话 45 个同 ID 块的覆盖区间零一致。落盘口径已统一到 v3，但
+    历史数据仍是 v1；留着就是地雷（任何直读 r["blocks"] 的代码都会错位）。
+    """
+    r = _legacy_v1_round(1)
+    assert blocks.needs_migration(r) is True          # v1 → 需迁移
+    assert not all(blocks.is_v3(b) for b in r["blocks"])
+
+    changed, report = blocks.migrate_rounds([r])
+
+    assert changed == 1
+    assert report == [(1, "work", "file")]            # work(整轮一块) → file(两文件两块)
+    assert all(blocks.is_v3(b) for b in r["blocks"])
+    assert [b["id"] for b in r["blocks"]] == ["R1-B1", "R1-B2"]
+    assert [b["file"] for b in r["blocks"]] == ["a.py", "b.py"]
+
+
+def test_migrate_matches_summaries_keys():
+    """迁移后的块号必须与 block_summaries 的键**严丝合缝**——那些描述本就
+    是当初用 v3 生成的，迁移只是把落盘块对齐同一口径（v1 是残留）。"""
+    from wovra.blocks import segment_round_by_file
+
+    r = _legacy_v1_round(1)
+    v3_ids = [b["id"] for b in segment_round_by_file(r)]
+    r["block_summaries"] = {bid: f"{bid} 的描述" for bid in v3_ids}
+
+    blocks.migrate_round(r)
+
+    assert set(r["block_summaries"]) == {b["id"] for b in r["blocks"]}
+
+
+def test_migrate_is_idempotent_and_leaves_v3_alone():
+    """幂等：已是 v3 的轮不再改动（迁移可反复跑）。"""
+    r = _legacy_v1_round(1)
+    blocks.migrate_round(r)
+    snapshot = json.dumps(r["blocks"], ensure_ascii=False, sort_keys=True)
+
+    changed, report = blocks.migrate_rounds([r])
+
+    assert changed == 0 and report == []
+    assert json.dumps(r["blocks"], ensure_ascii=False, sort_keys=True) == snapshot
+
+
+def test_migrate_clears_stale_ghost_tags():
+    """迁移顺带清历史误标：v1 块里存的旧 fail_tags（全文子串判定的产物）
+    在重算 v3 时按新口径（只看首行）重新生成——读成功的文件不再标幽灵。"""
+    r = _round(1, [
+        _event(1, 1, "user", content="读源码"),
+        _event(1, 2, "tool_call", tool="read_file", args={"path": "files.py"}),
+        _event(1, 3, "tool_result",
+               content="files.py（共 704 行，以下为第 1-200 行）\n"
+                       '    return f"文件不存在: {path}（解析为 {target}）。"'),
+        _event(1, 4, "final_answer", content="读完"),
+    ])
+    r["blocks"] = [{                                  # 旧判定留下的误标
+        "id": "R1-B1", "kind": "work", "start": 0, "end": 3,
+        "start_event": "R1-E01", "end_event": "R1-E04",
+        "touched_files": ["files.py"], "wrote_files": [],
+        "command_types": [], "fail_tags": ["幽灵"],
+    }]
+
+    blocks.migrate_round(r)
+
+    blk = [b for b in r["blocks"] if b.get("file") == "files.py"][0]
+    assert "fail_tags" not in blk, "正文含字面量的读成功不该保留幽灵标签"
+
+
+def test_migrate_does_not_touch_events_or_summaries():
+    """迁移只改 rounds[*]["blocks"]——事件、摘要、用户输入一律不动。"""
+    r = _legacy_v1_round(1)
+    r["block_summaries"] = {"R1-B1": "原有描述"}
+    r["user_input"]["normalized"] = "原意图"
+    events_before = json.dumps(r["events"], ensure_ascii=False, sort_keys=True)
+
+    blocks.migrate_round(r)
+
+    assert json.dumps(r["events"], ensure_ascii=False, sort_keys=True) == events_before
+    assert r["block_summaries"] == {"R1-B1": "原有描述"}
+    assert r["user_input"]["normalized"] == "原意图"

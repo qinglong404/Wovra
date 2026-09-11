@@ -40,6 +40,12 @@ from .segment import (  # noqa: F401
     segment_round_by_file,
 )
 from .segment import _ESCAPE_MARKERS, _NOT_FOUND_MARKERS, _VERIFY_TAGS, _block_kind, _fblock, _finalize, _finalize_fblock, _new_block, _op_failure  # noqa: F401
+from .migrate import (  # noqa: F401
+    is_v3,
+    migrate_round,
+    migrate_rounds,
+    needs_migration,
+)
 from .labels import (  # noqa: F401
     block_end_state,
     label_line,

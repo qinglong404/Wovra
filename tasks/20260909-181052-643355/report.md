@@ -3,7 +3,12 @@
 - **目标**：
 - **状态**：in_progress
 - **创建时间**：2026-09-09T18:10:52
-- **更新时间**：2026-09-10T14:03:45
+- **更新时间**：2026-09-11T21:22:54
+
+## 当前阶段（大步 / 小步）
+
+-（无开启中的大步）
+- 已验收 1 个大步（最近：测试工具层完整功能）
 
 ## 当前进展（AI 维护）
 
@@ -625,5 +630,6 @@ _尚无进展摘要。_
 - `2026-09-10T13:40:43` **llm_call**：[organization] prompt=86,881 cached=0 miss=86,881 completion=4,096 ttft=12.5s dur=79.1s finish=length
 - `2026-09-10T13:41:24` **llm_call**：[organization] prompt=86,993 cached=0 miss=86,993 completion=4,096 ttft=7.0s dur=40.9s finish=length
 - `2026-09-10T14:03:45` **llm_call**：[organization] prompt=87,078 cached=0 miss=87,078 completion=35,035 ttft=10.8s dur=305.5s finish=tool_calls
+- `2026-09-11T21:22:54` **maintenance**：历史块结构迁移：35 轮由 v1 粗分块重算为 v3 按文件聚合（R1、R2、R3、R4、R5、R6、R7、R8、R9、R10、R11、R12…）
 
 > 各事件为单行摘要；未截断的工具返回原文见同目录 task.json。

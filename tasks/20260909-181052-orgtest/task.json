@@ -4210,6 +4210,11 @@
       "time": "2026-09-10T20:12:24",
       "kind": "maintenance",
       "detail": "split：2 块未被域认领，已自动归主 agent ['R1-2-B1', 'R3-B1']"
+    },
+    {
+      "time": "2026-09-11T21:22:54",
+      "kind": "maintenance",
+      "detail": "历史块结构迁移：35 轮由 v1 粗分块重算为 v3 按文件聚合（R1、R2、R3、R4、R5、R6、R7、R8、R9、R10、R11、R12…）"
     }
   ],
   "rounds": [
@@ -4250,14 +4255,15 @@
       "blocks": [
         {
           "id": "R1-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R1-E01",
           "end_event": "R1-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R1-E01",
+            "R1-E02"
+          ]
         }
       ],
       "domains": [
@@ -4614,14 +4620,15 @@
       "blocks": [
         {
           "id": "R2-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R2-E01",
           "end_event": "R2-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R2-E01",
+            "R2-E02"
+          ]
         }
       ],
       "pending_org": {
@@ -4722,14 +4729,18 @@
       "blocks": [
         {
           "id": "R3-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 4,
           "start_event": "R3-E01",
           "end_event": "R3-E05",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R3-E01",
+            "R3-E02",
+            "R3-E03",
+            "R3-E04",
+            "R3-E05"
+          ]
         }
       ],
       "pending_org": {
@@ -5215,43 +5226,69 @@
       "blocks": [
         {
           "id": "R4-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 0,
-          "start_event": "R4-E01",
-          "end_event": "R4-E01",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
-        },
-        {
-          "id": "R4-B2",
           "kind": "environment",
           "start": 1,
-          "end": 4,
+          "end": 10,
           "start_event": "R4-E02",
-          "end_event": "R4-E05",
-          "touched_files": [],
-          "wrote_files": [],
+          "end_event": "R4-E11",
+          "events": [
+            "R4-E02",
+            "R4-E02",
+            "R4-E03",
+            "R4-E04",
+            "R4-E05",
+            "R4-E06",
+            "R4-E07",
+            "R4-E08",
+            "R4-E09",
+            "R4-E10",
+            "R4-E11"
+          ],
           "command_types": [
-            "file",
-            "environment"
+            "environment",
+            "file"
           ]
         },
         {
-          "id": "R4-B3",
-          "kind": "work",
-          "start": 5,
+          "id": "R4-B2",
+          "kind": "file",
+          "start": 9,
           "end": 25,
-          "start_event": "R4-E06",
+          "start_event": "R4-E10",
           "end_event": "R4-E26",
-          "touched_files": [
-            "/home/lkf/bc/python/Wovra/src/wovra/agent.py"
+          "events": [
+            "R4-E10",
+            "R4-E12",
+            "R4-E13",
+            "R4-E14",
+            "R4-E15",
+            "R4-E16",
+            "R4-E17",
+            "R4-E18",
+            "R4-E19",
+            "R4-E20",
+            "R4-E21",
+            "R4-E22",
+            "R4-E23",
+            "R4-E24",
+            "R4-E25",
+            "R4-E26"
           ],
-          "wrote_files": [],
+          "file": "/home/lkf/bc/python/Wovra/src/wovra/agent.py",
+          "ops": [
+            {
+              "e": "R4-E10",
+              "op": "read",
+              "c": "call_bkdr3my9xmckpega2c5nc7fm"
+            }
+          ],
+          "fail_tags": [
+            "越界"
+          ],
+          "has_tools": true,
           "command_types": [
-            "file",
             "test",
+            "file",
             "run"
           ]
         }
@@ -5302,14 +5339,15 @@
       "blocks": [
         {
           "id": "R5-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R5-E01",
           "end_event": "R5-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R5-E01",
+            "R5-E02"
+          ]
         }
       ],
       "pending_org": {
@@ -5710,15 +5748,34 @@
       "blocks": [
         {
           "id": "R6-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 21,
           "start_event": "R6-E01",
           "end_event": "R6-E22",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "file"
+          "events": [
+            "R6-E01",
+            "R6-E02",
+            "R6-E03",
+            "R6-E04",
+            "R6-E05",
+            "R6-E06",
+            "R6-E07",
+            "R6-E08",
+            "R6-E09",
+            "R6-E10",
+            "R6-E11",
+            "R6-E12",
+            "R6-E13",
+            "R6-E14",
+            "R6-E15",
+            "R6-E16",
+            "R6-E17",
+            "R6-E18",
+            "R6-E19",
+            "R6-E20",
+            "R6-E21",
+            "R6-E22"
           ]
         }
       ],
@@ -7049,21 +7106,31 @@
       "blocks": [
         {
           "id": "R7-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 11,
-          "start_event": "R7-E01",
-          "end_event": "R7-E12",
-          "touched_files": [
-            "nope.txt",
-            "t1_hello.txt",
-            "t2_empty.txt",
-            "t3_unicode.txt"
+          "kind": "file",
+          "start": 1,
+          "end": 7,
+          "start_event": "R7-E02",
+          "end_event": "R7-E08",
+          "events": [
+            "R7-E02",
+            "R7-E02",
+            "R7-E03",
+            "R7-E04",
+            "R7-E05",
+            "R7-E06",
+            "R7-E07",
+            "R7-E08"
           ],
-          "wrote_files": [
-            "t1_hello.txt",
-            "t2_empty.txt",
-            "t3_unicode.txt"
+          "file": "nope.txt",
+          "ops": [
+            {
+              "e": "R7-E02",
+              "op": "read",
+              "c": "call_mzdm6qy12irsitdev9oinu9r"
+            }
+          ],
+          "fail_tags": [
+            "幽灵"
           ],
           "command_types": [
             "file"
@@ -7071,44 +7138,373 @@
         },
         {
           "id": "R7-B2",
-          "kind": "work",
-          "start": 12,
-          "end": 29,
-          "start_event": "R7-E13",
-          "end_event": "R7-E30",
-          "touched_files": [
-            "t1_hello.txt",
-            "t2_empty.txt",
-            "t3_unicode.txt",
-            "sub/readme.txt",
-            "a/b/c/nested.txt",
-            "sp ace.txt"
+          "kind": "file",
+          "start": 8,
+          "end": 59,
+          "start_event": "R7-E09",
+          "end_event": "R7-E60",
+          "events": [
+            "R7-E09",
+            "R7-E10",
+            "R7-E13",
+            "R7-E14",
+            "R7-E15",
+            "R7-E16",
+            "R7-E17",
+            "R7-E59",
+            "R7-E60"
           ],
-          "wrote_files": [
-            "sub/readme.txt",
-            "a/b/c/nested.txt",
-            "sp ace.txt"
-          ],
-          "command_types": []
+          "file": "t1_hello.txt",
+          "ops": [
+            {
+              "e": "R7-E09",
+              "op": "write",
+              "c": "call_d7gx29hnrwolhh7a6nqnld5c"
+            },
+            {
+              "e": "R7-E13",
+              "op": "read",
+              "c": "call_62d4u7e79hu11jv81lgvolkv"
+            },
+            {
+              "e": "R7-E13",
+              "op": "read",
+              "c": "call_9g5kecnp9i6xdentdx7vy6pj"
+            },
+            {
+              "e": "R7-E13",
+              "op": "read",
+              "c": "call_br9qv0n8puzwia7r8fmn2t2u"
+            },
+            {
+              "e": "R7-E13",
+              "op": "read",
+              "c": "call_foeptq86detdm58c0q0kh0ff"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_d7plefghj21zjodd3yohwh51"
+            }
+          ]
         },
         {
           "id": "R7-B3",
-          "kind": "work",
-          "start": 30,
-          "end": 70,
-          "start_event": "R7-E31",
-          "end_event": "R7-E71",
-          "touched_files": [
-            "sub/readme.txt",
-            "a/b/c/nested.txt",
-            "sp ace.txt",
-            "../t1_hello.txt",
-            "/etc/hostname",
-            "sub/../t1_hello.txt",
-            "./t1_hello.txt",
-            "link_escape.md"
+          "kind": "file",
+          "start": 8,
+          "end": 60,
+          "start_event": "R7-E09",
+          "end_event": "R7-E61",
+          "events": [
+            "R7-E09",
+            "R7-E11",
+            "R7-E13",
+            "R7-E18",
+            "R7-E59",
+            "R7-E61"
           ],
-          "wrote_files": [],
+          "file": "t2_empty.txt",
+          "ops": [
+            {
+              "e": "R7-E09",
+              "op": "write",
+              "c": "call_0uqn5tb1a1y93ze7rwpiraxm"
+            },
+            {
+              "e": "R7-E13",
+              "op": "read",
+              "c": "call_reb56hpa7jv6yov2s6ieq6q5"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_o7w97mj55b0hlm7st3qf16f8"
+            }
+          ]
+        },
+        {
+          "id": "R7-B4",
+          "kind": "file",
+          "start": 8,
+          "end": 61,
+          "start_event": "R7-E09",
+          "end_event": "R7-E62",
+          "events": [
+            "R7-E09",
+            "R7-E12",
+            "R7-E13",
+            "R7-E19",
+            "R7-E20",
+            "R7-E21",
+            "R7-E22",
+            "R7-E23",
+            "R7-E24",
+            "R7-E25",
+            "R7-E26",
+            "R7-E59",
+            "R7-E62"
+          ],
+          "file": "t3_unicode.txt",
+          "ops": [
+            {
+              "e": "R7-E09",
+              "op": "write",
+              "c": "call_0y4y6sdf3atjognpvz0dwm08"
+            },
+            {
+              "e": "R7-E13",
+              "op": "read",
+              "c": "call_p7vl6cqg4qopz8zu10ys7y0g"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_dgv1nfvzguz6gmdjeknyf72y"
+            }
+          ]
+        },
+        {
+          "id": "R7-B5",
+          "kind": "file",
+          "start": 26,
+          "end": 62,
+          "start_event": "R7-E27",
+          "end_event": "R7-E63",
+          "events": [
+            "R7-E27",
+            "R7-E28",
+            "R7-E31",
+            "R7-E33",
+            "R7-E59",
+            "R7-E63"
+          ],
+          "file": "sub/readme.txt",
+          "ops": [
+            {
+              "e": "R7-E27",
+              "op": "write",
+              "c": "call_pco27cn260smfw0svztpxmj8"
+            },
+            {
+              "e": "R7-E31",
+              "op": "read",
+              "c": "call_kyae8i58glpci148ybsrtxav"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_0fet0cglnn7f535rfw844a44"
+            }
+          ]
+        },
+        {
+          "id": "R7-B6",
+          "kind": "file",
+          "start": 26,
+          "end": 63,
+          "start_event": "R7-E27",
+          "end_event": "R7-E64",
+          "events": [
+            "R7-E27",
+            "R7-E29",
+            "R7-E31",
+            "R7-E34",
+            "R7-E59",
+            "R7-E64"
+          ],
+          "file": "a/b/c/nested.txt",
+          "ops": [
+            {
+              "e": "R7-E27",
+              "op": "write",
+              "c": "call_eqxllq707xu473z3rr7oac3d"
+            },
+            {
+              "e": "R7-E31",
+              "op": "read",
+              "c": "call_xh6pxjsg79hil58k1yiapt4h"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_33gn0lvj1yx08j1waynoibk1"
+            }
+          ]
+        },
+        {
+          "id": "R7-B7",
+          "kind": "file",
+          "start": 26,
+          "end": 64,
+          "start_event": "R7-E27",
+          "end_event": "R7-E65",
+          "events": [
+            "R7-E27",
+            "R7-E30",
+            "R7-E31",
+            "R7-E32",
+            "R7-E35",
+            "R7-E36",
+            "R7-E37",
+            "R7-E59",
+            "R7-E65"
+          ],
+          "file": "sp ace.txt",
+          "ops": [
+            {
+              "e": "R7-E27",
+              "op": "write",
+              "c": "call_vc4zilx2qk8nqsszfysqgacc"
+            },
+            {
+              "e": "R7-E31",
+              "op": "read",
+              "c": "call_2cghvcumwkr595xd097nvy75"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_wxd4dp0mzqezmj6kivt3it6s"
+            }
+          ]
+        },
+        {
+          "id": "R7-B8",
+          "kind": "file",
+          "start": 37,
+          "end": 38,
+          "start_event": "R7-E38",
+          "end_event": "R7-E39",
+          "events": [
+            "R7-E38",
+            "R7-E39"
+          ],
+          "file": "../t1_hello.txt",
+          "ops": [
+            {
+              "e": "R7-E38",
+              "op": "read",
+              "c": "call_cffl7wvzhim1ex7f20zojykh"
+            }
+          ],
+          "fail_tags": [
+            "越界"
+          ]
+        },
+        {
+          "id": "R7-B9",
+          "kind": "file",
+          "start": 37,
+          "end": 39,
+          "start_event": "R7-E38",
+          "end_event": "R7-E40",
+          "events": [
+            "R7-E38",
+            "R7-E40"
+          ],
+          "file": "/etc/hostname",
+          "ops": [
+            {
+              "e": "R7-E38",
+              "op": "read",
+              "c": "call_jqe854f30os638r6n7v8t9xy"
+            }
+          ],
+          "fail_tags": [
+            "越界"
+          ]
+        },
+        {
+          "id": "R7-B10",
+          "kind": "file",
+          "start": 37,
+          "end": 45,
+          "start_event": "R7-E38",
+          "end_event": "R7-E46",
+          "events": [
+            "R7-E38",
+            "R7-E41",
+            "R7-E42",
+            "R7-E43",
+            "R7-E44",
+            "R7-E45",
+            "R7-E46"
+          ],
+          "file": "sub/../t1_hello.txt",
+          "ops": [
+            {
+              "e": "R7-E38",
+              "op": "read",
+              "c": "call_ns3msmzppwbta2gon7kqknu2"
+            }
+          ],
+          "command_types": [
+            "file"
+          ]
+        },
+        {
+          "id": "R7-B11",
+          "kind": "file",
+          "start": 44,
+          "end": 48,
+          "start_event": "R7-E45",
+          "end_event": "R7-E49",
+          "events": [
+            "R7-E45",
+            "R7-E47",
+            "R7-E48",
+            "R7-E49"
+          ],
+          "file": "./t1_hello.txt",
+          "ops": [
+            {
+              "e": "R7-E45",
+              "op": "read",
+              "c": "call_pfcqurisliqftvvpcaxpkfkh"
+            }
+          ]
+        },
+        {
+          "id": "R7-B12",
+          "kind": "file",
+          "start": 49,
+          "end": 70,
+          "start_event": "R7-E50",
+          "end_event": "R7-E71",
+          "events": [
+            "R7-E50",
+            "R7-E51",
+            "R7-E52",
+            "R7-E53",
+            "R7-E54",
+            "R7-E55",
+            "R7-E56",
+            "R7-E57",
+            "R7-E58",
+            "R7-E59",
+            "R7-E66",
+            "R7-E67",
+            "R7-E68",
+            "R7-E69",
+            "R7-E70",
+            "R7-E71"
+          ],
+          "file": "link_escape.md",
+          "ops": [
+            {
+              "e": "R7-E50",
+              "op": "read",
+              "c": "call_lg2u236fjguj2wcme2q117x6"
+            },
+            {
+              "e": "R7-E59",
+              "op": "delete",
+              "c": "call_j6vh4efmwwvwy37mfwhggskk"
+            }
+          ],
+          "fail_tags": [
+            "越界"
+          ],
           "command_types": [
             "file"
           ]
@@ -8779,16 +9175,25 @@
       "blocks": [
         {
           "id": "R8-B1",
-          "kind": "work",
-          "start": 0,
+          "kind": "file",
+          "start": 1,
           "end": 5,
-          "start_event": "R8-E01",
+          "start_event": "R8-E02",
           "end_event": "R8-E06",
-          "touched_files": [
-            "testlab/target.txt"
+          "events": [
+            "R8-E02",
+            "R8-E03",
+            "R8-E04",
+            "R8-E05",
+            "R8-E06"
           ],
-          "wrote_files": [
-            "testlab/target.txt"
+          "file": "testlab/target.txt",
+          "ops": [
+            {
+              "e": "R8-E02",
+              "op": "write",
+              "c": "call_o1uj6bk3g8y5ugldgkbe6i93"
+            }
           ],
           "command_types": [
             "other"
@@ -8796,69 +9201,254 @@
         },
         {
           "id": "R8-B2",
-          "kind": "work",
+          "kind": "file",
           "start": 6,
-          "end": 8,
+          "end": 23,
           "start_event": "R8-E07",
-          "end_event": "R8-E09",
-          "touched_files": [
-            "testlab/editme.txt",
-            "testlab/replaceline.txt"
+          "end_event": "R8-E24",
+          "events": [
+            "R8-E07",
+            "R8-E08",
+            "R8-E10",
+            "R8-E11",
+            "R8-E12",
+            "R8-E15",
+            "R8-E19",
+            "R8-E20",
+            "R8-E21",
+            "R8-E22",
+            "R8-E23",
+            "R8-E24"
           ],
-          "wrote_files": [
-            "testlab/editme.txt",
-            "testlab/replaceline.txt"
+          "file": "testlab/editme.txt",
+          "ops": [
+            {
+              "e": "R8-E07",
+              "op": "write",
+              "c": "call_xseq68amfen53103v50sby76"
+            },
+            {
+              "e": "R8-E10",
+              "op": "edit",
+              "c": "call_h8tngrd5saubh6citomb69wk"
+            },
+            {
+              "e": "R8-E10",
+              "op": "edit",
+              "c": "call_b6cbf824ph3o25hh07ynhu2h"
+            },
+            {
+              "e": "R8-E15",
+              "op": "read",
+              "c": "call_hingkanaso8ed4bm6o99bgpk"
+            }
           ],
-          "command_types": []
+          "command_types": [
+            "file"
+          ]
         },
         {
           "id": "R8-B3",
-          "kind": "work",
-          "start": 9,
-          "end": 13,
-          "start_event": "R8-E10",
-          "end_event": "R8-E14",
-          "touched_files": [
-            "testlab/editme.txt"
+          "kind": "file",
+          "start": 6,
+          "end": 88,
+          "start_event": "R8-E07",
+          "end_event": "R8-E89",
+          "events": [
+            "R8-E07",
+            "R8-E09",
+            "R8-E10",
+            "R8-E13",
+            "R8-E14",
+            "R8-E15",
+            "R8-E16",
+            "R8-E17",
+            "R8-E18",
+            "R8-E83",
+            "R8-E87",
+            "R8-E88",
+            "R8-E89"
           ],
-          "wrote_files": [
-            "testlab/editme.txt"
+          "file": "testlab/replaceline.txt",
+          "ops": [
+            {
+              "e": "R8-E07",
+              "op": "write",
+              "c": "call_v2txrgii5b2f71y9l4g9hrc7"
+            },
+            {
+              "e": "R8-E10",
+              "op": "edit",
+              "c": "call_yjncud1jfo0hbg5mz5ml0mir"
+            },
+            {
+              "e": "R8-E10",
+              "op": "edit",
+              "c": "call_7t6mnxdme8egy7oqkmtii2m9"
+            },
+            {
+              "e": "R8-E15",
+              "op": "edit",
+              "c": "call_m857dsvbkkfzfzlzv8yolc4n"
+            },
+            {
+              "e": "R8-E15",
+              "op": "edit",
+              "c": "call_jdxrtrncpyuz7mbdrfy5qzl2"
+            },
+            {
+              "e": "R8-E15",
+              "op": "read",
+              "c": "call_x1egxz0q3vhvhursf9s40alh"
+            },
+            {
+              "e": "R8-E83",
+              "op": "delete",
+              "c": "call_2gu0saw1xzb89x1rkwnii00j"
+            }
           ],
-          "command_types": []
+          "command_types": [
+            "file"
+          ]
         },
         {
           "id": "R8-B4",
-          "kind": "work",
-          "start": 14,
-          "end": 86,
-          "start_event": "R8-E15",
-          "end_event": "R8-E87",
-          "touched_files": [
-            "testlab/replaceline.txt",
-            "testlab/editme.txt",
-            "tool-layer-audit-20260909.md"
+          "kind": "file",
+          "start": 24,
+          "end": 84,
+          "start_event": "R8-E25",
+          "end_event": "R8-E85",
+          "events": [
+            "R8-E25",
+            "R8-E26",
+            "R8-E83",
+            "R8-E85"
           ],
-          "wrote_files": [
-            "tool-layer-audit-20260909.md"
-          ],
-          "command_types": [
-            "file",
-            "other"
+          "file": "testlab/overwrite.txt",
+          "ops": [
+            {
+              "e": "R8-E25",
+              "op": "delete",
+              "c": "call_2vantl3s4tikl58bhlctu92e"
+            },
+            {
+              "e": "R8-E83",
+              "op": "delete",
+              "c": "call_qppy8uva923b4tf80xjwlyju"
+            }
           ]
         },
         {
           "id": "R8-B5",
-          "kind": "work",
-          "start": 87,
-          "end": 90,
-          "start_event": "R8-E88",
-          "end_event": "R8-E91",
-          "touched_files": [
-            "tool-layer-audit-20260909.md"
+          "kind": "file",
+          "start": 24,
+          "end": 85,
+          "start_event": "R8-E25",
+          "end_event": "R8-E86",
+          "events": [
+            "R8-E25",
+            "R8-E27",
+            "R8-E28",
+            "R8-E29",
+            "R8-E30",
+            "R8-E31",
+            "R8-E32",
+            "R8-E33",
+            "R8-E34",
+            "R8-E35",
+            "R8-E36",
+            "R8-E37",
+            "R8-E38",
+            "R8-E39",
+            "R8-E40",
+            "R8-E41",
+            "R8-E42",
+            "R8-E43",
+            "R8-E44",
+            "R8-E45",
+            "R8-E46",
+            "R8-E47",
+            "R8-E48",
+            "R8-E49",
+            "R8-E50",
+            "R8-E51",
+            "R8-E52",
+            "R8-E53",
+            "R8-E54",
+            "R8-E55",
+            "R8-E56",
+            "R8-E57",
+            "R8-E58",
+            "R8-E59",
+            "R8-E60",
+            "R8-E61",
+            "R8-E62",
+            "R8-E63",
+            "R8-E64",
+            "R8-E65",
+            "R8-E66",
+            "R8-E67",
+            "R8-E68",
+            "R8-E69",
+            "R8-E70",
+            "R8-E71",
+            "R8-E72",
+            "R8-E73",
+            "R8-E74",
+            "R8-E75",
+            "R8-E76",
+            "R8-E77",
+            "R8-E78",
+            "R8-E79",
+            "R8-E80",
+            "R8-E81",
+            "R8-E82",
+            "R8-E83",
+            "R8-E86"
           ],
-          "wrote_files": [],
+          "file": "testlab/renamed.txt",
+          "ops": [
+            {
+              "e": "R8-E25",
+              "op": "delete",
+              "c": "call_v85e2t8qshuuu1qmcv0v286y"
+            },
+            {
+              "e": "R8-E83",
+              "op": "delete",
+              "c": "call_tp5a8urzljowd53bz27kugcx"
+            }
+          ],
           "command_types": [
-            "file"
+            "other"
+          ]
+        },
+        {
+          "id": "R8-B6",
+          "kind": "file",
+          "start": 82,
+          "end": 90,
+          "start_event": "R8-E83",
+          "end_event": "R8-E91",
+          "events": [
+            "R8-E83",
+            "R8-E84",
+            "R8-E88",
+            "R8-E90",
+            "R8-E91"
+          ],
+          "file": "tool-layer-audit-20260909.md",
+          "ops": [
+            {
+              "e": "R8-E83",
+              "op": "write",
+              "c": "call_pkbza7knv0l8d16r77gbj77f"
+            },
+            {
+              "e": "R8-E88",
+              "op": "read",
+              "c": "call_2jwown8bglbd2i90kdvoyg1i"
+            }
           ]
         }
       ],
@@ -8914,14 +9504,15 @@
       "blocks": [
         {
           "id": "R9-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R9-E01",
           "end_event": "R9-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R9-E01",
+            "R9-E02"
+          ]
         }
       ],
       "pending_org": {
@@ -8970,14 +9561,15 @@
       "blocks": [
         {
           "id": "R10-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R10-E01",
           "end_event": "R10-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R10-E01",
+            "R10-E02"
+          ]
         }
       ],
       "pending_org": {
@@ -9157,31 +9749,45 @@
       "blocks": [
         {
           "id": "R11-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 4,
-          "start_event": "R11-E01",
-          "end_event": "R11-E05",
-          "touched_files": [
-            "tool-layer-audit-20260909.md"
-          ],
-          "wrote_files": [
-            "tool-layer-audit-20260909.md"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R11-B2",
-          "kind": "work",
-          "start": 5,
+          "kind": "file",
+          "start": 1,
           "end": 9,
-          "start_event": "R11-E06",
+          "start_event": "R11-E02",
           "end_event": "R11-E10",
-          "touched_files": [
-            "tool-layer-audit-20260909.md"
+          "events": [
+            "R11-E02",
+            "R11-E03",
+            "R11-E04",
+            "R11-E05",
+            "R11-E06",
+            "R11-E07",
+            "R11-E08",
+            "R11-E09",
+            "R11-E10"
           ],
-          "wrote_files": [],
-          "command_types": []
+          "file": "tool-layer-audit-20260909.md",
+          "ops": [
+            {
+              "e": "R11-E02",
+              "op": "read",
+              "c": "call_fdhgfg79bd1qqhvbcu7tg0tz"
+            },
+            {
+              "e": "R11-E04",
+              "op": "edit",
+              "c": "call_7q1z9sp40mhnxf2skaailosf"
+            },
+            {
+              "e": "R11-E06",
+              "op": "read",
+              "c": "call_ngel6jz0p5lrw3bl0jptaz6a"
+            },
+            {
+              "e": "R11-E08",
+              "op": "read",
+              "c": "call_3tg96vukrslqugvh3w628k8i"
+            }
+          ]
         }
       ],
       "pending_org": {
@@ -9282,15 +9888,17 @@
       "blocks": [
         {
           "id": "R12-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 4,
           "start_event": "R12-E01",
           "end_event": "R12-E05",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "file"
+          "events": [
+            "R12-E01",
+            "R12-E02",
+            "R12-E03",
+            "R12-E04",
+            "R12-E05"
           ]
         }
       ],
@@ -9822,35 +10430,100 @@
       "blocks": [
         {
           "id": "R13-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 12,
-          "start_event": "R13-E01",
-          "end_event": "R13-E13",
-          "touched_files": [
-            "tool-layer-audit-20260909.md"
-          ],
-          "wrote_files": [
-            "tool-layer-audit-20260909.md"
-          ],
-          "command_types": [
-            "file"
-          ]
-        },
-        {
-          "id": "R13-B2",
-          "kind": "work",
-          "start": 13,
+          "kind": "file",
+          "start": 9,
           "end": 29,
-          "start_event": "R13-E14",
+          "start_event": "R13-E02",
           "end_event": "R13-E30",
-          "touched_files": [
-            "tool-layer-audit-20260909.md"
+          "events": [
+            "R13-E02",
+            "R13-E03",
+            "R13-E04",
+            "R13-E05",
+            "R13-E06",
+            "R13-E07",
+            "R13-E08",
+            "R13-E09",
+            "R13-E10",
+            "R13-E11",
+            "R13-E12",
+            "R13-E13",
+            "R13-E14",
+            "R13-E15",
+            "R13-E16",
+            "R13-E17",
+            "R13-E18",
+            "R13-E19",
+            "R13-E20",
+            "R13-E21",
+            "R13-E22",
+            "R13-E23",
+            "R13-E24",
+            "R13-E25",
+            "R13-E26",
+            "R13-E27",
+            "R13-E28",
+            "R13-E29",
+            "R13-E30"
           ],
-          "wrote_files": [
-            "tool-layer-audit-20260909.md"
-          ],
-          "command_types": []
+          "file": "tool-layer-audit-20260909.md",
+          "ops": [
+            {
+              "e": "R13-E10",
+              "op": "edit",
+              "c": "call_fu0fpao9azl6v24mjdzemx83"
+            },
+            {
+              "e": "R13-E10",
+              "op": "edit",
+              "c": "call_3k0uh6797er5z841axejcjfw"
+            },
+            {
+              "e": "R13-E14",
+              "op": "read",
+              "c": "call_wk7kfjdni5av50cm7kp2yihh"
+            },
+            {
+              "e": "R13-E14",
+              "op": "read",
+              "c": "call_0mwn359r3ce66ilsj3okfimd"
+            },
+            {
+              "e": "R13-E17",
+              "op": "edit",
+              "c": "call_e7m7gtghxox3sgj8xw5z1m49"
+            },
+            {
+              "e": "R13-E19",
+              "op": "read",
+              "c": "call_lf7ns7r10dclij2j72xd5ezz"
+            },
+            {
+              "e": "R13-E19",
+              "op": "read",
+              "c": "call_pgm5z7litsmkqibx4w9eaurc"
+            },
+            {
+              "e": "R13-E22",
+              "op": "read",
+              "c": "call_14z7rfjqa3zxv0km139ywxyw"
+            },
+            {
+              "e": "R13-E24",
+              "op": "edit",
+              "c": "call_5bzcxg5ezuviar2w2sgonzap"
+            },
+            {
+              "e": "R13-E26",
+              "op": "read",
+              "c": "call_biq4dsxhkj6w2m8k24ijv8jr"
+            },
+            {
+              "e": "R13-E28",
+              "op": "edit",
+              "c": "call_j1h562a28r430lt122c3lcge"
+            }
+          ]
         }
       ],
       "domains": [
@@ -9942,14 +10615,15 @@
       "blocks": [
         {
           "id": "R14-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R14-E01",
           "end_event": "R14-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R14-E01",
+            "R14-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -10067,31 +10741,31 @@
       "blocks": [
         {
           "id": "R15-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 2,
-          "start_event": "R15-E01",
-          "end_event": "R15-E03",
-          "touched_files": [
-            "system-prompt-cache-position-notes-20260909.md"
-          ],
-          "wrote_files": [
-            "system-prompt-cache-position-notes-20260909.md"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R15-B2",
-          "kind": "work",
-          "start": 3,
+          "kind": "file",
+          "start": 1,
           "end": 5,
-          "start_event": "R15-E04",
+          "start_event": "R15-E02",
           "end_event": "R15-E06",
-          "touched_files": [
-            "system-prompt-cache-position-notes-20260909.md"
+          "events": [
+            "R15-E02",
+            "R15-E03",
+            "R15-E04",
+            "R15-E05",
+            "R15-E06"
           ],
-          "wrote_files": [],
-          "command_types": []
+          "file": "system-prompt-cache-position-notes-20260909.md",
+          "ops": [
+            {
+              "e": "R15-E02",
+              "op": "write",
+              "c": "call_qc0kwxbl6eo1mk9poidqfphc"
+            },
+            {
+              "e": "R15-E04",
+              "op": "read",
+              "c": "call_h1g4bchuus62qo7bgau317nl"
+            }
+          ]
         }
       ],
       "block_summaries": {
@@ -10421,30 +11095,38 @@
       "blocks": [
         {
           "id": "R16-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 14,
-          "start_event": "R16-E01",
-          "end_event": "R16-E15",
-          "touched_files": [
-            "organization-split-mechanism-notes-20260909.md"
-          ],
-          "wrote_files": [
-            "organization-split-mechanism-notes-20260909.md"
-          ],
-          "command_types": [
-            "file"
-          ]
-        },
-        {
-          "id": "R16-B2",
-          "kind": "work",
-          "start": 15,
+          "kind": "file",
+          "start": 13,
           "end": 17,
-          "start_event": "R16-E16",
+          "start_event": "R16-E02",
           "end_event": "R16-E18",
-          "touched_files": [],
-          "wrote_files": [],
+          "events": [
+            "R16-E02",
+            "R16-E03",
+            "R16-E04",
+            "R16-E05",
+            "R16-E06",
+            "R16-E07",
+            "R16-E08",
+            "R16-E09",
+            "R16-E10",
+            "R16-E11",
+            "R16-E12",
+            "R16-E13",
+            "R16-E14",
+            "R16-E15",
+            "R16-E16",
+            "R16-E17",
+            "R16-E18"
+          ],
+          "file": "organization-split-mechanism-notes-20260909.md",
+          "ops": [
+            {
+              "e": "R16-E14",
+              "op": "write",
+              "c": "call_kgwzqy0yktmx9tl9yep48ffn"
+            }
+          ],
           "command_types": [
             "file"
           ]
@@ -10652,15 +11334,23 @@
       "blocks": [
         {
           "id": "R17-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 10,
           "start_event": "R17-E01",
           "end_event": "R17-E11",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "file"
+          "events": [
+            "R17-E01",
+            "R17-E02",
+            "R17-E03",
+            "R17-E04",
+            "R17-E05",
+            "R17-E06",
+            "R17-E07",
+            "R17-E08",
+            "R17-E09",
+            "R17-E10",
+            "R17-E11"
           ]
         }
       ],
@@ -10780,28 +11470,26 @@
       "blocks": [
         {
           "id": "R18-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 2,
-          "start_event": "R18-E01",
-          "end_event": "R18-E03",
-          "touched_files": [
-            "system-prompt-content-review-20260909.md"
-          ],
-          "wrote_files": [
-            "system-prompt-content-review-20260909.md"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R18-B2",
-          "kind": "work",
-          "start": 3,
+          "kind": "file",
+          "start": 1,
           "end": 5,
-          "start_event": "R18-E04",
+          "start_event": "R18-E02",
           "end_event": "R18-E06",
-          "touched_files": [],
-          "wrote_files": [],
+          "events": [
+            "R18-E02",
+            "R18-E03",
+            "R18-E04",
+            "R18-E05",
+            "R18-E06"
+          ],
+          "file": "system-prompt-content-review-20260909.md",
+          "ops": [
+            {
+              "e": "R18-E02",
+              "op": "write",
+              "c": "call_85d79naujb9etpwyivw251nw"
+            }
+          ],
           "command_types": [
             "file"
           ]
@@ -10856,14 +11544,15 @@
       "blocks": [
         {
           "id": "R19-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R19-E01",
           "end_event": "R19-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R19-E01",
+            "R19-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -10916,14 +11605,15 @@
       "blocks": [
         {
           "id": "R20-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R20-E01",
           "end_event": "R20-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R20-E01",
+            "R20-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -10974,14 +11664,15 @@
       "blocks": [
         {
           "id": "R21-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R21-E01",
           "end_event": "R21-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R21-E01",
+            "R21-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -11033,14 +11724,15 @@
       "blocks": [
         {
           "id": "R22-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R22-E01",
           "end_event": "R22-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R22-E01",
+            "R22-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -11091,14 +11783,15 @@
       "blocks": [
         {
           "id": "R23-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R23-E01",
           "end_event": "R23-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R23-E01",
+            "R23-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -11149,14 +11842,15 @@
       "blocks": [
         {
           "id": "R24-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R24-E01",
           "end_event": "R24-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R24-E01",
+            "R24-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -11351,31 +12045,41 @@
       "blocks": [
         {
           "id": "R25-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 6,
-          "start_event": "R25-E01",
-          "end_event": "R25-E07",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "file"
+          "kind": "user",
+          "start": 7,
+          "end": 7,
+          "start_event": "R25-E02",
+          "end_event": "R25-E08",
+          "events": [
+            "R25-E02",
+            "R25-E03",
+            "R25-E04",
+            "R25-E05",
+            "R25-E06",
+            "R25-E07",
+            "R25-E08"
           ]
         },
         {
           "id": "R25-B2",
-          "kind": "work",
-          "start": 7,
+          "kind": "file",
+          "start": 8,
           "end": 10,
-          "start_event": "R25-E08",
+          "start_event": "R25-E09",
           "end_event": "R25-E11",
-          "touched_files": [
-            "pre-compaction-snapshot-20260909.md"
+          "events": [
+            "R25-E09",
+            "R25-E10",
+            "R25-E11"
           ],
-          "wrote_files": [
-            "pre-compaction-snapshot-20260909.md"
-          ],
-          "command_types": []
+          "file": "pre-compaction-snapshot-20260909.md",
+          "ops": [
+            {
+              "e": "R25-E09",
+              "op": "write",
+              "c": "call_nw1zsc0dcmbcfkz1rlotj2kn"
+            }
+          ]
         }
       ],
       "block_summaries": {
@@ -11429,14 +12133,15 @@
       "blocks": [
         {
           "id": "R26-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R26-E01",
           "end_event": "R26-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R26-E01",
+            "R26-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -11488,14 +12193,15 @@
       "blocks": [
         {
           "id": "R27-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R27-E01",
           "end_event": "R27-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R27-E01",
+            "R27-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -11666,38 +12372,22 @@
       "blocks": [
         {
           "id": "R28-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
-          "end": 3,
-          "start_event": "R28-E01",
-          "end_event": "R28-E04",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "file"
-          ]
-        },
-        {
-          "id": "R28-B2",
-          "kind": "work",
-          "start": 4,
-          "end": 5,
-          "start_event": "R28-E05",
-          "end_event": "R28-E06",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
-        },
-        {
-          "id": "R28-B3",
-          "kind": "work",
-          "start": 6,
           "end": 8,
-          "start_event": "R28-E07",
+          "start_event": "R28-E01",
           "end_event": "R28-E09",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R28-E01",
+            "R28-E02",
+            "R28-E03",
+            "R28-E04",
+            "R28-E05",
+            "R28-E06",
+            "R28-E07",
+            "R28-E08",
+            "R28-E09"
+          ]
         }
       ],
       "block_summaries": {
@@ -11751,14 +12441,15 @@
       "blocks": [
         {
           "id": "R29-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R29-E01",
           "end_event": "R29-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R29-E01",
+            "R29-E02"
+          ]
         }
       ],
       "block_summaries": {
@@ -12021,76 +12712,80 @@
       "blocks": [
         {
           "id": "R30-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 2,
-          "start_event": "R30-E01",
-          "end_event": "R30-E03",
-          "touched_files": [
-            "wovra-demo/index.html"
+          "kind": "file",
+          "start": 1,
+          "end": 14,
+          "start_event": "R30-E02",
+          "end_event": "R30-E15",
+          "events": [
+            "R30-E02",
+            "R30-E03",
+            "R30-E08",
+            "R30-E09",
+            "R30-E10",
+            "R30-E11",
+            "R30-E12",
+            "R30-E13",
+            "R30-E14",
+            "R30-E15"
           ],
-          "wrote_files": [
-            "wovra-demo/index.html"
+          "file": "wovra-demo/index.html",
+          "ops": [
+            {
+              "e": "R30-E02",
+              "op": "write",
+              "c": "call_nqazb1dc0kelfq8f0gtcu0v8"
+            },
+            {
+              "e": "R30-E08",
+              "op": "edit",
+              "c": "call_a7xsk48qndc40wd3v89zlq1m"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "file",
+            "run"
+          ]
         },
         {
           "id": "R30-B2",
-          "kind": "work",
+          "kind": "file",
           "start": 3,
           "end": 4,
           "start_event": "R30-E04",
           "end_event": "R30-E05",
-          "touched_files": [
-            "wovra-demo/data.js"
+          "events": [
+            "R30-E04",
+            "R30-E05"
           ],
-          "wrote_files": [
-            "wovra-demo/data.js"
-          ],
-          "command_types": []
+          "file": "wovra-demo/data.js",
+          "ops": [
+            {
+              "e": "R30-E04",
+              "op": "write",
+              "c": "call_pamdihkdi1doncji7hzjm9nb"
+            }
+          ]
         },
         {
           "id": "R30-B3",
-          "kind": "work",
+          "kind": "file",
           "start": 5,
           "end": 6,
           "start_event": "R30-E06",
           "end_event": "R30-E07",
-          "touched_files": [
-            "wovra-demo/app.js"
+          "events": [
+            "R30-E06",
+            "R30-E07"
           ],
-          "wrote_files": [
-            "wovra-demo/app.js"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R30-B4",
-          "kind": "work",
-          "start": 7,
-          "end": 8,
-          "start_event": "R30-E08",
-          "end_event": "R30-E09",
-          "touched_files": [
-            "wovra-demo/index.html"
-          ],
-          "wrote_files": [
-            "wovra-demo/index.html"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R30-B5",
-          "kind": "work",
-          "start": 9,
-          "end": 14,
-          "start_event": "R30-E10",
-          "end_event": "R30-E15",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "file",
-            "run"
+          "file": "wovra-demo/app.js",
+          "ops": [
+            {
+              "e": "R30-E06",
+              "op": "write",
+              "c": "call_3xi4qyh60j5s1z4ty8sskb2k"
+            }
           ]
         }
       ],
@@ -12291,58 +12986,67 @@
       "blocks": [
         {
           "id": "R31-B1",
-          "kind": "work",
-          "start": 0,
+          "kind": "file",
+          "start": 1,
           "end": 2,
-          "start_event": "R31-E01",
+          "start_event": "R31-E02",
           "end_event": "R31-E03",
-          "touched_files": [
-            "wovra-demo/index.html"
+          "events": [
+            "R31-E02",
+            "R31-E03"
           ],
-          "wrote_files": [
-            "wovra-demo/index.html"
-          ],
-          "command_types": []
+          "file": "wovra-demo/index.html",
+          "ops": [
+            {
+              "e": "R31-E02",
+              "op": "write",
+              "c": "call_m92yd3fat086fqm7viaw26t4"
+            }
+          ]
         },
         {
           "id": "R31-B2",
-          "kind": "work",
+          "kind": "file",
           "start": 3,
           "end": 4,
           "start_event": "R31-E04",
           "end_event": "R31-E05",
-          "touched_files": [
-            "wovra-demo/data.js"
+          "events": [
+            "R31-E04",
+            "R31-E05"
           ],
-          "wrote_files": [
-            "wovra-demo/data.js"
-          ],
-          "command_types": []
+          "file": "wovra-demo/data.js",
+          "ops": [
+            {
+              "e": "R31-E04",
+              "op": "write",
+              "c": "call_qa65gqjh7vu9foadk28rwcb8"
+            }
+          ]
         },
         {
           "id": "R31-B3",
-          "kind": "work",
+          "kind": "file",
           "start": 5,
-          "end": 6,
-          "start_event": "R31-E06",
-          "end_event": "R31-E07",
-          "touched_files": [
-            "wovra-demo/app.js"
-          ],
-          "wrote_files": [
-            "wovra-demo/app.js"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R31-B4",
-          "kind": "work",
-          "start": 7,
           "end": 10,
-          "start_event": "R31-E08",
+          "start_event": "R31-E06",
           "end_event": "R31-E11",
-          "touched_files": [],
-          "wrote_files": [],
+          "events": [
+            "R31-E06",
+            "R31-E07",
+            "R31-E08",
+            "R31-E09",
+            "R31-E10",
+            "R31-E11"
+          ],
+          "file": "wovra-demo/app.js",
+          "ops": [
+            {
+              "e": "R31-E06",
+              "op": "write",
+              "c": "call_ylj224ahqehhhugb8ayp0prz"
+            }
+          ],
           "command_types": [
             "file"
           ]
@@ -12386,14 +13090,15 @@
       "blocks": [
         {
           "id": "R32-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R32-E01",
           "end_event": "R32-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R32-E01",
+            "R32-E02"
+          ]
         }
       ]
     },
@@ -12434,14 +13139,15 @@
       "blocks": [
         {
           "id": "R33-B1",
-          "kind": "work",
+          "kind": "fallback",
           "start": 0,
           "end": 1,
           "start_event": "R33-E01",
           "end_event": "R33-E02",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": []
+          "events": [
+            "R33-E01",
+            "R33-E02"
+          ]
         }
       ]
     },
@@ -12753,15 +13459,39 @@
       "blocks": [
         {
           "id": "R34-B1",
-          "kind": "work",
-          "start": 0,
+          "kind": "file",
+          "start": 1,
           "end": 17,
-          "start_event": "R34-E01",
+          "start_event": "R34-E02",
           "end_event": "R34-E18",
-          "touched_files": [
-            "pre-compaction-snapshot-20260909.md"
+          "events": [
+            "R34-E02",
+            "R34-E03",
+            "R34-E04",
+            "R34-E05",
+            "R34-E06",
+            "R34-E07",
+            "R34-E08",
+            "R34-E09",
+            "R34-E10",
+            "R34-E11",
+            "R34-E12",
+            "R34-E13",
+            "R34-E14",
+            "R34-E15",
+            "R34-E16",
+            "R34-E17",
+            "R34-E18"
           ],
-          "wrote_files": [],
+          "file": "pre-compaction-snapshot-20260909.md",
+          "ops": [
+            {
+              "e": "R34-E02",
+              "op": "read",
+              "c": "call_btqbt1mjzouopskqa7gdpk5h"
+            }
+          ],
+          "has_tools": true,
           "command_types": [
             "file",
             "run"
@@ -12839,18 +13569,24 @@
       "blocks": [
         {
           "id": "R35-B1",
-          "kind": "work",
-          "start": 0,
+          "kind": "file",
+          "start": 1,
           "end": 3,
-          "start_event": "R35-E01",
+          "start_event": "R35-E02",
           "end_event": "R35-E04",
-          "touched_files": [
-            "compaction-quality-review-20260909.md"
+          "events": [
+            "R35-E02",
+            "R35-E03",
+            "R35-E04"
           ],
-          "wrote_files": [
-            "compaction-quality-review-20260909.md"
-          ],
-          "command_types": []
+          "file": "compaction-quality-review-20260909.md",
+          "ops": [
+            {
+              "e": "R35-E02",
+              "op": "write",
+              "c": "call_kjzzg6yfpg2rt5wn43d3da7c"
+            }
+          ]
         }
       ]
     }
@@ -12929,5 +13665,5 @@
     }
   ],
   "created_at": "2026-09-09T18:10:52",
-  "updated_at": "2026-09-10T20:12:24"
+  "updated_at": "2026-09-11T21:22:54"
 }

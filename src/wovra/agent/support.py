@@ -47,6 +47,35 @@ _ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 # 早就写好、却因没传参而形同虚设的截断保护真正激活。
 _STATE_RENDER_BUDGET = int(os.environ.get("WOVRA_STATE_BUDGET", "8000"))
 
+# 维护调用（org/split）是否把 tools 收窄为单一出口工具。
+# 默认 False = 用**与工作对话完全相同的** tools 数组（缓存复议结论，
+# 2026-09-11）：
+#   * 收窄的代价经实测确认是真的——org 首跳 prompt=215,940/cached=896
+#     （命中 0.4%）、split 首跳 290,142/896（0.3%）；每次维护都按全量
+#     未命中计费（1 元/M 而非命中价 0.02 元/M），约 0.6 元/批。
+#   * 收窄的收益经实测确认**不成立**：维护调用根本不执行工具（只捕获
+#     提交参数），漂移的唯一后果是"这批没产物"，而现在有带诊断重发兜底；
+#     且 R8 污染复现里工具已只剩 submit_organization，模型照样调用了
+#     不存在于工具集的 check_background——收窄连"防跑偏"都没防住。
+# 设 WOVRA_MAINT_NARROW_TOOLS=1 可切回收窄（对照实验/回滚用）。
+_MAINT_NARROW_TOOLS_ENV = "WOVRA_MAINT_NARROW_TOOLS"
+
+
+def maint_tools(schemas: list[dict], submit_name: str) -> list[dict]:
+    """维护调用使用的 tools 数组。
+
+    默认返回**完整** schema 列表——与工作调用同一序列化，前缀缓存才能
+    从 system 一直骑到整理指令之前（tools 是前缀的一部分，数组一差分叉
+    即整段未命中）。收窄模式（env 开关）只留单一出口工具。
+    """
+    value = (os.environ.get(_MAINT_NARROW_TOOLS_ENV) or "").strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return [
+            s for s in schemas
+            if s.get("function", {}).get("name") == submit_name
+        ]
+    return list(schemas)
+
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "200"))
 
 _ACTION_WORDS = {

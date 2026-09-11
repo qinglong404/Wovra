@@ -15,6 +15,7 @@ from .support import (
     MODE_MANAGED,
     _COMPRESS_THRESHOLD,
     _clip_quote,
+    maint_tools,
 )
 from .prompts import (
     _ORG_META_INFO,
@@ -446,17 +447,26 @@ class _MaintenanceMixin:
         messages = list(base_messages or self._org_fallback_base(rounds))
         messages.append({"role": "user", "content": instruction})
 
-        # org 工具收窄为只留 submit_organization（2026-09-10）：模型会把
-        # 整理指令当普通工作对话乱调工具（实测正文说"先重建 HTML 前端"
-        # 然后去调 write_file）——收窄工具集是硬约束，比提示词可靠。
-        # 牺牲 org 路的前缀缓存（维护调用低频，可接受）。
-        org_tools = [
-            s for s in self._schemas
-            if s.get("function", {}).get("name") == "submit_organization"
-        ]
+        # tools 数组：默认与工作调用完全相同（缓存复议结论，2026-09-11）。
+        # 缘起：09-10 曾收窄为只留 submit_organization（防模型把整理指令
+        # 当工作对话乱调工具），代价是整个前缀缓存失效（实测命中 0.4%，
+        # 约 0.6 元/批）。复议实测表明这笔交易不划算——维护调用**从不执行
+        # 工具**（只捕获提交参数），漂移只导致"这批没产物"，而失败已有
+        # 带诊断重发兜底；且当时工具已只剩一个出口，模型照样调了不存在的
+        # 工具（幻觉），收窄并未真正防住。故改为恒定数组骑满缓存，
+        # WOVRA_MAINT_NARROW_TOOLS=1 可切回收窄（见 support.maint_tools）。
+        org_tools = maint_tools(self._schemas, _ORG_SUBMIT_TOOL)
         content, ordered, _usage = self._stream_call(
             messages, tools=org_tools, purpose="organization",
         )
+        foreign = self._foreign_tool_calls(ordered, _ORG_SUBMIT_TOOL)
+        if foreign and self.task is not None:
+            # 漂移的观测口径：恒定数组下模型偶尔会调工作工具（无害——
+            # 不执行，产物仍从 submit_organization 取），留痕供复议取数
+            self.task.record(
+                "maintenance",
+                f"org：模型调用了非出口工具 {foreign[:4]}，已忽略",
+            )
         state, strategy = self._extract_org_state(content, ordered)
         staged = self._stage_org_state(
             state, rounds, round_blocks, merged_groups
@@ -723,16 +733,19 @@ class _MaintenanceMixin:
         )
         messages.append({"role": "user", "content": instruction})
 
-        # 与 org 同策略：只留 submit_domains（收窄工具集是硬约束）
+        # 与 org 同策略：恒定 tools 数组（缓存复议结论，见 org 处注释）。
         # 开思考（不传 thinking disabled）：语义判断需要推理，实测
         # 不开思考不调工具、质量低（用户拍板）。
-        split_tools = [
-            s for s in self._schemas
-            if s.get("function", {}).get("name") == "submit_domains"
-        ]
+        split_tools = maint_tools(self._schemas, _SPLIT_SUBMIT_TOOL)
         content, ordered, _usage = self._stream_call(
             messages, tools=split_tools, purpose="split",
         )
+        foreign = self._foreign_tool_calls(ordered, _SPLIT_SUBMIT_TOOL)
+        if foreign and self.task is not None:
+            self.task.record(
+                "maintenance",
+                f"split：模型调用了非出口工具 {foreign[:4]}，已忽略",
+            )
         product = self._extract_domains(content, ordered)
         evidence = ""
         for tc in ordered or []:
@@ -1239,6 +1252,20 @@ class _MaintenanceMixin:
             ),
         })
         return fixed
+
+    @staticmethod
+    def _foreign_tool_calls(ordered: list, submit_name: str) -> list[str]:
+        """维护调用里出现的**非出口**工具名（漂移的观测口径）。
+
+        恒定 tools 数组下模型偶尔仍会调工作工具——维护阶段不执行任何工具，
+        这些调用无害（产物只从 submit_* 取），但留痕能回答"恒定数组是否
+        真的引来漂移"这个复议问题。
+        """
+        return [
+            str(tc.get("name") or "")
+            for tc in (ordered or [])
+            if tc.get("name") and tc.get("name") != submit_name
+        ]
 
     @staticmethod
     def _org_failure_evidence(content: str, ordered: list) -> str:

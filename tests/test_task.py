@@ -273,6 +273,65 @@ def test_save_sanitizes_lone_surrogates(monkeypatch, tmp_path):
     assert "\ufffd" in loaded.history[-1]["detail"]
 
 
+def test_load_self_heals_legacy_v1_blocks(monkeypatch, tmp_path):
+    """回归（2026-09-11）：加载旧会话时把 v1 粗分块自愈为 v3 并落盘。
+
+    为什么必须自愈而不是"手动迁移"：活跃会话的进程内存里握着旧 rounds，
+    手动改盘会被下一次 `_persist_rounds` 覆盖回去——只有重启后的新进程
+    读盘时顺手治好才算真修。迁移是确定性、幂等的，故随加载进行是安全的。
+    """
+    import json as _json
+
+    from wovra.task import Task
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="g")
+    task.rounds = [{
+        "seq": 1,
+        "user_input": {"original": "读两个文件", "normalized": ""},
+        "events": [
+            {"id": "R1-E01", "type": "user",
+             "message": {"role": "user", "content": "读两个文件"}},
+            {"id": "R1-E02", "type": "tool_call",
+             "message": {"role": "assistant", "content": "", "tool_calls": [
+                 {"id": "c1", "type": "function",
+                  "function": {"name": "read_file",
+                               "arguments": _json.dumps({"path": "a.py"})}}]}},
+            {"id": "R1-E03", "type": "tool_result",
+             "message": {"role": "tool", "tool_call_id": "c1", "content": "a 内容"}},
+            {"id": "R1-E04", "type": "final_answer",
+             "message": {"role": "assistant", "content": "读完"}},
+        ],
+        # 落盘的是 v1 粗分块（kind=work、无 events 键）
+        "blocks": [{
+            "id": "R1-B1", "kind": "work", "start": 0, "end": 3,
+            "start_event": "R1-E01", "end_event": "R1-E04",
+            "touched_files": ["a.py"], "wrote_files": [], "command_types": [],
+        }],
+        "end_state": "completed",
+    }]
+    task.save()
+
+    loaded = Task.load(task.id)
+
+    blk = loaded.rounds[0]["blocks"][0]
+    assert blk["kind"] == "file"           # v3：按文件聚合
+    assert blk["file"] == "a.py"
+    assert "events" in blk                 # v3 块恒带 events 键
+    # 留痕可查
+    assert any(
+        "历史块结构迁移" in e.get("detail", "")
+        for e in loaded.history if e.get("kind") == "maintenance"
+    )
+    # 落盘生效（不是只改了内存对象）
+    assert Task.load(task.id).rounds[0]["blocks"][0]["kind"] == "file"
+
+    # 幂等：已是 v3 的会话再次加载不再改写、不再留痕
+    history_before = len(Task.load(task.id).history)
+    again = Task.load(task.id)
+    assert len(again.history) == history_before
+
+
 def test_task_binds_and_restores_workspace(monkeypatch, tmp_path):
     """会话绑定工作区：创建时记录，加载时恢复——从任何目录恢复都回原地。"""
     from wovra import tools as tools_module

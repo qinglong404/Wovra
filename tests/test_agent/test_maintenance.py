@@ -500,13 +500,16 @@ def test_org_submits_via_resident_tool(monkeypatch, tmp_path):
     agent.run("问")
 
     assert len(agent.llm.calls) == 2
-    # 工具契约（2026-09-10 用户拍板）：org 收窄为只留 submit_organization
-    # ——关思考后模型会把整理指令当普通工作对话乱调工具（实测去调
-    # write_file），收窄工具集是硬约束；代价是 org 路前缀缓存不再可骑
-    # （维护调用低频，可接受）
-    assert [t["function"]["name"] for t in agent.llm.calls[1]["tools"]] == [
-        "submit_organization"
-    ]
+    # 工具契约（2026-09-11 缓存复议改定）：维护调用与工作调用使用**完全
+    # 相同的 tools 数组**（tools 是前缀的一部分，数组一差分叉即整段未命中）。
+    # 09-10 曾收窄为单一出口，实测代价是 org 首跳命中 0.4% ≈ 0.6 元/批，
+    # 而收益（防跑偏）未成立——维护调用不执行工具，漂移只让这批没产物，
+    # 且已有带诊断重发兜底。WOVRA_MAINT_NARROW_TOOLS=1 可切回收窄。
+    maint_tools = [t["function"]["name"] for t in agent.llm.calls[1]["tools"]]
+    work_tools = [t["function"]["name"] for t in agent.llm.calls[0]["tools"]]
+    assert maint_tools == work_tools          # 恒定：与工作调用同序列化
+    assert "submit_organization" in maint_tools
+    assert "write_file" not in maint_tools    # 本 agent 未注册工作工具（tools=[]）
     agent._promote_org_results()
     assert task.rounds[-1]["user_input"]["key_constraints"] == "禁止 git"
     assert task.rounds[-1]["block_summaries"]["R1-B1"] == "完成某事：细节描述"
@@ -758,16 +761,16 @@ def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
 
     agent._maybe_organize_batch()
 
-    # 工具契约（2026-09-10 用户拍板）：org/split 各自收窄为唯一出口
-    # 工具（submit_organization / submit_domains），不再与工作共用数组
+    # 工具契约（2026-09-11 缓存复议改定）：org/split 都使用与工作调用
+    # **相同**的 tools 数组。收窄模式只在 env 开关打开时生效。
     org_calls = [c for c in agent.llm.calls if c.get("lane") == "org"]
     split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
     assert org_calls and split_calls
-    assert [t["function"]["name"] for t in org_calls[0]["tools"]] == [
+    assert [t["function"]["name"] for t in org_calls[0]["tools"]] != [
         "submit_organization"
     ]
     assert [t["function"]["name"] for t in split_calls[0]["tools"]] == [
-        "submit_domains"
+        t["function"]["name"] for t in org_calls[0]["tools"]
     ]
     r1 = task.rounds[0]
     assert r1["org_state"] == "done"
@@ -945,9 +948,10 @@ def test_split_retries_once_with_diagnosis(monkeypatch, tmp_path):
     tail = second[-1]
     assert "submit_domains 参数" in tail["content"]
     assert "不要使用英文双引号" in tail["content"]
-    # 工具集仍是收窄的唯一出口
+    # 工具契约（2026-09-11 缓存复议）：重发同样用恒定数组（前缀一致才能
+    # 骑上首跳建立的缓存）
     assert [t["function"]["name"] for t in split_calls[1]["tools"]] == [
-        "submit_domains"
+        t["function"]["name"] for t in split_calls[0]["tools"]
     ]
     # 留痕：发起重发 + 重发可用
     details = [e.get("detail", "") for e in task.history

@@ -3015,6 +3015,11 @@
       "time": "2026-09-08T21:47:26",
       "kind": "usage",
       "detail": "[managed] steps=49 context=110,474 working=4,540,871 org=0 compaction=0 prompt=4,524,196 completion=16,675 total=4,540,871（思考 5,819） 缓存命中 4,397,056 tok（97.2%） 未命中 127,140 tok（2.8%） 等效输入 273,709 tok ttft=197.6s（峰值 14.5s）"
+    },
+    {
+      "time": "2026-09-11T21:22:54",
+      "kind": "maintenance",
+      "detail": "历史块结构迁移：1 轮由 v1 粗分块重算为 v3 按文件聚合（R1）"
     }
   ],
   "rounds": [
@@ -10618,1550 +10623,1902 @@
       "blocks": [
         {
           "id": "R1-B1",
-          "kind": "work",
-          "start": 0,
-          "end": 30,
-          "start_event": "R1-E01",
-          "end_event": "R1-E31",
-          "touched_files": [
-            "index.html"
+          "kind": "file",
+          "start": 29,
+          "end": 152,
+          "start_event": "R1-E02",
+          "end_event": "R1-E153",
+          "events": [
+            "R1-E02",
+            "R1-E03",
+            "R1-E04",
+            "R1-E05",
+            "R1-E06",
+            "R1-E07",
+            "R1-E08",
+            "R1-E09",
+            "R1-E10",
+            "R1-E11",
+            "R1-E12",
+            "R1-E13",
+            "R1-E14",
+            "R1-E15",
+            "R1-E16",
+            "R1-E17",
+            "R1-E18",
+            "R1-E19",
+            "R1-E20",
+            "R1-E21",
+            "R1-E22",
+            "R1-E23",
+            "R1-E24",
+            "R1-E25",
+            "R1-E26",
+            "R1-E27",
+            "R1-E28",
+            "R1-E29",
+            "R1-E30",
+            "R1-E31",
+            "R1-E32",
+            "R1-E33",
+            "R1-E148",
+            "R1-E149",
+            "R1-E150",
+            "R1-E151",
+            "R1-E152",
+            "R1-E153"
           ],
-          "wrote_files": [
-            "index.html"
+          "file": "index.html",
+          "ops": [
+            {
+              "e": "R1-E30",
+              "op": "write",
+              "c": "call_d66d68ae061e4bdc92e5ec97"
+            },
+            {
+              "e": "R1-E148",
+              "op": "edit",
+              "c": "call_60ea778589144527b96ae52c"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B2",
-          "kind": "work",
-          "start": 31,
-          "end": 34,
-          "start_event": "R1-E32",
-          "end_event": "R1-E35",
-          "touched_files": [
-            "css/style.css"
+          "kind": "file",
+          "start": 33,
+          "end": 36,
+          "start_event": "R1-E34",
+          "end_event": "R1-E37",
+          "events": [
+            "R1-E34",
+            "R1-E35",
+            "R1-E36",
+            "R1-E37"
           ],
-          "wrote_files": [
-            "css/style.css"
-          ],
-          "command_types": []
+          "file": "css/style.css",
+          "ops": [
+            {
+              "e": "R1-E34",
+              "op": "write",
+              "c": "call_ff90cab3d1af4bea937b5e6d"
+            }
+          ]
         },
         {
           "id": "R1-B3",
-          "kind": "work",
-          "start": 35,
-          "end": 38,
-          "start_event": "R1-E36",
-          "end_event": "R1-E39",
-          "touched_files": [
-            "js/constants.js"
+          "kind": "file",
+          "start": 37,
+          "end": 40,
+          "start_event": "R1-E38",
+          "end_event": "R1-E41",
+          "events": [
+            "R1-E38",
+            "R1-E39",
+            "R1-E40",
+            "R1-E41"
           ],
-          "wrote_files": [
-            "js/constants.js"
-          ],
-          "command_types": []
+          "file": "js/constants.js",
+          "ops": [
+            {
+              "e": "R1-E38",
+              "op": "write",
+              "c": "call_36658c9d2dd049a8831637f3"
+            }
+          ]
         },
         {
           "id": "R1-B4",
-          "kind": "work",
-          "start": 39,
-          "end": 42,
-          "start_event": "R1-E40",
-          "end_event": "R1-E43",
-          "touched_files": [
-            "js/noise.js"
+          "kind": "file",
+          "start": 41,
+          "end": 44,
+          "start_event": "R1-E42",
+          "end_event": "R1-E45",
+          "events": [
+            "R1-E42",
+            "R1-E43",
+            "R1-E44",
+            "R1-E45"
           ],
-          "wrote_files": [
-            "js/noise.js"
-          ],
-          "command_types": []
+          "file": "js/noise.js",
+          "ops": [
+            {
+              "e": "R1-E42",
+              "op": "write",
+              "c": "call_209899b10706415996dbde12"
+            }
+          ]
         },
         {
           "id": "R1-B5",
-          "kind": "work",
-          "start": 43,
-          "end": 46,
-          "start_event": "R1-E44",
-          "end_event": "R1-E47",
-          "touched_files": [
-            "js/worldgen.js"
+          "kind": "file",
+          "start": 45,
+          "end": 48,
+          "start_event": "R1-E46",
+          "end_event": "R1-E49",
+          "events": [
+            "R1-E46",
+            "R1-E47",
+            "R1-E48",
+            "R1-E49"
           ],
-          "wrote_files": [
-            "js/worldgen.js"
-          ],
-          "command_types": []
+          "file": "js/worldgen.js",
+          "ops": [
+            {
+              "e": "R1-E46",
+              "op": "write",
+              "c": "call_6c7629fc7ae142b884766aa0"
+            }
+          ]
         },
         {
           "id": "R1-B6",
-          "kind": "work",
-          "start": 47,
-          "end": 50,
-          "start_event": "R1-E48",
-          "end_event": "R1-E51",
-          "touched_files": [
-            "js/chunks.js"
+          "kind": "file",
+          "start": 49,
+          "end": 96,
+          "start_event": "R1-E50",
+          "end_event": "R1-E97",
+          "events": [
+            "R1-E50",
+            "R1-E51",
+            "R1-E52",
+            "R1-E53",
+            "R1-E94",
+            "R1-E95",
+            "R1-E96",
+            "R1-E97"
           ],
-          "wrote_files": [
-            "js/chunks.js"
+          "file": "js/chunks.js",
+          "ops": [
+            {
+              "e": "R1-E50",
+              "op": "write",
+              "c": "call_754aa92bea264d62b0e415a4"
+            },
+            {
+              "e": "R1-E94",
+              "op": "edit",
+              "c": "call_940d6885a4014bc5ad91fdd0"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B7",
-          "kind": "work",
-          "start": 51,
-          "end": 54,
-          "start_event": "R1-E52",
-          "end_event": "R1-E55",
-          "touched_files": [
-            "js/mesher.js"
+          "kind": "file",
+          "start": 53,
+          "end": 56,
+          "start_event": "R1-E54",
+          "end_event": "R1-E57",
+          "events": [
+            "R1-E54",
+            "R1-E55",
+            "R1-E56",
+            "R1-E57"
           ],
-          "wrote_files": [
-            "js/mesher.js"
-          ],
-          "command_types": []
+          "file": "js/mesher.js",
+          "ops": [
+            {
+              "e": "R1-E54",
+              "op": "write",
+              "c": "call_62eae8d052334831b522b02f"
+            }
+          ]
         },
         {
           "id": "R1-B8",
-          "kind": "work",
-          "start": 55,
-          "end": 58,
-          "start_event": "R1-E56",
-          "end_event": "R1-E59",
-          "touched_files": [
-            "js/physics.js"
+          "kind": "file",
+          "start": 57,
+          "end": 102,
+          "start_event": "R1-E58",
+          "end_event": "R1-E103",
+          "events": [
+            "R1-E58",
+            "R1-E59",
+            "R1-E60",
+            "R1-E61",
+            "R1-E102",
+            "R1-E103"
           ],
-          "wrote_files": [
-            "js/physics.js"
-          ],
-          "command_types": []
+          "file": "js/physics.js",
+          "ops": [
+            {
+              "e": "R1-E58",
+              "op": "write",
+              "c": "call_42785b71cf4c47e7a087d2db"
+            },
+            {
+              "e": "R1-E102",
+              "op": "edit",
+              "c": "call_84e58568cd8b4f779d8c8f0e"
+            }
+          ]
         },
         {
           "id": "R1-B9",
-          "kind": "work",
-          "start": 59,
-          "end": 62,
-          "start_event": "R1-E60",
-          "end_event": "R1-E63",
-          "touched_files": [
-            "js/raycast.js"
+          "kind": "file",
+          "start": 61,
+          "end": 190,
+          "start_event": "R1-E62",
+          "end_event": "R1-E191",
+          "events": [
+            "R1-E62",
+            "R1-E63",
+            "R1-E64",
+            "R1-E65",
+            "R1-E182",
+            "R1-E183",
+            "R1-E184",
+            "R1-E185",
+            "R1-E186",
+            "R1-E187",
+            "R1-E188",
+            "R1-E189",
+            "R1-E190",
+            "R1-E191"
           ],
-          "wrote_files": [
-            "js/raycast.js"
+          "file": "js/raycast.js",
+          "ops": [
+            {
+              "e": "R1-E62",
+              "op": "write",
+              "c": "call_6a61612797ea4c29be21ceb4"
+            },
+            {
+              "e": "R1-E182",
+              "op": "edit",
+              "c": "call_d1b529b390b14ab992c20d37"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "file",
+            "run"
+          ]
         },
         {
           "id": "R1-B10",
-          "kind": "work",
-          "start": 63,
-          "end": 66,
-          "start_event": "R1-E64",
-          "end_event": "R1-E67",
-          "touched_files": [
-            "js/inventory.js"
+          "kind": "file",
+          "start": 65,
+          "end": 68,
+          "start_event": "R1-E66",
+          "end_event": "R1-E69",
+          "events": [
+            "R1-E66",
+            "R1-E67",
+            "R1-E68",
+            "R1-E69"
           ],
-          "wrote_files": [
-            "js/inventory.js"
-          ],
-          "command_types": []
+          "file": "js/inventory.js",
+          "ops": [
+            {
+              "e": "R1-E66",
+              "op": "write",
+              "c": "call_e89c7dfef5f8461d91f7aa6e"
+            }
+          ]
         },
         {
           "id": "R1-B11",
-          "kind": "work",
-          "start": 67,
-          "end": 70,
-          "start_event": "R1-E68",
-          "end_event": "R1-E71",
-          "touched_files": [
-            "js/sound.js"
+          "kind": "file",
+          "start": 69,
+          "end": 72,
+          "start_event": "R1-E70",
+          "end_event": "R1-E73",
+          "events": [
+            "R1-E70",
+            "R1-E71",
+            "R1-E72",
+            "R1-E73"
           ],
-          "wrote_files": [
-            "js/sound.js"
-          ],
-          "command_types": []
+          "file": "js/sound.js",
+          "ops": [
+            {
+              "e": "R1-E70",
+              "op": "write",
+              "c": "call_f46ec4f020b043389dd20a2c"
+            }
+          ]
         },
         {
           "id": "R1-B12",
-          "kind": "work",
-          "start": 71,
-          "end": 74,
-          "start_event": "R1-E72",
-          "end_event": "R1-E75",
-          "touched_files": [
-            "js/particles.js"
+          "kind": "file",
+          "start": 73,
+          "end": 76,
+          "start_event": "R1-E74",
+          "end_event": "R1-E77",
+          "events": [
+            "R1-E74",
+            "R1-E75",
+            "R1-E76",
+            "R1-E77"
           ],
-          "wrote_files": [
-            "js/particles.js"
-          ],
-          "command_types": []
+          "file": "js/particles.js",
+          "ops": [
+            {
+              "e": "R1-E74",
+              "op": "write",
+              "c": "call_7ee2ade6c5e24d2d92e95322"
+            }
+          ]
         },
         {
           "id": "R1-B13",
-          "kind": "work",
-          "start": 75,
-          "end": 78,
-          "start_event": "R1-E76",
-          "end_event": "R1-E79",
-          "touched_files": [
-            "js/save.js"
+          "kind": "file",
+          "start": 77,
+          "end": 80,
+          "start_event": "R1-E78",
+          "end_event": "R1-E81",
+          "events": [
+            "R1-E78",
+            "R1-E79",
+            "R1-E80",
+            "R1-E81"
           ],
-          "wrote_files": [
-            "js/save.js"
-          ],
-          "command_types": []
+          "file": "js/save.js",
+          "ops": [
+            {
+              "e": "R1-E78",
+              "op": "write",
+              "c": "call_e557395cae7c43c1a8009cb7"
+            }
+          ]
         },
         {
           "id": "R1-B14",
-          "kind": "work",
-          "start": 79,
-          "end": 82,
-          "start_event": "R1-E80",
-          "end_event": "R1-E83",
-          "touched_files": [
-            "js/main.js"
+          "kind": "file",
+          "start": 81,
+          "end": 380,
+          "start_event": "R1-E82",
+          "end_event": "R1-E381",
+          "events": [
+            "R1-E82",
+            "R1-E83",
+            "R1-E84",
+            "R1-E85",
+            "R1-E246",
+            "R1-E247",
+            "R1-E308",
+            "R1-E309",
+            "R1-E310",
+            "R1-E311",
+            "R1-E312",
+            "R1-E313",
+            "R1-E378",
+            "R1-E379",
+            "R1-E380",
+            "R1-E381"
           ],
-          "wrote_files": [
-            "js/main.js"
+          "file": "js/main.js",
+          "ops": [
+            {
+              "e": "R1-E82",
+              "op": "write",
+              "c": "call_badd62253c444fcc8077c358"
+            },
+            {
+              "e": "R1-E246",
+              "op": "edit",
+              "c": "call_623b91c1d5904efc85da2f62"
+            },
+            {
+              "e": "R1-E308",
+              "op": "read",
+              "c": "call_ce9d78324162495b8ad8ec04"
+            },
+            {
+              "e": "R1-E312",
+              "op": "read",
+              "c": "call_b451c60e67e547d6ac32f3e1"
+            },
+            {
+              "e": "R1-E378",
+              "op": "edit",
+              "c": "call_aeed5463fdeb461abba57353"
+            },
+            {
+              "e": "R1-E380",
+              "op": "read",
+              "c": "call_a9461542dddd4a13ba51fba8"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B15",
-          "kind": "work",
-          "start": 83,
-          "end": 86,
-          "start_event": "R1-E84",
-          "end_event": "R1-E87",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 85,
+          "end": 136,
+          "start_event": "R1-E86",
+          "end_event": "R1-E137",
+          "events": [
+            "R1-E86",
+            "R1-E87",
+            "R1-E88",
+            "R1-E89",
+            "R1-E90",
+            "R1-E91",
+            "R1-E92",
+            "R1-E93",
+            "R1-E104",
+            "R1-E105",
+            "R1-E106",
+            "R1-E107",
+            "R1-E108",
+            "R1-E109",
+            "R1-E110",
+            "R1-E111",
+            "R1-E116",
+            "R1-E117",
+            "R1-E118",
+            "R1-E119",
+            "R1-E120",
+            "R1-E121",
+            "R1-E122",
+            "R1-E123",
+            "R1-E124",
+            "R1-E125",
+            "R1-E126",
+            "R1-E127",
+            "R1-E128",
+            "R1-E129",
+            "R1-E134",
+            "R1-E135",
+            "R1-E136",
+            "R1-E137"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/smoke.js",
+          "ops": [
+            {
+              "e": "R1-E86",
+              "op": "write",
+              "c": "call_9cbed253be274a70bd157d1d"
+            },
+            {
+              "e": "R1-E90",
+              "op": "edit",
+              "c": "call_d13d318ce3634011942ae96b"
+            },
+            {
+              "e": "R1-E104",
+              "op": "edit",
+              "c": "call_d4c0b97628f041aeaf249857"
+            },
+            {
+              "e": "R1-E106",
+              "op": "edit",
+              "c": "call_88ea8c35549d4afcb24b8159"
+            },
+            {
+              "e": "R1-E108",
+              "op": "edit",
+              "c": "call_6cc3849946d84f5ea16c833f"
+            },
+            {
+              "e": "R1-E116",
+              "op": "edit",
+              "c": "call_718cdf893267457c80dd8630"
+            },
+            {
+              "e": "R1-E118",
+              "op": "edit",
+              "c": "call_a223736e27a44fa18a1698aa"
+            },
+            {
+              "e": "R1-E122",
+              "op": "edit",
+              "c": "call_2e03e360ec79433694fcccf5"
+            },
+            {
+              "e": "R1-E126",
+              "op": "edit",
+              "c": "call_6f9c74237d9a4666a20252c5"
+            },
+            {
+              "e": "R1-E134",
+              "op": "edit",
+              "c": "call_6981867579d942c298dbad67"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B16",
-          "kind": "work",
-          "start": 87,
-          "end": 90,
-          "start_event": "R1-E88",
-          "end_event": "R1-E91",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 97,
+          "end": 138,
+          "start_event": "R1-E98",
+          "end_event": "R1-E139",
+          "events": [
+            "R1-E98",
+            "R1-E99",
+            "R1-E100",
+            "R1-E101",
+            "R1-E138",
+            "R1-E139"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-fall.js",
+          "ops": [
+            {
+              "e": "R1-E98",
+              "op": "write",
+              "c": "call_927e3c56c15141978c8159a9"
+            },
+            {
+              "e": "R1-E138",
+              "op": "delete",
+              "c": "call_40a7c69588d6480faf9d71f4"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B17",
-          "kind": "work",
-          "start": 91,
-          "end": 94,
-          "start_event": "R1-E92",
-          "end_event": "R1-E95",
-          "touched_files": [
-            "js/chunks.js"
+          "kind": "file",
+          "start": 111,
+          "end": 139,
+          "start_event": "R1-E112",
+          "end_event": "R1-E140",
+          "events": [
+            "R1-E112",
+            "R1-E113",
+            "R1-E114",
+            "R1-E115",
+            "R1-E138",
+            "R1-E140"
           ],
-          "wrote_files": [
-            "js/chunks.js"
+          "file": "tools/debug-water.js",
+          "ops": [
+            {
+              "e": "R1-E112",
+              "op": "write",
+              "c": "call_f1dd6427b71446838474e690"
+            },
+            {
+              "e": "R1-E138",
+              "op": "delete",
+              "c": "call_2c3305c7defa4654bfea152a"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B18",
-          "kind": "work",
-          "start": 95,
-          "end": 98,
-          "start_event": "R1-E96",
-          "end_event": "R1-E99",
-          "touched_files": [
-            "tools/debug-fall.js"
+          "kind": "file",
+          "start": 129,
+          "end": 146,
+          "start_event": "R1-E130",
+          "end_event": "R1-E147",
+          "events": [
+            "R1-E130",
+            "R1-E131",
+            "R1-E132",
+            "R1-E133",
+            "R1-E138",
+            "R1-E141",
+            "R1-E142",
+            "R1-E143",
+            "R1-E144",
+            "R1-E145",
+            "R1-E146",
+            "R1-E147"
           ],
-          "wrote_files": [
-            "tools/debug-fall.js"
+          "file": "tools/debug-ray.js",
+          "ops": [
+            {
+              "e": "R1-E130",
+              "op": "write",
+              "c": "call_2f4fe9666f9f4df88d3f0368"
+            },
+            {
+              "e": "R1-E138",
+              "op": "delete",
+              "c": "call_bd79781a23e54a0d9bad5d86"
+            }
           ],
+          "has_tools": true,
           "command_types": [
-            "run"
+            "run",
+            "other"
           ]
         },
         {
           "id": "R1-B19",
-          "kind": "work",
-          "start": 99,
-          "end": 102,
-          "start_event": "R1-E100",
-          "end_event": "R1-E103",
-          "touched_files": [
-            "js/physics.js"
+          "kind": "environment",
+          "start": 153,
+          "end": 158,
+          "start_event": "R1-E154",
+          "end_event": "R1-E159",
+          "events": [
+            "R1-E154",
+            "R1-E155",
+            "R1-E156",
+            "R1-E157",
+            "R1-E158",
+            "R1-E159"
           ],
-          "wrote_files": [
-            "js/physics.js"
+          "command_types": [
+            "environment",
+            "other"
+          ]
+        },
+        {
+          "id": "R1-B20",
+          "kind": "file",
+          "start": 159,
+          "end": 459,
+          "start_event": "R1-E160",
+          "end_event": "R1-E460",
+          "events": [
+            "R1-E160",
+            "R1-E161",
+            "R1-E162",
+            "R1-E163",
+            "R1-E164",
+            "R1-E165",
+            "R1-E166",
+            "R1-E167",
+            "R1-E168",
+            "R1-E169",
+            "R1-E248",
+            "R1-E249",
+            "R1-E250",
+            "R1-E251",
+            "R1-E252",
+            "R1-E253",
+            "R1-E254",
+            "R1-E255",
+            "R1-E256",
+            "R1-E257",
+            "R1-E258",
+            "R1-E259",
+            "R1-E260",
+            "R1-E261",
+            "R1-E262",
+            "R1-E263",
+            "R1-E264",
+            "R1-E265",
+            "R1-E266",
+            "R1-E267",
+            "R1-E268",
+            "R1-E269",
+            "R1-E274",
+            "R1-E275",
+            "R1-E276",
+            "R1-E277",
+            "R1-E278",
+            "R1-E279",
+            "R1-E288",
+            "R1-E289",
+            "R1-E290",
+            "R1-E291",
+            "R1-E292",
+            "R1-E293",
+            "R1-E294",
+            "R1-E295",
+            "R1-E322",
+            "R1-E323",
+            "R1-E324",
+            "R1-E325",
+            "R1-E326",
+            "R1-E327",
+            "R1-E328",
+            "R1-E329",
+            "R1-E330",
+            "R1-E331",
+            "R1-E332",
+            "R1-E333",
+            "R1-E334",
+            "R1-E335",
+            "R1-E336",
+            "R1-E337",
+            "R1-E338",
+            "R1-E339",
+            "R1-E366",
+            "R1-E367",
+            "R1-E368",
+            "R1-E369",
+            "R1-E374",
+            "R1-E375",
+            "R1-E376",
+            "R1-E377",
+            "R1-E382",
+            "R1-E383",
+            "R1-E384",
+            "R1-E385",
+            "R1-E406",
+            "R1-E407",
+            "R1-E408",
+            "R1-E409",
+            "R1-E410",
+            "R1-E411",
+            "R1-E442",
+            "R1-E443",
+            "R1-E444",
+            "R1-E445",
+            "R1-E446",
+            "R1-E447",
+            "R1-E448",
+            "R1-E449",
+            "R1-E450",
+            "R1-E451",
+            "R1-E452",
+            "R1-E453",
+            "R1-E454",
+            "R1-E455",
+            "R1-E456",
+            "R1-E457",
+            "R1-E458",
+            "R1-E459",
+            "R1-E460"
           ],
+          "file": "tools/e2e.js",
+          "ops": [
+            {
+              "e": "R1-E160",
+              "op": "write",
+              "c": "call_542c073452304da59ea182c8"
+            },
+            {
+              "e": "R1-E164",
+              "op": "edit",
+              "c": "call_f35bcfa872914c3cb1c1483a"
+            },
+            {
+              "e": "R1-E166",
+              "op": "edit",
+              "c": "call_186b140449134877a96c8f86"
+            },
+            {
+              "e": "R1-E248",
+              "op": "edit",
+              "c": "call_2885eff4ff08415f81006868"
+            },
+            {
+              "e": "R1-E252",
+              "op": "edit",
+              "c": "call_8c7d0e1c8f284d37a3e8baa0"
+            },
+            {
+              "e": "R1-E258",
+              "op": "edit",
+              "c": "call_7acd38f00c9e4b8da9fa9fd6"
+            },
+            {
+              "e": "R1-E260",
+              "op": "read",
+              "c": "call_a3c39bcb565f4765a531332b"
+            },
+            {
+              "e": "R1-E262",
+              "op": "edit",
+              "c": "call_e6c2c33a79864d7c972e14fc"
+            },
+            {
+              "e": "R1-E266",
+              "op": "read",
+              "c": "call_09b7cfa70c2f41f2af52aa5f"
+            },
+            {
+              "e": "R1-E274",
+              "op": "read",
+              "c": "call_fbfb2fb79a764bab9f58c899"
+            },
+            {
+              "e": "R1-E276",
+              "op": "edit",
+              "c": "call_01bdad940661428e9011ca1b"
+            },
+            {
+              "e": "R1-E288",
+              "op": "edit",
+              "c": "call_b0ebfa4752c543409eeae094"
+            },
+            {
+              "e": "R1-E322",
+              "op": "edit",
+              "c": "call_a70e7f549d594cb1be1fed89"
+            },
+            {
+              "e": "R1-E324",
+              "op": "edit",
+              "c": "call_a12bba3e9fba416cbdae3907"
+            },
+            {
+              "e": "R1-E328",
+              "op": "read",
+              "c": "call_cb57da7b7ac34945954e55a7"
+            },
+            {
+              "e": "R1-E330",
+              "op": "edit",
+              "c": "call_b27cf479f79343b5b2c8662d"
+            },
+            {
+              "e": "R1-E334",
+              "op": "read",
+              "c": "call_732f9560900d4d288c8e94df"
+            },
+            {
+              "e": "R1-E336",
+              "op": "edit",
+              "c": "call_2e2977750a3b481dabe9c33d"
+            },
+            {
+              "e": "R1-E366",
+              "op": "edit",
+              "c": "call_11b17ad083c844fba5ef6677"
+            },
+            {
+              "e": "R1-E374",
+              "op": "edit",
+              "c": "call_02d51fae7bf04018a2d77002"
+            },
+            {
+              "e": "R1-E382",
+              "op": "edit",
+              "c": "call_988af52ab302445ea0aeaf59"
+            },
+            {
+              "e": "R1-E406",
+              "op": "read",
+              "c": "call_2141474c75c04b18b8bd36e6"
+            },
+            {
+              "e": "R1-E408",
+              "op": "edit",
+              "c": "call_dcd533369cac45e79dce0205"
+            },
+            {
+              "e": "R1-E442",
+              "op": "edit",
+              "c": "call_89705ce1e6ef4454b4740f86"
+            },
+            {
+              "e": "R1-E446",
+              "op": "read",
+              "c": "call_e6fa67fea54649dc838defbc"
+            },
+            {
+              "e": "R1-E448",
+              "op": "edit",
+              "c": "call_69c61cf8f370466c9b99ef44"
+            }
+          ],
+          "has_tools": true,
+          "command_types": [
+            "run",
+            "file",
+            "other"
+          ]
+        },
+        {
+          "id": "R1-B21",
+          "kind": "file",
+          "start": 169,
+          "end": 196,
+          "start_event": "R1-E170",
+          "end_event": "R1-E197",
+          "events": [
+            "R1-E170",
+            "R1-E171",
+            "R1-E172",
+            "R1-E173",
+            "R1-E192",
+            "R1-E193",
+            "R1-E194",
+            "R1-E195",
+            "R1-E196",
+            "R1-E197"
+          ],
+          "file": "tools/debug-aim.js",
+          "ops": [
+            {
+              "e": "R1-E170",
+              "op": "write",
+              "c": "call_e33b4dd3d2524411a242e85e"
+            },
+            {
+              "e": "R1-E192",
+              "op": "write",
+              "c": "call_b1b85f2da09a4ce1b0b2bb3d"
+            }
+          ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
-          "id": "R1-B20",
-          "kind": "work",
-          "start": 103,
-          "end": 104,
-          "start_event": "R1-E104",
-          "end_event": "R1-E105",
-          "touched_files": [
-            "tools/smoke.js"
-          ],
-          "wrote_files": [
-            "tools/smoke.js"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R1-B21",
-          "kind": "work",
-          "start": 105,
-          "end": 106,
-          "start_event": "R1-E106",
-          "end_event": "R1-E107",
-          "touched_files": [
-            "tools/smoke.js"
-          ],
-          "wrote_files": [
-            "tools/smoke.js"
-          ],
-          "command_types": []
-        },
-        {
           "id": "R1-B22",
-          "kind": "work",
-          "start": 107,
-          "end": 108,
-          "start_event": "R1-E108",
-          "end_event": "R1-E109",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 173,
+          "end": 176,
+          "start_event": "R1-E174",
+          "end_event": "R1-E177",
+          "events": [
+            "R1-E174",
+            "R1-E175",
+            "R1-E176",
+            "R1-E177"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-cam.js",
+          "ops": [
+            {
+              "e": "R1-E174",
+              "op": "write",
+              "c": "call_55598b2dc47b443c998dc1a7"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B23",
-          "kind": "work",
-          "start": 109,
-          "end": 112,
-          "start_event": "R1-E110",
-          "end_event": "R1-E113",
-          "touched_files": [
-            "tools/debug-water.js"
+          "kind": "file",
+          "start": 177,
+          "end": 180,
+          "start_event": "R1-E178",
+          "end_event": "R1-E181",
+          "events": [
+            "R1-E178",
+            "R1-E179",
+            "R1-E180",
+            "R1-E181"
           ],
-          "wrote_files": [
-            "tools/debug-water.js"
+          "file": "tools/debug-conv.js",
+          "ops": [
+            {
+              "e": "R1-E178",
+              "op": "write",
+              "c": "call_55008f076e10477fb1157519"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B24",
-          "kind": "work",
-          "start": 113,
-          "end": 116,
-          "start_event": "R1-E114",
-          "end_event": "R1-E117",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 197,
+          "end": 214,
+          "start_event": "R1-E198",
+          "end_event": "R1-E215",
+          "events": [
+            "R1-E198",
+            "R1-E199",
+            "R1-E200",
+            "R1-E201",
+            "R1-E208",
+            "R1-E209",
+            "R1-E210",
+            "R1-E211",
+            "R1-E212",
+            "R1-E213",
+            "R1-E214",
+            "R1-E215"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-line.js",
+          "ops": [
+            {
+              "e": "R1-E198",
+              "op": "write",
+              "c": "call_b0dd166a217d499586522a41"
+            },
+            {
+              "e": "R1-E208",
+              "op": "edit",
+              "c": "call_b3d9acb097af446e923d98fa"
+            },
+            {
+              "e": "R1-E212",
+              "op": "edit",
+              "c": "call_6f4c652fdc0f4543850c8368"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B25",
-          "kind": "work",
-          "start": 117,
-          "end": 118,
-          "start_event": "R1-E118",
-          "end_event": "R1-E119",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 201,
+          "end": 206,
+          "start_event": "R1-E202",
+          "end_event": "R1-E207",
+          "events": [
+            "R1-E202",
+            "R1-E203",
+            "R1-E204",
+            "R1-E205",
+            "R1-E206",
+            "R1-E207"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-terrain.js",
+          "ops": [
+            {
+              "e": "R1-E202",
+              "op": "write",
+              "c": "call_5e25336961e6491889678add"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B26",
-          "kind": "work",
-          "start": 119,
-          "end": 122,
-          "start_event": "R1-E120",
-          "end_event": "R1-E123",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 215,
+          "end": 218,
+          "start_event": "R1-E216",
+          "end_event": "R1-E219",
+          "events": [
+            "R1-E216",
+            "R1-E217",
+            "R1-E218",
+            "R1-E219"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-walk.js",
+          "ops": [
+            {
+              "e": "R1-E216",
+              "op": "write",
+              "c": "call_77e95442c39341b99fec495d"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B27",
-          "kind": "work",
-          "start": 123,
-          "end": 126,
-          "start_event": "R1-E124",
-          "end_event": "R1-E127",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 219,
+          "end": 224,
+          "start_event": "R1-E220",
+          "end_event": "R1-E225",
+          "events": [
+            "R1-E220",
+            "R1-E221",
+            "R1-E222",
+            "R1-E223",
+            "R1-E224",
+            "R1-E225"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-collide.js",
+          "ops": [
+            {
+              "e": "R1-E220",
+              "op": "write",
+              "c": "call_544f145979d14d1ea82dc902"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B28",
-          "kind": "work",
-          "start": 127,
-          "end": 130,
-          "start_event": "R1-E128",
-          "end_event": "R1-E131",
-          "touched_files": [
-            "tools/debug-ray.js"
+          "kind": "file",
+          "start": 225,
+          "end": 228,
+          "start_event": "R1-E226",
+          "end_event": "R1-E229",
+          "events": [
+            "R1-E226",
+            "R1-E227",
+            "R1-E228",
+            "R1-E229"
           ],
-          "wrote_files": [
-            "tools/debug-ray.js"
+          "file": "tools/debug-step.js",
+          "ops": [
+            {
+              "e": "R1-E226",
+              "op": "write",
+              "c": "call_9039f61e8f524ab183411a1a"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B29",
-          "kind": "work",
-          "start": 131,
-          "end": 134,
-          "start_event": "R1-E132",
-          "end_event": "R1-E135",
-          "touched_files": [
-            "tools/smoke.js"
+          "kind": "file",
+          "start": 229,
+          "end": 232,
+          "start_event": "R1-E230",
+          "end_event": "R1-E233",
+          "events": [
+            "R1-E230",
+            "R1-E231",
+            "R1-E232",
+            "R1-E233"
           ],
-          "wrote_files": [
-            "tools/smoke.js"
+          "file": "tools/debug-walk2.js",
+          "ops": [
+            {
+              "e": "R1-E230",
+              "op": "write",
+              "c": "call_52cd256076864f5ba0c8917a"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B30",
-          "kind": "work",
-          "start": 135,
-          "end": 148,
-          "start_event": "R1-E136",
-          "end_event": "R1-E149",
-          "touched_files": [
-            "index.html"
+          "kind": "file",
+          "start": 233,
+          "end": 236,
+          "start_event": "R1-E234",
+          "end_event": "R1-E237",
+          "events": [
+            "R1-E234",
+            "R1-E235",
+            "R1-E236",
+            "R1-E237"
           ],
-          "wrote_files": [
-            "index.html"
+          "file": "tools/debug-blocks-browser.js",
+          "ops": [
+            {
+              "e": "R1-E234",
+              "op": "write",
+              "c": "call_ad077591c9e8493e9b119a6a"
+            }
           ],
+          "has_tools": true,
           "command_types": [
-            "run",
-            "other"
+            "run"
           ]
         },
         {
           "id": "R1-B31",
-          "kind": "work",
-          "start": 149,
-          "end": 152,
-          "start_event": "R1-E150",
-          "end_event": "R1-E153",
-          "touched_files": [],
-          "wrote_files": [],
+          "kind": "file",
+          "start": 237,
+          "end": 240,
+          "start_event": "R1-E238",
+          "end_event": "R1-E241",
+          "events": [
+            "R1-E238",
+            "R1-E239",
+            "R1-E240",
+            "R1-E241"
+          ],
+          "file": "tools/debug-keywalk.js",
+          "ops": [
+            {
+              "e": "R1-E238",
+              "op": "write",
+              "c": "call_826d1fd5e351449ca0b006aa"
+            }
+          ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B32",
-          "kind": "environment",
-          "start": 153,
-          "end": 156,
-          "start_event": "R1-E154",
-          "end_event": "R1-E157",
-          "touched_files": [],
-          "wrote_files": [],
+          "kind": "file",
+          "start": 241,
+          "end": 244,
+          "start_event": "R1-E242",
+          "end_event": "R1-E245",
+          "events": [
+            "R1-E242",
+            "R1-E243",
+            "R1-E244",
+            "R1-E245"
+          ],
+          "file": "tools/debug-pitch.js",
+          "ops": [
+            {
+              "e": "R1-E242",
+              "op": "write",
+              "c": "call_f56e1b8ef10b42f4ba9f2e6a"
+            }
+          ],
+          "has_tools": true,
           "command_types": [
-            "environment"
+            "run"
           ]
         },
         {
           "id": "R1-B33",
-          "kind": "work",
-          "start": 157,
-          "end": 160,
-          "start_event": "R1-E158",
-          "end_event": "R1-E161",
-          "touched_files": [
-            "tools/e2e.js"
+          "kind": "file",
+          "start": 269,
+          "end": 272,
+          "start_event": "R1-E270",
+          "end_event": "R1-E273",
+          "events": [
+            "R1-E270",
+            "R1-E271",
+            "R1-E272",
+            "R1-E273"
           ],
-          "wrote_files": [
-            "tools/e2e.js"
+          "file": "tools/debug-lock.js",
+          "ops": [
+            {
+              "e": "R1-E270",
+              "op": "write",
+              "c": "call_dab8ea9abc9c4051895ba817"
+            }
           ],
+          "has_tools": true,
           "command_types": [
-            "other"
+            "run"
           ]
         },
         {
           "id": "R1-B34",
-          "kind": "work",
-          "start": 161,
-          "end": 164,
-          "start_event": "R1-E162",
-          "end_event": "R1-E165",
-          "touched_files": [
-            "tools/e2e.js"
+          "kind": "file",
+          "start": 279,
+          "end": 282,
+          "start_event": "R1-E280",
+          "end_event": "R1-E283",
+          "events": [
+            "R1-E280",
+            "R1-E281",
+            "R1-E282",
+            "R1-E283"
           ],
-          "wrote_files": [
-            "tools/e2e.js"
+          "file": "tools/debug-place.js",
+          "ops": [
+            {
+              "e": "R1-E280",
+              "op": "write",
+              "c": "call_875d02dd30a046b9bb03324a"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B35",
-          "kind": "work",
-          "start": 165,
-          "end": 166,
-          "start_event": "R1-E166",
-          "end_event": "R1-E167",
-          "touched_files": [
-            "tools/e2e.js"
+          "kind": "file",
+          "start": 283,
+          "end": 286,
+          "start_event": "R1-E284",
+          "end_event": "R1-E287",
+          "events": [
+            "R1-E284",
+            "R1-E285",
+            "R1-E286",
+            "R1-E287"
           ],
-          "wrote_files": [
-            "tools/e2e.js"
+          "file": "tools/debug-place2.js",
+          "ops": [
+            {
+              "e": "R1-E284",
+              "op": "write",
+              "c": "call_9cb1c0201df64370bc1fe3eb"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B36",
-          "kind": "work",
-          "start": 167,
-          "end": 170,
-          "start_event": "R1-E168",
-          "end_event": "R1-E171",
-          "touched_files": [
-            "tools/debug-aim.js"
+          "kind": "file",
+          "start": 295,
+          "end": 298,
+          "start_event": "R1-E296",
+          "end_event": "R1-E299",
+          "events": [
+            "R1-E296",
+            "R1-E297",
+            "R1-E298",
+            "R1-E299"
           ],
-          "wrote_files": [
-            "tools/debug-aim.js"
+          "file": "tools/debug-place3.js",
+          "ops": [
+            {
+              "e": "R1-E296",
+              "op": "write",
+              "c": "call_d861f26444604fa39251ab85"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B37",
-          "kind": "work",
-          "start": 171,
-          "end": 174,
-          "start_event": "R1-E172",
-          "end_event": "R1-E175",
-          "touched_files": [
-            "tools/debug-cam.js"
+          "kind": "file",
+          "start": 299,
+          "end": 302,
+          "start_event": "R1-E300",
+          "end_event": "R1-E303",
+          "events": [
+            "R1-E300",
+            "R1-E301",
+            "R1-E302",
+            "R1-E303"
           ],
-          "wrote_files": [
-            "tools/debug-cam.js"
+          "file": "tools/debug-setblock.js",
+          "ops": [
+            {
+              "e": "R1-E300",
+              "op": "write",
+              "c": "call_ab8aebca866e49d5a8f7b080"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B38",
-          "kind": "work",
-          "start": 175,
-          "end": 178,
-          "start_event": "R1-E176",
-          "end_event": "R1-E179",
-          "touched_files": [
-            "tools/debug-conv.js"
+          "kind": "file",
+          "start": 303,
+          "end": 306,
+          "start_event": "R1-E304",
+          "end_event": "R1-E307",
+          "events": [
+            "R1-E304",
+            "R1-E305",
+            "R1-E306",
+            "R1-E307"
           ],
-          "wrote_files": [
-            "tools/debug-conv.js"
+          "file": "tools/debug-place4.js",
+          "ops": [
+            {
+              "e": "R1-E304",
+              "op": "write",
+              "c": "call_e57b1be82d1a421c9469904c"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B39",
-          "kind": "work",
-          "start": 179,
-          "end": 182,
-          "start_event": "R1-E180",
-          "end_event": "R1-E183",
-          "touched_files": [
-            "js/raycast.js"
+          "kind": "file",
+          "start": 313,
+          "end": 316,
+          "start_event": "R1-E314",
+          "end_event": "R1-E317",
+          "events": [
+            "R1-E314",
+            "R1-E315",
+            "R1-E316",
+            "R1-E317"
           ],
-          "wrote_files": [
-            "js/raycast.js"
+          "file": "tools/debug-rightclick.js",
+          "ops": [
+            {
+              "e": "R1-E314",
+              "op": "write",
+              "c": "call_6f65b83d401f4215894b5ef2"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B40",
-          "kind": "work",
-          "start": 183,
-          "end": 192,
-          "start_event": "R1-E184",
-          "end_event": "R1-E193",
-          "touched_files": [
-            "tools/debug-aim.js"
+          "kind": "file",
+          "start": 317,
+          "end": 320,
+          "start_event": "R1-E318",
+          "end_event": "R1-E321",
+          "events": [
+            "R1-E318",
+            "R1-E319",
+            "R1-E320",
+            "R1-E321"
           ],
-          "wrote_files": [
-            "tools/debug-aim.js"
+          "file": "tools/debug-hook.js",
+          "ops": [
+            {
+              "e": "R1-E318",
+              "op": "write",
+              "c": "call_a9ff38af8da442fc841c00bb"
+            }
           ],
+          "has_tools": true,
           "command_types": [
-            "file",
             "run"
           ]
         },
         {
           "id": "R1-B41",
-          "kind": "work",
-          "start": 193,
-          "end": 198,
-          "start_event": "R1-E194",
-          "end_event": "R1-E199",
-          "touched_files": [
-            "tools/debug-line.js"
+          "kind": "file",
+          "start": 339,
+          "end": 342,
+          "start_event": "R1-E340",
+          "end_event": "R1-E343",
+          "events": [
+            "R1-E340",
+            "R1-E341",
+            "R1-E342",
+            "R1-E343"
           ],
-          "wrote_files": [
-            "tools/debug-line.js"
+          "file": "tools/debug-seq.js",
+          "ops": [
+            {
+              "e": "R1-E340",
+              "op": "write",
+              "c": "call_3541b061c6a34ad4ac4a3f67"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B42",
-          "kind": "work",
-          "start": 199,
-          "end": 202,
-          "start_event": "R1-E200",
-          "end_event": "R1-E203",
-          "touched_files": [
-            "tools/debug-terrain.js"
+          "kind": "file",
+          "start": 343,
+          "end": 346,
+          "start_event": "R1-E344",
+          "end_event": "R1-E347",
+          "events": [
+            "R1-E344",
+            "R1-E345",
+            "R1-E346",
+            "R1-E347"
           ],
-          "wrote_files": [
-            "tools/debug-terrain.js"
+          "file": "tools/debug-seq2.js",
+          "ops": [
+            {
+              "e": "R1-E344",
+              "op": "write",
+              "c": "call_014a000c4c2f43829105b34e"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B43",
-          "kind": "work",
-          "start": 203,
-          "end": 208,
-          "start_event": "R1-E204",
-          "end_event": "R1-E209",
-          "touched_files": [
-            "tools/debug-line.js"
+          "kind": "file",
+          "start": 347,
+          "end": 350,
+          "start_event": "R1-E348",
+          "end_event": "R1-E351",
+          "events": [
+            "R1-E348",
+            "R1-E349",
+            "R1-E350",
+            "R1-E351"
           ],
-          "wrote_files": [
-            "tools/debug-line.js"
+          "file": "tools/debug-cond.js",
+          "ops": [
+            {
+              "e": "R1-E348",
+              "op": "write",
+              "c": "call_b71d6765773a4841ba7aa9c9"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B44",
-          "kind": "work",
-          "start": 209,
-          "end": 212,
-          "start_event": "R1-E210",
-          "end_event": "R1-E213",
-          "touched_files": [
-            "tools/debug-line.js"
+          "kind": "file",
+          "start": 351,
+          "end": 354,
+          "start_event": "R1-E352",
+          "end_event": "R1-E355",
+          "events": [
+            "R1-E352",
+            "R1-E353",
+            "R1-E354",
+            "R1-E355"
           ],
-          "wrote_files": [
-            "tools/debug-line.js"
+          "file": "tools/debug-sep.js",
+          "ops": [
+            {
+              "e": "R1-E352",
+              "op": "write",
+              "c": "call_5778c45e1d444edfab6584ca"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B45",
-          "kind": "work",
-          "start": 213,
-          "end": 216,
-          "start_event": "R1-E214",
-          "end_event": "R1-E217",
-          "touched_files": [
-            "tools/debug-walk.js"
+          "kind": "file",
+          "start": 355,
+          "end": 360,
+          "start_event": "R1-E356",
+          "end_event": "R1-E361",
+          "events": [
+            "R1-E356",
+            "R1-E357",
+            "R1-E358",
+            "R1-E359",
+            "R1-E360",
+            "R1-E361"
           ],
-          "wrote_files": [
-            "tools/debug-walk.js"
+          "file": "tools/debug-event.js",
+          "ops": [
+            {
+              "e": "R1-E356",
+              "op": "write",
+              "c": "call_1d79e97b76d6436f9dbe28b7"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B46",
-          "kind": "work",
-          "start": 217,
-          "end": 220,
-          "start_event": "R1-E218",
-          "end_event": "R1-E221",
-          "touched_files": [
-            "tools/debug-collide.js"
+          "kind": "file",
+          "start": 361,
+          "end": 364,
+          "start_event": "R1-E362",
+          "end_event": "R1-E365",
+          "events": [
+            "R1-E362",
+            "R1-E363",
+            "R1-E364",
+            "R1-E365"
           ],
-          "wrote_files": [
-            "tools/debug-collide.js"
+          "file": "tools/debug-hook2.js",
+          "ops": [
+            {
+              "e": "R1-E362",
+              "op": "write",
+              "c": "call_e22c11b7471f4ebd9047f52c"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B47",
-          "kind": "work",
-          "start": 221,
-          "end": 226,
-          "start_event": "R1-E222",
-          "end_event": "R1-E227",
-          "touched_files": [
-            "tools/debug-step.js"
+          "kind": "file",
+          "start": 369,
+          "end": 372,
+          "start_event": "R1-E370",
+          "end_event": "R1-E373",
+          "events": [
+            "R1-E370",
+            "R1-E371",
+            "R1-E372",
+            "R1-E373"
           ],
-          "wrote_files": [
-            "tools/debug-step.js"
+          "file": "tools/debug-z6.js",
+          "ops": [
+            {
+              "e": "R1-E370",
+              "op": "write",
+              "c": "call_cf8a1a68562f4f4eafa976ff"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B48",
-          "kind": "work",
-          "start": 227,
-          "end": 230,
-          "start_event": "R1-E228",
-          "end_event": "R1-E231",
-          "touched_files": [
-            "tools/debug-walk2.js"
+          "kind": "file",
+          "start": 385,
+          "end": 388,
+          "start_event": "R1-E386",
+          "end_event": "R1-E389",
+          "events": [
+            "R1-E386",
+            "R1-E387",
+            "R1-E388",
+            "R1-E389"
           ],
-          "wrote_files": [
-            "tools/debug-walk2.js"
+          "file": "tools/debug-place5.js",
+          "ops": [
+            {
+              "e": "R1-E386",
+              "op": "write",
+              "c": "call_5cfb69fed1224ed1a96f2f8a"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B49",
-          "kind": "work",
-          "start": 231,
-          "end": 234,
-          "start_event": "R1-E232",
-          "end_event": "R1-E235",
-          "touched_files": [
-            "tools/debug-blocks-browser.js"
+          "kind": "file",
+          "start": 389,
+          "end": 394,
+          "start_event": "R1-E390",
+          "end_event": "R1-E395",
+          "events": [
+            "R1-E390",
+            "R1-E391",
+            "R1-E392",
+            "R1-E393",
+            "R1-E394",
+            "R1-E395"
           ],
-          "wrote_files": [
-            "tools/debug-blocks-browser.js"
+          "file": "tools/debug-btn2.js",
+          "ops": [
+            {
+              "e": "R1-E390",
+              "op": "write",
+              "c": "call_ef10cdb7284a4f09bb345383"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B50",
-          "kind": "work",
-          "start": 235,
-          "end": 238,
-          "start_event": "R1-E236",
-          "end_event": "R1-E239",
-          "touched_files": [
-            "tools/debug-keywalk.js"
+          "kind": "file",
+          "start": 395,
+          "end": 404,
+          "start_event": "R1-E396",
+          "end_event": "R1-E405",
+          "events": [
+            "R1-E396",
+            "R1-E397",
+            "R1-E398",
+            "R1-E399",
+            "R1-E400",
+            "R1-E401",
+            "R1-E402",
+            "R1-E403",
+            "R1-E404",
+            "R1-E405"
           ],
-          "wrote_files": [
-            "tools/debug-keywalk.js"
+          "file": "tools/debug-e2e1.js",
+          "ops": [
+            {
+              "e": "R1-E396",
+              "op": "write",
+              "c": "call_4c0d3d01555745f291cf08e9"
+            },
+            {
+              "e": "R1-E400",
+              "op": "edit",
+              "c": "call_f48845179063487eb41f99a9"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B51",
-          "kind": "work",
-          "start": 239,
-          "end": 242,
-          "start_event": "R1-E240",
-          "end_event": "R1-E243",
-          "touched_files": [
-            "tools/debug-pitch.js"
+          "kind": "file",
+          "start": 411,
+          "end": 414,
+          "start_event": "R1-E412",
+          "end_event": "R1-E415",
+          "events": [
+            "R1-E412",
+            "R1-E413",
+            "R1-E414",
+            "R1-E415"
           ],
-          "wrote_files": [
-            "tools/debug-pitch.js"
+          "file": "tools/debug-final.js",
+          "ops": [
+            {
+              "e": "R1-E412",
+              "op": "write",
+              "c": "call_ff04a09c71d44c8fac01544d"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B52",
-          "kind": "work",
-          "start": 243,
-          "end": 246,
-          "start_event": "R1-E244",
-          "end_event": "R1-E247",
-          "touched_files": [
-            "js/main.js"
+          "kind": "file",
+          "start": 415,
+          "end": 420,
+          "start_event": "R1-E416",
+          "end_event": "R1-E421",
+          "events": [
+            "R1-E416",
+            "R1-E417",
+            "R1-E418",
+            "R1-E419",
+            "R1-E420",
+            "R1-E421"
           ],
-          "wrote_files": [
-            "js/main.js"
+          "file": "tools/debug-clear.js",
+          "ops": [
+            {
+              "e": "R1-E416",
+              "op": "write",
+              "c": "call_40fcd68e296d434f9ea2db53"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B53",
-          "kind": "work",
-          "start": 247,
-          "end": 248,
-          "start_event": "R1-E248",
-          "end_event": "R1-E249",
-          "touched_files": [
-            "tools/e2e.js"
+          "kind": "file",
+          "start": 421,
+          "end": 424,
+          "start_event": "R1-E422",
+          "end_event": "R1-E425",
+          "events": [
+            "R1-E422",
+            "R1-E423",
+            "R1-E424",
+            "R1-E425"
           ],
-          "wrote_files": [
-            "tools/e2e.js"
+          "file": "tools/debug-events.js",
+          "ops": [
+            {
+              "e": "R1-E422",
+              "op": "write",
+              "c": "call_9a3fbe84ade44b1fb4a6902d"
+            }
           ],
-          "command_types": []
+          "has_tools": true,
+          "command_types": [
+            "run"
+          ]
         },
         {
           "id": "R1-B54",
-          "kind": "work",
-          "start": 249,
-          "end": 252,
-          "start_event": "R1-E250",
-          "end_event": "R1-E253",
-          "touched_files": [
-            "tools/e2e.js"
+          "kind": "file",
+          "start": 425,
+          "end": 428,
+          "start_event": "R1-E426",
+          "end_event": "R1-E429",
+          "events": [
+            "R1-E426",
+            "R1-E427",
+            "R1-E428",
+            "R1-E429"
           ],
-          "wrote_files": [
-            "tools/e2e.js"
+          "file": "tools/debug-simple.js",
+          "ops": [
+            {
+              "e": "R1-E426",
+              "op": "write",
+              "c": "call_259b32ec94c14f429bb3cf70"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B55",
-          "kind": "work",
-          "start": 253,
-          "end": 258,
-          "start_event": "R1-E254",
-          "end_event": "R1-E259",
-          "touched_files": [
-            "tools/e2e.js"
+          "kind": "file",
+          "start": 429,
+          "end": 432,
+          "start_event": "R1-E430",
+          "end_event": "R1-E433",
+          "events": [
+            "R1-E430",
+            "R1-E431",
+            "R1-E432",
+            "R1-E433"
           ],
-          "wrote_files": [
-            "tools/e2e.js"
+          "file": "tools/debug-bisect.js",
+          "ops": [
+            {
+              "e": "R1-E430",
+              "op": "write",
+              "c": "call_df2baab6a3a9432a94c1a7b1"
+            }
           ],
+          "has_tools": true,
           "command_types": [
             "run"
           ]
         },
         {
           "id": "R1-B56",
-          "kind": "work",
-          "start": 259,
-          "end": 262,
-          "start_event": "R1-E260",
-          "end_event": "R1-E263",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R1-B57",
-          "kind": "work",
-          "start": 263,
-          "end": 270,
-          "start_event": "R1-E264",
-          "end_event": "R1-E271",
-          "touched_files": [
-            "tools/e2e.js",
-            "tools/debug-lock.js"
-          ],
-          "wrote_files": [
-            "tools/debug-lock.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B58",
-          "kind": "work",
-          "start": 271,
-          "end": 276,
-          "start_event": "R1-E272",
-          "end_event": "R1-E277",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B59",
-          "kind": "work",
-          "start": 277,
-          "end": 280,
-          "start_event": "R1-E278",
-          "end_event": "R1-E281",
-          "touched_files": [
-            "tools/debug-place.js"
-          ],
-          "wrote_files": [
-            "tools/debug-place.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B60",
-          "kind": "work",
-          "start": 281,
-          "end": 284,
-          "start_event": "R1-E282",
-          "end_event": "R1-E285",
-          "touched_files": [
-            "tools/debug-place2.js"
-          ],
-          "wrote_files": [
-            "tools/debug-place2.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B61",
-          "kind": "work",
-          "start": 285,
-          "end": 288,
-          "start_event": "R1-E286",
-          "end_event": "R1-E289",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B62",
-          "kind": "work",
-          "start": 289,
-          "end": 296,
-          "start_event": "R1-E290",
-          "end_event": "R1-E297",
-          "touched_files": [
-            "tools/debug-place3.js"
-          ],
-          "wrote_files": [
-            "tools/debug-place3.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B63",
-          "kind": "work",
-          "start": 297,
-          "end": 300,
-          "start_event": "R1-E298",
-          "end_event": "R1-E301",
-          "touched_files": [
-            "tools/debug-setblock.js"
-          ],
-          "wrote_files": [
-            "tools/debug-setblock.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B64",
-          "kind": "work",
-          "start": 301,
-          "end": 304,
-          "start_event": "R1-E302",
-          "end_event": "R1-E305",
-          "touched_files": [
-            "tools/debug-place4.js"
-          ],
-          "wrote_files": [
-            "tools/debug-place4.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B65",
-          "kind": "work",
-          "start": 305,
-          "end": 314,
-          "start_event": "R1-E306",
-          "end_event": "R1-E315",
-          "touched_files": [
-            "js/main.js",
-            "tools/debug-rightclick.js"
-          ],
-          "wrote_files": [
-            "tools/debug-rightclick.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B66",
-          "kind": "work",
-          "start": 315,
-          "end": 318,
-          "start_event": "R1-E316",
-          "end_event": "R1-E319",
-          "touched_files": [
-            "tools/debug-hook.js"
-          ],
-          "wrote_files": [
-            "tools/debug-hook.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B67",
-          "kind": "work",
-          "start": 319,
-          "end": 322,
-          "start_event": "R1-E320",
-          "end_event": "R1-E323",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B68",
-          "kind": "work",
-          "start": 323,
-          "end": 324,
-          "start_event": "R1-E324",
-          "end_event": "R1-E325",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R1-B69",
-          "kind": "work",
-          "start": 325,
-          "end": 336,
-          "start_event": "R1-E326",
-          "end_event": "R1-E337",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B70",
-          "kind": "work",
-          "start": 337,
-          "end": 340,
-          "start_event": "R1-E338",
-          "end_event": "R1-E341",
-          "touched_files": [
-            "tools/debug-seq.js"
-          ],
-          "wrote_files": [
-            "tools/debug-seq.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B71",
-          "kind": "work",
-          "start": 341,
-          "end": 344,
-          "start_event": "R1-E342",
-          "end_event": "R1-E345",
-          "touched_files": [
-            "tools/debug-seq2.js"
-          ],
-          "wrote_files": [
-            "tools/debug-seq2.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B72",
-          "kind": "work",
-          "start": 345,
-          "end": 348,
-          "start_event": "R1-E346",
-          "end_event": "R1-E349",
-          "touched_files": [
-            "tools/debug-cond.js"
-          ],
-          "wrote_files": [
-            "tools/debug-cond.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B73",
-          "kind": "work",
-          "start": 349,
-          "end": 352,
-          "start_event": "R1-E350",
-          "end_event": "R1-E353",
-          "touched_files": [
-            "tools/debug-sep.js"
-          ],
-          "wrote_files": [
-            "tools/debug-sep.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B74",
-          "kind": "work",
-          "start": 353,
-          "end": 356,
-          "start_event": "R1-E354",
-          "end_event": "R1-E357",
-          "touched_files": [
-            "tools/debug-event.js"
-          ],
-          "wrote_files": [
-            "tools/debug-event.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B75",
-          "kind": "work",
-          "start": 357,
-          "end": 362,
-          "start_event": "R1-E358",
-          "end_event": "R1-E363",
-          "touched_files": [
-            "tools/debug-hook2.js"
-          ],
-          "wrote_files": [
-            "tools/debug-hook2.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B76",
-          "kind": "work",
-          "start": 363,
-          "end": 366,
-          "start_event": "R1-E364",
-          "end_event": "R1-E367",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B77",
-          "kind": "work",
-          "start": 367,
-          "end": 370,
-          "start_event": "R1-E368",
-          "end_event": "R1-E371",
-          "touched_files": [
-            "tools/debug-z6.js"
-          ],
-          "wrote_files": [
-            "tools/debug-z6.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B78",
-          "kind": "work",
-          "start": 371,
-          "end": 374,
-          "start_event": "R1-E372",
-          "end_event": "R1-E375",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B79",
-          "kind": "work",
-          "start": 375,
-          "end": 378,
-          "start_event": "R1-E376",
-          "end_event": "R1-E379",
-          "touched_files": [
-            "js/main.js"
-          ],
-          "wrote_files": [
-            "js/main.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B80",
-          "kind": "work",
-          "start": 379,
-          "end": 382,
-          "start_event": "R1-E380",
-          "end_event": "R1-E383",
-          "touched_files": [
-            "js/main.js",
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": []
-        },
-        {
-          "id": "R1-B81",
-          "kind": "work",
-          "start": 383,
-          "end": 386,
-          "start_event": "R1-E384",
-          "end_event": "R1-E387",
-          "touched_files": [
-            "tools/debug-place5.js"
-          ],
-          "wrote_files": [
-            "tools/debug-place5.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B82",
-          "kind": "work",
-          "start": 387,
-          "end": 390,
-          "start_event": "R1-E388",
-          "end_event": "R1-E391",
-          "touched_files": [
-            "tools/debug-btn2.js"
-          ],
-          "wrote_files": [
-            "tools/debug-btn2.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B83",
-          "kind": "work",
-          "start": 391,
-          "end": 396,
-          "start_event": "R1-E392",
-          "end_event": "R1-E397",
-          "touched_files": [
-            "tools/debug-e2e1.js"
-          ],
-          "wrote_files": [
-            "tools/debug-e2e1.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B84",
-          "kind": "work",
-          "start": 397,
-          "end": 400,
-          "start_event": "R1-E398",
-          "end_event": "R1-E401",
-          "touched_files": [
-            "tools/debug-e2e1.js"
-          ],
-          "wrote_files": [
-            "tools/debug-e2e1.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B85",
-          "kind": "work",
-          "start": 401,
-          "end": 408,
-          "start_event": "R1-E402",
-          "end_event": "R1-E409",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B86",
-          "kind": "work",
-          "start": 409,
-          "end": 412,
-          "start_event": "R1-E410",
-          "end_event": "R1-E413",
-          "touched_files": [
-            "tools/debug-final.js"
-          ],
-          "wrote_files": [
-            "tools/debug-final.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B87",
-          "kind": "work",
-          "start": 413,
-          "end": 416,
-          "start_event": "R1-E414",
-          "end_event": "R1-E417",
-          "touched_files": [
-            "tools/debug-clear.js"
-          ],
-          "wrote_files": [
-            "tools/debug-clear.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B88",
-          "kind": "work",
-          "start": 417,
-          "end": 422,
-          "start_event": "R1-E418",
-          "end_event": "R1-E423",
-          "touched_files": [
-            "tools/debug-events.js"
-          ],
-          "wrote_files": [
-            "tools/debug-events.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B89",
-          "kind": "work",
-          "start": 423,
-          "end": 426,
-          "start_event": "R1-E424",
-          "end_event": "R1-E427",
-          "touched_files": [
-            "tools/debug-simple.js"
-          ],
-          "wrote_files": [
-            "tools/debug-simple.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B90",
-          "kind": "work",
-          "start": 427,
-          "end": 430,
-          "start_event": "R1-E428",
-          "end_event": "R1-E431",
-          "touched_files": [
-            "tools/debug-bisect.js"
-          ],
-          "wrote_files": [
-            "tools/debug-bisect.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B91",
-          "kind": "work",
-          "start": 431,
-          "end": 434,
-          "start_event": "R1-E432",
-          "end_event": "R1-E435",
-          "touched_files": [
-            "tools/debug-bisect2.js"
-          ],
-          "wrote_files": [
-            "tools/debug-bisect2.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B92",
-          "kind": "work",
-          "start": 435,
-          "end": 442,
-          "start_event": "R1-E436",
-          "end_event": "R1-E443",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
+          "kind": "file",
+          "start": 433,
+          "end": 440,
+          "start_event": "R1-E434",
+          "end_event": "R1-E441",
+          "events": [
+            "R1-E434",
+            "R1-E435",
+            "R1-E436",
+            "R1-E437",
+            "R1-E438",
+            "R1-E439",
+            "R1-E440",
+            "R1-E441"
+          ],
+          "file": "tools/debug-bisect2.js",
+          "ops": [
+            {
+              "e": "R1-E434",
+              "op": "write",
+              "c": "call_2566ec77b7594a9d8cd65fc6"
+            }
+          ],
+          "has_tools": true,
           "command_types": [
             "run",
             "file"
-          ]
-        },
-        {
-          "id": "R1-B93",
-          "kind": "work",
-          "start": 443,
-          "end": 448,
-          "start_event": "R1-E444",
-          "end_event": "R1-E449",
-          "touched_files": [
-            "tools/e2e.js"
-          ],
-          "wrote_files": [
-            "tools/e2e.js"
-          ],
-          "command_types": [
-            "run"
-          ]
-        },
-        {
-          "id": "R1-B94",
-          "kind": "work",
-          "start": 449,
-          "end": 459,
-          "start_event": "R1-E450",
-          "end_event": "R1-E460",
-          "touched_files": [],
-          "wrote_files": [],
-          "command_types": [
-            "run",
-            "file",
-            "other"
           ]
         }
       ]
@@ -12210,5 +12567,5 @@
     }
   ],
   "created_at": "2026-09-08T20:12:57",
-  "updated_at": "2026-09-08T21:47:26"
+  "updated_at": "2026-09-11T21:22:54"
 }
