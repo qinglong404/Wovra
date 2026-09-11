@@ -402,34 +402,45 @@ def test_expand_history_full_returns_complete_content():
     assert big in out  # 全文返回，无 4KB 上限
 
 
-def test_render_collapsed_keeps_live_blocks_only():
-    """折叠视图：👤+🎯 + 当前仍 LIVE 的块摘要；其余块折叠并注明。"""
+def test_render_collapsed_keeps_file_list_only():
+    """二级折叠（2026-09-12 用户拍板）：折叠档只留 👤+🎯+📌+**文件名清单**。
+
+    块摘要不再进折叠档——它们只由最近 keep_min 代的紧凑档承载，更老的轮
+    "要了再取"（expand_history 轮号 → summary 档 → full 档）。
+    为什么改：旧实现保留"文件仍存活"的块完整摘要，而真实会话里多数文件长期
+    live，于是折叠档**单调膨胀**——实测本会话 24 个折叠轮 46,782 tok，其中
+    80%（33,938 tok）是块摘要，把装配地板顶到 101,826 tok、越过 100,000 水位
+    线：压缩刚结束就已在触发线之上，冷却一到期立刻再压，压了等于没压。
+    """
     r1 = _mk_file_round(1, "写两个文件", ["a.txt", "b.txt"])
-    r2 = _mk_file_round(2, "删 b", ["b.txt"])
     agent = Agent(llm=_StubLLM(), tools=[])
-    agent.rounds = [r1, r2]
-    # 现场重算 v3 块 + ledger 推演（b.txt 被 R2 重写仍 live——改为删）
+    agent.rounds = [r1]
     from wovra import blocks as blocks_module
     from wovra import lifecycle as lifecycle_module
     ledger = lifecycle_module.FileLedger()
-    # 让 b.txt 变 dead：直接构造 delete 事件太啰嗦，用 ledger 状态注入
     ledger.update(r1, blocks=blocks_module.segment_round_by_file(r1))
-    # 模拟 b.txt 已死：手工把 ledger 条目改 dead
-    b_entry = ledger.entries().get("b.txt")
-    b_entry["state"] = "dead"
+    # 模拟 b.txt 已死：直接构造 delete 事件太啰嗦，用 ledger 状态注入
+    ledger.entries().get("b.txt")["state"] = "dead"
     r1["block_summaries"] = {
         "R1-B1": "a.txt 描述",
         "R1-B2": "b.txt 描述",
     }
     r1["user_input"]["normalized"] = "写两个文件"
+    r1["user_input"]["key_constraints"] = "不要用 git"
     out = agent._render_collapsed(r1, ledger)
     assert out is not None
     assert "（折叠）" in out
     assert "👤 用户:" in out
     assert "🎯 意图: 写两个文件" in out
-    assert "a.txt 描述" in out          # LIVE 块保留
-    assert "b.txt 描述" not in out      # dead 块折叠
-    assert "其余 1 块已折叠" in out
+    assert "📌 关键约束: 不要用 git" in out
+    # 文件名清单进折叠档，已删文件标状态（清单是"这轮碰过什么"的索引）
+    assert "涉及文件：" in out
+    assert "a.txt" in out and "b.txt（已删）" in out
+    # 块摘要不再进折叠档（这是本轮修复的核心）
+    assert "a.txt 描述" not in out
+    assert "b.txt 描述" not in out
+    assert "2 块细节已折叠" in out
+    assert "expand_history" in out
 
 
 def test_assemble_collapses_oldest_generation():
@@ -456,8 +467,9 @@ def test_assemble_collapses_oldest_generation():
     assert "R3]（折叠）" not in joined
     assert "R4]（折叠）" not in joined
     assert "R8]（折叠）" not in joined
-    # 折叠轮的块描述不出现（除了保留的 LIVE 块）；R1 的 f1.txt 全轮 live → 保留
-    assert "1 的块描述" in joined
+    # 折叠轮不再携带块摘要（二级折叠，2026-09-12），只给文件名清单
+    assert "1 的块描述" not in joined
+    assert "涉及文件：f1.txt" in joined
 
 
 def test_expand_round_summary_shows_block_view():

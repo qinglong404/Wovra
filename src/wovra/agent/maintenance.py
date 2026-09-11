@@ -190,13 +190,20 @@ class _MaintenanceMixin:
             ),
             default=0,
         )
-        if last_maintained and current_seq - last_maintained < self._org_cooldown:
-            # 冷却口径只认"真正维护过"：done（完成）或本进程在飞（pending
+        if last_maintained and current_seq - last_maintained <= self._org_cooldown:
+            # 最小间隔（2026-09-12 用户口径更正：**最少 N 轮内不触发**）。
+            # 原实现是 `<`，即"距上次维护满 3 轮就放行"——只安静 2 轮
+            # （R35 整理完 → R36 挡、R37 挡、R38 放行），与用户说的
+            # "最少 3 轮内不触发"差一轮；且同一份代码里宽限用的是 `<=`
+            # （R1-R3 豁免、R4 才放行），两个门不等式方向不一致本属笔误。
+            # 改 `<=` 后 R35 整理完 → R36/R37/R38 都挡、R39 才放行。
+            #
+            # 口径只认"真正维护过"：done（完成）或本进程在飞（pending
             # 且 seq ∈ _org_inflight）。崩溃遗留的 pending（上个进程维护
-            # 线程被中断的半程状态）不算已维护——否则冷却把它们当刚维护
+            # 线程被中断的半程状态）不算已维护——否则间隔把它们当刚维护
             # 过，挡掉本次会话第一次补整理（F 组实证：6 轮 pending 续跑，
-            # R7/R8 闭合被 8-6=2 < 3 连挡两轮，压缩迟迟不开始）。
-            return  # 冷却间隔：两次维护之间的最小轮距，防高频
+            # R7/R8 闭合被连挡，压缩迟迟不开始）。
+            return  # 两次维护之间至少安静 _org_cooldown 轮，防高频
         unorganized = self._unorganized_rounds()
         if not unorganized:
             return

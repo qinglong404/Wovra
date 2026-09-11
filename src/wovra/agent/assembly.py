@@ -311,12 +311,21 @@ class _AssemblyMixin:
         return "\n".join(lines)
 
     def _render_collapsed(self, r: dict, ledger) -> Optional[str]:
-        """早期轮折叠视图（2026-09-10 用户拍板：视图只保留最近 3 批整理）。
+        """早期轮二级折叠视图（2026-09-12 用户拍板：只保留最近几批的细节）。
 
-        折叠行 = 👤 原文 + 🎯 意图 + 当前仍 LIVE 的文件的块摘要；其余块
-        折叠成一行说明（防止模型误以为该轮只有这些块）。文件状态用装配
-        时的实时 ledger（整理时的状态会过期，新会话文件可能重建/删除）。
-        两级展开：expand_history 轮号 → 视图（summary 档）→ 原文（full 档）。
+        折叠行 = 👤 原文 + 🎯 意图 + 📌 关键约束 + **涉及文件名清单**。
+        块摘要**不再进折叠档**——块细节只由最近 keep_min 代（紧凑档）承载，
+        更老的轮"要了再取"（expand_history 轮号 → summary 档 → full 档）。
+
+        为什么改（2026-09-12 实测）：旧实现保留"文件仍存活"的块的完整摘要，
+        而真实会话里多数文件长期 live，于是折叠档**单调膨胀**——实测本会话
+        24 个折叠轮 46,782 tok，其中 80%（33,938 tok）是块摘要，把装配地板
+        顶到 101,826 tok、超过 100,000 水位线：压缩刚结束就已在触发线之上，
+        冷却一到期立刻再压，压了等于没压。二级折叠后折叠档降到 ~10.7K tok。
+
+        文件状态用装配时的实时 ledger（整理时的状态会过期，新会话文件可能
+        重建/删除）；已删文件标「已删」但仍列出——清单是"这轮碰过什么"的
+        索引，细节缺失由状态标注补位，比整块消失好。
         """
         if r.get("merged_skip"):
             return None
@@ -325,23 +334,27 @@ class _AssemblyMixin:
         lines.append(f"👤 用户: \"{ui['original']}\"")
         if ui.get("normalized"):
             lines.append(f"🎯 意图: {ui['normalized']}")
-        summaries = r.get("block_summaries") or {}
-        # 现场重算 v3 块（不信持久化 v2：旧轮 blocks 是 kind=work，无 file）
-        v3_by_id = {b["id"]: b for b in blocks_module.segment_round_by_file(r)}
-        kept = []
-        for bid, s in summaries.items():
-            b = v3_by_id.get(bid)
-            if b is None or b.get("kind") != "file":
+        if ui.get("key_constraints"):
+            lines.append(f"📌 关键约束: {ui['key_constraints']}")
+        # 现场重算 v3 块（不信持久化：旧轮 blocks 可能是 v1 粗分块）
+        files: list[str] = []
+        for b in blocks_module.segment_round_by_file(r):
+            if b.get("kind") != "file":
                 continue
-            if ledger.state_of(b.get("file", "")) == "live":
-                kept.append(f"▸ {bid}: {s}")
-        if kept:
-            lines.append("（以下块涉及的文件当前仍存活）")
-            lines += kept
-        folded = len(summaries) - len(kept)
-        if folded > 0:
+            f = str(b.get("file") or "")
+            if f and f not in files:
+                files.append(f)
+        if files:
+            parts = [
+                f"{f}（已删）" if ledger.state_of(f) == "dead" else f
+                for f in files
+            ]
+            lines.append("涉及文件：" + "、".join(parts))
+        folded = len(r.get("block_summaries") or {})
+        if folded:
             lines.append(
-                f"（其余 {folded} 块已折叠，expand_history 可按轮/块展开）"
+                f"（{folded} 块细节已折叠，expand_history 可展开本轮；"
+                "需要文件现状先 read_file）"
             )
         return "\n".join(lines)
 

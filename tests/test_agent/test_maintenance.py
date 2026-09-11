@@ -686,8 +686,16 @@ def test_assembly_does_not_duplicate_last_closed_round(monkeypatch, tmp_path):
 
 
 def test_protection_grace_and_cooldown(monkeypatch, tmp_path):
-    """保护机制：会话前 N 轮硬豁免维护（宽限），两次维护之间最小轮距
-    （冷却）——适配大项目起点，窗口保底紧急折叠不受豁免（另一条线）。"""
+    """保护机制：会话前 N 轮硬豁免维护（宽限），两次维护之间**最少 N 轮
+    不触发**（最小间隔，2026-09-12 用户口径更正）——适配大项目起点，
+    窗口保底紧急折叠不受豁免（另一条线）。
+
+    口径更正要点：原实现用 `<`，即"距上次维护满 N 轮就放行"，只安静
+    N−1 轮（R4 整理完 → R5 挡、R6 挡、R7 放行），与用户说的"最少 3 轮内
+    不触发"差一轮；且同一份代码里宽限用 `<=`（R1-R3 豁免、R4 才放行），
+    两个门不等式方向不一致本属笔误。改用 `<=` 后：R4 整理完 → R5/R6/R7
+    都挡、R8 才放行。
+    """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
 
     def org_json(*seqs):
@@ -703,27 +711,33 @@ def test_protection_grace_and_cooldown(monkeypatch, tmp_path):
         [_chunk(_delta(content="R3"))],                    # R3（宽限）
         [_chunk(_delta(content="R4"))],                    # R4
         [_chunk(_delta(content=org_json(4)))],             # R4 触发（宽限外首次）
-        [_chunk(_delta(content="R5"))],                    # R5（冷却 1<3）
-        [_chunk(_delta(content="R6"))],                    # R6（冷却 2<3）
-        [_chunk(_delta(content="R7"))],                    # R7
-        [_chunk(_delta(content=org_json(5, 6, 7)))],       # R7 触发（间隔 3 达标）
+        [_chunk(_delta(content="R5"))],                    # R5（间隔 1<=3 挡）
+        [_chunk(_delta(content="R6"))],                    # R6（间隔 2<=3 挡）
+        [_chunk(_delta(content="R7"))],                    # R7（间隔 3<=3 挡）
+        [_chunk(_delta(content="R8"))],                    # R8
+        [_chunk(_delta(content=org_json(5, 6, 7, 8)))],    # R8 触发（间隔 4 达标）
     ]
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM(responses), tools=[], task=task,
                   org_watermark=0, org_grace_rounds=3, org_cooldown_rounds=3)
 
-    for i in range(1, 8):
+    for i in range(1, 9):
         agent.run(f"轮{i}")
 
     org_calls = [c for c in agent.llm.calls if c.get("lane") == "org"
                  and "[整理指令]" in str(c["messages"][-1].get("content", ""))]
-    assert len(org_calls) == 2                       # R4、R7 两次
+    assert len(org_calls) == 2                       # R4、R8 两次
     # 宽限期的证据是调用时点（R1-R3 闭合时零维护调用）；R4 批次把它们
     # 一并收编属正常语义，故只断言 R1 无产物
     assert task.rounds[0]["user_input"]["normalized"] == ""
     assert task.rounds[3]["org_state"] == "done"     # R4 整理
-    assert task.rounds[4]["org_state"] == "done"     # R7 批次补齐 R5-R7
+    assert task.rounds[7]["org_state"] == "done"     # R8 批次补齐 R5-R8
     assert task.rounds[4]["pending_org"]["normalized"] == "R5 意图"
+    # 中间三轮在 R5/R6/R7 闭合时都被最小间隔挡住——它们的产物只能来自
+    # R8 那次批次（这正是"最少 3 轮内不触发"的直接证据：若沿用旧的 `<`，
+    # R7 闭合就会触发第三批，org_calls 会是 3 次）
+    for r in task.rounds[4:7]:
+        assert r.get("user_input", {}).get("normalized", "") == ""
 
 
 def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
