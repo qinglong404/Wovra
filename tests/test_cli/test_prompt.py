@@ -42,6 +42,23 @@ def test_system_prompt_matches_mode_and_environment(monkeypatch):
     assert ".venv/bin" in managed
 
 
+def test_system_prompt_forbids_ack_on_runtime_injection():
+    """系统提示词要求模型对运行时注入（非用户输入）不做确认性回复。
+
+    用户拍板（2026-09-11）：收到 <runtime-reminder> 信封或 [运行时] 开头
+    的新轮消息这类机制注入时，不要回"收到/明白/好的"这类无意义确认——
+    它们不是问题、不需要应答。两模式都要带这条约束。
+    """
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    for mode in (MODE_MANAGED, MODE_BASELINE):
+        prompt = _system_prompt(mode)
+        assert "不要做确认性回复" in prompt
+        assert "收到" in prompt or "不是问题、不需要应答" in prompt
+        assert "直接继续既有工作或保持静默" in prompt
+
+
 def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):
     """工作区指令包（1.3）：AGENTS.md 追加进系统提示词，缺失则跳过。"""
     (tmp_path / "AGENTS.md").write_text(
