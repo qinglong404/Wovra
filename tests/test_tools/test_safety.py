@@ -572,7 +572,10 @@ def test_escape_authorization_flow(tmp_path, monkeypatch):
     assert "outside data" in result
     store = ws / ".wovra" / "authorized-paths.json"
     assert store.exists()
-    assert target in store.read_text(encoding="utf-8")
+    # 解析 JSON 而不是原始文本子串：Windows 路径的反斜杠在 JSON 里被转义
+    # （C:\\Users\\…），子串匹配会假红——断言语义内容，平台无关
+    import json as _json
+    assert target in _json.loads(store.read_text(encoding="utf-8"))
 
     # 3) 持久化：重新读取（模拟新会话）仍识别已授权
     assert tools_module.safety.is_authorized(target)
@@ -638,3 +641,25 @@ def test_file_tools_authorization_flow(tmp_path, monkeypatch):
     monkeypatch.setattr(builtins, "input", lambda prompt: "n")
     with pytest.raises(ValueError, match="路径越界"):
         read_file("linkd.md")
+
+
+@pytest.mark.skipif(_os.name != "nt", reason="Windows 绝对路径通道专项（POSIX 由 / 通道覆盖）")
+def test_windows_absolute_path_outside_is_blocked(monkeypatch, tmp_path):
+    """Windows 绝对路径（盘符/UNC）必须与 POSIX 的 / 通道等价拦截。
+
+    2026-09-11 实测缺口：守卫此前只有 / 开头的规则，盘符形式的界外路径
+    在 Windows 上完全不被识别、界外内容原样读出。这里钉住该通道。
+    """
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("outside data\n", encoding="utf-8")
+
+    monkeypatch.setattr("wovra.tools.safety.PROJECT_ROOT", ws)
+    monkeypatch.setattr("wovra.tools.safety._audit", lambda detail: None)
+    monkeypatch.setattr(_sys, "stdin", type("S", (), {"isatty": lambda self: False})())
+
+    result = run_command(f"cat {outside / 'data.txt'}")
+    assert "已拒绝执行" in result
+    assert "outside data" not in result

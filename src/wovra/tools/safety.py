@@ -121,6 +121,15 @@ _INTERPRETER_PATH = re.compile(
     r"^/(?:usr/)?(?:local/)?(?:s?bin)/[\w.+-]+\.?(?:exe)?$"
 )
 
+# Windows 绝对路径通道（2026-09-11 两平台等价修复）：盘符绝对（C:\x、
+# C:/x）与 UNC（\\server\share\x）。守卫此前只有 POSIX 的 `/` 规则，
+# Windows 命令里的 `C:\...` 完全不被识别——探针 9 条 shell 越界用例在
+# Windows 全绿漏拦。前导断言排除词内冒号（URL `http://x` 里的 `p://`
+# 不误判）与路径中间位置（`a/../C:/x` 这类交给上溯通道）。
+_WIN_ABS_PATH = re.compile(
+    r"""(?<![\w:./\\-])(?:[A-Za-z]:[\\/][^\s'"|;&><)]*|\\\\[^\s'"|;&><)]+)"""
+)
+
 # 引号掩码（2026-09-11 误伤修复）：commit message（-m "…"）、文档文本
 # （echo "…"）、grep 正则（grep -e '…'）里的 token 会被链接/上溯/孤立
 # 斜杠检测当成真实路径误判。检测前先把**数据**引号段替换为占位符；
@@ -269,6 +278,7 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
     """找出命令行里指向工作区之外的绝对路径字面量。
 
     只认"像路径"的 token：以 / 开头、不是命令行选项、不是 URL。
+    另有 Windows 绝对路径通道（盘符 / UNC，见 _WIN_ABS_PATH）。
     masked：引号文本已掩码的版本（_command_escape 传入）；单独调用时
     自动计算。孤立 `/` 的判定在 masked 上做——引号文本里的 `/` 是
     数据不是访问；`-c` 代码段内的绝对路径（python3 -c "open('/x')"）
@@ -298,6 +308,27 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
         if _INTERPRETER_PATH.match(token):  # 解释器本体：放行
             continue
         found.append(token)
+
+    # Windows 绝对路径通道（2026-09-11 补齐）：本层加固此前只在 Linux 验证，
+    # `C:\...` / `C:/...` / UNC 形式在守卫里没有对应规则——探针 9 条 shell
+    # 用例在 Windows 上全部漏拦（cat/rm/重定向拿走界外金丝雀），且 `ln`
+    # 用例会把界内链接重指向界外、连累后续反向对照（假失败）。判定与其它
+    # 通道一致：解析后落在工作区内放行，界外交给授权门。
+    # 只在 Windows 上启用：POSIX 里 `C:\x` 只是普通文件名（相对路径），
+    # 不是绝对路径，据此判定会在"PROJECT_ROOT ≠ cwd"时产生误拦。
+    if os.name == "nt":
+        root_resolved = PROJECT_ROOT.resolve()
+        for raw in _WIN_ABS_PATH.findall(masked):
+            token = raw.rstrip(",;")
+            if not token:
+                continue
+            try:
+                resolved = Path(token).resolve()
+            except (OSError, ValueError):
+                continue
+            if resolved.is_relative_to(root_resolved):
+                continue  # 工作区内的绝对路径：正常用法，放行
+            found.append(token)
     return found
 
 
