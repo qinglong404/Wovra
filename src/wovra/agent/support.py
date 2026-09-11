@@ -33,6 +33,11 @@ _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "
 
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 
+# 分裂判据的体量门槛（2026-09-11 用户拍板）：主 agent 残留桶（纯对话/
+# 未入域块）与域并列构成顶层节点；但其占比 ≤ 该值（≈15K @ 100K 水位）
+# 时不拆出——并入主 agent、不计入节点数。纯聊天单独拆出去不合理。
+_SPLIT_CHAT_MERGE_RATIO = float(os.environ.get("WOVRA_SPLIT_CHAT_RATIO", "0.15"))
+
 _ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 
 _DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "200"))

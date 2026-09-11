@@ -523,6 +523,9 @@ class _MaintenanceMixin:
         # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
         hard_lines, n_live = self._split_hard_data(rounds)
         round_blocks, map_lines, _merged = self._block_map_lines(rounds)
+        # 主 agent 残留桶占比（零 LLM 体量事实）：纯对话块合计占本批内容
+        # 多少——顶层节点计数的门槛由它定（判据见 _SPLIT_INSTRUCTIONS）。
+        chat_share = self._chat_block_share(rounds, round_blocks)
         all_ids = {
             b["id"] for blocks in round_blocks.values() for b in blocks
         }
@@ -533,7 +536,9 @@ class _MaintenanceMixin:
             f"请做**现状归属分析**（不是话题分类），对象为这些轮次：R{seq_list}。\n\n"
             "[硬数据]（Runtime 生成，零 LLM）\n"
             + "\n".join(hard_lines)
-            + f"\n- 活性文件数（分裂单元数上限）：{n_live}\n\n"
+            + f"\n- 活性文件数（分裂单元数上限）：{n_live}"
+            + f"\n- 纯对话块（无文件交互，闲聊）内容占比：约 {chat_share * 100:.0f}%"
+            + "\n\n"
             "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
             + "\n".join(map_lines)
             + "\n\n"
@@ -590,6 +595,31 @@ class _MaintenanceMixin:
             pending["split_assessment"] = split
         self._persist_rounds()
         return True
+
+    def _chat_block_share(
+        self, rounds: list[dict], round_blocks: dict[int, list[dict]]
+    ) -> float:
+        """纯对话块（fallback，无文件交互）内容占本批的比例（零 LLM）。
+
+        分裂判据的体量事实（2026-09-11 用户拍板）：闲聊很多时，主 agent
+        残留桶（纯对话/未入域块）与域并列构成顶层节点（该分裂）；占比
+        ≤ _SPLIT_CHAT_MERGE_RATIO（15%，≈15K @ 100K 水位）则不拆出，
+        并入主 agent、不计入节点数。内容量按事件 message.content 字符数
+        估算（与装配同口径的量级，精确值不重要）。
+        """
+        total = 0
+        chat = 0
+        for r in rounds:
+            by_id = {e["id"]: e for e in (r.get("events") or [])}
+            for b in round_blocks.get(r["seq"]) or []:
+                size = sum(
+                    len((by_id.get(i) or {}).get("message", {}).get("content") or "")
+                    for i in b.get("events") or []
+                )
+                total += size
+                if b.get("kind") == "fallback":
+                    chat += size
+        return (chat / total) if total else 0.0
 
     def _split_hard_data(self, rounds: list[dict]) -> tuple[list[str], int]:
         """分裂硬数据（零 LLM）：活性文件清单 + 数量。

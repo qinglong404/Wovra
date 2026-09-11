@@ -585,6 +585,64 @@ def test_split_lane_failure_independent(monkeypatch, tmp_path):
     assert "domains" not in r1["pending_org"]           # 分裂路无残留
 
 
+def test_split_instruction_carries_chat_share_fact(monkeypatch, tmp_path):
+    """分裂指令带残留桶占比事实（零 LLM 体量）：模型据此执行
+    15% 门槛——纯对话块 ≤15% 不构成顶层节点、不拆出。"""
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_domains_chunk()]],
+    )
+
+    agent._maybe_organize_batch()
+
+    split_calls = [c for c in agent.llm.calls if c.get("lane") == "split"]
+    assert split_calls
+    prompt = "\n".join(
+        str(m.get("content") or "") for m in split_calls[0]["messages"]
+    )
+    assert "纯对话块（无文件交互，闲聊）内容占比" in prompt
+    assert "%" in prompt  # 占比数值（本批内容量级由事件字符数估算）
+
+
+def test_chat_block_share_counts_fallback_only():
+    """残留桶占比只算 fallback（纯对话）块：文件工作块不摊进闲聊占比。"""
+    from wovra import blocks as blocks_module
+
+    agent = Agent(llm=_StubLLM(), tools=[])
+
+    def _ev(eid, etype, content, tool_call=None):
+        message = {"role": "user" if etype == "user" else
+                   ("assistant" if etype != "tool_result" else "tool"),
+                   "content": content}
+        if tool_call:
+            message["tool_calls"] = [{"id": f"c{eid}", "function": tool_call}]
+        return {"id": eid, "type": etype, "status": "", "truncated": "",
+                "message": message}
+
+    chat_round = {"seq": 1, "user_input": {"original": "u", "normalized": ""},
+                  "events": [_ev("R1-E01", "user", "u"),
+                             _ev("R1-E02", "final_answer", "聊" * 200)]}
+    tiny_chat = {"seq": 1, "user_input": {"original": "u", "normalized": ""},
+                 "events": [_ev("R1-E01", "user", "u"),
+                            _ev("R1-E02", "final_answer", "好")]}
+    file_round = {"seq": 2, "user_input": {"original": "hi", "normalized": ""},
+                  "events": [_ev("R2-E01", "user", "hi"),
+                             _ev("R2-E02", "tool_call", "",
+                                 {"name": "write_file",
+                                  "arguments": '{"path": "a.py"}'}),
+                             _ev("R2-E03", "tool_result", "内容" * 300)]}
+
+    rbs = {r["seq"]: blocks_module.segment_round_by_file(r)
+           for r in (chat_round, file_round)}
+    # 纯聊天轮：全部是 fallback → 占比 ≈ 100%
+    share_chat = agent._chat_block_share([chat_round], rbs)
+    assert share_chat > 0.9
+    # 文件工作轮 + 极小聊天轮：文件块不摊进占比 → 残留桶占比很小
+    share_work = agent._chat_block_share([tiny_chat, file_round], rbs)
+    assert 0.0 < share_work < 0.15
+
+
 def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
     """机制二：一次调用为全部块产出路由式摘要 + 大类归类。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
