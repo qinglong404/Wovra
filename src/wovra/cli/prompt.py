@@ -90,9 +90,11 @@ def _system_prompt(mode: str) -> str:
     )
     if mode == MODE_MANAGED:
         extra = (
-            "上下文由 Runtime 分层管理：最近几轮全量保留，更早的轮次被"
-            "降档成一行索引；需要更早轮次的细节时，用 expand_history 工具"
-            "按 ID（如 R3 或 R3-E02）展开，不要凭记忆猜测。"
+            "上下文由 Runtime 分层管理：未整理的轮次全量保留；已整理的轮次"
+            "是紧凑视图（用户原话 + 意图 + 逐块细节），更早的按文件现状"
+            "折叠成几行。需要细节时用 expand_history 按 ID 展开——轮 R3、"
+            "块 R3-B2、事件 R3-E02、合并组 R1-2；档位 summary 给块视图、"
+            "full 给原文。不要凭记忆猜测。"
         )
     else:
         extra = (

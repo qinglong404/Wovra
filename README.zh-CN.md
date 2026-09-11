@@ -349,13 +349,14 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 > 验证并封版（见 [docs/context-management-v3.md](docs/context-management-v3.md)），
 > 下一阶段沿地图探索职责划分与 Runtime 治理。
 
-* [x] 最小智能体运行时（15 个工具：文件 / 命令 / 后台任务 / 网络检索 / 交互确认）
+* [x] 最小智能体运行时（25 个工具：文件 / 命令 / 后台任务 / 网络检索 / 交互确认 / 计划账本 / 历史展开）
 * [x] 任务表示与持久任务状态（Task / TaskState / report.md / 会话绑定工作区）
 * [x] 上下文管理 V3：执行期零截断、窗口保底、文件地图、锚点自愈
-* [x] 水位触发的批量合并整理（设计定稿，管线待实现）
+* [x] 水位触发的批量整理 → 分裂（串行纯追加管线，下一轮开启时生效；更早视图按文件现状折叠）
 * [x] 安全机制（黑名单 + 敏感确认 + 过期保护 + 审计 + 原子落盘）
 * [x] 成本核算（三分账 / 等效输入 / 上下文占用 / 缓存命中，逐轮落盘）
 * [x] 对照实验两轮（managed vs baseline，见下方实测结果）
+* [ ] 开放/大范围任务的开工前规划闸门（已写意图存档，未实现）
 * [ ] 重度场景验证（合成长轨迹回放 + 真实长任务）
 * [ ] 基于职责的智能体隔离（下一阶段）
 * [ ] 独立任务评估
@@ -394,6 +395,7 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 | [docs/context-runtime-v2.md](docs/context-runtime-v2.md) | V2 设计定稿（历史，含修订记录） |
 | [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | 观察性对照数据 |
 | [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | 三代机制对照实验 |
+| [docs/preflight-planning-intent.md](docs/preflight-planning-intent.md) | 开放/大范围任务的开工前规划闸门（意图存档，未实现） |
 | [experiments/README.md](experiments/README.md) | 受控实验协议与工具 |
 
 架构将随着实际使用和实验而演进。

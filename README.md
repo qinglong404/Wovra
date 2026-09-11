@@ -350,13 +350,14 @@ This makes it possible to experiment with different underlying agents without ch
 > (see [docs/context-management-v3.md](docs/context-management-v3.md)).
 > Next: responsibility-based agent organization and runtime governance.
 
-* [x] Minimal agent runtime (15 tools: files / commands / background tasks / web / interactive confirmation)
+* [x] Minimal agent runtime (25 tools: files / commands / background tasks / web / interactive confirmation / plan ledger / history expansion)
 * [x] Task representation and persistent task state (Task / TaskState / report.md / workspace-bound sessions)
 * [x] Context management V3: zero truncation during execution, window guard, file map, anchor self-healing
-* [x] Watermark-triggered batch organization (design finalized, pipeline pending)
+* [x] Watermark-triggered batch organization → split (serial append pipeline, promoted on the next round; older views folded by current file state)
 * [x] Safety (deny-list + sensitive-command confirmation + staleness guard + audit + atomic persistence)
 * [x] Cost accounting (purpose-split / effective input / context occupancy / cache hits, persisted per round)
 * [x] Two controlled comparison experiments (managed vs baseline, see results below)
+* [ ] Pre-flight planning gate for open-ended / large-scope work (intent archived, not implemented)
 * [ ] Heavy-load validation (synthetic long-trajectory replay + real long tasks)
 * [ ] Responsibility-based agent isolation (next stage)
 * [ ] Independent task evaluation
@@ -402,6 +403,7 @@ Full data and derivation:
 | [docs/context-runtime-v2.md](docs/context-runtime-v2.md) | V2 design spec (historical, with revisions) |
 | [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | Observational comparison data |
 | [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | Three-generation mechanism experiment |
+| [docs/preflight-planning-intent.md](docs/preflight-planning-intent.md) | Pre-flight planning gate for open-ended / large-scope work (intent archive, not implemented) |
 | [experiments/README.md](experiments/README.md) | Controlled experiment protocol and tooling |
 
 The architecture will evolve through actual usage and experiments.
