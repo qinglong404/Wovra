@@ -444,6 +444,15 @@ def move_file(path: str, new_path: str) -> str:
     src = safety._safe_path_lexical(path)
     dst = safety._safe_path_lexical(new_path)
     if dst.is_symlink() or dst.exists():
+        # 目标已存在且是目录：用户本意多半是"移进该目录"——给路，别只让删/换名。
+        # （2026-09-13 摩擦修复：实测 move_file('f.txt', 'bdir') 只回"目标已存在"）
+        if dst.is_dir() and not dst.is_symlink():
+            hint = str(src.name) if src.name else path.split("/")[-1]
+            return (
+                f"目标是一个已存在的目录：{new_path}（解析为 {dst}）。"
+                f"move_file 不覆盖也不并入目录——要把 {path} 移进该目录，"
+                f"请把 new_path 写为目标内的完整路径（如 {new_path}/{hint}）。"
+            )
         return f"目标已存在: {new_path}（解析为 {dst}）——move 不覆盖，先删除或换名"
     if not src.is_symlink() and not src.exists():
         return f"文件不存在: {path}（解析为 {src}）"

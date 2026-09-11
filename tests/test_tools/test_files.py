@@ -405,3 +405,21 @@ def test_restore_file_missing_keeps_no_history(monkeypatch, tmp_path):
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     result = restore_file("no-such.md")
     assert "没有历史版本" in result and "是目录" not in result
+
+
+def test_move_file_to_existing_dir_suggests_inner_path(monkeypatch, tmp_path):
+    """move_file 目标为已存在目录 → 提示"移进该目录"的正确写法。
+
+    修复前只回"目标已存在，先删除或换名"——用户本意很可能是移进目录，
+    提示完全没给这条路（实测 move_file('f.txt', 'bdir')）。
+    """
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("f.txt", "x")
+    (tmp_path / "bdir").mkdir()
+    result = move_file("f.txt", "bdir")
+    assert "已存在的目录" in result and "bdir/f.txt" in result
+    # 文件未被移动（move 不覆盖不并入）
+    assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "x"
+    assert not (tmp_path / "bdir" / "f.txt").exists()

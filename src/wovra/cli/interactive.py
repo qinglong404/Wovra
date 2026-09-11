@@ -128,7 +128,10 @@ def _local_command(command: str, task: Task, agent=None) -> None:
             if args_ and args_[0].isdigit():
                 args_[0] = f"bg-{args_[0]}"  # bg 1 == bg bg-1
             if len(args_) >= 2 and args_[0].lower() == "stop":
-                print(stop_background(args_[1]))
+                target = args_[1]
+                if target.isdigit():
+                    target = f"bg-{target}"  # bg stop 1 == bg stop bg-1
+                print(stop_background(target))
             elif len(args_) == 1:
                 print(check_background(args_[0]))
             else:

@@ -308,3 +308,41 @@ def test_local_command_bg_numeric_id(monkeypatch, tmp_path, capsys):
         assert "引擎层完成" in out
     finally:
         tools_module.background._BACKGROUND_TASKS.clear()
+
+
+def test_local_command_bg_stop_numeric_id(monkeypatch, tmp_path, capsys):
+    """bg stop 1 == bg stop bg-1：停止分支的编号短写也一致。
+
+    修复前 stop 分支不做数字转换——`\\bg stop 1` 落到 stop_background('1')
+    查不到任务（实测：未找到后台任务: 1），违背 _LOCAL_HELP 承诺的
+    "任务 id 可只写末尾短串或 bg 编号"。
+    """
+    from wovra.cli import _local_command
+    from wovra import tools as tools_module
+
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="x")
+    task.save()
+    log = tmp_path / "bg-1.log"
+    log.write_text("x", encoding="utf-8")
+
+    class FakeProc:
+        returncode = -9
+
+        def poll(self):
+            return -9
+
+        def wait(self, timeout=None):
+            return -9
+
+    tools_module.set_current_session(task.id)
+    tools_module.background._BACKGROUND_TASKS["bg-1"] = {
+        "proc": FakeProc(), "log": log, "pos": 0, "command": "",
+        "label": "子任务 x", "session": task.id, "keep_alive": False,
+    }
+    try:
+        _local_command("\\bg stop 1", task, None)
+        out = capsys.readouterr().out
+        assert "已停止" in out and "bg-1" in out
+    finally:
+        tools_module.background._BACKGROUND_TASKS.clear()
