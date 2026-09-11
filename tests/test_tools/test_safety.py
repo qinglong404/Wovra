@@ -487,7 +487,7 @@ def test_tool_descriptions_first_paragraphs_are_frozen():
 
     # 抽查几个高频工具的措辞（全量快照会随文档改进频繁变动，这里只锁
     # 真正影响模型行为的引导语）
-    assert "num_lines=400" in _schema_of(tools_module.read_file)["function"]["description"]
+    assert "20,000 行" in _schema_of(tools_module.read_file)["function"]["description"]
     assert "60 秒" in _schema_of(tools_module.run_command)["function"]["description"]
     # glob_files 只有首段进 schema——include_hidden 等细节在第二段，
     # 模型是通过**参数表**（上一个测试锁住的）得知该开关，不是靠描述
@@ -505,7 +505,7 @@ def test_schema_description_carries_first_paragraph():
     assert "60 秒" in description
 
     read_desc = _schema_of(read_file)["function"]["description"]
-    assert "num_lines=400" in read_desc  # 通读引导：避免零碎小段反复读
+    assert "20,000 行" in read_desc  # 通读引导：避免零碎小段反复读
 
 
 def test_escape_detection_false_positives_fixed(workspace):

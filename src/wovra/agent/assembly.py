@@ -111,7 +111,7 @@ class _AssemblyMixin:
         if file_map:
             block.append(
                 "[历史涉及文件]（这些轮次的原文已整理收纳，修改前先 read_file "
-                "获取现状，通读时按 num_lines=400 连续分段）"
+                "获取现状，通读时用大 num_lines 一次读完）"
             )
             block += file_map
         todo_lines = self._todo_tail_lines()

@@ -117,7 +117,12 @@ def _workspace_instructions() -> str:
 
     项目所有者在工作区根放一份 AGENTS.md（"怎么跑测试、哪些目录别碰、
     用哪个包管理器"），Wovra 在该项目下工作时自动遵循——跨项目可用，
-    不必改代码。文件缺失静默跳过；超长截断（提示词不是仓库）。
+    不必改代码。文件缺失静默跳过。
+
+    上限（2026-09-11 放宽，worklog §25）：原为 8000 字符硬截断——同属
+    "省小钱花大钱"（用户口径：除压缩外全面全量输入）。这是项目所有者
+    亲手写的纪律，截掉一半比不加载更糟；现放宽到 100,000 字符，正常
+    文件根本碰不到，只防误放巨型文件进提示词。
     """
     doc = PROJECT_ROOT / "AGENTS.md"
     try:
@@ -126,8 +131,8 @@ def _workspace_instructions() -> str:
         return ""
     if not content:
         return ""
-    if len(content) > 8000:
-        content = content[:8000] + "\n…（AGENTS.md 超长已截断）"
+    if len(content) > 100_000:
+        content = content[:100_000] + "\n…（AGENTS.md 超长已截断）"
     return (
         "\n\n[工作区指令]（来自项目根 AGENTS.md，项目所有者撰写，优先级高于"
         "你的通用习惯）\n"
