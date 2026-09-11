@@ -75,6 +75,52 @@ def cmd_maint(args: argparse.Namespace) -> None:
         task = _load_task(tasks[0]["id"])
     print(ui.maint_view(task))
 
+def cmd_views(args: argparse.Namespace) -> None:
+    """wovra views：查看按域分化的上下文视图（机械渲染，零模型成本）。
+
+    这是 Level 1 第二步（装配按域分化）的**检视口**：分裂产物说"哪些文件
+    属哪个职责域"，本命令把每个域**实际会拿到的上下文材料**打出来——
+    本域块全分辨率、外域块指针、按文件域切片的账本、域卡与身份。
+    零 LLM、不改会话状态，纯读取（同 report/maint 一类）。
+
+    不给域参数时列全部域的规模摘要；给了则打该域视图全文。
+    """
+    if args.task_id:
+        task = _load_task(args.task_id)
+    else:
+        tasks = _all_tasks()
+        if not tasks:
+            print(ui.info("还没有任何任务。直接 `wovra chat` 开始第一个会话。"))
+            return
+        task = _load_task(tasks[0]["id"])
+
+    try:
+        from ..views import build_views, human_report
+    except ImportError as exc:  # pragma: no cover——模块缺失属安装问题
+        raise SystemExit(ui.error(f"域视图模块不可用：{exc}")) from None
+
+    built = build_views(task.rounds, task.get_state(), registry=task.registry)
+    if not args.domain:
+        print(ui.rule("域视图摘要"))
+        for line in human_report(built):
+            if line.startswith("- "):
+                print(line)
+        print(ui.info("\n用 `wovra views <域id或名字>` 看某个域的完整视图。"))
+        return
+
+    want = args.domain.strip()
+    view = None
+    for name, v in built["views"].items():
+        if want in (name, v["path_id"]) or want == v["path_id"].lower():
+            view = v
+            break
+    if view is None:
+        known = "、".join(f"{v['path_id']}({n})" for n, v in built["views"].items())
+        raise SystemExit(ui.error(f"未找到域：{want}。现存：{known}"))
+    print(ui.rule(f"域视图：{view['path_id']}（{view['name']}）"))
+    print(view["text"])
+
+
 def cmd_list(args: argparse.Namespace) -> None:
     """wovra list：列出所有任务（按更新时间倒序，带数字编号）。"""
     tasks = _all_tasks()
@@ -208,6 +254,15 @@ def main(argv: list[str] | None = None) -> None:
     p_maint.add_argument("task_id", nargs="?", default="",
                          help="任务 id 或列表编号；省略取最近更新的会话")
     p_maint.set_defaults(func=cmd_maint)
+
+    p_views = sub.add_parser(
+        "views", help="查看按域分化的上下文视图（机械渲染，零模型成本）"
+    )
+    p_views.add_argument("domain", nargs="?", default="",
+                         help="域 id（如 A-1）或域名；省略则列全部域摘要")
+    p_views.add_argument("task_id", nargs="?", default="",
+                         help="任务 id 或列表编号；省略取最近更新的会话")
+    p_views.set_defaults(func=cmd_views)
 
     sub.add_parser("help", help="显示帮助")
 

@@ -390,6 +390,25 @@ def _registry_lines(registry: list | None) -> list[str]:
     return lines
 
 
+def _domain_view_lines(task) -> list[str]:
+    """机械渲染域视图摘要（零 LLM，Level 1 第二步的可见面）。
+
+    为什么必须可见：域视图是"装配按域分化"的材料层——它决定每个子 agent
+    看得到什么。用户若看不到"每个域拿到多少块、多大体量、账本切到几条"，
+    就无法判断分裂质量（同注册表栏的理由）。
+    """
+    try:
+        from .views import build_views, human_report
+    except Exception:  # noqa: BLE001——渲染层的降级：缺该模块不阻断报告
+        return ["-（域视图不可用）"]
+    try:
+        built = build_views(task.rounds, task.get_state(), registry=task.registry)
+    except Exception as exc:  # noqa: BLE001
+        return [f"-（域视图派生失败：{exc!r}）"]
+    lines = human_report(built)
+    return lines[2:] if len(lines) > 2 else ["-（无域视图）"]
+
+
 def report_view(task, children: list[dict] | None = None) -> str:
     """人机协同报告：大局默认，细节按事件 ID 剥开（机制四）。
 
@@ -442,6 +461,10 @@ def report_view(task, children: list[dict] | None = None) -> str:
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
     lines += _registry_lines(task.registry)
+
+    lines += ["", "## 域视图（Level 1 第二步：装配按域分化的材料）"]
+    lines += _domain_view_lines(task)
+
     lines += [
         "",
         "> 细节按需剥开：对主 agent 说\"展开 R3-E02\"即可取回任意事件原文；",
@@ -564,6 +587,9 @@ def maint_view(task) -> str:
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
     lines += _registry_lines(getattr(task, "registry", None))
+
+    lines += ["", "## 域视图（Level 1 第二步：装配按域分化的材料）"]
+    lines += _domain_view_lines(task)
 
     lines += ["", "## 维护批次（history 记账）"]
     maint = [h for h in (task.history or []) if h.get("kind") == "maintenance"]
