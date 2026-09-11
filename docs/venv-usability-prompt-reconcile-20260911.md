@@ -83,8 +83,10 @@ uv run python -m pytest -q
 ## 5. 提交与推送
 
 - git 提交：本次改动提交为一条 commit（见提交信息）。
-- git push：`git push` 在 `_DENIED_PATTERNS` 黑名单里（对外发布不由
-  agent 自主决定）——**由用户在终端手动执行**。
+- git push：`git push` 曾位于 `_DENIED_PATTERNS` 黑名单（对外发布不由
+  agent 自主决定）；2026-09-11 用户拍板改为**走确认门**（执行前 y/N 授权
+  一次即可），git 类破坏性操作（push/reset/clean/checkout/restore）不再
+  硬拦。
 
 ## 6. 已知边界
 

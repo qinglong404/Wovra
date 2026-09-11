@@ -51,8 +51,10 @@ FAILURE_MARKERS = (
 )
 
 # 破坏性命令黑名单：子串匹配，宁可误杀不可放过。
-# 有意保持保守——rm -r、git push 这类即使"看起来安全"也拒绝，
+# 有意保持保守——rm -r 这类即使"看起来安全"也拒绝，
 # 模型收到拒绝文本后会自行寻找替代方案（这是流式循环的好处）。
+# git 类破坏性操作（push/reset/clean/checkout/restore）2026-09-11 起
+# 移出黑名单、改走确认门：用户 y/N 授权一次即可执行，不硬拦。
 _DENIED_PATTERNS = (
     "rm -r",          # 递归删除（含 -rf/-fr）
     " -delete",       # find 的删除变体
@@ -60,11 +62,6 @@ _DENIED_PATTERNS = (
     "mkfs",
     "dd if=",
     ":(){",           # fork 炸弹
-    "git push",       # 对外发布，不由 agent 自主决定
-    "git reset --hard",
-    "git clean",
-    "git checkout -- ",
-    "git restore",
     "shutdown",
     "reboot",
     "chmod -R",
@@ -502,7 +499,7 @@ def user_input_pending() -> bool:
 
 
 _CONFIRM_PATTERNS = (
-    r"\bgit\s+(commit|tag|merge|rebase|remote\s+add)\b",
+    r"\bgit\s+(commit|tag|merge|rebase|push|reset|clean|checkout|restore|remote\s+add)\b",
     r"\b(pip|pip3)\s+install\b", r"\buv\s+(pip\s+)?(add|install|sync)\b",
     r"\bconda\s+(install|create|remove)\b",
     r"\bnpm\s+(install|i)\b", r"\bpnpm\s+(add|install)\b", r"\byarn\s+add\b",
