@@ -63,8 +63,9 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
-    escape = safety._command_escape(command)
+    escape = safety._command_escape_targets(command)
     if escape:
+        reason, targets = escape
         # venv 可用性提示（2026-09-11 运行者实测）：uv 建的 .venv/bin/python
         # 是指向工作区外系统解释器的符号链接，命中 _linked_outside 被拦——
         # 这是安全层的有意行为，但第一次撞上的人会以为工具坏了。识别出
@@ -74,12 +75,18 @@ def run_command(command: str, timeout: int | None = None) -> str:
             "的符号链接——请改用 `uv run ...`（如 `uv run python -m pytest`）。"
             if ".venv/" in command else ""
         )
-        return (
-            f"已拒绝执行：命令试图{escape}（{command[:120]}）。"
-            f"所有命令都限定在工作区 {safety.PROJECT_ROOT} 内运行。"
-            f"{hint}"
-            f"如果确实需要访问工作区之外，请向用户说明理由并请其自行操作。"
-        )
+        # 越界授权（2026-09-11 用户拍板）：目标已授权或用户当场授权一次 →
+        # 放行执行；未授权 → 拒绝。targets 提取失败（空）时保守拒绝。
+        if targets and safety._request_path_authorization(targets, "run_command"):
+            safety._audit(f"[run_command][越界已授权] {command}")
+        else:
+            return (
+                f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
+                f"所有命令默认限定在工作区 {safety.PROJECT_ROOT} 内运行。"
+                f"{hint}"
+                f"越界访问需用户授权：授权一次后该路径自动放行"
+                f"（授权清单: {safety.PROJECT_ROOT / '.wovra' / 'authorized-paths.json'}）。"
+            )
     reason = safety._confirm_reason(command)
     if reason and not safety._ask_yes_no(
         f"命令包含敏感操作（命中 `{reason}`），是否允许执行？\n  {command[:200]}"

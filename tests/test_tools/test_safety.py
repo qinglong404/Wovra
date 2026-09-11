@@ -468,3 +468,142 @@ def test_schema_description_carries_first_paragraph():
 
     read_desc = _schema_of(read_file)["function"]["description"]
     assert "num_lines=400" in read_desc  # 通读引导：避免零碎小段反复读
+
+
+def test_escape_detection_false_positives_fixed(workspace):
+    """2026-09-11 误伤修复：文本分隔符/引号文本/cd 自身工作区不再误拦。
+
+    探针（scripts/probe_cmd_escape.py）实证的三个误伤 + 真实越界对照。
+    """
+    from wovra import tools as tools_module
+
+    # 误伤 1：commit message 里"空格-斜杠-空格"是文本分隔符，不是根目录访问
+    for command in (
+        "prompts.py / support.py / tools/__init__.py",
+        "echo a / b",
+        "git commit -m 'docs/x.md 与 src/y.py 的差异'",
+    ):
+        assert not tools_module.safety._command_escape(command), command
+
+    # 误伤 2：commit message 里的 .venv/bin/... 是文本引用不是执行
+    command = 'git commit -m "run_command 拦截 .venv/bin/python 时提示"'
+    assert not tools_module.safety._command_escape(command), command
+
+    # 误伤 3：cd 到工作区本身的绝对路径（运行者实测：cd /home/.../Wovra 被拦）
+    command = f"cd {workspace.root} && pwd"
+    assert not tools_module.safety._command_escape(command), command
+
+    # 引号内绝对路径是数据文本不是访问
+    assert not tools_module.safety._command_escape('echo "see /etc/passwd"')
+
+    # 对照：真实越界仍拦
+    assert tools_module.safety._command_escape("find / -name x")
+    assert tools_module.safety._command_escape("ls -la /")
+    assert tools_module.safety._command_escape("cat /etc/passwd")
+    assert tools_module.safety._command_escape("cd /tmp && ls")
+    assert tools_module.safety._command_escape("cd .. && pwd")
+
+
+def test_escape_authorization_flow(tmp_path, monkeypatch):
+    """越界授权（2026-09-11 用户拍板）：非交互拒绝 → 交互授权一次 →
+    放行+落盘 → 持久化 → 未授权路径仍拦。
+
+    授权清单 .wovra/authorized-paths.json（gitignored，机器本地状态）。
+    """
+    import builtins
+    import sys as _sys
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("outside data\n", encoding="utf-8")
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", ws)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+
+    target = str(outside / "data.txt")
+
+    # 1) 非交互环境：安全拒绝（越界不是普通敏感操作，绝不自动放行）
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: False))
+    result = run_command(f"cat {target}")
+    assert "已拒绝执行" in result
+    assert not tools_module.safety.is_authorized(target)
+
+    # 2) 交互环境：用户授权一次 → 放行并落盘
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.setattr(builtins, "input", lambda prompt: "y")
+    result = run_command(f"cat {target}")
+    assert "已拒绝执行" not in result
+    assert "outside data" in result
+    store = ws / ".wovra" / "authorized-paths.json"
+    assert store.exists()
+    assert target in store.read_text(encoding="utf-8")
+
+    # 3) 持久化：重新读取（模拟新会话）仍识别已授权
+    assert tools_module.safety.is_authorized(target)
+    assert target in tools_module.safety._load_authorized()
+
+    # 4) 未授权路径仍拦（交互但用户拒绝）
+    other = outside / "other.txt"
+    other.write_text("other\n", encoding="utf-8")
+    monkeypatch.setattr(builtins, "input", lambda prompt: "n")
+    result = run_command(f"cat {other}")
+    assert "已拒绝执行" in result
+
+
+def test_file_tools_authorization_flow(tmp_path, monkeypatch):
+    """文件工具：指向界外的链接经授权后可读可写；未授权仍拒。
+
+    目录授权 = 其下全部内容（前缀匹配）；文件授权 = 精确匹配。
+    """
+    import builtins
+    import os as _os
+    import sys as _sys
+    from types import SimpleNamespace as _NS
+
+    from wovra import tools as tools_module
+
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "secret.md").write_text("SECRET\n", encoding="utf-8")
+    (outside / "write.md").write_text("old\n", encoding="utf-8")
+    try:
+        _os.symlink(outside / "secret.md", ws / "link.md")
+        _os.symlink(outside / "write.md", ws / "linkw.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不支持创建符号链接")
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", ws)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+
+    # 1) 非交互：读界外链接被拒（不授权）
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: False))
+    with pytest.raises(ValueError, match="路径越界"):
+        read_file("link.md")
+
+    # 2) 交互授权一次 → 读放行，授权落盘
+    monkeypatch.setattr(_sys, "stdin", _NS(isatty=lambda: True))
+    monkeypatch.setattr(builtins, "input", lambda prompt: "y")
+    assert "SECRET" in read_file("link.md")
+    assert tools_module.safety.is_authorized(str((outside / "secret.md").resolve()))
+
+    # 3) 已授权路径：写界外（经链接）放行，内容真实落在界外文件
+    result = write_file("linkw.md", "new content\n")
+    assert "已覆盖" in result
+    assert (outside / "write.md").read_text(encoding="utf-8") == "new content\n"
+
+    # 4) 未授权文件仍拒（交互但用户拒绝）
+    (outside / "deny.md").write_text("deny\n", encoding="utf-8")
+    try:
+        _os.symlink(outside / "deny.md", ws / "linkd.md")
+    except (OSError, NotImplementedError):
+        pytest.skip("当前环境不支持创建符号链接")
+    monkeypatch.setattr(builtins, "input", lambda prompt: "n")
+    with pytest.raises(ValueError, match="路径越界"):
+        read_file("linkd.md")

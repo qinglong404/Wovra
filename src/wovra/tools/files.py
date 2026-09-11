@@ -47,18 +47,33 @@ def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
     symlinks="root"（默认）额外放行**指向界内**的链接——界内做别名
     是正常工程行为，不该误伤；"skip" 则一律跳过链接。
 
+    界外授权目录（2026-09-11 用户拍板）：起点经用户授权（目录=其下
+    全部内容）时，遍历边界从工作区切换到授权目录本身——授权目录内部
+    的文件正常产出，不再被"越界即跳过"过滤。
+
     去重：链接与其目标都命中时只产出一次（按真实路径判重）——
     否则 `glob *.txt` 会把同一个文件列两遍，模型会以为有两份。
     """
     root_resolved = safety.PROJECT_ROOT.resolve()
+    # 界外授权目录：起点已获授权 → 该目录内部按授权目录为边界
+    try:
+        boundary = (
+            root.resolve() if safety.is_authorized(str(root.resolve()))
+            else root_resolved
+        )
+    except OSError:
+        boundary = root_resolved
     seen: set[Path] = set()
     for path in sorted(root.rglob(glob)):
         if not path.is_file():
             continue
         resolved = path.resolve()
-        if not resolved.is_relative_to(root_resolved):
-            continue  # ① 遍历穿出工作区（含跟随 symlink 到界外）
-        relative = resolved.relative_to(root_resolved)
+        if not resolved.is_relative_to(boundary):
+            continue  # ① 遍历穿出工作区/授权目录（含跟随 symlink 到界外）
+        try:
+            relative = resolved.relative_to(boundary)
+        except ValueError:
+            continue
         if any(part in _IGNORED_DIRS for part in relative.parts):
             continue  # ② 噪声目录
         if symlinks == _SYMLINK_SKIP and path.is_symlink():
@@ -72,6 +87,19 @@ def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
 def _is_hidden(relative: Path) -> bool:
     """相对路径的任一段以 . 开头（隐藏文件/目录）。"""
     return any(part.startswith(".") for part in relative.parts)
+
+
+def _display_rel(path: Path) -> Path:
+    """路径 → 展示用相对路径；授权目录（界外）内文件回退为绝对路径。
+
+    search_files/glob_files 的输出会被模型用于 read_file——read_file 只收
+    工作区相对路径，所以界外授权文件输出绝对路径，模型改用 run_command
+    访问（2026-09-11 授权机制引入后新增场景）。
+    """
+    try:
+        return path.relative_to(safety.PROJECT_ROOT)
+    except ValueError:
+        return path
 
 # ---- 只读工具 -------------------------------------------------------------
 
@@ -158,7 +186,7 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
         for line_number, line in enumerate(all_lines, start=1):
             if regex.search(line):
                 # 统一用 / 分隔，输出跨平台一致（也便于回填给 read_file 等工具）
-                relative = path.relative_to(safety.PROJECT_ROOT).as_posix()
+                relative = _display_rel(path).as_posix()
                 entry = f"{relative}:{line_number}: {line.strip()[:200]}"
                 if context > 0:
                     lo = max(0, line_number - 1 - context)
@@ -191,13 +219,13 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
     root = safety._safe_directory(directory)
     filtered = [
         p for p in _walk(root, pattern)
-        if include_hidden or not _is_hidden(p.relative_to(safety.PROJECT_ROOT))
+        if include_hidden or not _is_hidden(_display_rel(p))
     ]
     filtered.sort(key=lambda p: p.as_posix())
     if not filtered:
         hint = "" if include_hidden else "（隐藏文件未计入，需要时加 include_hidden=True）"
         return f"无匹配文件: {pattern}（directory={directory}）{hint}"
-    lines = [p.relative_to(safety.PROJECT_ROOT).as_posix() for p in filtered[:200]]
+    lines = [_display_rel(p).as_posix() for p in filtered[:200]]
     more = f"\n…(共 {len(filtered)} 个，已显示前 200)" if len(filtered) > 200 else ""
     return "\n".join(lines) + more
 
@@ -243,9 +271,16 @@ def _stale_error(path: Path) -> str | None:
 _HISTORY_KEEP = 10
 
 
-def _history_slot(target: Path) -> Path:
-    """文件 → 它的版本档案目录（从 PROJECT_ROOT 现算，测试可重定向）。"""
-    rel = target.relative_to(safety.PROJECT_ROOT).as_posix()
+def _history_slot(target: Path) -> Path | None:
+    """文件 → 它的版本档案目录（从 PROJECT_ROOT 现算，测试可重定向）。
+
+    授权目录外的文件（界外链接目标）不属于工作区版本档案：返回 None
+    （_archive_version 会跳过归档，写入照常进行）。
+    """
+    try:
+        rel = target.relative_to(safety.PROJECT_ROOT).as_posix()
+    except ValueError:
+        return None
     return safety.PROJECT_ROOT / ".wovra" / "history" / rel.replace("/", "__")
 
 
@@ -263,6 +298,8 @@ def _archive_version(target: Path) -> str | None:
     except (UnicodeDecodeError, OSError):
         return None  # 非文本/不可读：无法归档，但也不阻止写操作
     slot = _history_slot(target)
+    if slot is None:
+        return None  # 界外授权文件：不在工作区版本档案内，跳过归档
     slot.mkdir(parents=True, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{next(_VERSION_SEQ):04d}"
     (slot / f"{stamp}.bak").write_text(old, encoding="utf-8")
@@ -285,6 +322,8 @@ def restore_file(path: str, version: str = "") -> str:
     if stale:
         return stale
     slot = _history_slot(target)
+    if slot is None:
+        return f"{path} 位于工作区之外（授权文件不纳入版本档案），restore_file 仅支持工作区内文件"
     versions = sorted(slot.glob("*.bak")) if slot.exists() else []
     if not versions:
         return f"{path} 没有历史版本（版本归档自启用 checkpoint 起生效）"

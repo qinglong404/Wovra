@@ -14,8 +14,14 @@ interaction 各模块依赖；它自身不 import 包内其它模块。
     * `_safe_path_lexical`  —— 词法拒绝 `..`，不跟随末段链接
                               （需要操作链接本身的工具用：delete/move）
     * `_safe_write_path` / `_safe_directory` —— 上述 + 拒绝指向界外的链接
+
+**越界授权（2026-09-11 用户拍板）**：跨工作区访问不再一律拒绝——
+先请求用户授权一次（交互 y/N，非交互安全拒绝），授权路径写入
+`.wovra/authorized-paths.json`（持久化，重启仍在），之后访问放行。
+授权粒度：单文件或目录（目录授权 = 其下全部内容）。未授权仍拦。
 """
 
+import json
 import os
 import re
 from pathlib import Path, PurePosixPath
@@ -118,6 +124,84 @@ _INTERPRETER_PATH = re.compile(
     r"^/(?:usr/)?(?:local/)?(?:s?bin)/[\w.+-]+\.?(?:exe)?$"
 )
 
+# 引号掩码（2026-09-11 误伤修复）：commit message（-m "…"）、文档文本
+# （echo "…"）、grep 正则（grep -e '…'）里的 token 会被链接/上溯/孤立
+# 斜杠检测当成真实路径误判。检测前先把**数据**引号段替换为占位符；
+# 代码解释器的引号段是**真实要执行的代码**（bash -c '…'、perl -e '…'、
+# python3 -c "…"），其内的越界路径是真实访问，必须原样保留给检测器。
+# 按命令名区分：白名单命令的 -c/-e 段保留，其余引号段掩码。
+
+_CODE_EXEC_COMMANDS = (
+    "bash", "sh", "zsh", "ksh", "dash", "ash", "csh", "tcsh",
+    "python", "python2", "python3", "perl", "ruby", "node", "php", "lua",
+)
+_EXEC_FLAG_ARG = re.compile(
+    r"(?:^|[;&|(]\s*)(?:[A-Za-z0-9_./-]*/)?("
+    + "|".join(re.escape(c) for c in _CODE_EXEC_COMMANDS)
+    + r")(?:\.exe)?\s+-[ce]\s+(['\"])(.*?)\2",
+    re.DOTALL,
+)
+_QUOTED_SEGMENT = re.compile(r"(['\"])(.*?)\1", re.DOTALL)
+
+
+def _mask_quoted_text(command: str) -> str:
+    """把命令里的数据引号段掩码；代码解释器的 `-c/-e` 段还原保留。
+
+    白名单解释器（bash -c、perl -e、python3 -c…）的引号内是**要执行
+    的代码**——其中的越界路径必须继续被检测；echo/-m/grep 等传参的
+    引号内是**数据**——掩码掉避免误伤。
+    """
+    protected: list[str] = []
+
+    def _keep(m):
+        protected.append(m.group(0))
+        return f"\x00{len(protected) - 1}\x00"
+
+    masked = _EXEC_FLAG_ARG.sub(_keep, command)
+    masked = _QUOTED_SEGMENT.sub(
+        lambda m: m.group(1) + "TEXT" + m.group(1), masked
+    )
+    for i, seg in enumerate(protected):
+        masked = masked.replace(f"\x00{i}\x00", seg)
+    return masked
+
+
+# 命令词集合：孤立 `/`（find /、ls /）只有紧跟**命令词或选项**时才
+# 是根目录访问；普通词之间的 `/`（a / b、1 / 2、prompts.py / x）是
+# 文本分隔符/除法（probe 实测：commit message 含"空格-斜杠-空格"被误拦）。
+# 名单偏保守——误伤（拦死合法命令）代价远大于漏拦（越界访问还有
+# 绝对路径/链接/上溯三个通道兜底，且最终有用户授权门）。
+_ROOT_TARGET_COMMANDS = frozenset({
+    "ls", "dir", "cat", "head", "tail", "find", "grep", "rg", "tree",
+    "pwd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "stat",
+    "du", "df", "less", "more", "file", "xxd", "od", "tar", "rsync",
+    "scp", "curl", "wget", "python", "python3", "bash", "sh", "awk",
+    "sed", "sort", "uniq", "xargs", "env", "which", "whereis", "locate",
+    "top", "ps", "kill", "tee", "dd", "mount", "umount", "open", "xdg-open",
+})
+
+
+def _has_root_slash_target(masked: str) -> bool:
+    """孤立 `/` 是否指向根目录：前面必须是命令词、选项或赋值。
+
+    `find / -name x`、`ls -la /`、`root=/` → True；
+    `echo a / b`、`prompts.py / support.py`、`1 / 2` → False。
+    """
+    for m in re.finditer(r"/", masked):
+        if m.end() < len(masked) and not masked[m.end()].isspace():
+            continue  # 非孤立（后面还有内容）：交给绝对路径通道
+        head = masked[:m.start()]
+        prev = re.search(r"([^\s'\"|;&<>=()$`]+)\s*$", head)
+        if not prev:
+            return True  # 行首就是 /（如 `find /` 无前 token 时，前面其实有命令）
+        tok = prev.group(1).rstrip(",;")
+        if tok.startswith("-") or tok in _ROOT_TARGET_COMMANDS:
+            return True
+        if re.search(r"(?:^|[\s;|&(])[A-Za-z_][\w]*=$", head):
+            return True  # 赋值右值：root=/、dir=/
+    return False
+
+
 # 界内链接穿透（探针实测的洞）：`cat escape.txt` 里没有绝对路径、
 # 也没有 `..`，但 escape.txt 是指向界外的链接——shell 会顺着读到界外。
 # 静态分析无法判断"命令里哪个 token 是路径"，只能对**疑似路径的 token**
@@ -129,7 +213,9 @@ def _linked_outside(command: str) -> str | None:
     这是对绝对路径检测的补充：`cat escape.txt` 不含任何绝对路径，
     但 escape.txt 是界外链接。只解析**像文件名的 token**（含 `.` 或 `/`、
     且不是选项/URL），逐个查它在工作区内是否为指向界外的链接。
+    数据引号段（commit message 等）先掩码——那只是文本引用，不是执行。
     """
+    command = _mask_quoted_text(command)
     root = PROJECT_ROOT.resolve()
     for raw in re.findall(r"[^\s'\"|;&<>=()$`]+", command):
         token = raw.strip(",;:")
@@ -164,6 +250,7 @@ def _linked_outside(command: str) -> str | None:
 # `cat a/../b.txt` 归一回界内属正常写法，不该误伤。
 def _traverses_outside(command: str) -> str | None:
     """命令里的相对路径 token 经归一化后落在界外 → 返回该 token。"""
+    command = _mask_quoted_text(command)
     root = PROJECT_ROOT.resolve()
     for raw in re.findall(r"[^\s'\"|;&<>=()$`]+", command):
         token = raw.strip(",;:")
@@ -181,21 +268,26 @@ def _traverses_outside(command: str) -> str | None:
     return None
 
 
-def _outside_absolute_paths(command: str) -> list[str]:
+def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str]:
     """找出命令行里指向工作区之外的绝对路径字面量。
 
     只认"像路径"的 token：以 / 开头、不是命令行选项、不是 URL。
+    masked：引号文本已掩码的版本（_command_escape 传入）；单独调用时
+    自动计算。孤立 `/` 的判定在 masked 上做——引号文本里的 `/` 是
+    数据不是访问；`-c` 代码段内的绝对路径（python3 -c "open('/x')"）
+    仍由下方 findall 在**原始命令**上捕获。
     """
     root = str(PROJECT_ROOT.resolve())
     found: list[str] = []
-    # 单独一个 `/`（如 `find / -name x`）也是界外目标；用词边界匹配，
-    # 避免把 `a/b` 里的斜杠或除法当路径。
-    if re.search(r"(?:^|[\s'\"=])/(?=\s|$)", command):
+    # 单独一个 `/`（如 `find / -name x`）也是界外目标；只有紧跟命令词/
+    # 选项才是根目录访问（见 _has_root_slash_target 注释）
+    masked = masked if masked is not None else _mask_quoted_text(command)
+    if _has_root_slash_target(masked):
         found.append("/")
     # 前导断言必须排除 `.` 和 `-`：`./x`、`../x`、`a/../b` 都是**相对**
     # 路径，把其中的 `/x` 当绝对路径会误拦（自我测试抓到的：一条
     # `cat ./t1.txt` 被报成"访问工作区之外的绝对路径 /t1.txt"）。
-    for raw in re.findall(r"(?<![\w:/.\-])/[^\s'\"|;&><)]*", command):
+    for raw in re.findall(r"(?<![\w:/.\-])/[^\s'\"|;&><)]*", masked):
         token = raw.rstrip(",;")
         if not token or token == "/":
             continue
@@ -212,13 +304,10 @@ def _outside_absolute_paths(command: str) -> list[str]:
     return found
 
 
-def _command_escape(command: str) -> str | None:
-    """检测命令里"离开工作区"的意图，返回原因；没有则 None。
+def _command_escape_targets(command: str) -> tuple[str, list[str]] | None:
+    """检测命令里"离开工作区"的意图，返回 (原因, 越界目标路径列表)。
 
-    两类：
-    * `cd` 到界外（`cd ..`、`cd /tmp`、`cd ~`、`bash -c 'cd /tmp'`）；
-    * 出现指向界外的绝对路径字面量（`cat /etc/passwd`）。
-
+    目标列表供授权门使用：授权后这些路径放行。没有越界则 None。
     判定的是 **cd 处于命令位置**的上溯，而不是"出现 cd 二字"：
 
         cd ..                    → 拦（段首命令）
@@ -229,21 +318,63 @@ def _command_escape(command: str) -> str | None:
 
     写文档/测试断言时经常要引用 "cd .." 这个字符串，误伤它们得不偿失。
     """
+    masked = _mask_quoted_text(command)
     command_word = r"(?:^|[;&|(])\s*"          # 段首、分隔符或子 shell
     wrapper = r"(?:[A-Za-z0-9_./-]+\s+-c\s+['\"]?\s*)?"  # bash -c '…'
     target = r"['\"]?(?:\.\.|/|~|\$HOME|\$\{HOME\})"      # 界外目标（可带引号）
     if re.search(command_word + wrapper + r"cd\s+" + target, command):
-        return "cd 到工作区之外"
-    outside = _outside_absolute_paths(command)
+        targets = _extract_cd_targets(command)
+        root_resolved = PROJECT_ROOT.resolve()
+        # 界内 cd 放行（2026-09-11 运行者实测误伤）：`cd /home/.../Wovra`
+        # 是工作区本身的绝对路径，不该拦；`cd /tmp`、`cd ..` 仍拦。
+        # targets 提取失败（空）时保守拦截。
+        if targets and all(
+            Path(t).is_relative_to(root_resolved) for t in targets
+        ):
+            pass
+        else:
+            return "cd 到工作区之外", targets
+    outside = _outside_absolute_paths(command, masked=masked)
     if outside:
-        return f"访问工作区之外的绝对路径（{outside[0]}）"
-    traversal = _traverses_outside(command)
+        return f"访问工作区之外的绝对路径（{outside[0]}）", outside
+    traversal = _traverses_outside(masked)
     if traversal:
-        return f"用相对路径上溯到工作区之外（{traversal}）"
-    linked = _linked_outside(command)
+        return f"用相对路径上溯到工作区之外（{traversal}）", [traversal]
+    linked = _linked_outside(masked)
     if linked:
-        return f"经由指向工作区之外的链接（{linked}）"
+        return f"经由指向工作区之外的链接（{linked}）", [linked]
     return None
+
+
+def _extract_cd_targets(command: str) -> list[str]:
+    """cd 越界时提取目标路径（归一化为绝对路径，供授权使用）。
+
+    `cd ..` → 工作区父目录；`cd /tmp` → /tmp；`cd ~` → 家目录。
+    提取失败返回空列表（授权门会退化为"仅放行已授权项"）。
+    """
+    targets: list[str] = []
+    for m in re.finditer(
+        r"(?:^|[;&|(])\s*(?:[A-Za-z0-9_./-]+\s+-c\s+['\"]?\s*)?cd\s+['\"]?([^\s'\"|;&<>=()$`]+)",
+        command,
+    ):
+        raw = m.group(1).rstrip(",;")
+        if raw in (".", ".."):
+            resolved = (PROJECT_ROOT / raw).resolve()
+        elif raw.startswith("~"):
+            expanded = os.path.expanduser(raw)
+            resolved = Path(expanded).resolve()
+        elif raw.startswith("/"):
+            resolved = Path(raw).resolve()
+        else:
+            resolved = (PROJECT_ROOT / raw).resolve()
+        targets.append(str(resolved))
+    return targets
+
+
+def _command_escape(command: str) -> str | None:
+    """检测命令里"离开工作区"的意图，返回原因；没有则 None。"""
+    result = _command_escape_targets(command)
+    return result[0] if result else None
 
 # ---- 审计挂钩 ---------------------------------------------------------------
 # Agent 绑定任务时通过 set_audit_recorder 注册回调；工具用它把
@@ -309,33 +440,51 @@ def _safe_path_lexical(relative: str) -> Path:
 
 
 def _safe_write_path(relative: str) -> Path:
-    """写入类工具的统一入口：词法拒绝 `..`，且不允许写到界外链接上。
+    """写入类工具的统一入口：词法拒绝 `..`，界外链接需用户授权。
 
     write/edit/replace/restore 都会**改动内容**，所以除了不接受
     中间穿越，也不能顺着一个指向界外的链接去写——那等于从工作区
     内部改写外部文件。读类工具同理（read_file 也走这套判定）。
+    2026-09-11 起：指向界外的链接不再一律拒绝——经用户授权一次后
+    放行（授权清单 .wovra/authorized-paths.json，重启仍在）。
     """
     target = _safe_path_lexical(relative)
     if not _within_root(target):
-        raise ValueError(
-            f"路径越界，只允许访问项目目录内的文件: {relative}"
-            f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}）"
-        )
+        try:
+            resolved = target.resolve()
+        except OSError:  # 链接成环等病态路径：不可授权
+            resolved = None
+        if resolved is None or not _request_path_authorization(
+            [str(resolved)], "文件工具"
+        ):
+            raise ValueError(
+                f"路径越界，只允许访问项目目录内的文件: {relative}"
+                f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}。"
+                f"越界访问需用户授权一次，授权后自动放行）"
+            )
     return target
 
 
 def _safe_directory(directory: str) -> Path:
     """目录类参数（list_files/search_files/glob_files）的统一入口。
 
-    与 _safe_path_lexical 同规则（拒绝 `..`），额外要求解析后仍在
-    界内——遍历的起点不能是一个指向界外的链接。
+    与 _safe_path_lexical 同规则（拒绝 `..`）；解析后仍在界内的链接
+    照常放行，指向界外的链接需用户授权一次（授权目录 = 其下全部内容）。
     """
     target = _safe_path_lexical(directory)
     if not _within_root(target):
-        raise ValueError(
-            f"路径越界，只允许访问项目目录内的文件: {directory}"
-            f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}）"
-        )
+        try:
+            resolved = target.resolve()
+        except OSError:
+            resolved = None
+        if resolved is None or not _request_path_authorization(
+            [str(resolved)], "目录遍历"
+        ):
+            raise ValueError(
+                f"路径越界，只允许访问项目目录内的文件: {directory}"
+                f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}。"
+                f"越界访问需用户授权一次，授权后自动放行）"
+            )
     return target
 
 # ---- 敏感操作确认 -------------------------------------------------------------
@@ -391,3 +540,77 @@ def _ask_yes_no(question: str) -> bool:
         _user_input_pending = False
     # Ctrl+C 不吞：向上传播 = 打断本轮（统一的中断语义）
     return answer in ("y", "yes")
+
+
+# ---- 越界授权（2026-09-11 用户拍板） ----------------------------------------
+# 跨工作区访问不再一律拒绝：先请求用户授权一次（交互 y/N，非交互安全
+# 拒绝），授权路径写入 .wovra/authorized-paths.json（与版本归档同目录，
+# gitignored——绝对路径是机器本地状态，不进版本库），之后访问自动放行。
+# 授权粒度：单文件或目录（目录授权 = 其下全部内容，按前缀匹配）。
+
+def _authorized_store() -> Path:
+    return PROJECT_ROOT / ".wovra" / "authorized-paths.json"
+
+
+def _load_authorized() -> list[str]:
+    store = _authorized_store()
+    try:
+        return json.loads(store.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+
+
+def _save_authorized(paths: list[str]) -> None:
+    store = _authorized_store()
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(
+        json.dumps(paths, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+
+
+def is_authorized(target: str) -> bool:
+    """target（绝对路径）是否已被授权：自身精确匹配或位于某授权目录下。"""
+    t = Path(target).resolve()
+    for p in _load_authorized():
+        ap = Path(p)
+        if t == ap or t.is_relative_to(ap):
+            return True
+    return False
+
+
+def add_authorization(target: str) -> None:
+    """把目标绝对路径写入授权清单（幂等，重复授权不产生重复条目）。"""
+    paths = _load_authorized()
+    if target not in paths:
+        paths.append(target)
+        _save_authorized(paths)
+    _audit(f"[授权] {target}")
+
+
+def _request_path_authorization(targets: list[str], tool: str) -> bool:
+    """越界目标未授权时向用户请求授权一次；全部已授权直接放行。
+
+    交互环境 y/N（默认拒绝）；非交互环境**安全拒绝**——越界不是普通
+    敏感操作（_ask_yes_no 对脚本自动放行是怕阻塞实验），授权自动放行
+    等于静默打开工作区边界。授权成功 → 写入持久化清单并返回 True。
+    """
+    import sys
+
+    new = [t for t in targets if not is_authorized(t)]
+    if not new:
+        return True
+    if not sys.stdin.isatty():
+        _audit(f"[授权] 非交互环境拒绝越界访问: {new}")
+        return False
+    question = (
+        f"以下目标在工作区之外（工具: {tool}），是否授权本次访问？\n"
+        + "\n".join(f"  - {t}" for t in new)
+        + "\n授权后写入授权清单（.wovra/authorized-paths.json），之后"
+          "访问自动放行；未授权的越界访问仍会被拒绝。"
+    )
+    if _ask_yes_no(question):
+        for t in new:
+            add_authorization(t)
+        return True
+    _audit(f"[授权] 用户拒绝: {new}")
+    return False

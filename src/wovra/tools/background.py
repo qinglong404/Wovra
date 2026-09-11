@@ -57,12 +57,17 @@ def run_background(command: str, keep_alive: bool = False) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
-    escape = safety._command_escape(command)
+    escape = safety._command_escape_targets(command)
     if escape:
-        return (
-            f"已拒绝执行：命令试图{escape}（{command[:120]}）。"
-            f"后台命令同样限定在工作区 {safety.PROJECT_ROOT} 内运行。"
-        )
+        reason, targets = escape
+        if targets and safety._request_path_authorization(targets, "run_background"):
+            safety._audit(f"[run_background][越界已授权] {command}")
+        else:
+            return (
+                f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
+                f"后台命令同样默认限定在工作区 {safety.PROJECT_ROOT} 内运行；"
+                f"越界访问需用户授权一次（授权后自动放行）。"
+            )
     reason = safety._confirm_reason(command)
     if reason and not safety._ask_yes_no(
         f"后台命令包含敏感操作（命中 `{reason}`），是否允许启动？\n  {command[:200]}"
