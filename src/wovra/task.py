@@ -47,6 +47,70 @@ _PATCH_LIST_FIELDS = (
     "open_questions", "escalations", "experiments",
 )
 
+# TaskState.render 的裁剪策略（2026-09-11 P0 修复）。
+# 旧实现是对整块文本做 `text[:budget]` 切片，而节的输出顺序是
+# 目标→现状→已完成→已决策→…→决策升级→待办实验→约束，切片保头部，
+# 于是活会话实测"只剩已完成一节"：决策升级与待办实验（文档写明的人机
+# 协同一等公民，且**没有第二个注入点**）被整节吃掉——需要人拍板的事
+# 模型永远读不到；而且"保最旧"的取舍方向与 apply_patch 的"淘汰最旧"
+# 正好相反，两头口径打架。
+# 新策略：**按节分配**，每节在配额内保留**最新**条目，被裁的条数显式
+# 写进标签（「前 N 条已省略，见 report」），并给整块加一条总注——
+# 关键节优先取配额，其余节分剩余的，任何情况下都不静默消失一整节。
+_STATE_SECTION_ORDER = (
+    ("已完成", "completed"),
+    ("已决策", "decisions"),
+    ("已知问题", "known_issues"),
+    ("待解决问题", "open_questions"),
+    ("决策升级", "escalations"),
+    ("待办实验", "experiments"),
+    ("约束", "constraints"),
+)
+
+# 配额优先级：关键节（决策升级/待办实验/约束）先取，其余按
+# 已决策 > 已知问题 > 待解决问题 > 已完成。已完成的档案价值最低——
+# 原文在 history 与 report.md 里，且它是唯一会无限增长的节（实测
+# 活会话单它一节就 9,356 字符，超过 8,000 的整块预算）。
+_STATE_SECTION_PRIORITY = (
+    "escalations", "experiments", "constraints",
+    "decisions", "known_issues", "open_questions", "completed",
+)
+
+# 有节被裁剪时追加的总注（可 grep 的锚点）
+_STATE_TRIM_NOTE = "(任务状态按预算裁剪，省略条目见 report)"
+
+
+def _section_need(label: str, items: list[str]) -> int:
+    """一节完整渲染所需的字符数（用于配额分配）。"""
+    return len(label) + 1 + len("；".join(items))
+
+
+def _fit_section(label: str, items: list[str], share: int) -> tuple[str, int]:
+    """在 share 字符内保留尽量多的**最新**条目（与 apply_patch 淘汰最旧同向）。
+
+    至少保留最新的一条：宁可略微超配额，也不让一节整节消失——旧实现
+    正是"整节消失"。返回 (渲染文本, 被省略条数)；省略条数写进标签，
+    与 report.md / history 对得上。
+    """
+    kept: list[str] = []
+    used = len(label) + 1  # 全角冒号
+    for item in reversed(items):
+        cost = len(item) + (1 if kept else 0)  # 分隔用全角分号
+        if kept and used + cost > share:
+            break
+        kept.append(item)
+        used += cost
+    kept.reverse()
+    omitted = len(items) - len(kept)
+    if not kept:
+        return f"{label}（{omitted} 条已省略，见 report）", omitted
+    if omitted:
+        return (
+            f"{label}（前 {omitted} 条已省略，见 report）：" + "；".join(kept),
+            omitted,
+        )
+    return f"{label}：" + "；".join(kept), 0
+
 
 def sanitize_surrogates(text: str) -> str:
     """把字符串里的未配对代理项替换为 U+FFFD（�），其余字节不变。
@@ -136,33 +200,57 @@ class TaskState:
 
         空状态返回空串——新会话不给模型一个空的任务状态头
         （否则模型会困惑"任务状态是空的"）。
+
+        budget=None：全量渲染（人读视图、report、测试用）。
+        budget=N：**按节分配**配额（见 _STATE_SECTION_PRIORITY 的注释）——
+        关键节优先取满、每节在配额内保最新条目、被裁条数显式标注。绝不
+        再出现旧实现那种"整块切片把整节吃掉"（实测只剩「已完成」一节，
+        决策升级与待办实验全部不可见）。为保证每节至少留最新一条，极端
+        情况下总长可能略超 budget——宁可略超，不可静默丢节。
         """
-        lines = []
+        head: list[str] = []
         if self.goal:
-            lines.append(f"目标：{self.goal}")
+            head.append(f"目标：{self.goal}")
         if self.current_status:
-            lines.append(f"当前状态：{self.current_status}")
+            head.append(f"当前状态：{self.current_status}")
         if self.is_done:
-            lines.append("任务已完成。")
-        for label, name in (
-            ("已完成", "completed"),
-            ("已决策", "decisions"),
-            ("已知问题", "known_issues"),
-            ("待解决问题", "open_questions"),
-            ("决策升级", "escalations"),
-            ("待办实验", "experiments"),
-            ("约束", "constraints"),
-        ):
-            items = getattr(self, name)
-            if items:
-                lines.append(f"{label}：" + "；".join(items))
-        if not lines:
+            head.append("任务已完成。")
+        sections = [
+            (label, name, getattr(self, name))
+            for label, name in _STATE_SECTION_ORDER
+            if getattr(self, name)
+        ]
+        if not head and not sections:
             return ""
-        lines.insert(0, "[任务状态]")
-        text = "\n".join(lines)
-        if budget and len(text) > budget:
-            text = text[:budget] + "\n(任务状态过长已截断)"
-        return text
+        if budget is None:
+            lines = head + [
+                f"{label}：" + "；".join(items) for label, _name, items in sections
+            ]
+            return "\n".join(["[任务状态]"] + lines)
+
+        # 按节分配：头部固定开销先扣，再给裁剪提示留一行
+        fixed = len("[任务状态]") + 1 + sum(len(x) + 1 for x in head)
+        quota = max(0, budget - fixed - len(_STATE_TRIM_NOTE) - 1)
+        share: dict[str, int] = {}
+        left = quota
+        by_name = {name: (label, items) for label, name, items in sections}
+        for name in _STATE_SECTION_PRIORITY:
+            if name not in by_name:
+                continue
+            label, items = by_name[name]
+            take = min(_section_need(label, items), left)
+            share[name] = take
+            left -= take
+
+        trimmed = False
+        lines = list(head)
+        for label, name, items in sections:
+            text, omitted = _fit_section(label, items, share.get(name, 0))
+            trimmed = trimmed or omitted > 0
+            lines.append(text)
+        if trimmed:
+            lines.append(_STATE_TRIM_NOTE)
+        return "\n".join(["[任务状态]"] + lines)
 
 
 # history 事件的 kind → 报告里显示的中文标签

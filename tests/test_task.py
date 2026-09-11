@@ -208,15 +208,19 @@ def test_empty_task_state_renders_nothing():
 
 
 def test_state_render_respects_budget():
-    """回归（2026-09-11 机制评审）：render 的 budget 必须真的截断。
+    """回归（2026-09-11 机制评审）：render 的 budget 必须真的裁剪。
 
     TaskState 的 7 个列表各有 200 条上限（STATE_LIST_CAP），理论最坏
     1400 条，且状态是**每轮都进上下文**的（信封尾部）——不设预算就是
     一条无界常驻负担。render 早就支持 budget，但装配处此前没传，
-    截断保护形同虚设。
+    裁剪保护形同虚设。
+
+    2026-09-11 P0 修正口径：裁剪从「整块尾部切片」改为「按节分配」。
+    旧口径在活会话上实测**只剩「已完成」一节**（决策升级 7 条、待办实验
+    13 条全部不可见），且保最旧的取舍方向与 apply_patch 淘汰最旧相反。
     """
     from wovra import task as task_module
-    from wovra.task import TaskState, STATE_LIST_CAP
+    from wovra.task import TaskState, STATE_LIST_CAP, _STATE_TRIM_NOTE
 
     state = TaskState(goal="目标")
     state.completed = [f"完成项{i}" for i in range(STATE_LIST_CAP)]
@@ -224,29 +228,69 @@ def test_state_render_respects_budget():
     assert "完成项0" in full and len(full) > 500
 
     cut = state.render(budget=200)
-    assert len(cut) <= 200 + 30          # 截断 + 提示行
-    assert cut.endswith("(任务状态过长已截断)")
-    assert "完成项0" in cut               # 保头部（最旧条目在头部）
-    assert "完成项最后" not in cut
+    assert "已完成" in cut                      # 节不消失
+    assert "完成项199" in cut                   # 保最新（与 apply_patch 淘汰最旧同向）
+    assert "完成项0" not in cut                 # 最旧条目被裁
+    assert "条已省略，见 report" in cut          # 裁了多少条显式写出来
+    assert cut.endswith(_STATE_TRIM_NOTE)       # 有节被裁才加总注
+
+    # 没有超预算时不加总注（不会每轮都挂着一条噪声）
+    small = TaskState(goal="小").render(8000)
+    assert _STATE_TRIM_NOTE not in small
 
     # 装配处的预算常量存在且被默认使用
     from wovra.agent.support import _STATE_RENDER_BUDGET
     assert _STATE_RENDER_BUDGET > 0
 
 
+def test_state_render_keeps_critical_sections_under_tight_budget():
+    """P0 复现：紧预算下**任何一节都不能整节消失**，关键节优先。
+
+    旧口径（整块 text[:budget]）在活会话上的实测结果：只剩「已完成」
+    一节，决策升级 7 条与待办实验 13 条全被吃掉——而这两节是文档写明的
+    人机协同一等公民、**没有第二个注入点**，模型永远读不到「需要人拍板」
+    的事。这条用例把那个形状钉死。
+    """
+    from wovra.task import TaskState
+
+    state = TaskState(goal="目标")
+    state.completed = [f"完成项{i}" for i in range(200)]
+    state.decisions = [f"决策{i}" for i in range(20)]
+    state.known_issues = [f"问题{i}" for i in range(15)]
+    state.open_questions = [f"待解决{i}" for i in range(6)]
+    state.escalations = [f"升级{i}" for i in range(7)]
+    state.experiments = [f"实验{i}" for i in range(11)]
+    state.constraints = [f"约束{i}" for i in range(3)]
+
+    # 预算故意压到只够关键节 + 每节至少一条
+    cut = state.render(budget=600)
+    for label in ("已完成", "已决策", "已知问题", "待解决问题", "决策升级", "待办实验", "约束"):
+        assert label in cut, f"{label} 整节消失——旧口径的病灶复发"
+    # 关键节全量保留（它们体量小、且是人机协同的唯一出口）
+    assert all(f"升级{i}" in cut for i in range(7))
+    assert all(f"实验{i}" in cut for i in range(11))
+    assert all(f"约束{i}" in cut for i in range(3))
+
+
 def test_assembly_truncates_oversized_task_state(monkeypatch):
     """回归（2026-09-11）：装配上下文里的任务状态受预算约束，
-    不会随列表增长无限膨胀。"""
+    不会随列表增长无限膨胀；且裁剪时关键节不被吃掉。"""
     from wovra.agent import Agent
+    from wovra.task import _STATE_TRIM_NOTE
 
     task = Task.create(goal="目标")
     task.task_state["completed"] = [f"完成项{i}" * 20 for i in range(300)]
+    task.task_state["escalations"] = ["需要人拍板的事项"]
+    task.task_state["experiments"] = ["需要人当传感器的事项"]
     agent = Agent(llm=object(), tools=[], task=task)
     agent.current_round = None
     agent.messages = []
     msgs = agent._assemble_messages()
     body = "\n".join(m.get("content", "") for m in msgs)
-    assert "任务状态过长已截断" in body
+    assert _STATE_TRIM_NOTE in body
+    # 关键节即使在被裁的装配里也必须可见（P0 病灶：旧实现只剩「已完成」）
+    assert "需要人拍板的事项" in body
+    assert "需要人当传感器的事项" in body
 
 
 def test_state_patch_done_syncs_task_status():
