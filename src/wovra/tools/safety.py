@@ -179,18 +179,37 @@ def _mask_quoted_text(command: str) -> str:
     return masked
 
 
-# 命令词集合：孤立 `/`（find /、ls /）只有紧跟**命令词或选项**时才
-# 是根目录访问；普通词之间的 `/`（a / b、1 / 2、prompts.py / x）是
-# 文本分隔符/除法（probe 实测：commit message 含"空格-斜杠-空格"被误拦）。
+# 命令词集合（**两个判定共用一份**）：
+#   ① `_has_root_slash_target`——孤立 `/`（find /、ls /）只有紧跟**命令词
+#      或选项**时才是根目录访问；普通词之间的 `/`（a / b、1 / 2、
+#      prompts.py / x）是文本分隔符/除法（probe 实测：commit message 含
+#      "空格-斜杠-空格"被误拦）。
+#   ② `_follows_path_command`——纯点斜 token（`..`、`../..`）只有处在
+#      **路径参数位置**才算访问，文本里的点号（`echo ..`）不是。
 # 名单偏保守——误伤（拦死合法命令）代价远大于漏拦（越界访问还有
 # 绝对路径/链接/上溯三个通道兜底，且最终有用户授权门）。
+#
+# **cmd 侧词表补齐**（2026-09-12，worklog §50）：本表原先只有 POSIX 常用词，
+# 于是 `attrib ..`（实测打印出 D:\BC 的目录内容）、`icacls ..`（读出界外目录
+# 的 ACL）、`type ..`、`xcopy .. dst`、`robocopy .. dst`、`findstr x ..`、
+# `copy .. .` 整类放行——而**同样写法的 `dir ..` 拦得住**，差别只在"命令词
+# 在不在表里"。判据不变（仍看前一个 token 是否命令词/选项），只补词表。
+# 已知残余（本批不动，见 §50.4）：纯点斜 token **不紧邻**命令词时仍漏
+# （`tar cf x.tar ..` 的 `..` 前面是参数值 `x.tar`）。
 _ROOT_TARGET_COMMANDS = frozenset({
+    # POSIX / 跨平台
     "ls", "dir", "cat", "head", "tail", "find", "grep", "rg", "tree",
     "pwd", "rm", "cp", "mv", "mkdir", "touch", "chmod", "chown", "stat",
     "du", "df", "less", "more", "file", "xxd", "od", "tar", "rsync",
     "scp", "curl", "wget", "python", "python3", "bash", "sh", "awk",
     "sed", "sort", "uniq", "xargs", "env", "which", "whereis", "locate",
     "top", "ps", "kill", "tee", "dd", "mount", "umount", "open", "xdg-open",
+    # Windows cmd（文件/路径读写类）。文本命令（echo/printf/ver/rem）与
+    # 纯进程命令（tasklist/date）有意不收：它们的参数不是路径。
+    "type", "attrib", "icacls", "cacls", "takeown", "copy", "xcopy",
+    "robocopy", "del", "erase", "rd", "rmdir", "move", "ren", "rename",
+    "findstr", "fc", "comp", "compact", "expand", "makecab", "subst",
+    "where", "certutil", "fsutil", "notepad", "code", "start", "explorer",
 })
 
 # cmd 多字母开关（Windows 工具常用；单字母开关见 _is_cmd_option 的规则）。

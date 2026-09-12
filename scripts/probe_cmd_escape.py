@@ -50,6 +50,17 @@ CASES = [
     "dir ..",
     "ls ../..",
     "cat -n ..",
+    # §50：cmd 侧命令词补齐（attrib/icacls/type 曾整类放行——实测
+    # `attrib ..` 打印出界外目录、`icacls ..` 读出界外 ACL）
+    "attrib ..",
+    "icacls ..",
+    "type ..",
+    "xcopy .. dst",
+    "robocopy .. dst",
+    # §50.4 已知残余：纯点斜 token 不紧邻命令词（前面是参数值/盘符）——仍放行
+    "tar cf x.tar ..",
+    "findstr /S x ..",
+    "subst z: ..",
     # 对照：文本里的点号（不是路径访问）——不该拦
     "echo ..",
     "printf 1..2",

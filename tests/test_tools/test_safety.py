@@ -827,6 +827,47 @@ def test_bare_dotdot_traversal_is_blocked(workspace):
     assert traverses("cat a/../b.txt") is None
 
 
+def test_windows_path_commands_treat_dotdot_as_path(workspace):
+    """cmd 侧命令词也要在表内（worklog §50）：同一杆秤不能只量 POSIX。
+
+    修复前实测漏拦（全部真被放行、真读到了界外）：`attrib ..` 打印出
+    D:\\BC 的目录内容、`icacls ..` 读出界外目录的 ACL、`type ..` 真的去开了
+    界外路径；`xcopy .. dst`、`robocopy .. dst`、`findstr x ..`、`copy .. .`、
+    `tar cf x.tar ..` 同理。而**写法相同的 `dir ..` 拦得住**——差别只在
+    "命令词在不在 `_ROOT_TARGET_COMMANDS` 里"，不是判据本身的问题。
+
+    本批只补词表（判据不变）。文本里的点号（`echo ..`）与界内点号（`ls .`）
+    照旧放行；含字母的上溯路径本来就拦得住，不在此测。
+    """
+    from wovra import tools as tools_module
+
+    safety = tools_module.safety
+    escape = safety._command_escape
+
+    for command in (
+        "attrib ..", "icacls ..", "type ..", "xcopy .. dst",
+        "robocopy .. dst", "copy .. .", "del ..",
+        "rd ..", "compact ..", "more ..",
+    ):
+        assert "上溯" in (escape(command) or ""), f"{command} 应被拦"
+
+    # 词表补齐后，孤立 `/` 判定也跟着认这些命令词（同一份表）
+    assert "绝对路径" in (escape("attrib /") or "")
+
+    # 词表补齐不得误伤：界内参数与文本点号照旧放行
+    for command in (
+        "type t1.txt", "copy t1.txt t2.txt", "attrib t1.txt", "ls .",
+        "echo ..", "printf 1..2", "ls sub", "type sub/t1.txt",
+    ):
+        assert escape(command) is None, f"{command} 不该被拦"
+
+    # 已知残余（§50.4，本批不动）：纯点斜 token **不紧邻**命令词时仍漏——
+    # 前一个 token 是参数值（`x.tar`、`x`）或赋值，不是命令词。
+    for command in ("tar cf x.tar ..", "findstr /S x ..", "t1=.. ; echo x",
+                    "subst z: .."):
+        assert escape(command) is None, f"{command} 属已知残余，不该在此变拦"
+
+
 def test_fs_root_can_never_be_authorized(monkeypatch, tmp_path):
     """盘根/根目录永不可授权——清单里一条 `D:\\` 曾让整块盘放行（§9）。"""
     from wovra import tools as tools_module

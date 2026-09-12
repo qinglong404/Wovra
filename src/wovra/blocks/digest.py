@@ -45,6 +45,9 @@ def block_digest(r: dict, b: dict) -> str:
 
     只带"动作与对象"——工具名、文件路径、命令原文（截断）、用户输入
     头部；正文内容不复制（那是 Full 存档的事，索引只做路由）。
+    块内事件一律经 `_block_event_indices` 取（v3 带 events 列表、v1 位置
+    区间夹取）：索引区间越界时**少取而不抛**——摘要是维护管线的一环，
+    崩了会把 promote/标注整条带走。
     """
     events = r.get("events") or []
     lines = [f"{b['id']}（{b['start_event']}~{b['end_event']}，{b['kind']}）"]

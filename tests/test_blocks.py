@@ -177,6 +177,52 @@ def test_empty_round_yields_no_blocks():
     assert blocks.segment_round(_round(1, [])) == []
 
 
+# ---- digest：块内事件下标的越界守卫（v1 位置区间回退） -----------------------
+
+
+def test_block_event_indices_v1_range_is_clamped():
+    """v1 回退路径的位置区间必须夹进 events 实际范围，不能 IndexError。
+
+    现场（会话 20260912-110034-98d42c 实测）：promote 恰好发生在"开新轮
+    瞬间"——新轮 events=[]，而块记的下标还是旧的 [0..5]；此前直接
+    events[i] 抛 IndexError，被 _record_split_lifecycle 吞掉，promote 那刻的
+    视图体量/生命周期动作/status 全部没落账（7 个域 dormant 的根因之一）。
+    口径：拿不到就不取，而不是崩。
+    """
+    from wovra.blocks.digest import _block_event_indices
+
+    b = {"id": "R1-B1", "kind": "work", "start": 0, "end": 5}
+
+    # ① 开新轮瞬间：events 为空，区间 [0..5] 全悬空 → 空列表，不抛
+    assert _block_event_indices({"seq": 1, "events": []}, b) == []
+    # ② 事件被截短的轮：区间尾部越界 → 只取仍在范围内的部分
+    short = _round(1, [
+        _event(1, 1, "user", content="hi"),
+        _event(1, 2, "final_answer", content="done"),
+    ])
+    assert _block_event_indices(short, b) == [0, 1]
+    # ③ 起点越界（区间整体落在负半轴/尾部之后）→ 空列表
+    assert _block_event_indices(short, {**b, "start": 9, "end": 12}) == []
+    # ④ 区间字段非法（None/字符串脏值）→ 空列表，不抛
+    assert _block_event_indices(short, {**b, "start": None, "end": "x"}) == []
+
+
+def test_block_digest_and_render_survive_empty_or_truncated_round():
+    """越界守卫的上游收益：空轮/截短轮跑 block_digest 与 render_round 不崩。
+
+    摘要少一行不致命；抛异常会把整条维护管线（promote/标注）带崩。
+    """
+    b = {"id": "R1-B1", "kind": "work", "start": 0, "end": 5,
+         "start_event": "R1-E01", "end_event": "R1-E06"}
+    empty = {"seq": 1, "events": [], "user_input": {"original": ""}}
+    assert "R1-B1" in blocks.block_digest(empty, b)  # 不抛即通过
+    assert blocks.render_round(empty, [b]) == ""     # 空轮视图为空串
+
+    short = _round(1, [_event(1, 1, "user", content="hi")])
+    assert "R1-B1" in blocks.block_digest(short, b)
+    assert "R1-B1" in blocks.render_round(short, [b])
+
+
 # ---- 渲染 --------------------------------------------------------------------
 
 
