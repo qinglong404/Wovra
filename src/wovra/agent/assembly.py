@@ -6,6 +6,7 @@ import re
 from typing import Optional
 from .. import blocks as blocks_module
 from .. import lifecycle as lifecycle_module
+from .. import routing as routing_module
 from .. import tokens as tokens
 from .. import truncate as truncate
 from .. import views as views_module
@@ -24,13 +25,34 @@ class _AssemblyMixin:
         self.last_context_estimate = self._estimate_messages(msgs)
         return msgs
 
-    def _assemble_messages_impl(self) -> list[dict]:
+    def _assemble_full_messages(self) -> list[dict]:
+        """**全量材料装配**（不看 active_view）：维护管线专用（2026-09-12）。
+
+        整理/分裂是**全局**作业——它要处理的正是"所有未整理轮的全部材料"，
+        而视图装配（`_assemble_view_messages`）只给得出某一个域那一份料。
+        §41 让主 agent 也走视图装配之后，`_maint_snapshot` 继续复用
+        `_assemble_messages()` 就等于把维护输入换成了"主 agent 那一桶"：实测
+        同一会话 9 条消息 vs 全量 188 条，模型看不到料 → 整理连续失败 → 7 轮
+        原文永远挂着、随后以全分辨率灌进各视图（worklog §44，根因起点）。
+
+        代价知情：维护调用不再骑本轮工作调用的前缀缓存（视图分化开启时二者
+        前缀本就不同），这笔"一次前缀断裂"已在 `economics.PREFIX_BREAK_TOKENS`
+        定价，且它换回的是"整理真的能看到材料"。
+
+        不更新 `last_context_estimate`：水位触发判定继续用"本轮真实装配体量"，
+        维护输入口径不参与水位判定（两个口径不可混用，见 worklog §44.3-6）。
+        """
+        return self._assemble_messages_impl(force_full=True)
+
+    def _assemble_messages_impl(self, *, force_full: bool = False) -> list[dict]:
         """按变化频率排序装配上下文（缓存友好布局）。
 
         [1] system 人设（静态）
         [2] 历史轮次视图（少变：闭合时成形，之后不可变）
         [3] Task State + 降档轮次的一行索引 + 文件地图（每轮变——放尾部）
         [4] 当前 Round 事件（追加式全量，轮内赦免）
+
+        `force_full=True` 时跳过视图分化分支（见 `_assemble_full_messages`）。
         """
         past = [r for r in self.rounds if r is not self.current_round]
 
@@ -49,14 +71,14 @@ class _AssemblyMixin:
             msgs.extend(self._current_round_messages())
             return msgs
 
-        # ---- 视图分化（Level 1 第二/三步，2026-09-12）----------------
-        # 开关（默认关）打开**且**本轮有非主 agent 的 active_view 时，走
-        # 视图装配：四段布局 [system 人设 + 全局职责表] → [本视图历史] →
-        # [本视图身份与域卡] → [运行时信封]。隔离第一：非本视图的轮整轮
-        # 不出现（不留轮号、文件名、块 ID），故每个视图各自积累长链。
-        # 开关关闭或缺省（= 主 agent）时，下面的旧路径**逐字节不变**。
+        # ---- 视图分化（Level 1 第二/三步）----------------------------
+        # 路由到谁，装配就只给谁那份料——**主 agent 不例外**（2026-09-12
+        # 用户拍板：「主 agent 就吃自己那份料、基本说不了一句话」）。旧行为
+        # （主 agent 拿全量）是"隔离只对子域生效"的不对称态：实测落主 agent
+        # 的轮占 69%，这批轮一点不瘦身（worklog §38.4-2 / §40.4 待办甲）。
+        # 开关显式关掉（WOVRA_ACTIVE_VIEW=0）时走下面旧路径、逐字节不变。
         view_name = self._active_view()
-        if view_name and view_name != views_module.MAIN_AGENT_ID:
+        if view_name and not force_full and routing_module.active_view_enabled():
             msgs = self._assemble_view_messages(view_name, past)
             if msgs is not None:
                 return msgs
@@ -285,6 +307,11 @@ class _AssemblyMixin:
         # 结果落在本轮开头，而视图历史全是 user/assistant 文本对——补上
         # 上一轮的收尾 tool_call 原文，避免 tool 消息悬空被严格端点 400
         cur_msgs = self._current_round_messages()
+        handoff: Optional[dict] = None
+        if view_name != views_module.MAIN_AGENT_ID:
+            # 接手方看到的当前轮里不能留"路由器那一步"（2026-09-12 实测缺陷，
+            # 见 `_strip_router_steps`）——那一步的回执会被接手方当成本轮答复。
+            cur_msgs, handoff = self._strip_router_steps(cur_msgs)
         prev_tail = None
         if past:
             last_evs = past[-1].get("events") or []
@@ -298,7 +325,70 @@ class _AssemblyMixin:
                 while cur_msgs and cur_msgs[0].get("role") == "tool":
                     cur_msgs = cur_msgs[1:]
         msgs.extend(cur_msgs)
+        if handoff is not None:
+            # 转交说明放在绝对尾部（runtime-reminder 通道）：接手方因此知道
+            # "这一轮为什么在我手上、用户原话在哪、要直接干活"。
+            msgs.append(
+                _runtime_reminder("\n".join(self._handoff_lines(view_name, handoff)))
+            )
         return msgs
+
+    def _strip_router_steps(
+        self, msgs: list[dict]
+    ) -> tuple[list[dict], Optional[dict]]:
+        """接手方视图：剥掉本轮里"路由动作"那几步（2026-09-12 实测缺陷修复）。
+
+        现象（R10 现场，用户报"转交后本轮只回个转交给谁，然后没了"）：主 agent
+        调 `route_to` 之后视图确实换了、接手方也确实被调用了，但接手方看到的
+        当前轮历史里仍留着主 agent 那次 `route_to` 调用**连它的回执**
+        （"已转交 ▨▨……就此停手"）。接手方把回执当成该说的话，本轮只回一句
+        "已转交 ▨▨"就闭合——用户的问题得等他下一次提问才被回答。
+
+        路由动作是**路由器那一层的私有动作**，对目标域没有信息价值：用户原话
+        已在消息里，转交理由另以运行时信封补上（`_handoff_lines`）。故整条剥掉。
+        只在结构干净时动手——同一条 assistant 消息里若还夹着别的工具调用
+        （混批），保留原样：宁多留一条，不坏协议结构。
+
+        返回（消息列表, 转交说明 dict 或 None）。
+        """
+        keep: list[dict] = []
+        dropped = 0
+        pending_tool = 0
+        for m in msgs:
+            if pending_tool > 0 and m.get("role") == "tool":
+                pending_tool -= 1
+                dropped += 1
+                continue
+            pending_tool = 0
+            names = [
+                (c.get("function") or {}).get("name")
+                for c in (m.get("tool_calls") or [])
+            ]
+            if names == ["route_to"]:
+                pending_tool = 1
+                dropped += 1
+                continue
+            keep.append(m)
+        if not dropped:
+            return keep, None
+        rec = dict((self.current_round or {}).get("route_handoff") or {})
+        rec.setdefault("to", "")
+        rec.setdefault("reason", "")
+        return keep, rec
+
+    def _handoff_lines(self, view_name: str, handoff: dict) -> list[str]:
+        """接手方尾部的转交说明（替代被剥掉的路由步骤）。"""
+        src = str(handoff.get("from") or "").strip() or "主 agent"
+        reason = str(handoff.get("reason") or "").strip()
+        head = f"[回合内转交] 本轮由 {src} 转交给你（{view_name}）"
+        if reason:
+            head += f"——理由：{reason}"
+        return [
+            head,
+            "上一条用户消息就是用户原话（原封转来，未经过转述）——请直接动手把"
+            "这一轮干完、把结果回答给用户。不要把这条说明或转交过程复述给用户"
+            "（「已转交 ▨▨」之类的话对用户没有信息量），也不要再转回主 agent。",
+        ]
 
     def _view_round_head(self, r: dict, rec: dict, index: dict) -> list[str]:
         """本视图里一轮的轮头（用户原文/意图/约束）+ 该轮用户块。"""

@@ -3,7 +3,9 @@
 本模块：test_maintenance。"""
 
 import json
+from wovra import registry as registry_module
 from wovra import task as task_module
+from wovra import views as views_module
 from wovra.agent import Agent
 from wovra.task import Task, TaskState
 
@@ -1458,3 +1460,103 @@ def test_backlog_skips_incomplete_protocol(monkeypatch, tmp_path):
 
     assert agent.llm.calls == []              # 未发出必然 400 的请求
     assert agent.rounds[0]["org_state"] == ""  # 也未标记成 pending/failed
+
+
+# ---- 维护输入口径 / 视图体量口径（2026-09-12，worklog §44）--------------------
+
+
+def _two_domain_task(monkeypatch, tmp_path):
+    """两域两文件的会话：装配分流后"当前视图那一桶"明显小于全量材料。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.rounds = [
+        _mk_file_round(1, "写 a", ["a.txt"]),
+        _mk_file_round(2, "写 b", ["b.txt"]),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    task.rounds[0]["domains"] = [
+        {"name": "甲", "file_domains": ["a.txt"]},
+        {"name": "乙", "file_domains": ["b.txt"]},
+    ]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    return agent, task
+
+
+def test_maint_snapshot_uses_full_material_not_active_view(monkeypatch, tmp_path):
+    """维护输入 = **全量材料**，不随 `active_view` 变瘦（2026-09-12，worklog §44.3-1）。
+
+    现场：域产物一生效，`_maint_snapshot` 复用的 `_assemble_messages` 就成了
+    "当前视图那一桶"——同一会话实测 333 条 → **9 条**，整理模型看不到料，
+    R7-R13 连续两次交不出产物（org=False split=False），7 轮 185,787 tok 原文
+    永远未整理。整理/分裂面对的是所有未整理轮的全部材料，故快照走全量装配。
+    """
+    agent, task = _two_domain_task(monkeypatch, tmp_path)
+    full = agent._assemble_full_messages()
+
+    # 当前轮标记为窄域「甲」：普通装配只给甲那份料（分流生效）
+    agent.current_round = {
+        "seq": 3, "user_input": {"original": "接着干", "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open",
+        "org_state": "", "active_view": "甲",
+    }
+    agent.rounds.append(agent.current_round)
+    view_msgs = agent._assemble_messages()
+    snapshot = agent._maint_snapshot()
+
+    assert snapshot is not None
+    assert len(view_msgs) < len(full), "视图装配应比全量材料瘦（分流生效的前提）"
+    assert len(snapshot) == len(agent._assemble_full_messages())
+    assert len(snapshot) > len(view_msgs), "维护输入不许跟着 active_view 变瘦"
+
+
+def test_view_assembly_watermarks_uses_assembly_caliber(monkeypatch, tmp_path):
+    """体量口径订正：水位与经济判据用**装配口径**，材料口径只作对照。
+
+    同一域实测 材料 5,144 tok vs 装配 90,979 tok（17.7×，worklog §44.3-2/3）；
+    混用会让 `(B − B′) × N − C` 得出与事实相反的符号（仪器报"值得拆"而按
+    装配口径应为负）。故运行时以装配口径为准，并把材料口径一并留下。
+    """
+    agent, _task = _two_domain_task(monkeypatch, tmp_path)
+    domains = registry_module.latest_domains(agent.rounds)
+    marks = agent._view_assembly_watermarks(domains, watermark=1)
+
+    assert set(marks) >= {"甲", "乙"}
+    jia = marks["甲"]
+    assert jia["degraded"] is False            # 装配口径派生成功
+    assert jia["material_tokens"] > 0          # 材料口径留存供对照
+    assert jia["tokens"] >= jia["material_tokens"]  # 装配口径含块内事件全文
+    assert jia["over"] is True                 # 到线判定用的是装配口径
+    assert int(jia["material_tokens"]) == int(
+        views_module.view_watermarks(
+            agent.rounds, agent.task.get_state(), domains=domains,
+            registry=agent.task.registry,
+        )["甲"]["tokens"]
+    )
+
+
+def test_split_coverage_lines_feed_gap_and_overlap(monkeypatch, tmp_path):
+    """覆盖缺口硬数据进分裂分析（2026-09-12，§40.4 待办乙 + §44.3-5）：
+
+    未覆盖文件 = 本批分域的漏项（掉主 agent 兜底桶）；多域共命轮 = 父子域语义
+    重叠/分域过细的信号（抬高视图切换频率、压低粘滞率）。两条都由 Runtime
+    机械现算，判定仍归模型。
+    """
+    agent, _task = _two_domain_task(monkeypatch, tmp_path)
+    # 甲乙共命 R1；R2 只有谁也不认领的 c.txt
+    agent.rounds[0]["events"].extend([
+        {"id": "R1-E20", "type": "tool_call", "message": {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "cx", "type": "function", "function": {
+                "name": "write_file",
+                "arguments": json.dumps({"path": "b.txt", "content": "x"})}}]}},
+    ])
+    agent.rounds.append(_mk_file_round(2, "写 c", ["c.txt"]))
+    agent.rounds[0]["domains"] = [
+        {"name": "甲", "file_domains": ["a.txt"]},
+        {"name": "乙", "file_domains": ["b.txt"]},
+    ]
+
+    joined = "\n".join(agent._split_coverage_lines(agent.rounds))
+    assert "分裂覆盖缺口：1 个文件" in joined and "c.txt" in joined
+    assert "多域共命轮：1 轮" in joined and "R1（2 域）" in joined

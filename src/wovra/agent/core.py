@@ -40,6 +40,7 @@ from .prompts import (
     _NOTIFY_SCHEMA,
     _ORG_DOMAINS_SCHEMA,
     _ORG_SUBMIT_SCHEMA,
+    _ROUTE_TO_SCHEMA,
     _SWITCH_VIEW_SCHEMA,
     _TODO_SCHEMA,
 )
@@ -100,6 +101,11 @@ class _CoreMixin:
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()
+        # 回合内转交的待办落点（route_to，2026-09-12）：工具方法只把目标
+        # 记在这里，由 `_work_loop` 在工具批次跑完后换视图——工具执行期间
+        # 改装配会让同一批里后续工具看到错乱的上下文。跳数记在轮上
+        # （route_hops）随轮持久化，使 `\c` 续跑不会把上限重置掉。
+        self._pending_route: str = ""
         # 维护快照的推迟标记（2026-09-11 实测缺陷的落点）：里程碑闭合发生
         # 在工具方法体**内部**（todo→verify_milestone→close_round），此刻
         # 调用方的 assistant(tool_calls) 还没有 tool 结果。若在此刻取装配
@@ -196,6 +202,11 @@ class _CoreMixin:
             # 跨 agent 公共信息面与纠错通道）
             self.register(self.list_agents, schema=_LIST_AGENTS_SCHEMA)
             self.register(self.switch_view, schema=_SWITCH_VIEW_SCHEMA)
+            # 回合内转交（2026-09-12 用户拍板）：主 agent 的**本职动作**——
+            # 收到消息、对职责表、把用户原话转给对应 agent，由它在本回合内
+            # 直接接续干活（不需要再回主 agent 转述）。只在 managed 下注册：
+            # baseline 装配不看视图，转交没有落点。
+            self.register(self.route_to, schema=_ROUTE_TO_SCHEMA)
 
     def _bind_globals(self) -> None:
         """把进程级全局绑定对准本会话（审计记录器、后台任务归属）。
@@ -272,6 +283,9 @@ class _CoreMixin:
             # 与今天逐字节相同。若紧接着有分裂产物生效，`_settle_views`
             # 会按新职责表补判（渐近归属：先归位、再干活）。
             "active_view": "",
+            # 本回合已转交次数（route_to 跳数上限的落点，随轮持久化——
+            # `\c` 续跑不会把上限重置掉，见 support._MAX_ROUTE_HOPS）
+            "route_hops": 0,
             # 显式转交的原始意志（switch_view / notify 写明的那次）——补判时
             # 复用，使"转交"不会因为中间插了一次 promote 而丢失。
             "route_explicit": self._take_pending_view(),
@@ -423,6 +437,42 @@ class _CoreMixin:
             self._persist_rounds()
         return len(changed)
 
+    def _apply_pending_route(self) -> bool:
+        """把 `route_to` 登记的转交落到本轮 `active_view` 上（回合内换视图）。
+
+        只在工具批次跑完后调用（批次执行期间换装配，会让同批里后面的工具
+        按错乱的上下文理解自己看到的文件）。换的是**同一个 Round 内的视图**：
+        历史段从主 agent 桶变成目标域桶，当前轮事件（用户原文 + 这次转交的
+        tool_call 与结果）原样保留——目标接手那一刻看得到用户说了什么，
+        也知道这活是怎么转过来的。
+
+        路由留痕照记（人视图可查"这轮为什么给了它"）；跳数记在轮上，
+        使 `\\c` 续跑不会把上限重置掉。
+        """
+        target = str(self._pending_route or "")
+        self._pending_route = ""
+        if not target or self.current_round is None:
+            return False
+        from .. import views as views_module
+
+        before = str(self.current_round.get("active_view") or "") or views_module.MAIN_AGENT_ID
+        if target == before:
+            return False
+        self.current_round["active_view"] = target
+        self.current_round["route_hops"] = int(
+            self.current_round.get("route_hops") or 0
+        ) + 1
+        if self.task is not None:
+            self.task.record(
+                "route",
+                f"R{self.current_round.get('seq')} 回合内转交：{before} → {target}"
+                f"（本回合第 {self.current_round['route_hops']} 跳）",
+            )
+        if self.on_progress:
+            self.on_progress(f"🔀 本回合改由 {target} 接手")
+        self._persist_rounds()
+        return True
+
     def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
         """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。"""
         if self.current_round is None:
@@ -447,8 +497,13 @@ class _CoreMixin:
 
         这里只做机械校验（零 LLM）：assistant 声明的 tool_call 必须在
         任何后续 user 消息之前拿到 tool 结果，且序列不能以悬空收尾。
+
+        **快照取全量材料，不取当前视图**（2026-09-12 修复，worklog §44）：
+        原实现取 `self._assemble_messages()`，而视图分化后它是"当前 active_view
+        那一桶"，域产物一出现维护输入就从 333 条掉到 9 条 → 整理连续失败。
+        整理/分裂面对的是所有未整理轮的全部材料，故走 `_assemble_full_messages()`。
         """
-        msgs = self._assemble_messages()
+        msgs = self._assemble_full_messages()
         pending: set[str] = set()
         for m in msgs:
             role = m.get("role")
@@ -632,6 +687,10 @@ class _CoreMixin:
                 )
                 self.last_stats["tool_calls"] += len(ordered)
                 self._run_tool_batch(ordered)
+                # 回合内转交（route_to）：工具批次跑完才换视图——批次执行
+                # 期间改装配会让同批后续工具看到错乱的上下文。换完继续
+                # 循环，下一步就是新视图自己装配、自己动手。
+                self._apply_pending_route()
                 continue
 
             # 模型不再请求工具 → 产出最终回答 → Round 闭合。

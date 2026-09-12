@@ -349,6 +349,36 @@ def test_view_watermarks_reports_per_view_tokens_rounds_and_over_flag():
     assert low["工具层"]["over"] is True
 
 
+def test_coverage_gap_reports_uncovered_files_and_overlapped_rounds():
+    """覆盖缺口 + 多域共命轮是**机械事实**（2026-09-12，worklog §40.3/§44.3-5）。
+
+    动机：主 agent 桶里"未覆盖文件"占大头时，涨的不是主 agent 的定位，而是
+    分裂覆盖不全；多个域共命同一轮则是父子域语义重叠的信号（直接抬高视图
+    切换频率、压低粘滞率）。两者都由 Runtime 现算成硬数据喂回分裂分析，
+    判定仍归模型。
+    """
+    rounds = [
+        # R1 被两个域同时命中（工具层 + 前端）→ 共命轮
+        _block_round(1, ["src/wovra/tools/safety.py", "index.html"]),
+        # R2 只有没人认领的文件 → 覆盖缺口
+        _block_round(2, ["scripts/maint_health.py"]),
+    ]
+    domains = [
+        {"name": "工具层", "file_domains": ["src/wovra/tools/"]},
+        {"name": "前端", "file_domains": ["index.html"]},
+    ]
+    gap = views_module.coverage_gap(domains, rounds)
+    assert gap["uncovered"] == ["scripts/maint_health.py"]
+    assert gap["overlapped_rounds"] == [1]
+    assert gap["round_domain_counts"][1] == 2
+
+    # 全覆盖且无共命时不误报
+    clean = views_module.coverage_gap(
+        domains, [_block_round(3, ["src/wovra/tools/shell.py"])]
+    )
+    assert clean["uncovered"] == [] and clean["overlapped_rounds"] == []
+
+
 def test_view_watermarks_survives_no_domains():
     """无分裂产物时不炸：只有主 agent 一份，且不被当成"要拆的主 agent"。"""
     rounds = [_block_round(1, ["a.py"])]

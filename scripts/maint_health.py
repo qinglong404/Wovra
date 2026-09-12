@@ -136,6 +136,24 @@ def report(task_id: str) -> None:
 
         total = agent.last_context_estimate
         system_tok = tokens_module.estimate(agent.system_prompt or "")
+        # 旧全量基线（2026-09-12，视图分化默认开之后必需）：装配层现在只给
+        # 本轮视图那份料，故 `total` 是**主 agent 自己那桶**，不再是"今天
+        # 的装配"。A/B 的分母必须是旧行为（单体全量），否则 A 读出来恒 100%
+        # ——仪器给错数比没数更糟（§40.2 同款教训）。做法：临时把开关关掉
+        # 再装配一次，量完立刻还原（只读，不落盘）。
+        import os as _os2
+        from wovra import routing as routing_module
+        _env_key = routing_module.ACTIVE_VIEW_ENV
+        _saved_env = _os2.environ.get(_env_key)
+        try:
+            _os2.environ[_env_key] = "0"
+            legacy_total = agent._estimate_messages(agent._assemble_messages())
+        finally:
+            if _saved_env is None:
+                _os2.environ.pop(_env_key, None)
+            else:
+                _os2.environ[_env_key] = _saved_env
+        agent.last_context_estimate = total  # 量完还原（后续节读的是真实口径）
         # 未整理轮原文：装配的分支条件是 `org_state != "done"`（全部历史轮），
         # **不是** `end_state == completed`——未闭合的轮同样全量进上下文。
         # 第一版按 completed 过滤，自检报出 57% 偏差（这就是它该干的活）。
@@ -188,7 +206,8 @@ def report(task_id: str) -> None:
         print(f"会话 {task_id}　轮 {seq}（未整理 {len(raw_rounds)}）　"
               f"org 代次 {agent._org_generation}")
         print("── 触发判定 ──")
-        print(f"装机体量 {total:,} / 触发线 {watermark:,}　→ {verdict}")
+        print(f"本轮装配口径（active_view {agent._active_view()}）{total:,} / "
+              f"触发线 {watermark:,}　→ {verdict}")
         print(f"宽限 {grace} 轮　最小间隔 {cooldown} 轮　上次维护 R{last_maint or '-'}")
         print("── 地板构成（装配总估算拆分）──")
         print(f"合计 {total:,}　system {system_tok:,}　"
@@ -200,14 +219,21 @@ def report(task_id: str) -> None:
               f"todo {todo_tok:,}）")
         print(f"当前开放轮 {cur_tok:,}（{'进行中' if agent.current_round else '无'}）")
         print(f"未整理轮 {len(raw_rounds)} 轮")
-        print(f"地板（合计 − 未整理原文）= {floor:,}"
+        # 口径（2026-09-12 订正）：地板与分项核对是**材料口径**的量（全量装配
+        # `legacy_total`）。此前拿"本轮装配口径"的 `total` 当分母——视图分化
+        # 开启后 total 只是"当前视图那一桶"，于是打出「地板 −168,137／
+        # 分项核对偏差 1121%」这种自相矛盾读数（worklog §44.3-6：不是算错，
+        # 是两个口径混用）。两个口径各自成行，不再互相验算。
+        print(f"材料口径（旧全量装配）{legacy_total:,}"
+              f"　地板（材料口径 − 未整理原文）= {floor:,}"
               f"　占触发线 {floor / watermark:.0%}")
-        # 自洽性校验：分项之和必须回到总估算（容差 5%）——仪器给错数比没数更糟
+        # 自洽性校验：材料口径的分项之和必须回到全量装配（容差 5%）——
+        # 仪器给错数比没数更糟。
         parts = (system_tok + sizes["originals"] + sizes["compact"]
                  + sizes["collapsed"] + raw_tok + cur_tok + envelope)
-        drift = abs(parts - total) / max(total, 1)
+        drift = abs(parts - legacy_total) / max(legacy_total, 1)
         flag = "OK" if drift <= 0.05 else f"**偏差 {drift:.0%}——口径有漏项**"
-        print(f"分项核对：{parts:,} vs 合计 {total:,}　{flag}")
+        print(f"分项核对（材料口径）：{parts:,} vs 全量装配 {legacy_total:,}　{flag}")
         print("── 缓存命中（全历史 llm_call）──")
         calls = _parse_llm_calls(task)
         if not calls:
@@ -276,8 +302,8 @@ def report(task_id: str) -> None:
                 (marks.get(views_module.MAIN_AGENT_ID) or {}).get("tokens") or 0
             )
             main_share = (main_tok / total_now) if total_now else 0.0
-            print(f"逐视图：{detail}")
-            print(f"主 agent 份额：{main_tok:,} / {total_now:,} = {main_share:.1%}")
+            print(f"逐视图（材料口径）：{detail}")
+            print(f"主 agent 份额（材料口径）：{main_tok:,} / {total_now:,} = {main_share:.1%}")
             # 主 agent 桶构成（2026-09-12 加，用户追问「刚分裂完主 agent 一定最小，
             # 现在是咋回事」）：桶里装的到底是什么？口径上它应只收「环境准备 +
             # 独立思想（保底块）+ 用户块 + 不属于任何域的文件块」。若"未覆盖
@@ -286,7 +312,6 @@ def report(task_id: str) -> None:
             _idx = built.get("index") or {}
             _ent = views_module._file_domain_entries(built.get("domains") or [])
             buckets = {"环境": 0, "用户": 0, "保底": 0, "未覆盖文件": 0, "其他": 0}
-            uncovered: list[str] = []
             for bid in main_view.get("own_ids") or []:
                 item = _idx.get(str(bid))
                 if item is None:
@@ -303,28 +328,58 @@ def report(task_id: str) -> None:
                     buckets["保底"] += 1
                 elif kind == "file" and not views_module._match_domain(path, _ent):
                     buckets["未覆盖文件"] += 1
-                    if path and path not in uncovered:
-                        uncovered.append(path)
                 else:
                     buckets["其他"] += 1
             print("主 agent 桶构成：" + "｜".join(
                 f"{k} {v} 块" for k, v in buckets.items() if v
             ))
+            # 覆盖缺口改成单一口径来源（`views.coverage_gap`，与运行时喂给分裂
+            # 模型的硬数据同一函数）——仪器与机制不再各算一份（worklog §44）。
+            gap = views_module.coverage_gap(
+                built.get("domains"), task.rounds,
+                index=_idx, owners=built.get("owners"),
+            )
+            uncovered = list(gap.get("uncovered") or [])
             if uncovered:
                 print(f"未覆盖文件 {len(uncovered)} 个（未落在任何域 file_domains 下）："
                       + "、".join(uncovered[:12])
                       + ("…" if len(uncovered) > 12 else ""))
-            over = [n for n, m in marks.items()
+            ol = gap.get("overlapped_rounds") or []
+            if ol:
+                counts = gap.get("round_domain_counts") or {}
+                print(f"多域共命轮 {len(ol)} 轮（≥2 域同时命中同一轮，"
+                      "父子域重叠/分域过细的信号）："
+                      + "、".join(f"R{s}({counts.get(s, 0)}域)" for s in ol[:12]))
+            # 水位与经济判据一律用**装配口径**——与运行时同一函数、同一算法
+            # （`Agent._view_assembly_watermarks`）：材料口径只用于上面那行对照。
+            # 2026-09-12 订正：此前这里用材料口径，于是同一份材料打出"值得拆"
+            # 而按装配口径应为负（worklog §44.3-3）。
+            try:
+                asm_marks = agent._view_assembly_watermarks(
+                    built.get("domains") or [], watermark
+                )
+            except Exception as error:  # noqa: BLE001——退回材料口径并标注
+                print(f"（装配口径派生失败，退回材料口径：{error!r}）")
+                asm_marks = marks
+            asm_detail = "｜".join(
+                f"{n} {int(m.get('tokens') or 0):,}"
+                + ("（降级）" if m.get("degraded") else "")
+                for n, m in sorted(
+                    asm_marks.items(), key=lambda x: -int(x[1].get("tokens") or 0)
+                )
+            )
+            print(f"逐视图（装配口径）：{asm_detail}")
+            over = [n for n, m in asm_marks.items()
                     if m.get("over") and n != views_module.MAIN_AGENT_ID]
             print(f"视图水位（阈值 {watermark:,}）："
                   f"{len(marks)} 个视图，到自身水位 {len(over)} 个"
                   + (f"——{'、'.join(over)}（考虑在内部再裂一层）" if over else ""))
             # 经济判据（零 LLM 机械算式，plan §13.3）
-            assessed = economics_module.assess_from_watermarks(total, marks)
+            assessed = economics_module.assess_from_watermarks(total, asm_marks)
             for line in economics_module.format_lines(assessed):
                 print(line)
             actions = split_lifecycle_module.plan(
-                views_module.latest_domains(task.rounds), task.registry, marks,
+                views_module.latest_domains(task.rounds), task.registry, asm_marks,
                 b_before=total,
             )
             for line in split_lifecycle_module.summary_lines(actions):
@@ -342,17 +397,17 @@ def report(task_id: str) -> None:
                   f"粘滞率 {sticky:.1%}（目标 >80%）")
             # 视图装配 A/B（步 2 验收第 2 条的实测口径：路由到某域时装配体量
             # 应 ≤ 今天的 70%）。只读派生：直接调 _assemble_view_messages，
-            # 不落盘、不改材料、不碰 env（故与开关状态无关）。
+            # 不落盘、不改材料、不碰 env。
             #
-            # 口径：**扣掉当前轮**再比。当前轮是轮内赦免的（不分档、不被隔离），
-            # 两边都原样带它，不扣掉就会把"当前轮很大"读成"视图没瘦"。
-            base = max(total - cur_tok, 1)
+            # 口径（2026-09-12 修正）：分母是**旧全量**（开关关掉时的装配，
+            # `legacy_total`），不是 `total`——视图分化默认开后 `total` 本身
+            # 就是主 agent 视图，拿它当 100% 会让每个视图都"看起来"≥100%。
+            # 分子同样扣掉当前轮（轮内赦免，两边都带它）。
+            base = max(legacy_total - cur_tok, 1)
             rows = []
             for name in sorted(
                 views, key=lambda n: -int((views[n] or {}).get("est_tokens") or 0)
             ):
-                if name == views_module.MAIN_AGENT_ID:
-                    continue          # 主 agent 视图瘦身是已知缺口（§38.4-2）
                 if len(rows) >= 5:
                     break
                 try:
@@ -366,17 +421,15 @@ def report(task_id: str) -> None:
                 tok = max(Agent._estimate_messages(view_msgs) - cur_tok, 0)
                 rows.append(f"{name} {tok:,}（{tok / base:.0%}）")
             if rows:
-                print(f"视图装配 A/B（今天历史+信封 {base:,} tok ＝100%，"
-                      f"已扣当前轮）：" + "　".join(rows))
+                print(f"视图装配 A/B（分子=装配口径；旧全量（单体装配）{base:,} tok "
+                      f"＝100%，已扣当前轮）：" + "　".join(rows))
             # 隔离否定断言（真实会话材料，步 2 验收第 2 条的后半句）：
-            # 子视图字节里**非本域**的块 ID、块描述、轮号零出现；
-            # 本域块 ID 保留（expand_history 的锚）。
+            # **每个视图**（含主 agent）字节里，非本视图的块 ID、块描述、
+            # 轮号零出现；本视图块 ID 保留（expand_history 的锚）。
             index = built.get("index") or {}
             leaks: list[str] = []
             kept = 0
             for name, view in views.items():
-                if name == views_module.MAIN_AGENT_ID:
-                    continue          # 主 agent 全量是已知缺口（§38.4-2）
                 text = str(view.get("text") or "")
                 own = {str(b) for b in (view.get("own_ids") or [])}
                 kept += len(own & {str(b) for b in index})

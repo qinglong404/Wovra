@@ -16,13 +16,29 @@ from .segment import segment_round, segment_round_by_file
 
 
 def _block_event_indices(r: dict, b: dict) -> list[int]:
-    """块内事件在轮事件流里的下标（v3 优先按 ID 取，v1 回退连续区间）。"""
+    """块内事件在轮事件流里的下标（v3 优先按 ID 取，v1 回退连续区间）。
+
+    越界守卫（2026-09-12，会话 20260912-110034-98d42c 实测）：v1 回退路径是
+    **位置区间** `start..end`，它假定"块记的下标在该轮 events 里仍然存在"。
+    两种现场不成立：① 开新轮瞬间（新轮 `events=[]`，而 promote 恰好发生在
+    这一刻）→ `end` 落在空数组外；② 事件被截短的轮（历史/诊断副本）。
+    此前直接 `events[i]` 抛 IndexError，被 `_record_split_lifecycle` 吞掉 →
+    promote 那刻的视图体量、生命周期动作、status 全部没落账（7 个域至今
+    dormant 的根因之一，见 worklog §44 / `scripts/probe_split_watermark_indexerror.py`）。
+    故此处把区间夹进 events 的实际范围：**拿不到就不取，而不是崩**。
+    """
     events = r.get("events") or []
     ids = b.get("events")
     if ids:
         wanted = set(ids)
         return [i for i, e in enumerate(events) if e.get("id") in wanted]
-    return list(range(b["start"], b["end"] + 1))
+    try:
+        start = int(b.get("start") or 0)
+        end = int(b.get("end") if b.get("end") is not None else -1)
+    except (TypeError, ValueError):
+        return []
+    lo, hi = max(0, start), min(end, len(events) - 1)
+    return list(range(lo, hi + 1)) if hi >= lo else []
 
 def block_digest(r: dict, b: dict) -> str:
     """块的确定性摘要（机制二 LLM 标注的输入）：路由式信息，零 LLM。
@@ -37,7 +53,7 @@ def block_digest(r: dict, b: dict) -> str:
         lines.append(f"本轮用户输入: {ui_head}")
     for i in _block_event_indices(r, b):
         e = events[i]
-        if e.get("type") != "tool_call":
+        if not isinstance(e, dict) or e.get("type") != "tool_call":
             continue
         for call in (e.get("message") or {}).get("tool_calls") or []:
             name, args = _call_info(call)
@@ -55,9 +71,17 @@ def block_digest(r: dict, b: dict) -> str:
                 )
             elif name == "read_file":
                 lines.append(f"  👁 read_file ← {args.get('path', '')}")
-    # 块内若含最终回答，附头部（那是"对用户的承诺"，路由价值高）
-    tail = events[b["end"]]
-    if tail.get("type") == "final_answer":
+    # 块内若含最终回答，附头部（那是"对用户的承诺"，路由价值高）。
+    # 同一守卫：`end` 可能落在 events 之外（空轮/截短轮），此时退到最后一条
+    # 真实事件——摘要少一行不致命，抛 IndexError 会把整条维护管线带崩。
+    tail = None
+    try:
+        idx = int(b.get("end") if b.get("end") is not None else -1)
+    except (TypeError, ValueError):
+        idx = -1
+    if events:
+        tail = events[idx] if 0 <= idx < len(events) else events[-1]
+    if isinstance(tail, dict) and tail.get("type") == "final_answer":
         lines.append(f"  ◆ 最终回答头: {_head(str(tail['message'].get('content') or ''), 100)}")
     return "\n".join(lines)
 

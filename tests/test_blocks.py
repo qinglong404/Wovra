@@ -204,6 +204,42 @@ def test_block_digest_routes_not_reproduces():
     assert "长内容" * 500 not in digest  # 正文不复制
 
 
+def test_block_digest_survives_empty_and_short_event_streams():
+    """越界守卫（2026-09-12，worklog §44.3-4）：块记的事件下标在该轮 events
+    里不存在时不崩——摘要少几行不致命，抛 IndexError 会把整条维护管线带崩。
+
+    两种现场都是真的：
+    ① **开新轮瞬间**（新轮 `events=[]`）——promote 恰好发生在这一刻，摘要里
+       `events[b["end"]]` 取到空数组 → IndexError（`scripts/probe_split_watermark_indexerror.py`
+       16 次调用复现 8 次）；
+    ② **事件被截短的轮**（历史副本/诊断现场）——v1 回退路径的位置区间越界。
+    两处异常都被 `_record_split_lifecycle` 的兜底吞掉，后果是 promote 那刻的
+    视图体量、生命周期动作、status 全部没落账（7 个域至今 dormant）。
+    """
+    # ① 空事件轮 + v1 块（只有位置区间）
+    empty_round = {"seq": 1, "events": [], "user_input": {"original": "开新轮"}}
+    v1_block = {"id": "R1-B1", "kind": "work", "start": 0, "end": 0,
+                "start_event": "R1-E01", "end_event": "R1-E05"}
+    text = blocks.block_digest(empty_round, v1_block)
+    assert "R1-B1" in text and "最终回答头" not in text
+
+    # ② 事件被截短：块声明的区间落在 events 之外
+    full = _round(2, [
+        _event(2, 1, "tool_call", tool="read_file", args={"path": "a.py"}),
+        _event(2, 2, "tool_result", content="ok"),
+    ])
+    short = dict(full, events=full["events"][:1])
+    short_block = {"id": "R2-B1", "kind": "work", "start": 0, "end": 9,
+                   "start_event": "R2-E01", "end_event": "R2-E10"}
+    text = blocks.block_digest(short, short_block)
+    assert "R2-B1" in text          # 拿得到的事件照常摘要，拿不到的不取
+
+    # ③ v3 块的 `end` 越界时，尾部 final_answer 退到真实最后一条（不抛）
+    v3_block = {"id": "R2-B2", "kind": "work", "start": 0, "end": 42,
+                "start_event": "R2-E01", "end_event": "R2-E99"}
+    assert blocks.block_digest(short, v3_block)
+
+
 def test_render_round_shows_commands_and_writes():
     """人读视图：块行带事件区间/文件/标签，命令原文缩进可核对。
 

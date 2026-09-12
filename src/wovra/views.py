@@ -194,6 +194,61 @@ def ownership(
     return out
 
 
+def coverage_gap(
+    domains: Iterable[dict] | None,
+    rounds: Iterable[dict] | None = None,
+    index: Optional[dict[str, dict]] = None,
+    owners: Optional[dict[str, str]] = None,
+) -> dict:
+    """分裂的**覆盖缺口**事实（零 LLM）——喂回分裂分析的硬数据（2026-09-12）。
+
+    动机（worklog §40.3 / §44.3-5）：主 agent 桶里若"未覆盖文件"占大头，涨的
+    不是主 agent 的定位，而是**分裂的覆盖不全**；这是可机械发现的信号，故必须
+    显式打出来让模型自纠。本函数只给事实，判定仍归模型：
+
+    * `uncovered`：有文件、却不落在任何域 `file_domains` 下的文件路径（它们只能
+      掉进主 agent 兜底桶）。同一文件在更早的产物里可能有归属，最近一批没再
+      声明 → 这里如实列出当前缺口。
+    * `overlapped_rounds`：被 **≥2 个非主 agent 域**命中的轮（`A-1` 与 `A-1-1`
+      这类父子重叠、或多域共命同一批轮的直接信号——共命越多，路由越容易横跳，
+      粘滞率越低）。父域与子域同时命中是**语义重叠**，不是因为代码文件重叠。
+    """
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    index = index if index is not None else block_index(rounds)
+    owners = owners if owners is not None else ownership(domains, index)
+    entries = _file_domain_entries(domains)
+    uncovered: list[str] = []
+    for bid, item in index.items():
+        block = item["block"]
+        if str(block.get("kind") or "") != "file":
+            continue
+        path = str(block.get("file") or "")
+        if not path or _match_domain(path, entries):
+            continue
+        if owners.get(bid) != MAIN_AGENT_ID:
+            continue  # 已被某域接管（例如整轮补判归域），不算缺口
+        if path not in uncovered:
+            uncovered.append(path)
+    by_round: dict[int, set[str]] = {}
+    for bid, owner in owners.items():
+        if owner == MAIN_AGENT_ID:
+            continue
+        item = index.get(bid)
+        if item is None:
+            continue
+        try:
+            seq = int(item["seq"] or 0)
+        except (TypeError, ValueError):
+            continue
+        by_round.setdefault(seq, set()).add(str(owner))
+    overlapped = sorted(seq for seq, names in by_round.items() if len(names) >= 2)
+    return {
+        "uncovered": sorted(uncovered),
+        "overlapped_rounds": overlapped,
+        "round_domain_counts": {seq: len(n) for seq, n in by_round.items()},
+    }
+
+
 def slice_state(
     state, file_domains: Iterable[str], *, exclude: bool = False
 ) -> dict[str, list[str]]:
@@ -352,18 +407,23 @@ def view_blocks_by_round(
     命中的轮不进返回（整轮不出现，不留占位）。装配按轮取本域块 ID 渲染，
     故与 `view_for_domain` 的文字形态不可能各说各话（同一判据、同一 index）。
 
-    主 agent（`MAIN_AGENT_ID`）返回空字典——它的装配是"今天的装配"
-    （全量），不需要筛。
+    **主 agent 也走这一套**（2026-09-12 用户拍板：主 agent 只吃自己那份料）：
+    它的桶就是**补集**——环境块 + 用户块 + 保底块 + 不属任何域的文件块，
+    口径与 `view_for_domain` 逐字一致（同一 `ownership`，同一 index），故
+    它同样只填 `own_ids`（用户块本来就归它，不必再随命中轮补一次）。
     """
-    if str(view_name) == MAIN_AGENT_ID:
-        return {}
     rounds = [r for r in (rounds or []) if isinstance(r, dict)]
     index = index if index is not None else block_index(rounds)
     owners = owners if owners is not None else ownership(domains, index)
+    main = str(view_name) == MAIN_AGENT_ID
     out: dict[int, dict] = {}
     for bid, owner in owners.items():
         item = index.get(bid)
         if item is None or owner != view_name:
+            continue
+        # 用户块一律走下面第二遍（渲染时挂在轮头，与用户原文同位置）；
+        # 若在这里也收进 own_ids，主 agent 视图会把同一块渲染两遍。
+        if str(item["block"].get("kind") or "") == "user":
             continue
         try:
             seq = int(item["seq"] or 0)
@@ -376,6 +436,7 @@ def view_blocks_by_round(
         rec["own_ids"].append(str(bid))
     # 用户块随命中轮进（口径：与轮头用户原文同规则）——故第二遍扫块类型，
     # 只把**已在命中轮**里的用户块收进来（非命中轮仍然整轮不出现）。
+    # 主 agent 同理：只有它名下有块的那几轮，轮头用户原文才留下来。
     for bid, item in index.items():
         if str(item["block"].get("kind") or "") != "user":
             continue
@@ -438,10 +499,18 @@ def view_watermarks(
     `rounds`（该域活跃轮数＝命中轮数，同时是经济判据里 `N_future` 的保守下界）、
     `over`（是否已达自身水位）。
 
-    口径提醒（2026-09-12 更新）：`tokens` 是该视图**全部块的一行式重建**，
+    口径提醒（2026-09-12 **订正**）：`tokens` 是该视图**全部块的一行式重建**，
     已按**本视图自己的代次水位**分档（最近 3 批全分辨率、更早代折叠为文件名
-    清单）——故它不再是"未分档的上界"，而是当前真实口径；但它仍不含装配
-    侧的口袋（信封、职责表、身份段），比真实装配体量略小。
+    清单）。此前注释称它"属上界"——**实测是下界，且差得不小**：同一会话同一域，
+    材料口径 5,144 tok 而装配口径（块内事件全文）90,979 tok，差 17.7×
+    （worklog §44.3-2，仪器 `scripts/diag_view_assembly_buckets.py`）。
+    故：
+    * 本函数的 `tokens` / `over` 是**材料口径**，只可用于"材料在长没长"；
+    * 凡与经济判据 `(B − B′) × N − C`、水位（`over`）比较的口径，必须与 `B`
+      同源（`B` = `last_context_estimate` = **装配口径**）——故运行时用
+      `Agent._view_assembly_watermarks()`（它在本函数结果上覆写为装配口径），
+      不要直接拿本函数的 `tokens` 进算式（2026-09-12 之前正是这么混用的，
+      结果同一份材料给出方向相反的两个结论：worklog §44.3-3）。
     仪器（`scripts/maint_health.py`）会临时关掉折叠再派生一次做 A/B——同一份
     材料两次派生，跨会话比数没有意义（域树与轮数都会变）。
     """

@@ -748,6 +748,9 @@ class _MaintenanceMixin:
         # 文件为止」。判据归机制、语义归模型：Runtime 给体量事实，模型判断
         # 这一摊活是否真已分成互不相干的两条线。
         view_lines = self._split_view_watermarks()
+        # 覆盖缺口硬数据（零 LLM，2026-09-12）：未覆盖文件 + 多域共命轮——
+        # 前者是分域漏项、后者是父子域重叠，两者都是机械事实，喂给模型自纠。
+        coverage_lines = self._split_coverage_lines(rounds)
         all_ids = {
             b["id"] for blocks in round_blocks.values() for b in blocks
         }
@@ -761,6 +764,7 @@ class _MaintenanceMixin:
             + f"\n- 活性文件数（分裂单元数上限）：{n_live}"
             + f"\n- 纯对话块（无文件交互，闲聊）内容占比：约 {chat_share * 100:.0f}%"
             + ("\n" + "\n".join(view_lines) if view_lines else "")
+            + ("\n" + "\n".join(coverage_lines) if coverage_lines else "")
             + "\n\n"
             "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
             + "\n".join(map_lines)
@@ -1187,6 +1191,76 @@ class _MaintenanceMixin:
         if changed:
             self._persist_rounds()
 
+    def _split_coverage_lines(self, rounds: list[dict]) -> list[str]:
+        """覆盖缺口硬数据（零 LLM）：未覆盖文件 + 多域共命轮（2026-09-12）。
+
+        见 `views.coverage_gap` 的动机（worklog §40.4 待办乙 + §44.3-5）。给模型
+        的用途：① 有文件没被任何域认领 = 本批分域的漏项，可自纠；② 多个域共命
+        同一批轮 = 父域与子域语义重叠（或分域过细）——它直接抬高视图切换频率、
+        压低粘滞率（实测 61.5% vs 目标 >80%）。
+        """
+        domains = registry_module.latest_domains(self.rounds)
+        gap = views_module.coverage_gap(domains, rounds)
+        lines: list[str] = []
+        uncovered = gap.get("uncovered") or []
+        if uncovered:
+            shown = "、".join(uncovered[:10]) + ("…" if len(uncovered) > 10 else "")
+            lines.append(
+                f"- 分裂覆盖缺口：{len(uncovered)} 个文件未落在任何域"
+                f"（掉主 agent 兜底桶）：{shown}"
+            )
+        else:
+            lines.append("- 分裂覆盖缺口：无（所有文件块都有域认领）")
+        over = gap.get("overlapped_rounds") or []
+        if over:
+            counts = gap.get("round_domain_counts") or {}
+            shown = "、".join(f"R{s}（{counts.get(s, 0)} 域）" for s in over[:10])
+            lines.append(
+                f"- 多域共命轮：{len(over)} 轮被 ≥2 个域同时命中"
+                f"（父子域重叠或分域过细的信号）：{shown}"
+            )
+        return lines
+
+    def _view_assembly_watermarks(
+        self, domains: list, watermark: Optional[int] = None
+    ) -> dict[str, dict]:
+        """各视图的**装配口径**体量（另存材料口径）+ 是否到自身水位。
+
+        口径订正（2026-09-12，worklog §44.3-3）：`views.view_watermarks` 给的是
+        **材料口径**（块的一行式重建），而水位与经济判据里的 `B` 是**装配口径**
+        （`last_context_estimate`，含块内事件全文）——二者实测差 12–17.7×。
+        混用的后果是同一份材料给出方向相反的两个结论（仪器报"值得拆"，按装配
+        口径应为负）。故此处以装配口径为准：逐视图调 `_assemble_view_messages`
+        实测（零 LLM、毫秒级；与 `maint_health` 的 A/B 行同一函数、同一算法）。
+
+        派生失败时退回材料口径并在 `degraded` 标出——宁可标注"口径降级"，
+        也不静默换一个不同源的数（§40.2 教训：仪器给错数比没数更糟）。
+        """
+        material = views_module.view_watermarks(
+            self.rounds,
+            self.task.get_state() if self.task is not None else None,
+            domains=domains,
+            registry=(self.task.registry if self.task is not None else None),
+        )
+        out: dict[str, dict] = {}
+        for name, mark in material.items():
+            item = dict(mark)
+            base = int(mark.get("tokens") or 0)
+            item["material_tokens"] = base
+            item["tokens"] = base
+            item["degraded"] = True
+            try:
+                msgs = self._assemble_view_messages(name, self.rounds)
+            except Exception:  # noqa: BLE001——派生失败退回材料口径（带标注）
+                msgs = None
+            if msgs:
+                item["tokens"] = int(self._estimate_messages(msgs))
+                item["degraded"] = False
+            if watermark is not None:
+                item["over"] = item["tokens"] >= int(watermark)
+            out[str(name)] = item
+        return out
+
     def _split_view_watermarks(self) -> list[str]:
         """逐层分裂的硬数据行（零 LLM）：各视图自身体量 + 是否到自己的水位。
 
@@ -1195,23 +1269,24 @@ class _MaintenanceMixin:
         「只操作单个文件为止」。判据归机制（Runtime 给体量事实）、语义归模型
         （这一摊活是否真已分成互不相干的两条线）。
 
-        体量口径与 `view_watermarks` 同源（该视图全部块的一行式重建，属上界，
-        偏保守）；主 agent 不出现在这里——它是兜底桶，不参与「拆不拆自己」。
+        **口径 = 装配口径**（2026-09-12 订正）：与水位、`B` 同源；括号内附材料
+        口径供对照。主 agent 不出现在这里——它是兜底桶，不参与「拆不拆自己」。
         """
         domains = registry_module.latest_domains(self.rounds)
         if not domains:
             return []
         try:
-            marks = views_module.view_watermarks(
-                self.rounds,
-                self.task.get_state() if self.task is not None else None,
-                domains=domains,
-                registry=(self.task.registry if self.task is not None else None),
-                watermark=self._org_watermark,
-            )
-        except Exception:  # noqa: BLE001——硬数据不可用不该让分裂分析失败
+            marks = self._view_assembly_watermarks(domains, self._org_watermark)
+        except Exception as error:  # noqa: BLE001——硬数据不可用不该让分裂分析失败
+            # 不静默：口径降级/不可用必须留痕，否则模型是在"没有体量事实"的
+            # 情况下做分裂判断，而人看不见这件事（worklog §44.3-4 的教训）。
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"分裂硬数据不可用（{error!r}），本批分裂按无体量事实进行",
+                )
             return []
-        lines = ["- 各视图自身体量（= 该域全部块的一行式重建，属上界）："]
+        lines = ["- 各视图自身体量（装配口径；括号内为材料口径，两者不可混用）："]
         for name, mark in sorted(
             marks.items(), key=lambda kv: -int(kv[1].get("tokens") or 0)
         ):
@@ -1219,10 +1294,12 @@ class _MaintenanceMixin:
                 continue
             over = "**已到自身水位 → 考虑在其内部再裂一层**" if mark.get("over") \
                 else "未到水位（不拆）"
+            degraded = "（口径降级：仅材料口径）" if mark.get("degraded") else ""
             lines.append(
-                f"  - {name}：{int(mark.get('tokens') or 0):,} tok／"
-                f"{int(mark.get('blocks') or 0)} 块／活跃 {int(mark.get('rounds') or 0)} 轮"
-                f" → {over}"
+                f"  - {name}：{int(mark.get('tokens') or 0):,} tok"
+                f"（材料 {int(mark.get('material_tokens') or 0):,}）"
+                f"／{int(mark.get('blocks') or 0)} 块／活跃 {int(mark.get('rounds') or 0)} 轮"
+                f"{degraded} → {over}"
             )
         if len(lines) == 1:
             return []
@@ -1240,16 +1317,14 @@ class _MaintenanceMixin:
           为负者只记录不拆（不是错误，是"现在还不值得拆"）。
 
         `B` 取本轮装配体量实测值（`last_context_estimate`）；`B′` 取该域视图
-        材料体量（口径上界，见 views.view_watermarks 注释）；`N_future` 取该域
-        活跃轮数（保守下界：它已被用了这么多轮，未来至少还会用这么多）。
+        **装配口径**体量（与 `B` 同源；2026-09-12 订正前用材料口径，二者实测差
+        12–17.7×，见 worklog §44.3-3）；`N_future` 取该域活跃轮数（保守下界：
+        它已被用了这么多轮，未来至少还会用这么多）。
         """
         if self.task is None:
             return
         try:
-            marks = views_module.view_watermarks(
-                self.rounds, self.task.get_state(),
-                domains=domains, registry=self.task.registry,
-            )
+            marks = self._view_assembly_watermarks(domains)
         except Exception as error:  # noqa: BLE001——记账失败不能拖垮 promote
             self.task.record(
                 "maintenance", f"分裂生命周期：视图体量不可用（{error!r}），跳过记账"
