@@ -504,6 +504,28 @@ def session_summary(task_id: str, data: dict) -> dict:
     }
 
 
+def _split_meta(r: dict) -> dict | None:
+    """分裂结果（已落实的轮字段 + 尚未落实的 pending_org）——机械透出。
+
+    split_assessment/domains 落盘在轮上；未落实时暂存 pending_org，
+    下一轮开启才并入注册表。"分裂成功没/为什么/结果如何"全在这里。
+    """
+    po = r.get("pending_org") or {}
+    sa = r.get("split_assessment") or po.get("split_assessment")
+    dm = r.get("domains") or po.get("domains")
+    un = r.get("unassigned") or po.get("unassigned")
+    if not (sa or dm or un):
+        return None
+    return {
+        "assessment": sa if isinstance(sa, dict) else {},
+        "domains": [{"name": d.get("name"), "description": d.get("description") or "",
+                     "file_domains": d.get("file_domains") or []}
+                    for d in (dm or []) if isinstance(d, dict)],
+        "unassigned": len(un or []),
+        "pending": bool(po.get("domains") or po.get("split_assessment")),
+    }
+
+
 def _round_meta(r: dict, usage: dict | None = None) -> dict:
     """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。"""
     evs = r.get("events") or []
@@ -519,6 +541,7 @@ def _round_meta(r: dict, usage: dict | None = None) -> dict:
         "t0": (evs[0].get("timestamp") or "") if evs else "",
         "t1": (evs[-1].get("timestamp") or "") if evs else "",
         "usage": usage or {},
+        "split": _split_meta(r),
         "blocks": r.get("blocks") or [],
     }
 
@@ -633,10 +656,13 @@ def context_dump(task_id: str, mode: str = "view",
     elif view:
         got = agent._assemble_view_messages(view, task.rounds or [])
         if got is None:
-            return {"mode": "view", "view": view, "available": False,
-                    "messages": [], "total_chars": 0,
-                    "note": "该 agent 无独立视图（走全量路径）"}
-        msgs = got
+            # 无独立视图（未分裂/视图降级）：回退到主装配——用户要的是
+            # "这个 agent 现在看到什么"，不是一句"不可用"
+            msgs = agent._assemble_messages()
+            note = (f"{view} 无独立视图（未分裂或走全量路径）——"
+                    "以下为主装配视图（整理/压缩生效后）")
+        else:
+            msgs = got
     else:
         msgs = agent._assemble_messages()
         note = "当前装配视图：整理/压缩/分档生效后，模型下一轮实际会看到的上下文"

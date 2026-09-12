@@ -389,6 +389,10 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .viz-view{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11px}
 .viz-bar{flex:1;min-width:40px;height:7px;border-radius:4px;background:var(--bg4);overflow:hidden}
 .viz-bar i{display:block;height:100%}
+
+.split-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.split-dom{border-left:3px solid var(--line2);padding:6px 0 6px 10px;margin-top:8px;font-size:11.5px}
+.split-dom b{color:var(--tx)}
 </style>
 </head>
 <body>
@@ -1707,6 +1711,30 @@ function ctxViz(){
       <span class="viz-bar"><i style="width:${pct.toFixed(1)}%;background:${col}"></i></span>
       <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">${e.calls} 次 · ${fmtN(e.prompt)} tok · ${pct.toFixed(1)}%</span></div>`;
   }).join('')||'<div class="empty" style="padding:8px 0">无调用账</div>';
+  // ④ 分裂结果：评估结论 + 产出的域（含尚未落实进注册表的）
+  const splitRounds=rl.filter(r=>r.split);
+  const lastSplit=splitRounds.length?splitRounds[splitRounds.length-1].split:null;
+  const regNames=new Set(reg.map(e=>e.name));
+  let splitHtml='<div class="empty" style="padding:8px 0">本会话尚无分裂分析</div>';
+  if(lastSplit){
+    const a=lastSplit.assessment||{};
+    const ok=a.splittable===true;
+    const badge=ok?`<span class="fbadge t-create">可分裂</span>`
+                  :`<span class="fbadge t-read">不可分裂</span>`;
+    const pend=lastSplit.pending?`<span class="fbadge t-modify">待下一轮落实</span>`:
+                                `<span class="fbadge t-create">已落实</span>`;
+    splitHtml=`<div class="split-head">${badge}${pend}
+      <span class="mono" style="color:var(--tx3);font-size:10px">产出 ${lastSplit.domains.length} 域 · 未归属块 ${lastSplit.unassigned}</span></div>`+
+      (a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">为什么这样判定</summary>
+        <div class="ev"><pre>${esc(a.reason)}</pre></div></details>`:'')+
+      lastSplit.domains.map(d=>{
+        const merged=regNames.has(d.name);
+        return `<div class="split-dom" style="border-left-color:${merged?'var(--teal)':'var(--gold)'}">
+          <b>${esc(d.name||'?')}</b>${merged?'<span class="fbadge t-create">已入注册表</span>':'<span class="fbadge t-modify">待落实</span>'}
+          <div style="color:var(--tx3);font-size:11px;margin-top:3px">${esc((d.description||'').slice(0,140))}</div>
+          ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`;
+      }).join('');
+  }
   return `<h3 class="sec">上下文与整理可视化</h3>
     <div class="viz-card">
       <div class="viz-lab">轮整理状态 <span style="color:var(--tx3);font-weight:400">（${rl.length} 轮：${Object.entries(counts).map(([k,v])=>`${ORG_NAME[k]||k} ${v}`).join(' · ')}）</span></div>
@@ -1715,6 +1743,8 @@ function ctxViz(){
         `<span class="lg"><i style="background:${c}"></i>${ORG_NAME[k]}</span>`).join('')}</div>
       <div class="viz-lab" style="margin-top:14px">视图体量 <span style="color:var(--tx3);font-weight:400">（当前 / 模型窗口；分裂后每域一条）</span></div>
       <div>${bars||'<div class="empty" style="padding:8px 0">无注册表</div>'}</div>
+      <div class="viz-lab" style="margin-top:14px">分裂结果 <span style="color:var(--tx3);font-weight:400">（评估结论 / 产出的域 / 是否已落实进注册表）</span></div>
+      <div>${splitHtml}</div>
       <div class="viz-lab" style="margin-top:14px">调用开销构成 <span style="color:var(--tx3);font-weight:400">（整轮对话 vs 维护开销：整理/压缩/分裂）</span></div>
       <div>${usage}</div>
     </div>`;

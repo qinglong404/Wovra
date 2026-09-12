@@ -132,6 +132,23 @@ def test_http_context_dump(tmp_path, monkeypatch):
     assert serve.context_dump("ghost", "raw") is None
 
 
+def test_round_meta_exposes_split_result():
+    """分裂结果透出：已落实字段 + 未落实 pending_org 都要能看见。"""
+    data = _fake_task()
+    data["rounds"][0]["pending_org"] = {
+        "domains": [{"name": "工具层", "description": "守卫与审批",
+                     "file_domains": ["src/wovra/tools"]}],
+        "split_assessment": {"splittable": True, "reason": "两条独立工作线"},
+        "unassigned": ["R1-B9"],
+    }
+    meta = serve.session_meta("s1", data)
+    sp = meta["round_list"][0]["split"]
+    assert sp["assessment"]["splittable"] is True
+    assert sp["domains"][0]["name"] == "工具层"
+    assert sp["unassigned"] == 1 and sp["pending"] is True
+    assert meta["round_list"][1]["split"] is None      # 无分裂数据的轮不编造
+
+
 def test_todo_log_derives_calls():
     """计划页流水：从轮事件抽 todo 调用（动作/文本/结果配对）。"""
     data = _fake_task()
