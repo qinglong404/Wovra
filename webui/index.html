@@ -183,6 +183,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .tcard .t-sum{flex:1;min-width:0;color:var(--tx2);font-family:var(--mono);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .tcard .t-st{font-size:10px;font-family:var(--mono);flex-shrink:0}
 .st-ok{color:var(--teal)} .st-bad{color:var(--red)} .st-deny{color:var(--gold)} .st-run{color:var(--tx3)}
+.st-running{color:var(--acc);animation:pulse 1.2s infinite}   /* 运行中：蓝色呼吸 */
 .tcard .t-args{border-top:1px solid var(--line);padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--tx2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;background:var(--bg0)}
 .tcard .t-result{border-top:1px solid var(--line);padding:8px 12px;font-size:12px;color:var(--tx2);line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto}
 .tcard:not(.open) .t-args,.tcard:not(.open) .t-result{display:none}
@@ -274,6 +275,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #pending-bar .pbtn.ok:hover{background:#1a3b2c}
 #pending-bar .pbtn.bad{color:var(--red);border-color:#6b2a34;background:#2a1620}
 #pending-bar .pbtn.bad:hover{background:#3a1c26}
+#pending-bar .pbtn.always{color:var(--acc);border-color:#33488f;background:#16203a}
+#pending-bar .pbtn.always:hover{background:#1d2b4d}
 #composer{display:none;gap:10px;padding:10px max(var(--pad-x),calc((100% - var(--read-max))/2));border-top:1px solid var(--line);background:var(--bg1)}
 #composer.show{display:flex}
 #compose{flex:1;resize:none;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;color:var(--tx);font-family:var(--sans);font-size:13.5px;padding:10px 13px;outline:none;min-height:44px;max-height:160px;line-height:1.5}
@@ -644,7 +647,8 @@ function renderHeader(){
   const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['project','项目'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
     `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
-    `<span class="chip" style="cursor:pointer;align-self:center;margin-left:6px" onclick="select(CUR)">↻ 刷新</span>`;
+    `<span class="chip" style="cursor:pointer;align-self:center;margin-left:6px" onclick="select(CUR)">↻ 刷新</span>`+
+    `<span class="chip ${META&&META.safety_mode==='auto'?'bad':'warn'}" style="cursor:pointer;align-self:center;margin-left:6px" onclick="toggleSafety()" title="点击切换：审批模式（敏感操作先问）/ 自主运行（确认闸门全部放行）">${META&&META.safety_mode==='auto'?'⚡ 自主运行':'⚿ 审批模式'}</span>`;
   renderFollowChip();
   renderCtxbar();
 }
@@ -769,12 +773,13 @@ function applyChunk(c){
   }
   return dirty;
 }
-function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用）
-  const wasCur=CUR===LIVE.cur,viaSend=LIVE.viaSend;
+async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用）
+  const wasCur=CUR===LIVE.cur;
+  if(!wasCur){liveDetach();return}
+  // 先让正式渲染落位（正文 md 上屏），再撤直播区——否则正文会"消失一瞬再出现"
+  FOLLOW=true;$('#send').disabled=false;
+  try{await refreshAfterTurn()}catch(e){}
   liveDetach();
-  if(wasCur&&!viaSend){   // send 自带的轮询负责它发起的轮；这里兜刷新页面中途挂上的
-    FOLLOW=true;$('#send').disabled=false;refreshAfterTurn();
-  }
 }
 function liveAttach(jobId){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
@@ -794,6 +799,19 @@ async function stopTurn(){   // ⏹ 终止本轮（对齐 CLI Ctrl+C：轮保持
   if(!confirm('终止当前轮？\n已完成的步骤保留，轮保持开放（/c 可续跑）。'))return;
   try{await fetch(`/api/jobs/${LIVE.job}/cancel`,{method:'POST'})}catch(e){}
   LIVE.status='终止中…';renderLive();
+}
+async function toggleSafety(){
+  if(!CUR||!META)return;
+  const cur=META.safety_mode==='auto'?'auto':'approve';
+  const next=cur==='auto'?'approve':'auto';
+  if(next==='auto'&&!confirm('切到自主运行模式？所有敏感操作确认将在本会话内被自动放行（适合无人值守长跑）。'))return;
+  try{
+    const r=await fetch(`/api/sessions/${CUR}/safety`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({mode:next})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('HTTP '+r.status));return}
+    META.safety_mode=j.mode;renderHeader();
+  }catch(e){alert('切换失败：'+e.message)}
 }
 async function undoTurn(){   // /undo 撤销最近一条开放轮
   if(!CUR)return;
@@ -1087,7 +1105,11 @@ function drawConv(c,toBottom){
       resEl.textContent=ci.result;
       const [txt,cls]=resultStatus(ci.name,ci.result);
       stEl.textContent=txt;stEl.className='t-st '+cls;
-    }else{stEl.textContent='无结果';stEl.className='t-st st-run'}
+    }else{
+      const run=(META&&META.status==='in_progress');
+      stEl.textContent=run?'● 运行中…':'无结果';
+      stEl.className='t-st '+(run?'st-running':'st-run');
+    }
   }
   highlightIn(c);
   if(toBottom){
@@ -1101,7 +1123,11 @@ function drawConv(c,toBottom){
   if(LIVE.job&&CUR===LIVE.cur)renderLive();   // 重绘后把直播区接回来
 }
 function ci_status(ci){
-  if(!ci||ci.result==null)return['无结果','st-run'];
+  if(!ci||ci.result==null){
+    // 轮在跑：明确"运行中"（蓝）；轮已结束仍无结果才是真的无结果
+    return (META&&META.status==='in_progress')
+      ?['● 运行中…','st-running']:['无结果','st-run'];
+  }
   const [t,c]=resultStatus(ci.name,ci.result);return[t,c];
 }
 
@@ -1272,7 +1298,8 @@ function renderPendingBar(jobId,p){
     // 确认类只有两态：后端只认 y/yes 为通过（自由文本会被当拒绝），
     // 因此不给输入框，只给两个大按钮
     html+=`<div class="pb-actions">
-      <span class="pbtn ok" data-ans="y">✓ 允许执行</span>
+      <span class="pbtn ok" data-ans="y">✓ 同意本次</span>
+      <span class="pbtn always" data-ans="always" title="把这类命令记入本会话白名单，之后同类不再询问">✓✓ 同意以后同类</span>
       <span class="pbtn bad" data-ans="n">✗ 拒绝</span></div>`;
   }else{
     // 防御性再分割：服务端已拆过一轮，但模型可能用别的分隔符（｜；;）

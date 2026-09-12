@@ -208,8 +208,26 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
         return f"用户的回答: {ans or '（空）'}"
 
     def web_ask_yes_no(question: str) -> bool:
+        """确认闸门（审批模式）：自主模式全放行；"以后同类"命中白名单放行；
+        三选项回答 always 时把标签记进会话白名单。"""
+        tag = confirm_tag(question)
+        mode = str(getattr(task, "safety_mode", "approve") or "approve")
+        if mode == "auto":
+            job["live"].append({"k": "status", "s": "自主运行：敏感操作自动放行"})
+            return True
+        if tag in (getattr(task, "approved_tags", None) or []):
+            job["live"].append({"k": "status", "s": f"已授权同类操作：{tag}"})
+            return True
         ans, got = _wait("confirm", question)
-        return got and (ans or "").strip().lower() in ("y", "yes")
+        a = (ans or "").strip().lower()
+        if a in ("always", "总是", "以后同类", "a"):
+            tags = list(getattr(task, "approved_tags", None) or [])
+            if tag not in tags:
+                tags.append(tag)
+            task.approved_tags = tags
+            task.save()
+            return True
+        return got and a in ("y", "yes")
 
     orig_ask, orig_yes = _cli_prompt.ask_user, _safety._ask_yes_no
     _cli_prompt.ask_user = web_ask_user
@@ -399,6 +417,22 @@ def usage_totals(history: list[dict] | None) -> dict:
         totals["finish"][f] = totals["finish"].get(f, 0) + 1
         totals["rows"].append({"time": h.get("time", ""), **row})
     return totals
+
+
+def confirm_tag(question: str) -> str:
+    """把确认问题归成一个"同类"标签（审批三选项的"以后同类"靠它）。
+
+    命中模式（命令含敏感操作）→ 用模式串做标签（最稳的同类判据）；
+    文件删除 → 用路径；其余退回问题前 60 字。
+    """
+    q = str(question or "")
+    m = re.search(r"命中 `([^`]+)`", q)
+    if m:
+        return "cmd:" + m.group(1)
+    m = re.search(r"确认删除文件 (.+?)[？（]", q)
+    if m:
+        return "del:" + m.group(1).strip()
+    return "q:" + q.strip()[:60]
 
 
 def session_summary(task_id: str, data: dict) -> dict:
@@ -668,6 +702,8 @@ class _Handler(BaseHTTPRequestHandler):
                         if j["task_id"] == m.group(1)
                         and j["status"] in ("queued", "running")]
             meta["live_job"] = live[0] if live else None
+            meta["safety_mode"] = str(data.get("safety_mode") or "approve")
+            meta["approved_tags"] = list(data.get("approved_tags") or [])
             return self._json(meta)
         m = re.fullmatch(r"/api/sessions/([^/]+)/views/(.+)", path)
         if m:
@@ -775,6 +811,20 @@ class _Handler(BaseHTTPRequestHandler):
         mr = re.fullmatch(r"/api/sessions/([^/]+)/resume", path)
         if mr:
             return self._start_resume(mr.group(1))
+        msf = re.fullmatch(r"/api/sessions/([^/]+)/safety", path)
+        if msf:
+            mode = str(body.get("mode") or "")
+            if mode not in ("approve", "auto"):
+                return self._json({"error": "mode 只能是 approve 或 auto"}, 400)
+            try:
+                task = task_module.Task.load(msf.group(1))
+            except (OSError, ValueError, json.JSONDecodeError):
+                return self._json({"error": "session not found"}, 404)
+            task.safety_mode = mode
+            task.save()
+            with self.cache._lock:
+                self.cache._cache.pop(msf.group(1), None)
+            return self._json({"ok": True, "mode": mode})
         mu = re.fullmatch(r"/api/sessions/([^/]+)/undo", path)
         if mu:
             return self._undo_round(mu.group(1))

@@ -480,6 +480,12 @@ class Task:
     # 会话绑定的工作区（创建时的 PROJECT_ROOT）。恢复会话时以此为准——
     # 无论从哪个目录启动 wovra，都回到该会话原本的文件世界
     workspace: str = ""
+    # 安全模式（2026-09-12）："approve" = 一切敏感操作先问人（默认）；
+    # "auto" = 自主运行——确认闸门全部放行（适合无人值守长跑）
+    safety_mode: str = "approve"
+    # 会话级"同意以后同类命令"白名单（审批三选项的记忆）：存标签，
+    # 如 "cmd:<命中模式>" 或 "del:<路径>"
+    approved_tags: list[str] = field(default_factory=list)
     # 会话的上下文模式（managed/baseline）：恢复时沿用，防止实验数据串味
     mode: str = ""
     # ⚠ V1.2 遗迹·标废不删（2026-09-11 遗产整治，方案 A）：

@@ -76,6 +76,8 @@ ttft/dur/finish）——解析只在 serve 侧做一次，前端不重复实现�
 | 端点 | 语义 | 互斥 |
 |---|---|---|
 | `DELETE /api/sessions/{id}` | 删除单个会话目录 | 运行中作业 / CLI 持锁 → 409 |
+| `POST /api/sessions/{id}/safety` `{mode}` | `{ok,mode}` | 安全模式切换：`approve`（默认，敏感操作先问）/ `auto`（自主运行，确认闸门全放行）；落 task.safety_mode |
+| `POST /api/jobs/{id}/answer` `{answer}` | `{ok}` | 审批/提问应答：`y`/`always`（同意并记入本会话同类白名单 `task.approved_tags`）/`n` 或其他文本 |
 | `DELETE /api/sessions` `{ids:[…]}` | 批量删除：逐个复用单删判定，失败项逐条报告不拖累其余 → `{deleted, failed}` | 同上（per-id） |
 
 缓存纪律：serve 进程内按 task.json mtime 缓存摘要（文件没变不重解析）；

@@ -559,6 +559,35 @@ def test_split_choices_fullwidth_separators():
     assert _split_choices(["A. 一", "B、二"]) == ["一", "二"]
 
 
+def test_confirm_tag_and_safety_endpoint(server, tmp_path, monkeypatch):
+    """确认标签归并（同类判据）+ 安全模式端点 + 会话字段持久化。"""
+    from wovra.serve import confirm_tag
+    assert confirm_tag("命令包含敏感操作（命中 `\\bgit\\s+(commit|tag)\\b`）") \
+        == "cmd:\\bgit\\s+(commit|tag)\\b"
+    assert confirm_tag("确认删除文件 D:/x/a.txt？（删除前自动归档）") == "del:D:/x/a.txt"
+    assert confirm_tag("随便问问").startswith("q:")
+
+    # 真实 Task（可持久化新字段）挂到 server 的 tasks_root 下
+    import json as _json
+    from dataclasses import asdict as _asdict
+    from wovra.task import Task
+    tasks = tmp_path / "tasks2"
+    tasks.mkdir()
+    t = Task(id="sf1", goal="g")
+    (tasks / "sf1").mkdir()
+    (tasks / "sf1" / "task.json").write_text(
+        _json.dumps(_asdict(t), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    code, body = _get(server + "/api/sessions/sf1/safety", method="POST",
+                      body={"mode": "auto"})
+    assert code == 200 and body["mode"] == "auto"
+    saved = _json.loads((tasks / "sf1" / "task.json").read_text(encoding="utf-8"))
+    assert saved["safety_mode"] == "auto"
+    code, body = _get(server + "/api/sessions/sf1/safety", method="POST",
+                      body={"mode": "nonsense"})
+    assert code == 400
+
+
 def test_http_sse_stream(server):
     """SSE 端点：分片 data 行 + 终态 done 事件，写完即断。"""
     serve._JOBS["js"] = {"job_id": "js", "task_id": "s1", "status": "done",
