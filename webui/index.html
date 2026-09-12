@@ -657,9 +657,18 @@ async function send(){
     const j=await r.json();
     if(r.status===409){$('#pend-run').textContent='⚠ '+j.error;return}
     if(r.status!==202){$('#pend-run').textContent='⚠ '+(j.error||('HTTP '+r.status));return}
+    let pendSig='';
     const iv=setInterval(async()=>{
       try{
         const jd=await api('/api/jobs/'+j.job_id);
+        if(jd.pending){
+          const pr=document.getElementById('pend-run');
+          if(!pr)return;
+          const sig=j.job_id+'|'+jd.pending.type+'|'+jd.pending.question;
+          if(sig!==pendSig){pendSig=sig;renderPending(pr,j.job_id,jd.pending)}
+          return;
+        }
+        pendSig='';
         if(jd.status==='running'||jd.status==='queued')return;
         clearInterval(iv);$('#send').disabled=false;
         if(jd.status==='error'){$('#pend-run').textContent='✗ '+jd.error;return}
@@ -670,6 +679,32 @@ async function send(){
     },1500);
   }catch(e){$('#send').disabled=false;$('#pend-run').textContent='✗ '+e.message}
 }
+function renderPending(pr,jobId,p){
+  pr.style.color='var(--tx)';pr.style.whiteSpace='normal';
+  const kind=p.type==='confirm'?'请求确认':'模型提问';
+  let html=`⏸ <b>${esc(kind)}</b>：${esc(p.question)}`;
+  const freeId='pend-free';
+  if(p.choices&&p.choices.length){
+    html+='<div class="blocks" style="margin-top:7px">'+p.choices.map((c,i)=>
+      `<span class="chip acc" style="cursor:pointer" data-ans="${esc(c)}">${String.fromCharCode(65+i)}. ${esc(c)}</span>`).join('')+'</div>';
+  }
+  html+=`<div style="display:flex;gap:7px;margin-top:7px;align-items:center">
+    <input id="${freeId}" placeholder="或自由回答…" style="flex:1;min-width:0;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:6px 10px;font-size:12.5px;outline:none">
+    <span class="chip acc" style="cursor:pointer" data-ans="__free__">回答</span>
+    ${p.type==='confirm'?'<span class="chip bad" style="cursor:pointer" data-ans="n">拒绝</span>':''}</div>`;
+  pr.innerHTML=html;
+  pr.querySelectorAll('[data-ans]').forEach(el=>el.addEventListener('click',async()=>{
+    const v=el.dataset.ans==='__free__'?(document.getElementById(freeId)?.value||''):el.dataset.ans;
+    await answerJob(jobId,v);
+  }));
+}
+async function answerJob(jobId,ans){
+  const r=await fetch(`/api/jobs/${jobId}/answer`,{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:ans})});
+  const pr=document.getElementById('pend-run');
+  if(pr){pr.textContent='已回答，轮继续…';pr.style.color='var(--tx3)'}
+}
+
 async function refreshAfterTurn(){
   META=await api('/api/sessions/'+CUR);buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
   const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));

@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import itertools
 import json
+import os
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -141,12 +142,60 @@ _TURN_GATE = threading.Lock()
 _job_lock = threading.Lock()
 
 
+_ASK_TIMEOUT = int(os.environ.get("WOVRA_ASK_TIMEOUT", "1800"))
+
+
 def _execute_turn(job_id: str, task_id: str, content: str) -> None:
-    """轮执行线程：CLI 同款管线（会话锁 → agent → run → 补整理）。"""
+    """轮执行线程：CLI 同款管线（会话锁 → agent → run → 补整理）。
+
+    交互桥（C4.5）：轮内 ask_user / 敏感操作确认不再走 stdin——
+    发布到 job.pending（前端渲染选项/输入框），POST /api/jobs/{id}/answer
+    回填后放行；超时（WOVRA_ASK_TIMEOUT，默认 30 分钟）保守回退：
+    ask → 空回答、confirm → 拒绝。补丁只在轮线程生命周期内生效并恢复。
+    """
     job = _JOBS[job_id]
     from .agent import MODE_MANAGED
+    from .cli import prompt as _cli_prompt
     from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
     from .cli.session import _acquire_session_lock, _release_session_lock
+    from .tools import interaction as _interaction
+    from .tools import safety as _safety
+
+    state: dict = {"answer": None}
+    ev = threading.Event()
+    job["_ev"] = ev
+    job["_state"] = state   # answer 路由由此回填（桥的闭包读它）
+
+    def _wait(kind: str, text: str, choices: list | None = None,
+              multi: bool = False):
+        ev.clear()
+        job["pending"] = {"type": kind, "question": text,
+                          "choices": choices or [], "multi": bool(multi)}
+        got = ev.wait(_ASK_TIMEOUT)
+        job["pending"] = None
+        return (state.get("answer") or ""), got
+
+    def web_ask_user(question: str, choices: str = "", multi: bool = False) -> str:
+        opts = _interaction._split_choices(choices)[:8]
+        ans, got = _wait("ask", question, opts, multi)
+        ans = (ans or "").strip()
+        letters = "ABCDEFGH"
+        if opts and ans:
+            tokens = ([t.strip().rstrip(".").upper() for t in ans.split(",")]
+                      if multi else [ans.rstrip(".").upper()])
+            last = letters[len(opts) - 1]
+            if all(len(t) == 1 and "A" <= t <= last for t in tokens):
+                picked = " | ".join(opts[ord(t) - ord("A")] for t in tokens)
+                return f"用户的回答: {picked}"
+        return f"用户的回答: {ans or '（空）'}"
+
+    def web_ask_yes_no(question: str) -> bool:
+        ans, got = _wait("confirm", question)
+        return got and (ans or "").strip().lower() in ("y", "yes")
+
+    orig_ask, orig_yes = _cli_prompt.ask_user, _safety._ask_yes_no
+    _cli_prompt.ask_user = web_ask_user
+    _safety._ask_yes_no = web_ask_yes_no
     try:
         job["status"] = "running"
         task = task_module.Task.load(task_id)
@@ -167,6 +216,10 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
     except Exception as error:  # noqa: BLE001——错误原样回给发起页
         job["status"] = "error"
         job["error"] = f"{type(error).__name__}: {error}"
+    finally:
+        _cli_prompt.ask_user = orig_ask
+        _safety._ask_yes_no = orig_yes
+        job["pending"] = None
 
 _ORG_STATES = ("done", "pending", "failed")
 
@@ -481,7 +534,8 @@ class _Handler(BaseHTTPRequestHandler):
             if job is None:
                 return self._json({"error": "job not found"}, 404)
             return self._json({k: job.get(k)
-                               for k in ("status", "answer", "error")})
+                               for k in ("status", "answer", "error",
+                                         "pending")})
         return self._json({"error": "not found"}, 404)
 
     # ---- C4：受控写通道（唯一的写形态 = 新建会话 / 追加一轮对话） ----
@@ -501,6 +555,19 @@ class _Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/turn", path)
         if m:
             return self._start_turn(m.group(1), str(body.get("content") or ""))
+        ma = re.fullmatch(r"/api/jobs/([^/]+)/answer", path)
+        if ma:
+            job = _JOBS.get(ma.group(1))
+            if job is None or not job.get("pending"):
+                return self._json({"error": "no pending question"}, 404)
+            st = job.get("_state")
+            if st is not None:
+                st["answer"] = str(body.get("answer") or "")
+            job["answer"] = str(body.get("answer") or "")
+            ev = job.get("_ev")
+            if ev:
+                ev.set()
+            return self._json({"ok": True})
         return self._json({"error": "not found"}, 404)
 
     do_PUT = do_POST

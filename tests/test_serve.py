@@ -262,3 +262,93 @@ def test_http_view_endpoint(tmp_path, monkeypatch):
             assert e.code == 404
     finally:
         httpd.shutdown()
+
+
+def test_http_ask_bridge_flow(server, monkeypatch, tmp_path):
+    """C4.5 交互桥：轮内 ask_user/敏感确认路由到网页——POST answer 放行。
+
+    _build_agent 替身为假 agent：run() 里调用被桥接的 ask_user 与
+    _ask_yes_no，验证 pending 发布 → answer 回填 → 轮完成的全链路。
+    """
+    import time as _time
+
+    from wovra.cli import prompt as cli_prompt
+    from wovra.tools import safety as safety_mod
+
+    tasks = tmp_path / "tasks3"
+    (tasks / "s1").mkdir(parents=True)
+    (tasks / "s1" / "task.json").write_text(
+        json.dumps(_fake_task(), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+
+    captured = {}
+
+    class FakeAgent:
+        def run(self, content, **kw):
+            captured["ask"] = cli_prompt.ask_user("选哪种模式？", "A|B", False)
+            captured["confirm"] = safety_mod._ask_yes_no("允许安装依赖？")
+            return "已按选择执行"
+
+        def organize_backlog(self):
+            pass
+
+    def fake_build(task, mode="managed", **kw):
+        return FakeAgent()
+
+    monkeypatch.setattr(cli_prompt, "_build_agent", fake_build)
+
+    body = json.dumps({"content": "继续"}).encode("utf-8")
+    req = urllib.request.Request(server + "/api/sessions/s1/turn",
+                                 data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 202
+        job_id = json.loads(r.read())["job_id"]
+
+    # 等待 pending 问题出现（ask 先到）
+    pending = None
+    for _ in range(60):
+        code, j = _get(server + f"/api/jobs/{job_id}")
+        if j.get("pending"):
+            pending = j["pending"]
+            break
+        _time.sleep(0.05)
+    assert pending and pending["type"] == "ask"
+    assert pending["question"] == "选哪种模式？"
+    assert pending["choices"] == ["A", "B"]
+
+    # 回答选项 A → 桥接展开后进入 confirm
+    req = urllib.request.Request(server + f"/api/jobs/{job_id}/answer",
+                                 data=json.dumps({"answer": "A"}).encode(),
+                                 method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 200
+
+    # 等待 confirm 出现
+    pending2 = None
+    for _ in range(60):
+        code, j = _get(server + f"/api/jobs/{job_id}")
+        if j.get("pending"):
+            pending2 = j["pending"]
+            break
+        _time.sleep(0.05)
+    assert pending2 and pending2["type"] == "confirm"
+
+    # 回答 y → 放行 → 轮完成
+    req = urllib.request.Request(server + f"/api/jobs/{job_id}/answer",
+                                 data=json.dumps({"answer": "y"}).encode(),
+                                 method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 200
+
+    for _ in range(60):
+        code, j = _get(server + f"/api/jobs/{job_id}")
+        if j["status"] == "done":
+            break
+        _time.sleep(0.05)
+    assert j["status"] == "done"
+    assert captured["ask"] == "用户的回答: A"        # 字母 → 选项原文展开
+    assert captured["confirm"] is True               # y → 放行
+    serve._JOBS.pop(job_id, None)
