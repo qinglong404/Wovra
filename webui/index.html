@@ -1208,7 +1208,7 @@ function renderCtxbar(){
         <span class="ctx-dot" style="background:${col}"></span>
         <span class="mono" style="color:${col}">${esc(lab)}</span>
         <span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${col}"></i></span>
-        <span class="mono">${fmtN(tk)}/${fmtN(win)}</span>
+        <span class="mono">${fmtN(tk)}/${fmtN(win)}（${(share>=10?share.toFixed(1):share.toFixed(2))}%）</span>
         </div>`;
     }).join('');
     return;
