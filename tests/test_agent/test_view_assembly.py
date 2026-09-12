@@ -266,3 +266,46 @@ def test_view_tiering_rewrites_only_on_own_watermark_advance(monkeypatch):
     assert "第 5 代描述" in body_after             # 第 6 代那轮仍在全分辨率
     # 折叠不改归属：折叠轮的块 ID 依然保留（expand_history 的锚）
     assert "R1-B" in body_after
+
+
+def test_view_assembly_repairs_checkpoint_split_tool_message(monkeypatch):
+    """视图装配的协议补缝：上一轮以 tool_call 结尾（检查点轮边界）、
+    当前轮以 tool 结果开头时，补上收尾 tool_call——tool 消息不得悬空
+    （视图历史全是 user/assistant 文本对，悬空即被严格端点 400）。"""
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    call_msg = {"role": "assistant", "content": "",
+                "tool_calls": [{"id": "c9", "type": "function",
+                                "function": {"name": "todo", "arguments": "{}"}}]}
+    r1 = {
+        "seq": 1,
+        "user_input": {"original": "写工具", "normalized": ""},
+        "events": [
+            {"id": "R1-E01", "type": "user", "status": "", "truncated": "写工具",
+             "message": {"role": "user", "content": "写工具"}},
+            {"id": "R1-E02", "type": "tool_call", "status": "",
+             "truncated": "todo(verify)", "message": call_msg},
+        ],
+        "end_state": "completed", "org_state": "done",
+    }
+    task = _task_with_domains([r1])
+    agent = _agent(task)
+    agent.current_round = {
+        "seq": 2, "user_input": {"original": "[运行时] 大步验收通过",
+                                 "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open",
+        "org_state": "", "active_view": "工具层",
+    }
+    agent.rounds.append(agent.current_round)
+    agent.messages = []
+    agent._record_event("tool_result", {"role": "tool", "tool_call_id": "c9",
+                                        "content": "大步已验收"})
+
+    msgs = agent._assemble_messages()
+
+    for i, m in enumerate(msgs):
+        if m.get("role") == "tool":
+            prev = msgs[i - 1] if i else None
+            assert prev is not None and prev.get("role") == "assistant" \
+                and prev.get("tool_calls"), (
+                f"位置 {i} 的 tool 消息悬空——严格端点会 400"
+            )

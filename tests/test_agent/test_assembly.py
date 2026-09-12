@@ -548,3 +548,96 @@ def test_expand_levels_are_distinct_for_organized_round():
     assert "R1-E02" in full and "写好了" in full
     # 三档内容互不相同
     assert len({trunc, summ, full}) == 3
+
+
+# ---- 协议补缝：检查点轮边界的 tool_call/tool_result 跨轮拆分 ------------
+
+
+def _checkpoint_split_rounds():
+    """检查点轮边界的两轮：R1 以 verify 的 tool_call 结尾，R2 以其结果开头。
+
+    这是 verify_milestone = 轮边界的固有形态：tool_call 落在闭合一侧，
+    tool 结果落在开启一侧。R1 已整理、R2 未整理时装配流会出现悬空 tool。
+    """
+    call_msg = {"role": "assistant", "content": "",
+                "tool_calls": [{"id": "c1", "type": "function",
+                                "function": {"name": "todo",
+                                             "arguments": "{\"action\":\"verify_milestone\"}"}}]}
+    result_msg = {"role": "tool", "tool_call_id": "c1", "content": "大步已验收"}
+    r1 = {
+        "seq": 1,
+        "user_input": {"original": "干活", "normalized": "澄清：干活"},
+        "events": [
+            {"id": "R1-E01", "type": "user", "status": "", "truncated": "干活",
+             "message": {"role": "user", "content": "干活"}},
+            {"id": "R1-E02", "type": "tool_call", "status": "",
+             "truncated": "todo(verify_milestone)", "message": call_msg},
+        ],
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }
+    r2 = {
+        "seq": 2,
+        "user_input": {"original": "[运行时] 大步验收通过，轮次在此闭合",
+                       "normalized": ""},
+        "events": [
+            {"id": "R2-E01", "type": "tool_result", "status": "",
+             "truncated": "大步已验收", "message": result_msg},
+            {"id": "R2-E02", "type": "final_answer", "status": "",
+             "truncated": "收尾",
+             "message": {"role": "assistant", "content": "收尾"}},
+        ],
+        "refined_index": {}, "end_state": "completed", "org_state": "",
+    }
+    return r1, r2, call_msg
+
+
+def _assert_no_dangling_tool(msgs):
+    """协议不变量：任何 tool 消息的前一条必须是带 tool_calls 的 assistant。"""
+    for i, m in enumerate(msgs):
+        if m.get("role") == "tool":
+            prev = msgs[i - 1] if i else None
+            assert prev is not None and prev.get("role") == "assistant" \
+                and prev.get("tool_calls"), (
+                f"位置 {i} 的 tool 消息悬空（前一条："
+                f"{(prev or {}).get('role')}）——严格端点会 400"
+            )
+
+
+def test_checkpoint_split_pair_survives_compact_boundary():
+    """已整理轮以 tool_call 结尾 + 未整理轮以 tool 结果开头 → 补缝。
+
+    紧凑视图不含 tool_calls 消息；不补则装配流 tool 悬空，DeepSeek 400
+    （2026-09-12 用 Wovra 改 Wovra 会话实测）。"""
+    r1, r2, call_msg = _checkpoint_split_rounds()
+    task = Task.create(goal="x")
+    task.rounds = [r1, r2]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    _make_open_round(agent, 3, "继续")
+
+    msgs = agent._assemble_messages()
+
+    _assert_no_dangling_tool(msgs)
+    # 补上的正是 R1 的收尾 tool_call 原文（不是合成物）
+    assert any(m.get("tool_calls") == call_msg["tool_calls"] for m in msgs)
+
+
+def test_checkpoint_split_at_current_round_boundary():
+    """同款补缝在当前轮边界：上一已整理轮以 tool_call 结尾、当前轮以
+    tool 结果开头（结果事件先进本轮，本轮尚无别的消息）。"""
+    r1, _, _ = _checkpoint_split_rounds()
+    task = Task.create(goal="x")
+    task.rounds = [r1]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.current_round = {
+        "seq": 2, "user_input": {"original": "[运行时] 大步验收通过",
+                                 "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open", "org_state": "",
+    }
+    agent.rounds.append(agent.current_round)
+    agent.messages = []
+    agent._record_event("tool_result", {"role": "tool", "tool_call_id": "c1",
+                                        "content": "大步已验收"})
+
+    msgs = agent._assemble_messages()
+
+    _assert_no_dangling_tool(msgs)

@@ -101,7 +101,11 @@ class _AssemblyMixin:
              if r.get("org_state") == "done"}
         )
         keep_min = done_gens[-1] - 2 if done_gens else 0
+        # 协议补缝状态：上一已整理轮的收尾 tool_call 原文（见循环内注释）
+        prev_compact_tail: Optional[dict] = None
+        prev_was_compact = False
         for r in past:
+            evs = r.get("events") or []
             if r.get("org_state") == "done":
                 # 已整理：紧凑视图（原文+意图+精修索引；细节可 expand_history 取回）
                 organized_rounds.append(r)
@@ -109,13 +113,35 @@ class _AssemblyMixin:
                     compact = self._render_compact(r)
                 else:
                     compact = self._render_collapsed(r, ledger)
-                if compact is None:
-                    continue  # 合并组非组首轮：由组首轮合并显示
-                view_msgs.append({"role": "user", "content": r["user_input"]["original"]})
-                view_msgs.append({"role": "assistant", "content": compact})
+                if compact is not None:
+                    view_msgs.append({"role": "user", "content": r["user_input"]["original"]})
+                    view_msgs.append({"role": "assistant", "content": compact})
+                prev_was_compact = True
+                prev_compact_tail = (
+                    evs[-1]["message"]
+                    if evs and evs[-1]["message"].get("role") == "assistant"
+                    and evs[-1]["message"].get("tool_calls")
+                    else None
+                )
             else:
                 # 未整理：原文全量——分辨率损失只允许来自整理，不来自装配
-                view_msgs.extend(e["message"] for e in r["events"])
+                #
+                # 协议补缝（2026-09-12 实测 400）：里程碑检查点把轮闭在
+                # "tool_call 已发出、结果落进下一轮"的中间态。前一轮若已
+                # 整理成紧凑视图（tool_calls 不在流里）而本轮原样回放且以
+                # tool 消息开头，严格端点（DeepSeek）直接 400——补上前一轮
+                # 的收尾 tool_call 原文恢复配对；取不到时丢弃开头的孤儿
+                # tool 消息（协议优先，原文仍在 Full 存档可 expand 取回）。
+                if (prev_was_compact and evs
+                        and evs[0]["message"].get("role") == "tool"):
+                    if prev_compact_tail is not None:
+                        view_msgs.append(prev_compact_tail)
+                    else:
+                        while evs and evs[0]["message"].get("role") == "tool":
+                            evs = evs[1:]
+                view_msgs.extend(e["message"] for e in evs)
+                prev_was_compact = False
+                prev_compact_tail = None
 
         block = []
         if state_render:
@@ -132,7 +158,17 @@ class _AssemblyMixin:
             block = todo_lines + block
 
         msgs.extend(view_msgs)
-        msgs.extend(self._current_round_messages())
+        # 当前轮与上一已整理轮之间的同一处补缝（检查点把 tool_call 留在
+        # 上轮、结果落在本轮开头的形态）
+        cur_msgs = self._current_round_messages()
+        if (prev_was_compact and cur_msgs
+                and cur_msgs[0].get("role") == "tool"):
+            if prev_compact_tail is not None:
+                msgs.append(prev_compact_tail)
+            else:
+                while cur_msgs and cur_msgs[0].get("role") == "tool":
+                    cur_msgs = cur_msgs[1:]
+        msgs.extend(cur_msgs)
         # 信封绝对尾部（2026-09-08 用户拍板，D 组实证）：todo/TaskState/
         # 文件地图是高频变化状态，放在当前轮事件之前时每次变化都作废其
         # 后全部前缀——D 段1 26 次 todo 变化把命中率砸到 77.5%（段2/3
@@ -245,7 +281,23 @@ class _AssemblyMixin:
                 )
         if block:
             msgs.append(_runtime_reminder("\n\n".join(block)))
-        msgs.extend(self._current_round_messages())
+        # 协议补缝（与主装配同款）：检查点轮边界的 tool_call 留在上一轮、
+        # 结果落在本轮开头，而视图历史全是 user/assistant 文本对——补上
+        # 上一轮的收尾 tool_call 原文，避免 tool 消息悬空被严格端点 400
+        cur_msgs = self._current_round_messages()
+        prev_tail = None
+        if past:
+            last_evs = past[-1].get("events") or []
+            if (last_evs and last_evs[-1]["message"].get("role") == "assistant"
+                    and last_evs[-1]["message"].get("tool_calls")):
+                prev_tail = last_evs[-1]["message"]
+        if cur_msgs and cur_msgs[0].get("role") == "tool":
+            if prev_tail is not None:
+                msgs.append(prev_tail)
+            else:
+                while cur_msgs and cur_msgs[0].get("role") == "tool":
+                    cur_msgs = cur_msgs[1:]
+        msgs.extend(cur_msgs)
         return msgs
 
     def _view_round_head(self, r: dict, rec: dict, index: dict) -> list[str]:
