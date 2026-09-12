@@ -140,6 +140,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .bub{font-size:13.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
 .crow.user .bub{background:linear-gradient(180deg,#1d2745,#19223a);border:1px solid #2d3c66;border-radius:12px 3px 12px 12px;padding:10px 14px}
 .crow.agent .bub{background:var(--bg2);border:1px solid var(--line);border-radius:3px 12px 12px 12px;padding:10px 14px}
+.crow.agent .bub.interim{background:transparent;border:none;border-left:2px solid var(--line2);border-radius:0;padding:2px 0 2px 11px;color:var(--tx2);font-size:12.5px}
 .cgroup{margin-bottom:14px}
 .crow.user{margin-top:18px}   /* 轮首用户消息与上一轮拉开（轮头线已移到其下方） */
 .gbox{border:1px solid var(--line2);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:7px}
@@ -1015,7 +1016,9 @@ function drawConv(c,toBottom){
       }
       if(e.type==='tool_call'){
         if(e.thinking)feed(sender,{t:'think',text:e.thinking});
-        if(String(content||'').trim())feed(sender,{t:'text',text:content,tm:when(ei)});
+        // 带工具调用的这步的正文是"过程发言"（边做边说），不是最终回答——
+        // 视觉上弱化，最终回答才醒目地收在最后
+        if(String(content||'').trim())feed(sender,{t:'text',text:content,tm:when(ei),interim:true});
         for(const tc of tcs){
           const name=tc.function?.name||'?';
           calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
@@ -1087,6 +1090,9 @@ function drawConv(c,toBottom){
             <div class="think-body">${esc(it.text)}</div></div>`;
         }
         if(it.t==='text'){
+          if(it.interim){   // 过程发言：左边一条细线，弱化呈现
+            return `<div class="bub interim">${esc(it.text)}</div>${mtm(it.tm)}`;
+          }
           const inner=it.md?md(it.text):esc(it.text);
           return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
             `<div class="bub md">${inner}</div>${mtm(it.tm)}`;
@@ -1550,6 +1556,21 @@ function renderTodo(c){
     `<details class="hist"><summary>🏁 ${esc(h.goal)}</summary>
      <div class="ev"><b>验收证据</b><pre>${esc(h.evidence)}</pre></div></details>`).join('')
     ||'<div class="empty">暂无已验收大步</div>';
+  // todo 工具调用流水：模型对计划做了什么（check_step/push/verify_milestone…）
+  const log=[...(META.todo_log||[])].reverse();
+  const ACT={start_milestone:['🎯 开大步','t-create'],add_step:['＋ 加小步','t-create'],
+    check_step:['✓ 完成小步','t-modify'],drop_step:['↩ 撤小步','t-delete'],
+    defer_check:['⏸ 挂起验收','t-read'],
+    verify_milestone:['🏁 验收大步','t-create'],drop_milestone:['✗ 弃大步','t-delete'],
+    show:['▤ 查看','t-read']};
+  html+='<h3 class="sec">todo 调用流水 · '+log.length+' <span style="font-weight:400;color:var(--tx3)">（模型对计划做过的每一步动作）</span></h3>';
+  html+=log.length?`<div class="tree-body tree-pad">`+log.map(x=>{
+    const m=ACT[x.action]||[x.action||'?','t-read'];
+    return `<div class="frow" style="cursor:default">
+      <span class="fbadge ${m[1]}" style="flex-shrink:0">${m[0]}</span>
+      <span class="fpath" style="flex:1;color:var(--tx2)">${esc(x.text||'（无描述）')}</span>
+      <span class="fmeta"><span class="fsz" style="min-width:0">R${x.seq} · ${esc(fmtClock(x.time))}</span></span></div>`;
+  }).join('')+`</div>`:'<div class="empty" style="padding:14px 0">本会话尚未调用 todo</div>';
   c.innerHTML=html;
 }
 

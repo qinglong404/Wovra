@@ -101,6 +101,23 @@ def test_session_meta_strips_events_keeps_blocks():
     assert "escalations" in meta["task_state"]
 
 
+def test_todo_log_derives_calls():
+    """计划页流水：从轮事件抽 todo 调用（动作/文本/结果配对）。"""
+    data = _fake_task()
+    data["rounds"][0]["events"] += [
+        {"id": "R1-E02", "type": "tool_call", "timestamp": "2026-09-12T10:59:20",
+         "message": {"role": "assistant", "content": "", "tool_calls": [
+             {"id": "t1", "type": "function", "function": {
+                 "name": "todo", "arguments": '{"action": "push", "text": "写单测"}'}}]}},
+        {"id": "R1-E03", "type": "tool_result", "timestamp": "2026-09-12T10:59:21",
+         "message": {"role": "tool", "tool_call_id": "t1", "content": "已加入小步"}},
+    ]
+    log = serve.todo_log(data)
+    assert len(log) == 1
+    assert log[0]["action"] == "push" and log[0]["text"] == "写单测"
+    assert log[0]["result"] == "已加入小步" and log[0]["seq"] == 1
+
+
 def test_session_meta_corrects_legacy_window():
     """旧数据把水位 100K 存成 registry window——投影层即时校正为真实窗口。"""
     data = _fake_task()

@@ -435,6 +435,39 @@ def confirm_tag(question: str) -> str:
     return "q:" + q.strip()[:60]
 
 
+def todo_log(data: dict, limit: int = 60) -> list[dict]:
+    """todo 工具调用流水（从轮事件机械派生，零新口径）。
+
+    计划页要能看到"模型对计划做了什么"——check_step/push/verify_milestone
+    这些动作此前只落在事件里，页面上无处可看。
+    """
+    out: list[dict] = []
+    for r in data.get("rounds") or []:
+        results: dict = {}
+        for e in r.get("events") or []:
+            msg = e.get("message") or {}
+            if msg.get("role") == "tool" and msg.get("tool_call_id"):
+                results[msg["tool_call_id"]] = str(msg.get("content") or "")[:200]
+        for e in r.get("events") or []:
+            msg = e.get("message") or {}
+            for tc in msg.get("tool_calls") or []:
+                fn = tc.get("function") or {}
+                if fn.get("name") != "todo":
+                    continue
+                try:
+                    args = json.loads(fn.get("arguments") or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                out.append({
+                    "seq": r.get("seq"), "time": e.get("timestamp", ""),
+                    "action": str(args.get("action") or ""),
+                    "text": str(args.get("text") or args.get("goal")
+                                or args.get("evidence") or "")[:160],
+                    "result": results.get(tc.get("id"), "")[:200],
+                })
+    return out[-limit:]
+
+
 def session_summary(task_id: str, data: dict) -> dict:
     """会话摘要（列表视图用；小对象，常驻缓存）。"""
     rounds = data.get("rounds") or []
@@ -706,6 +739,7 @@ class _Handler(BaseHTTPRequestHandler):
             meta["approved_tags"] = list(data.get("approved_tags") or [])
             from .agent.support import _ORG_WATERMARK_DEFAULT
             meta["org_watermark"] = _ORG_WATERMARK_DEFAULT   # 整理水位（账本产出条件）
+            meta["todo_log"] = todo_log(data)                 # todo 工具调用流水
             return self._json(meta)
         m = re.fullmatch(r"/api/sessions/([^/]+)/views/(.+)", path)
         if m:
