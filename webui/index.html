@@ -398,6 +398,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 
 .desc-clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .desc-open{display:block;-webkit-line-clamp:unset;overflow:visible}
+.att{color:var(--gold);font-size:10px;margin-left:3px}
 </style>
 </head>
 <body>
@@ -2041,7 +2042,7 @@ function renderUsage(c){
     rowsAll.push({kind:'pending',x});
   }
   const agentTable=!rowsAll.length?'':`
-    <h3 class="sec">按 agent 聚合（轮次/步数精确；用量按 steps 签名归属，近似口径）</h3>
+    <h3 class="sec">按 agent 聚合（实跑轮次/步数精确；「+N 归属」= 渐近归属补判，只归位不重做活，不计用量）</h3>
     <table class="tbl"><thead><tr>
       <th>agent</th><th>轮次</th><th>步数</th><th>上下文峰值 tok</th>
       <th>单轮消费 tok</th><th>重组后视图 tok</th><th>Σprompt tok</th><th>Σ输出 tok</th><th>命中率</th></tr></thead>
@@ -2056,10 +2057,13 @@ function renderUsage(c){
         const a=r.a;
         const hitA=fmtP(a.cached||0,(a.cached||0)+(a.miss||0));
         const vTok=r.vs?(r.vs.tokens||0):(a.ctx_cur||0);
+        const ATTR_TIP='渐近归属：分裂产物生效前到达的轮由主 agent 执行，生效后按域补判了材料归属——只归位、不重做活，故不计入实跑也不计用量';
+        const ar=(a.attributed_rounds||0), as=(a.attributed_steps||0);
         return `<tr><td><span class="mono" style="color:${agentColor(a.agent)}">${esc(prettyName(a.agent))}</span> <span class="mono" style="color:var(--tx3)">${esc(a.agent)}</span></td>
-          <td class="mono">${a.rounds}</td><td class="mono">${fmtN(a.steps||0)}</td>
+          <td class="mono">${a.rounds}${ar?`<span class="att" title="${esc(ATTR_TIP)}"> +${ar} 归属</span>`:''}</td>
+          <td class="mono">${fmtN(a.steps||0)}${as?`<span class="att" title="${esc(ATTR_TIP)}"> +${fmtN(as)} 归属</span>`:''}</td>
           <td class="mono">${fmtN(a.ctx_peak||0)}</td><td class="mono">${fmtN(a.avg_prompt||0)}</td>
-          <td class="mono" style="color:var(--acc)">${vTok?fmtN(vTok):'—'}</td>
+          <td class="mono" style="color:${vTok?'var(--acc)':'var(--tx3)'}">${vTok?fmtN(vTok):'未接活'}</td>
           <td class="mono">${fmtN(a.prompt||0)}</td><td class="mono">${fmtN(a.completion||0)}</td>
           <td class="mono" style="color:var(--teal)">${hitA}</td></tr>`}).join('')}</tbody></table>`;
   c.innerHTML=

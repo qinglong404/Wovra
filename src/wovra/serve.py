@@ -81,6 +81,27 @@ def round_usage_map(data: dict) -> dict[int, dict]:
     return out
 
 
+_ATTR_RE = re.compile(r"R(\d+)→([^、（）]+)")
+
+
+def attributed_seqs(data: dict) -> dict:
+    """渐近归属补判过的轮（seq → 补判到的视图），从 history 的 route 行机械解析。
+
+    这些轮**实际由主 agent 执行**（它们到达时域树尚不存在），只是材料归属
+    后来补判给了某个域。故计数与用量都该记在实际执行方，归属另列。
+    """
+    out: dict = {}
+    for h in data.get("history") or []:
+        if h.get("kind") != "route":
+            continue
+        detail = str(h.get("detail") or "")
+        if "渐近归属" not in detail:
+            continue
+        for m in _ATTR_RE.finditer(detail):
+            out[int(m.group(1))] = m.group(2).strip()
+    return out
+
+
 def agent_stats(
     data: dict, main_id: str = "", registry: list | None = None
 ) -> list[dict]:
@@ -104,14 +125,19 @@ def agent_stats(
         if aid not in per:
             per[aid] = {"agent": aid, "rounds": 0, "steps": 0, "prompt": 0,
                         "cached": 0, "miss": 0, "completion": 0,
-                        "ctx_peak": 0, "billed_rounds": 0}
+                        "ctx_peak": 0, "billed_rounds": 0,
+                        "attributed_rounds": 0, "attributed_steps": 0}
             order.append(aid)
         return per[aid]
 
     usage = round_usage_map(data)
+    attr = attributed_seqs(data)
     for r in rounds:
-        aid = r.get("active_view") or main_id
-        b = bucket(aid)
+        view = r.get("active_view") or main_id
+        # 渐近归属补判的轮：实际执行方是主 agent（到达时域树还没建），
+        # 计数与用量都记它；补判到的域另计 attributed_*（只归位、没干活）
+        executor = main_id if r.get("seq") in attr else view
+        b = bucket(executor)
         b["rounds"] += 1
         b["steps"] += r.get("steps_used") or 0
         agg = usage.get(r.get("seq")) or {}
@@ -120,6 +146,10 @@ def agent_stats(
         for k in _USAGE_KEYS:
             b[k] += agg.get(k, 0)
         b["ctx_peak"] = max(b["ctx_peak"], agg.get("context", 0))
+        if r.get("seq") in attr and view != executor:
+            ab = bucket(view)
+            ab["attributed_rounds"] += 1
+            ab["attributed_steps"] += r.get("steps_used") or 0
 
     out = []
     runtime = registry_module.runtime_stats(
