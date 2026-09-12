@@ -569,6 +569,22 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 
 
+def view_sizes(task_id: str) -> dict | None:
+    """各 agent 重组后视图体量（走 pending_views 的物化，剥掉消息正文）。
+
+    顶部状态栏用：未生效的分裂产物也要显示"重组后各 agent 各看到多少"，
+    不然注册表里只剩分裂前那次装配的旧数（实测：显示 17K，实际重组后 5.9K）。
+    """
+    got = pending_views(task_id)
+    if got is None:
+        return None
+    return {"agents": [{k: a.get(k) for k in
+                        ("id", "name", "is_main", "count", "total_chars",
+                         "alt_count", "alt_chars")}
+                       for a in got.get("agents") or []],
+            "pending": True, "note": got.get("note")}
+
+
 def _split_meta(r: dict) -> dict | None:
     """分裂结果（已落实的轮字段 + 尚未落实的 pending_org）——机械透出。
 
@@ -889,6 +905,12 @@ class _Handler(BaseHTTPRequestHandler):
         if m:
             view = unquote(m.group(2))
             result = view_messages(m.group(1), view)
+            if result is None:
+                return self._json({"error": "session not found"}, 404)
+            return self._json(result)
+        mvs = re.fullmatch(r"/api/sessions/([^/]+)/view-sizes", path)
+        if mvs:
+            result = view_sizes(mvs.group(1))
             if result is None:
                 return self._json({"error": "session not found"}, 404)
             return self._json(result)

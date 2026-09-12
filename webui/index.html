@@ -683,6 +683,7 @@ function renderHeader(){
     `<span class="chip ${META&&META.safety_mode==='auto'?'bad':'warn'}" style="cursor:pointer;align-self:center;margin-left:6px" onclick="toggleSafety()" title="点击切换：审批模式（敏感操作先问）/ 自主运行（确认闸门全部放行）">${META&&META.safety_mode==='auto'?'⚡ 自主运行':'⚿ 审批模式'}</span>`;
   renderFollowChip();
   renderCtxbar();
+  ensureViewSizes().then(()=>{if(META)renderCtxbar()});
 }
 function setTab(t){TAB=t;renderHeader();renderTab()}
 function copySid(el){
@@ -1178,7 +1179,42 @@ function ci_status(ci){
 
 /* ---- 对话页顶部的 agent 上下文条（注册表运行时账）----
    分母 window = 模型上下文窗口（WOVRA_CONTEXT_LIMIT，默认 1M），不是整理水位 */
+let VIEWSIZES=null;   // {sig, agents:[{id,name,is_main,count,total_chars,...}]}
+async function ensureViewSizes(force){
+  if(!META)return;
+  const pend=(META.round_list||[]).filter(r=>r.split&&r.split.pending&&(r.split.domains||[]).length);
+  if(!pend.length){VIEWSIZES=null;return}   // 无暂存产物：状态栏用注册表现值即可
+  const sig=CUR+'|'+(META.round_list||[]).length+'|'+pend.length;
+  if(!force&&VIEWSIZES&&VIEWSIZES.sig===sig)return;
+  try{
+    const d=await api(`/api/sessions/${CUR}/view-sizes`);
+    VIEWSIZES={sig,agents:d.agents||[]};
+  }catch(e){VIEWSIZES=null}
+}
 function renderCtxbar(){
+  // 有暂存产物时显示"重组后"各 agent 体量（含尚未并入注册表的子 agent），
+  // 否则用注册表运行时账——两种口径都在标签里写明
+  if(VIEWSIZES&&(VIEWSIZES.agents||[]).length){
+    const bar=document.getElementById('ctxbar');
+    bar.classList.add('show');
+    bar.innerHTML=VIEWSIZES.agents.map(a=>{
+      const col=agentColor(a.id||a.name);
+      const win=((META.registry||[]).find(e=>e.id===a.id||e.name===a.name)||{}).window||1000000;
+      const share=win?a.total_chars/win*100:0;
+      const lab=a.is_main?'主 agent':(a.id||'');
+      return `<div class="ctx-cell" title="${esc(a.name||'')}（${esc(a.id||'')}）&#10;重组后视图 ${fmtN(a.total_chars)} 字符（≈${fmtN(Math.round(a.total_chars/3))} tok · ${a.count} 条）${a.alt_chars?`
+对照：全量装配 ${fmtN(a.alt_chars)} 字符`:''}&#10;待生效：轮闭合或开新轮时并入注册表">
+        <span class="ctx-dot" style="background:${col}"></span>
+        <span class="mono" style="color:${col}">${esc(lab)}</span>
+        <span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${col}"></i></span>
+        <span class="mono">${fmtN(a.total_chars)}/${fmtN(win)}</span>
+        <span class="fbadge t-modify" style="flex-shrink:0">重组后·待生效</span></div>`;
+    }).join('');
+    return;
+  }
+  renderCtxbarReg();
+}
+function renderCtxbarReg(){
   const bar=document.getElementById('ctxbar');
   const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
   bar.classList.toggle('show',!!entries.length);
@@ -1378,7 +1414,7 @@ async function answerJob(jobId,ans){
 }
 
 async function refreshAfterTurn(){
-  META=await api('/api/sessions/'+CUR);buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
+  META=await api('/api/sessions/'+CUR);VIEWSIZES=null;buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
   if(META.live_job&&!LIVE.job)liveAttach(META.live_job);
   const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
   if(fresh.length){
