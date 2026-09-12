@@ -111,13 +111,14 @@ class _CoreMixin:
         # 开场前建好）；而"开新轮"是唯一的切换点——两者必须互斥，否则会出现
         # "正在开轮、产物同时改写装配"的竞选，破坏前缀纪律。
         self._view_lock = threading.RLock()
-        # 维护快照的推迟标记（2026-09-11 实测缺陷的落点）：里程碑闭合发生
-        # 在工具方法体**内部**（todo→verify_milestone→close_round），此刻
-        # 调用方的 assistant(tool_calls) 还没有 tool 结果。若在此刻取装配
-        # 快照，尾部就是"未被回复的 tool_calls"，紧接着追加的整理指令以
-        # user 角色出现——严格端点直接 400（实测 21:27 那批 1 秒失败、
-        # 未计费，靠下一批次补上）。置位后由 _finish_tool_result 在结果
-        # 落盘后补做水位检查。
+        # 维护快照的推迟标记（2026-09-11 实测缺陷的落点；§53 之后成**防御性**
+        # 路径）：若轮在工具方法体**内部**被闭合（历史上由检查点切轮触发：
+        # todo→verify_milestone→close_round），此刻调用方的 assistant(tool_calls)
+        # 还没有 tool 结果。若在此刻取装配快照，尾部就是"未被回复的 tool_calls"，
+        # 紧接着追加的整理指令以 user 角色出现——严格端点直接 400（实测 21:27
+        # 那批 1 秒失败、未计费，靠下一批次补上）。置位后由 _finish_tool_result
+        # 在结果落盘后补做水位检查。§53 把检查点改为轮内标记后，内置路径不再在
+        # 工具体内闭合轮，但 \c 续跑/中断重放/未来实现仍可能需要它。
         self._maint_deferred = False
         # 整理代次（2026-09-10 用户拍板：视图只保留最近 3 批整理，更早的
         # 按文件状态折叠）：每次成功整理 +1，批次轮打 org_generation 落盘；
@@ -205,7 +206,7 @@ class _CoreMixin:
             # 由方法体守卫拒绝（见 submit_organization / submit_domains）。
             self.register(self.submit_organization, schema=_ORG_SUBMIT_SCHEMA)
             self.register(self.submit_domains, schema=_ORG_DOMAINS_SCHEMA)
-            # 大步/小步计划账本（工作工具，深度恒 1，见 todo-milestone-tool.md）
+            # 阶段/工作项计划账本（工作工具，深度恒 1，见 todo-milestone-tool.md）
             self.register(self.todo, schema=_TODO_SCHEMA)
             # 跨 agent 通信（机制五）：单向 notify / 双向 consult
             self.register(self.notify, schema=_NOTIFY_SCHEMA)
@@ -719,6 +720,8 @@ class _CoreMixin:
         self.current_round["blocks"] = blocks_module.segment_round_by_file(
             self.current_round
         )
+        # 阶段锚点回填（§53）：块切分完成才能说清"这次阶段验收落在哪个块"。
+        self._backfill_stage_anchors()
         self._account_agent_activity()   # 3a：轮次/步数落到最终接手方
         self.current_round = None
         self._persist_rounds()
@@ -884,14 +887,14 @@ class _CoreMixin:
                 # 中断通知记为持久轮事件（runtime-reminder 信封，每轮只记
                 # 一次）：重试与 \c 续跑时模型都知道此前响应失败过，重试
                 # 不再是盲目的从头再想——思考无法回传（协议 400），能给的
-                # 只有 steering：压缩思考、直接迈第一小步
+                # 只有 steering：压缩思考、直接迈出第一个工作项
                 if empty_streak == 1:
                     self._record_event(
                         "runtime_note",
                         _runtime_reminder(
                             "上一次响应在生成中途被异常终止，未产出任何正文"
                             "（长思考流被服务端掐断）。请大幅压缩思考，不要"
-                            "重做完整规划，直接迈出第一小步（一次工具调用），"
+                            "重做完整规划，直接迈出第一个工作项（一次工具调用），"
                             "分多步边做边验证。"
                         ),
                     )
@@ -1026,10 +1029,10 @@ class _CoreMixin:
             self.task.record("tool_result", f"{name} -> {result_for_context[:500]}")
             self._persist_rounds()
 
-        # 补做被推迟的水位检查（2026-09-11 400 实测的收尾）：工具方法体内
-        # 闭合轮时（todo→verify_milestone→close_round）快照协议不全，检查
-        # 被置为 deferred；现在这条调用的 tool 结果已落盘、装配合法，正是
-        # 补取的时机——水位口径与触发条件都不变，只是晚了半拍。
+        # 补做被推迟的水位检查（2026-09-11 400 实测的收尾；§53 之后为防御性
+        # 路径）：轮若在工具方法体内被闭合，当时快照协议不全，检查被置为
+        # deferred；现在这条调用的 tool 结果已落盘、装配合法，正是补取的
+        # 时机——水位口径与触发条件都不变，只是晚了半拍。
         if self._maint_deferred:
             self._maint_deferred = False
             self._maybe_organize_batch()

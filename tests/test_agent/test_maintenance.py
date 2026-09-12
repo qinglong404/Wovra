@@ -1370,13 +1370,18 @@ def _dangling(msgs: list[dict]) -> list[str]:
     return sorted(bad | pending)
 
 
-def test_maint_snapshot_defers_when_protocol_incomplete(monkeypatch, tmp_path):
-    """协议闸门（2026-09-11 400 实测的修法）：闭合发生在**工具方法体内部**
-    时（todo→verify_milestone→close_round），调用方的 tool 结果尚未落盘，
-    装配尾部就是未回复的 tool_calls——此刻取快照、追加整理指令，严格端点
-    直接 400（实测 21:27 那批 1 秒失败、未计费，产物只能等下一批补上）。
+def test_maint_snapshot_gate_defers_on_dangling_tail(monkeypatch, tmp_path):
+    """协议闸门：装配尾悬空时**不取快照**，置 deferred，结果落盘后补做。
 
-    修法：此刻不取快照，置 deferred；该调用的 tool 结果落盘后自动补做。
+    原始触发场景（2026-09-11 400 实测的修法）：检查点切轮会在**工具方法体内**
+    闭合轮（todo→verify_milestone→close_round），此刻调用方的 tool 结果尚未
+    落盘，装配尾部是未回复的 tool_calls——取快照追加整理指令会被严格端点
+    直接 400（实测 21:27 那批 1 秒失败、未计费）。
+
+    **§53（2026-09-12）之后检查点改为轮内标记、不再切轮**，内置路径不再在
+    工具方法体内闭合轮，故闸门成为**防御性**路径（\\c 续跑、中断重放、未来
+    任何"工具体内闭合"的实现仍需要它）。本用例直接构造那个现场，钉住闸门
+    本身与 deferred 的补做回路。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     task = Task.create(goal="g")
@@ -1387,23 +1392,40 @@ def test_maint_snapshot_defers_when_protocol_incomplete(monkeypatch, tmp_path):
     )
     agent._open_or_reuse_round("干活")
     agent._record_event("user", {"role": "user", "content": "干活"})
-    agent.todo(action="start_milestone", goal="大步甲", acceptance=["可跑"])
-    agent.todo(action="add_step", text="小步一")
-    agent.todo(action="check_step", text="小步一")
-    args = json.dumps({"action": "verify_milestone", "evidence": "测试全绿"})
-    # 主循环的真实形态：先记 assistant(tool_calls)，再执行工具
-    agent._record_event("tool_call", {
-        "role": "assistant", "content": "",
-        "tool_calls": [{"id": "call_1", "type": "function",
-                        "function": {"name": "todo", "arguments": args}}],
+    # 模拟"轮已在工具方法体内闭合"（§53 之前由检查点触发）——不走 close_round，
+    # 免得它顺手把这次水位检查做掉（那样就测不到闸门了）
+    r = agent.rounds[-1]
+    r["end_state"] = "completed"
+    r["org_state"] = ""
+    agent.current_round = None
+
+    # 闭合那一刻的装配尾：一条未回复的 tool_calls（调用方结果尚未落盘）
+    args = json.dumps({"action": "verify_stage", "evidence": "测试全绿"})
+    r["events"].append({
+        "id": "R1-E99", "type": "tool_call", "status": "",
+        "truncated": "todo(verify_stage)",
+        "message": {"role": "assistant", "content": "",
+                    "tool_calls": [{"id": "call_1", "type": "function",
+                                    "function": {"name": "todo", "arguments": args}}]},
     })
     agent.last_context_estimate = 5000
-    # 闭合那一刻的装配：尾部正是这条未回复的 tool_call → 闸门拦下
-    agent._tools_running = True   # 真实路径=工具批次执行中（悬空尾兜底只修重载遗留）
+    agent._tools_running = True   # 真实路径=工具批次执行中
     assert agent._maint_snapshot() is None
-    assert _dangling(agent._assemble_messages()) == ["call_1"]
 
-    agent._execute("call_1", "todo", args)  # 内部 close_round → 水位检查
+    agent._maybe_organize_batch()          # 水位到线，但尾部悬空 → 推迟
+
+    assert agent._maint_deferred is True   # 推迟，不冒 400 的风险
+    assert agent.llm.calls == []           # 一条整理调用都没发
+    details = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
+    assert any("水位检查推迟" in d for d in details), details
+
+    # 结果落盘（补进同一轮）→ 补做那条被推迟的检查
+    r["events"].append({
+        "id": "R1-E100", "type": "tool_result", "status": "",
+        "truncated": "todo -> OK",
+        "message": {"role": "tool", "tool_call_id": "call_1", "content": "OK"},
+    })
+    agent._finish_tool_result("call_1", "todo", args, "OK")
 
     assert agent._maint_deferred is False  # 已补做，标记复位
     org_calls = [c for c in agent.llm.calls
@@ -1411,8 +1433,6 @@ def test_maint_snapshot_defers_when_protocol_incomplete(monkeypatch, tmp_path):
                         for m in c["messages"])]
     assert len(org_calls) == 1, "结果落盘后应补发起整理（不吞掉这次触发）"
     assert _dangling(org_calls[0]["messages"]) == []  # 补做时输入协议完整
-    details = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
-    assert any("水位检查推迟" in d for d in details), details
 
 
 def test_maint_snapshot_taken_when_protocol_complete(monkeypatch, tmp_path):

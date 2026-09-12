@@ -463,30 +463,43 @@ class _AssemblyMixin:
         return " ".join(parts).strip()
 
     def _todo_tail_lines(self) -> list[str]:
-        """当前大步/小步进度的尾部展示（跨轮续跑的工作记忆；空则不占位）。"""
+        """当前阶段 / 工作项进度的尾部展示（跨轮续跑的工作记忆；空则不占位）。
+
+        词表见 worklog §53：大步 → **阶段**（M{n}），小步 → **工作项**；
+        "步"从此只指执行步数。
+        """
         todo = (self.task.todo or {}) if self.task is not None else {}
         milestone = todo.get("milestone")
         if not milestone:
             return []
         steps = todo.get("steps") or []
         done_n = sum(1 for s in steps if s["done"])
-        lines = [f"[当前大步] {milestone['goal']}（小步 {done_n}/{len(steps)}）"]
+        stage_id = f"{milestone.get('id')} " if milestone.get("id") else ""
+        lines = [
+            f"[当前阶段] {stage_id}{milestone['goal']}"
+            f"（工作项 {done_n}/{len(steps)}）"
+        ]
         if not milestone.get("planned"):
             # 结构闸门是拒绝式反馈，但模型看不到"还没拆"这件事——尾部
             # 用一行提醒把它变成可操作项，避免 verify 时才发现被拒
-            lines.append("[待办] 本大步尚未拆小步——先 add_step 拆出阶段内工作项")
+            lines.append(
+                "[待办] 本阶段尚未拆工作项——先 add_item 拆出阶段内的工作项"
+            )
         deferred = milestone.get("deferred") or []
         if deferred:
-            lines.append(f"[挂起人工验收] {len(deferred)} 项，大步收尾一次性呈交")
+            lines.append(
+                f"[挂起人工验收] {len(deferred)} 项，阶段收尾一次性呈交"
+            )
         return lines
 
     def _milestone_map_lines(self, rounds: list[dict]) -> list[str]:
-        """轮 ↔ 大步映射（整理/分裂指令的现状归属辅助）。
+        """轮 ↔ 阶段映射（整理/分裂指令的现状归属辅助）。
 
-        大步 = 可验收单元（todo.history 已验收 + 在飞 milestone）。同一
-        大步的轮通常同属一个功能域，映射帮整理/分裂分析判断现状归属；
-        历史条目缺 started_seq（迁移前的旧数据）时按"上一个大步闭合轮
-        +1"推断，保证区间无重叠。无大步记录返回空列表。
+        阶段 = 可验收单元（`todo.history` 已验收 + 进行中的 `milestone`），
+        带 M{n} 编号与 `{round, event, block}` 锚点。同一阶段的轮通常同属一个
+        功能域，映射帮整理/分裂分析判断现状归属；历史条目缺 started_seq
+        （迁移前的旧数据）时按"上一阶段闭合轮 +1"推断，保证区间无重叠。
+        无阶段记录返回空列表。
         """
         todo = (self.task.todo or {}) if self.task is not None else {}
         spans: list[tuple[int, Optional[int], str, str]] = []
@@ -498,28 +511,30 @@ class _AssemblyMixin:
             start = e.get("started_seq")
             if not start or start <= prev_end:
                 start = prev_end + 1
-            spans.append((start, end, str(e.get("goal") or ""), "已验收"))
+            label = f"{e.get('id')} " if e.get("id") else ""
+            spans.append((start, end, label + str(e.get("goal") or ""), "已验收"))
             prev_end = end
         m = todo.get("milestone")
         if m and m.get("started_seq"):
             start = m["started_seq"]
             if start <= prev_end:
                 start = prev_end + 1
-            spans.append((start, None, str(m.get("goal") or ""), "进行中"))
+            label = f"{m.get('id')} " if m.get("id") else ""
+            spans.append((start, None, label + str(m.get("goal") or ""), "进行中"))
         if not spans:
             return []
         lines = [
-            "[轮↔大步映射]（大步 = 可验收单元；同一大步的轮通常同属一个功能域，"
-            "辅助现状归属判断）"
+            "[轮↔阶段映射]（阶段 = 可验收单元，带 M 编号；同一阶段的轮通常同属"
+            "一个功能域，辅助现状归属判断）"
         ]
         for r in rounds:
             seq = r["seq"]
-            tag = "未进入大步"
+            tag = "未进入任何阶段"
             for start, end, goal, status in spans:
                 if (end is None and seq >= start) or (
                     end is not None and start <= seq <= end
                 ):
-                    tag = f"大步『{goal[:36]}』（{status}）"
+                    tag = f"阶段『{goal[:36]}』（{status}）"
                     break
             lines.append(f"  R{seq} ← {tag}")
         return lines

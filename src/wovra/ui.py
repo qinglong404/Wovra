@@ -452,7 +452,7 @@ def report_view(task, children: list[dict] | None = None) -> str:
     if state.current_status:
         lines.append(f"当前状态：{state.current_status}")
 
-    lines += ["", "## 当前阶段（大步 / 小步）"]
+    lines += ["", "## 计划（阶段 / 工作项）"]
     lines += task.todo_lines()
 
     lines += ["", "## 已完成"]

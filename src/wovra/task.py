@@ -138,8 +138,8 @@ _PATCH_LIST_FIELDS = (
 #
 # `completed` **退出模型侧**，理由三条实测依据：
 # 1. 它是唯一无限增长的节——活会话实测 49 条 / 19,582 字符 / 14,005 tok，
-#    占全部条目文本的 62.7%，而其内容几乎全是 `[大步] …（验收：…）`，
-#    即 verify_milestone 自动写入的**验收证据副本**，与 worklog、
+#    占全部条目文本的 62.7%，而其内容几乎全是 `[阶段] …（验收：…）`，
+#    即 verify_stage 自动写入的**验收证据副本**，与 worklog、
 #    report.md、events 流三重冗余；
 # 2. R16 的按节预算已把它压到 143 tok——占着 62.7% 的存储，模型实际
 #    只看到一句片段，等于纯噪声；
@@ -500,7 +500,7 @@ class Task:
     parent_id: str = ""
     org_context: str = ""
     pending_instruction: str = ""
-    todo: dict = field(default_factory=dict)  # 大步/小步计划账本（深度恒 1）
+    todo: dict = field(default_factory=dict)  # 阶段/工作项计划账本（深度恒 1）
     # agent 注册表（机制三）：路径 ID / 类别描述 / 所有权文件域 / 状态 /
     # 收件箱（单向通信的落信处）+ per-agent 运行时账（轮次/步数/上下文体量/
     # 窗口，2026-09-12 3a）。默认只有主 agent；分裂执行时扩充
@@ -547,9 +547,11 @@ class Task:
         return state
 
     def todo_lines(self) -> list[str]:
-        """机械渲染当前大步/小步计划账本（人视图共用，零 LLM）。
+        """机械渲染当前阶段 / 工作项计划账本（人视图共用，零 LLM）。
 
-        大步 = 阶段（最小可行 → 逐步增加功能），小步 = 阶段内的拆解。
+        词表（2026-09-12 用户口径，worklog §53）：**阶段**（Stage，M{n}）= 可
+        验收的推进增量；**工作项**（Item）= 阶段内的拆解。旧名"大步/小步"带
+        "步"字，与执行账里的"步数"撞车，故只改看得见的词（落盘键不变）。
         这份账本平时只进模型上下文，人看不到；这里把它变成可读文本。
         """
         todo = self.todo or {}
@@ -557,24 +559,29 @@ class Task:
         steps = todo.get("steps") or []
         history = todo.get("history") or []
         if not milestone:
-            lines = ["-（无开启中的大步）"]
+            lines = ["-（无进行中的阶段）"]
             if history:
                 # 历史 goal 可能是整段阶段描述，人视图只留一句摘要
-                last = _one_line(str(history[-1].get("goal", "")), 50)
-                lines.append(f"- 已验收 {len(history)} 个大步（最近：{last}）")
+                last = history[-1]
+                label = f"{last.get('id')} " if last.get("id") else ""
+                lines.append(
+                    f"- 已验收 {len(history)} 个阶段"
+                    f"（最近：{label}{_one_line(str(last.get('goal', '')), 50)}）"
+                )
             return lines
         done_n = sum(1 for s in steps if s.get("done"))
         detail = []
         if milestone.get("started_seq") is not None:
             detail.append(f"自 R{milestone['started_seq']}")
         if steps or milestone.get("planned"):
-            detail.append(f"小步 {done_n}/{len(steps)}")
+            detail.append(f"工作项 {done_n}/{len(steps)}")
+        stage_id = f"{milestone.get('id')} " if milestone.get("id") else ""
         lines = [
-            f"- 大步：{_one_line(str(milestone.get('goal', '')), 80)}"
+            f"- 阶段 {stage_id}{_one_line(str(milestone.get('goal', '')), 80)}"
             + (f"（{'；'.join(detail)}）" if detail else "")
         ]
         if not milestone.get("planned"):
-            lines.append("  - 尚未拆小步——先 add_step 拆出阶段内工作项")
+            lines.append("  - 尚未拆工作项——先 add_item 拆出阶段内的工作项")
         acceptance = milestone.get("acceptance") or []
         if acceptance:
             lines.append(
@@ -586,11 +593,11 @@ class Task:
         for d in milestone.get("deferred") or []:
             lines.append(f"  - [待人工验收] {_one_line(str(d), 60)}")
         if history:
-            lines.append(f"- 已验收 {len(history)} 个大步")
+            lines.append(f"- 已验收 {len(history)} 个阶段")
         return lines
 
     def todo_summary_line(self) -> str:
-        """当前大步/小步的单行摘要（终端底栏用，无颜色）。
+        """当前阶段 / 工作项的单行摘要（终端底栏用，无颜色）。
 
         bottom_toolbar 不解析裸 ANSI，所以这里只给纯文本；着色与否
         由调用方（终端）决定。
@@ -599,17 +606,18 @@ class Task:
         milestone = todo.get("milestone")
         history = todo.get("history") or []
         if not milestone:
-            line = "无开启大步"
+            line = "无进行中的阶段"
             if history:
                 line += f" · 已验收 {len(history)} 个"
             return line
         steps = todo.get("steps") or []
-        line = f"阶段 {_one_line(str(milestone.get('goal', '')), 40)}"
+        stage_id = f"{milestone.get('id')} " if milestone.get("id") else ""
+        line = f"阶段 {stage_id}{_one_line(str(milestone.get('goal', '')), 40)}"
         if milestone.get("planned") or steps:
             done_n = sum(1 for s in steps if s.get("done"))
-            line += f" · 小步 {done_n}/{len(steps)}"
+            line += f" · 工作项 {done_n}/{len(steps)}"
         else:
-            line += " · 未拆小步"
+            line += " · 未拆工作项"
         deferred = milestone.get("deferred") or []
         if deferred:
             line += f" · 待验收 {len(deferred)}"
@@ -628,7 +636,7 @@ class Task:
         `acceptance_criteria` 参数已删除（2026-09-11 遗产整治）：实测
         0/77 会话有数据、src 内 0 处消费者，唯一使用者是 experiments/
         脚本（改为把验收清单写进自己的 meta.json）。现行验收口径是
-        大步的 `acceptance` 字段（见 `todo` 账本与 todo-milestone-tool.md）。
+        阶段的 `acceptance` 字段（见 `todo` 账本与 todo-milestone-tool.md）。
         """
         now = datetime.now()
         task_id = now.strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:6]
@@ -891,7 +899,7 @@ class Task:
         if self.requirements:
             lines.append("\n## 需求\n")
             lines += [f"- {r}" for r in self.requirements]
-        lines.append("\n## 当前阶段（大步 / 小步）\n")
+        lines.append("\n## 计划（阶段 / 工作项）\n")
         lines += self.todo_lines()
         lines.append("\n## 当前进展（AI 维护）\n")
         lines.append(self.summary or "_尚无进展摘要。_")

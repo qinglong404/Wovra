@@ -485,13 +485,14 @@ _TODO_SCHEMA: dict = {
     "function": {
         "name": "todo",
         "description": (
-            "大步/小步计划账本（深度恒 1：只存当前大步，验收通过后才写"
-            "下一大步）。两层是两个维度（不是平铺的一条清单）：大步 = "
-            "阶段——从最小可行起步、逐步增加功能，一次可验收的增量；"
-            "小步 = 阶段内的工作拆解——阶段内直接做仍然复杂，必须先 "
-            "add_step 拆成能逐步完成、逐步自证的工作项再动手，全部完成"
-            "后才能 verify（结构闸门：未拆过小步或带未完成小步的验收"
-            "会被拒绝）。"
+            "阶段/工作项计划账本（深度恒 1：只存当前阶段，验收通过后才写"
+            "下一阶段）。两层是两个维度（不是平铺的一条清单）：**阶段** = "
+            "从最小可行起步、逐步增加功能，一次可验收的增量（带 M 编号）；"
+            "**工作项** = 阶段内的拆解——阶段内直接做仍然复杂，必须先 "
+            "add_item 拆成能逐步完成、逐步自证的工作项再动手，全部完成"
+            "后才能 verify（结构闸门：未拆过工作项或带未完成工作项的验收"
+            "会被拒绝）。验收 = 轮内**检查点**（带 {round, event, block} "
+            "锚点），**不切轮**——轮 = 一次用户输入到最终回答。"
         ),
         "parameters": {
             "type": "object",
@@ -499,45 +500,43 @@ _TODO_SCHEMA: dict = {
                 "action": {
                     "type": "string",
                     "enum": [
-                        "start_milestone", "add_step", "check_step",
-                        "drop_step", "defer_check", "verify_milestone",
-                        "drop_milestone", "show",
+                        "start_stage", "add_item", "check_item",
+                        "drop_item", "defer_check", "verify_stage",
+                        "drop_stage", "show",
                     ],
                     "description": "动作",
                 },
                 "goal": {
                     "type": "string",
-                    "description": "start_milestone：本大步要交付什么",
+                    "description": "start_stage：本阶段要交付什么",
                 },
                 "acceptance": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": (
-                        "start_milestone：验收标准（可检验），必填，硬上限 3 条"
-                        "（1-3 条）——入口是证据不是自述。里程碑驱动轮下验收即"
-                        "轮边界（verify 时闭合当前轮），验收标准宽度直接决定轮"
-                        "粒度与整理批次大小：按可验收的增量划大步，超 3 条拆成"
-                        "下一大步"
+                        "start_stage：验收标准（可检验），必填，硬上限 3 条"
+                        "（1-3 条）——入口是证据不是自述。按可验收的增量划"
+                        "阶段，超 3 条拆成下一阶段"
                     ),
                 },
                 "text": {
                     "type": "string",
                     "description": (
-                        "add/check/drop_step、defer_check 的条目文本。"
-                        "add_step 写阶段内的工作项——开好大步后第一件事"
-                        "就是拆小步（结构闸门：没拆过小步的 verify 会被拒）"
+                        "add/check/drop_item、defer_check 的条目文本。"
+                        "add_item 写阶段内的工作项——开好阶段后第一件事"
+                        "就是拆工作项（结构闸门：没拆过工作项的 verify 会被拒）"
                     ),
                 },
                 "evidence": {
                     "type": "string",
                     "description": (
-                        "verify_milestone：验收证据（测试输出/人工确认），"
+                        "verify_stage：验收证据（测试输出/人工确认），"
                         "必填，禁止自述完成"
                     ),
                 },
                 "reason": {
                     "type": "string",
-                    "description": "drop_milestone：作废原因，必填（计划可证伪，留死亡原因）",
+                    "description": "drop_stage：作废原因，必填（计划可证伪，留死亡原因）",
                 },
             },
             "required": ["action"],

@@ -183,7 +183,7 @@ def test_local_command_report_and_todo(monkeypatch, tmp_path, capsys):
     _local_command("/report", task)  # 斜杠前缀等价
     out = capsys.readouterr().out
     assert "任务报告" in out
-    assert "当前阶段（大步 / 小步）" in out and "骨架可跑" in out
+    assert "计划（阶段 / 工作项）" in out and "骨架可跑" in out
 
 
 def test_toolbar_text_has_stage_and_hotkeys():

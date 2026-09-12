@@ -271,6 +271,6 @@ def test_report_view_renders_todo(monkeypatch, tmp_path):
     task.save()
 
     out = ui.report_view(task)
-    assert "## 当前阶段（大步 / 小步）" in out
-    assert "骨架可跑" in out and "小步 0/1" in out
+    assert "## 计划（阶段 / 工作项）" in out
+    assert "骨架可跑" in out and "工作项 0/1" in out
     assert "[ ] 渲染循环" in out

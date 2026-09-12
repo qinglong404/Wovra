@@ -43,7 +43,7 @@ def _flush_stdin() -> None:
         pass
 
 def _toolbar_text(task: Task) -> str:
-    """输入行底栏：当前大步/小步 + 快捷键提示。
+    """输入行底栏：当前阶段/工作项 + 快捷键提示。
 
     纯文本——prompt_toolkit 的 bottom_toolbar 不解析裸 ANSI 转义，
     ui.paint 的着色码会原样显示，所以这里不套颜色（着色归终端主题）。
@@ -167,7 +167,7 @@ def _chat_help() -> None:
     print(ui.rule("chat 模式帮助"))
     print("直接输入文字即可对话，每轮结束自动保存到磁盘。")
     print(f"  {ui.paint('help / 帮助', 'bold')}      显示本帮助")
-    print(f"  {ui.paint('report / maint / todo', 'bold')}  会话内看报告 / 整理分裂进度 / 当前大步小步（快捷键 F2 / F3）")
+    print(f"  {ui.paint('report / maint / todo', 'bold')}  会话内看报告 / 整理分裂进度 / 当前阶段与工作项（快捷键 F2 / F3）")
     print(f"  {ui.paint('bg / undo / c', 'bold')}  本地命令（\\help 看全部；零模型成本）")
     print(f"  {ui.paint('exit / quit / 退出', 'bold')}  保存并离开会话")
     print(f"  {ui.paint('Ctrl+C / Ctrl+D', 'bold')}  同 exit")
@@ -204,7 +204,7 @@ def cmd_chat(args: argparse.Namespace) -> None:
         _replay_history(task)
         print(ui.info("输入指令开始对话；\\help 看本地命令，help 查看帮助，exit 退出。\n"))
 
-        # 输入会话建一次：跨轮复用输入历史，底栏常驻显示当前大步/小步
+        # 输入会话建一次：跨轮复用输入历史，底栏常驻显示当前阶段/工作项
         prompt_session = _make_prompt_session(task)
         while True:
             try:
@@ -288,7 +288,7 @@ _LOCAL_HELP = """\
   bg stop <任务id>     强制停止后台进程
   report              会话内看人视图报告（同 `wovra report`；快捷键 F2）
   maint               会话内看整理/分裂进度（同 `wovra maint`）
-  todo                会话内看当前大步/小步（快捷键 F3）
+  todo                会话内看当前阶段与工作项（快捷键 F3）
   undo                撤销最近一条开放轮（打错字/误发送的后悔药）
   help                本帮助
 任务 id 可只写末尾短串或 bg 编号（如 bg 1）。

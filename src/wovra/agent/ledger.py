@@ -1,11 +1,24 @@
-"""Agent 账本类工具：todo（大步/小步）、notify/consult（跨 agent 通信）、
+"""Agent 账本类工具：todo（阶段/工作项）、notify/consult（跨 agent 通信）、
 route_to/switch_view（路由与转交）、submit_organization / submit_domains
 （维护管线的提交守卫）。
 """
+from datetime import datetime
 from typing import Optional
 
 from ..registry import MAIN_AGENT_ID
 from .support import _MAX_ROUTE_HOPS
+
+# 动作名 v2（2026-09-12 用户口径，worklog §53）：大步→阶段、小步→工作项，
+# 让"步"专指执行步数（`steps_used`），不再与计划单位抢词。
+# 旧名保留为**别名**：在飞会话/旧提示词回显时仍能执行；schema 只广告新名。
+_ACTION_ALIASES = {
+    "start_milestone": "start_stage",
+    "add_step": "add_item",
+    "check_step": "check_item",
+    "drop_step": "drop_item",
+    "verify_milestone": "verify_stage",
+    "drop_milestone": "drop_stage",
+}
 
 
 class _LedgerMixin:
@@ -47,43 +60,62 @@ class _LedgerMixin:
         evidence: str = "",
         reason: str = "",
     ) -> str:
-        """大步/小步计划账本（深度恒 1 的滚动计划）。
+        """阶段 / 工作项计划账本（深度恒 1 的滚动计划）。
 
-        两层是两个维度（2026-09-11 用户拍板）：大步 = 阶段（最小可行 →
-        逐步增加功能），小步 = 阶段内的工作拆解——阶段内工作直接做仍然
-        复杂，必须拆小步推进。与"平铺 todo（一个任务拆几步）"的本质
-        区别即在此，故 verify 设结构闸门：从未拆过小步、或有未完成小步
-        未交代 → 拒绝（E/F 组实测 8 个阶段 0 次小步，模型会直接跳过）。
+        **词表（2026-09-12 用户口径，worklog §53）**：原来的"大步 / 小步"改名
+        ——大步 = **阶段**（Stage，可验收的推进增量）、小步 = **工作项**（Item，
+        阶段内的可自证拆解）。理由：它们都带"步"字，与执行账里的"步数"
+        （`steps_used`）撞车，与"轮"也抢"推进单位"的语义。改后词场互不重叠：
+
+            轮（用户输入单位）→ 块（文件边界单位）→ 检查点（阶段验收的锚）
+            阶段（计划单位，M1/M2…）→ 工作项（阶段内拆解）
+            步（执行计数，只进运行账）
+
+        内部落盘键仍是 `milestone` / `steps`（只改看得见的词，零迁移）。
+        旧动作名保留为别名（见 `_ACTION_ALIASES`），schema 只广告新名。
+
+        两层是两个维度（2026-09-11 用户拍板）：阶段 = 从最小可行起步、逐步
+        增加功能；工作项 = 阶段内的拆解——阶段内工作直接做仍然复杂，必须先
+        拆再动手。与"平铺 todo（一个任务拆几步）"的本质区别即在此，故 verify
+        设结构闸门：从未拆过工作项、或有未完成工作项未交代 → 拒绝（E/F 组
+        实测 8 个阶段 0 次拆解，模型会直接跳过）。
+
+        **验收不切轮**（2026-09-12 用户口径更正；旧行为见 worklog §52）：阶段
+        验收是**轮内检查点**，不是轮边界——"轮 = 一次用户输入 → 最终回答"永不
+        为运行时事件分割。检查点带编号（M{n}）与 `{round, event, block}` 锚点
+        （block 在轮闭合、块切分完成后机械回填）。巨型轮期间不整理是**接受**的
+        （用户口径：我们服务长期多轮任务，单体巨轮不值那份维护钱）。
 
         人工验收两型（2026-09-08 用户拍板）：阻塞型 = 不验收进行不下去，
         停轮等反馈（开放轮语义，\\c 续跑）；非阻塞型（美观等主观项）=
-        defer_check 挂起继续干，大步收尾一次性呈交，未决转 experiments
+        defer_check 挂起继续干，阶段收尾一次性呈交，未决转 experiments
         不搁置。
         """
         if self.task is None:
             return "todo：当前无任务绑定。"
+        action = _ACTION_ALIASES.get(str(action or ""), str(action or ""))
         todo = self.task.todo or {}
         milestone = todo.get("milestone")
         steps = todo.get("steps") or []
         deferred = milestone.get("deferred") or [] if milestone else []
 
-        if action == "start_milestone":
+        if action == "start_stage":
             if milestone:
                 return (
-                    f"已有开启中的大步：{milestone['goal']}（深度恒 1："
-                    "先 verify_milestone 或 drop_milestone，再开新大步）"
+                    f"已有进行中的阶段：{milestone['goal']}（深度恒 1："
+                    "先 verify_stage 或 drop_stage，再开新阶段）"
                 )
             if not goal.strip() or not (acceptance or []):
-                return "start_milestone 需要 goal 与 acceptance（验收标准必填——入口是证据不是自述）"
+                return "start_stage 需要 goal 与 acceptance（验收标准必填——入口是证据不是自述）"
             if len(acceptance) > 3:
                 return (
                     f"acceptance 共 {len(acceptance)} 条，超过 3 条硬上限（1-3 条）"
-                    "——一个大步只承载一次可验收增量：里程碑驱动轮下验收即轮"
-                    "边界，大步越宽轮越晚闭合、整理批次越大（F 组实测 4-6 条"
-                    "打包的大步把上下文堆到 325K）。把超出的验收标准拆成下一"
-                    "大步，重试 start_milestone。"
+                    "——一个阶段只承载一次可验收增量。把超出的验收标准拆成下一"
+                    "阶段，重试 start_stage。"
                 )
+            todo["milestone_seq"] = int(todo.get("milestone_seq") or 0) + 1
             todo["milestone"] = {
+                "id": f"M{todo['milestone_seq']}",
                 "goal": goal.strip(),
                 "acceptance": [str(a) for a in acceptance],
                 "started_seq": (
@@ -92,76 +124,77 @@ class _LedgerMixin:
                     else len(self.rounds) + 1
                 ),
                 "deferred": [],
-                # 是否拆过小步（结构闸门的判据）：verify 前必须为 True。
+                # 是否拆过工作项（结构闸门的判据）：verify 前必须为 True。
                 # 与 steps 是否为空分开——全部完成后 steps 会被清空/删除，
                 # 用 planned 记录"规划过"这一事实，模型 add→drop 全清后
                 # 仍可验收（有据可查），但从未拆过会被拒。
                 "planned": False,
             }
             todo["steps"] = []
-        elif action == "add_step":
+        elif action == "add_item":
             if not milestone:
-                return "无开启中的大步——先 start_milestone。"
+                return "无进行中的阶段——先 start_stage。"
             if not text.strip():
-                return "add_step 需要 text。"
+                return "add_item 需要 text。"
             steps.append({"text": text.strip(), "done": False})
             todo["steps"] = steps
             todo["milestone"]["planned"] = True
-        elif action in ("check_step", "drop_step"):
+        elif action in ("check_item", "drop_item"):
             if not milestone:
-                return "无开启中的大步。"
+                return "无进行中的阶段。"
             hit = next((s for s in steps if s["text"] == text.strip()), None)
             if hit is None:
                 listing = "\n".join(
                     f"  [{'x' if s['done'] else ' '}] {s['text']}" for s in steps
                 ) or "  （空）"
-                return f"未找到小步：{text.strip()}\n当前小步：\n{listing}"
-            if action == "check_step":
+                return f"未找到工作项：{text.strip()}\n当前工作项：\n{listing}"
+            if action == "check_item":
                 hit["done"] = True
             else:
                 steps.remove(hit)
             todo["steps"] = steps
         elif action == "defer_check":
             if not milestone:
-                return "无开启中的大步。"
+                return "无进行中的阶段。"
             if not text.strip():
                 return "defer_check 需要 text（待人工验收项）。"
             deferred.append(text.strip())
             todo["milestone"]["deferred"] = deferred
             return (
                 f"已挂起人工验收（非阻塞）：{text.strip()}\n"
-                f"本大步累积 {len(deferred)} 项，将在 verify_milestone 时一次性呈交；"
+                f"本阶段累积 {len(deferred)} 项，将在 verify_stage 时一次性呈交；"
                 "期间继续工作。"
             )
-        elif action == "verify_milestone":
+        elif action == "verify_stage":
             if not milestone:
-                return "无开启中的大步。"
+                return "无进行中的阶段。"
             if not evidence.strip():
                 return (
-                    "verify_milestone 需要 evidence（验收证据：测试输出/人工确认）"
+                    "verify_stage 需要 evidence（验收证据：测试输出/人工确认）"
                     "——禁止自述完成。"
                 )
-            # 结构闸门（2026-09-11 用户拍板）：大步 = 阶段、小步 = 阶段内
-            # 的拆解——阶段内的活直接做仍然复杂，必须先拆。E/F 组实测
-            # 8 个阶段 0 次小步：不加门模型会跳过拆解直接闷头做。
-            # 判据用 planned（拆过小步这件事）而非 steps 非空——后者在
+            # 结构闸门（2026-09-11 用户拍板）：阶段 = 可验收增量、工作项 =
+            # 阶段内的拆解——阶段内的活直接做仍然复杂，必须先拆。E/F 组实测
+            # 8 个阶段 0 次拆解：不加门模型会跳过拆解直接闷头做。
+            # 判据用 planned（拆过工作项这件事）而非 steps 非空——后者在
             # 全部完成/作废后为空，会误伤正常验收。
             if not milestone.get("planned"):
                 return (
-                    "verify 被拒：本大步还没有拆过小步。大步 = 阶段（最小可行"
-                    " → 逐步增加功能），阶段内的工作直接做仍然复杂——先用 "
-                    "add_step 拆成能逐步完成、逐步自证的工作项，全部完成后再"
-                    "验收（账本要能说明这个阶段做了什么，哪怕只有一条）。"
+                    "verify 被拒：本阶段还没有拆过工作项。阶段 = 可验收的推进"
+                    "增量（最小可行 → 逐步增加功能），阶段内的工作直接做仍然"
+                    "复杂——先用 add_item 拆成能逐步完成、逐步自证的工作项，"
+                    "全部完成后再验收（账本要能说明这个阶段做了什么，哪怕"
+                    "只有一条）。"
                 )
             undone = [s["text"] for s in steps if not s["done"]]
             if undone:
                 listing = "\n".join(f"  [ ] {t}" for t in undone)
                 return (
-                    f"verify 被拒：还有 {len(undone)} 条未完成小步：\n{listing}\n"
-                    "先 check_step 完成它们，或 drop_step 说明为什么不用做了"
+                    f"verify 被拒：还有 {len(undone)} 条未完成工作项：\n{listing}\n"
+                    "先 check_item 完成它们，或 drop_item 说明为什么不用做了"
                     "（计划可证伪，废弃留痕），再验收。"
                 )
-            entry = f"[大步] {milestone['goal']}（验收：{evidence.strip()}）"
+            entry = f"[阶段] {milestone['goal']}（验收：{evidence.strip()}）"
             self.task.apply_state_patch({"completed": [entry]})
             if deferred:
                 # 非阻塞人工验收未决项不搁置：转 experiments（人当传感器
@@ -169,11 +202,15 @@ class _LedgerMixin:
                 self.task.apply_state_patch({
                     "experiments": [f"[待人工验收] {t}" for t in deferred]
                 })
+            stage_id = str(milestone.get("id") or f"M{len(todo.get('history') or []) + 1}")
+            anchor = self._stage_anchor(stage_id, milestone["goal"], evidence.strip())
             todo.setdefault("history", []).append({
+                "id": stage_id,
                 "goal": milestone["goal"],
                 "evidence": evidence.strip(),
                 "started_seq": milestone.get("started_seq"),
-                "closed_seq": len(self.rounds),
+                "closed_seq": (self.current_round or {}).get("seq") or len(self.rounds),
+                "anchor": dict(anchor),
             })
             tail_note = (
                 f"另有 {len(deferred)} 项非阻塞人工验收已转入待办实验"
@@ -183,64 +220,51 @@ class _LedgerMixin:
             todo["steps"] = []
             self.task.todo = todo
             self.task.save()
-            # 里程碑驱动轮（2026-09-08 用户拍板）：大步验收 = 检查点 =
-            # 轮边界——闭合当前轮并开新轮续写同一回合。D 组实证：一个
-            # 229 步巨型轮跑完全程无闭合，水位机制全场未出力。闭合触发
-            # 水位检查。说明文本放新轮 user_input 与工具结果（不在
-            # assistant tool_call 与 tool 消息之间插事件——严格端点会拒）。
+            # 检查点记在**轮内**（2026-09-12 用户口径：验收不切轮）。旧行为是
+            # "检查点 = 轮边界"（close_round + 开新轮续写），它造出没有用户
+            # 意图的人造轮、并让步数跨轮累计（worklog §52 实证：R12 只有 2 个
+            # 事件却记 13 步、usage 行与轮号错位）。
             if self.current_round is not None:
-                closed_seq = self.current_round["seq"]
-                checkpoint_note = (
-                    "[运行时] 大步验收通过，轮次在此闭合"
-                    "（里程碑驱动轮：检查点 = 轮边界）。"
-                )
-                self.close_round()
-                if self._open_or_reuse_round(checkpoint_note):
-                    self._promote_org_results()
-                    # 渐近归属 + 本轮判定（顺序不可颠倒：先归位、再干活）
-                    self._settle_and_route(checkpoint_note)
-                self._persist_rounds()
-                # 轮边界必须在窗口里可见——否则用户体感"一轮"与账本的
-                # 多轮对不上（F 组实测：5 次里程碑闭合全程静默）
-                if self.on_progress:
-                    self.on_progress(
-                        f"🏁 大步『{milestone['goal']}』验收闭合——轮次 R{closed_seq} 归档，开新轮续写"
-                    )
+                self.current_round.setdefault("checkpoints", []).append(dict(anchor))
             return (
-                f"大步已验收：{milestone['goal']}\n证据：{evidence.strip()}\n"
+                f"阶段 {stage_id} 已验收：{milestone['goal']}\n"
+                f"证据：{evidence.strip()}\n"
                 + (tail_note + "\n" if tail_note else "")
-                + "轮次已在此闭合并开启新轮（里程碑驱动轮）。"
-                "现在可以 start_milestone 写下一大步。"
+                + f"检查点记在 {anchor['round']} 轮内（{anchor['event']}）——"
+                "**轮不因验收分割**（阶段是计划单位，轮是用户输入单位，两者"
+                "正交）。现在可以 start_stage 写下一阶段。"
             )
-        elif action == "drop_milestone":
+        elif action == "drop_stage":
             if not milestone:
-                return "无开启中的大步。"
+                return "无进行中的阶段。"
             if not reason.strip():
-                return "drop_milestone 需要 reason（作废原因——计划可证伪，留死亡原因）。"
+                return "drop_stage 需要 reason（作废原因——计划可证伪，留死亡原因）。"
             todo.setdefault("history", []).append({
+                "id": str(milestone.get("id") or f"M{len(todo.get('history') or []) + 1}"),
                 "goal": milestone["goal"],
                 "evidence": f"作废：{reason.strip()}",
                 "started_seq": milestone.get("started_seq"),
-                "closed_seq": len(self.rounds),
+                "closed_seq": (self.current_round or {}).get("seq") or len(self.rounds),
             })
             if deferred:
                 self.task.apply_state_patch({
-                    "experiments": [f"[待人工验收·大步作废遗留] {t}" for t in deferred]
+                    "experiments": [f"[待人工验收·阶段作废遗留] {t}" for t in deferred]
                 })
             todo["milestone"] = None
             todo["steps"] = []
         elif action == "show":
             if not milestone:
                 hist = todo.get("history") or []
-                return "无开启中的大步。" + (
-                    f"\n已验收 {len(hist)} 个大步。" if hist else ""
+                return "无进行中的阶段。" + (
+                    f"\n已验收 {len(hist)} 个阶段。" if hist else ""
                 )
             lines = [
-                f"当前大步：{milestone['goal']}（自 R{milestone['started_seq']}）",
+                f"当前阶段 {milestone.get('id') or ''}：{milestone['goal']}"
+                f"（自 R{milestone['started_seq']}）",
                 "验收标准：\n" + "\n".join(f"  - {a}" for a in milestone["acceptance"]),
             ]
             if steps:
-                lines.append("小步：\n" + "\n".join(
+                lines.append("工作项：\n" + "\n".join(
                     f"  [{'x' if s['done'] else ' '}] {s['text']}" for s in steps
                 ))
             if deferred:
@@ -254,8 +278,71 @@ class _LedgerMixin:
         cur = todo.get("milestone")
         if cur:
             done_n = sum(1 for s in todo.get("steps") or [] if s["done"])
-            return f"OK：{action}（{cur['goal']}｜小步 {done_n}/{len(todo['steps'])}）"
+            return (
+                f"OK：{action}（{cur.get('id') or ''} {cur['goal']}"
+                f"｜工作项 {done_n}/{len(todo['steps'])}）"
+            )
         return f"OK：{action}"
+
+    def _stage_anchor(self, stage_id: str, goal: str, evidence: str) -> dict:
+        """阶段验收的锚点：`{id, goal, evidence, round, event, block, at}`。
+
+        `round`/`event` 验收当场就有（事件取当前轮最后一条：即这次 verify 的
+        tool_call）；`block` 要等**轮闭合、块按文件切分完成**后才能确定，由
+        `_backfill_stage_anchors()` 回填——于是"这个阶段在哪一轮、哪一块完成"
+        可查（用户口径：阶段要编号 + 锚点）。
+        """
+        r = self.current_round or {}
+        events = r.get("events") or []
+        event_id = str((events[-1] or {}).get("id") or "") if events else ""
+        return {
+            "id": stage_id,
+            "goal": goal,
+            "evidence": evidence,
+            "round": int(r.get("seq") or 0),
+            "event": event_id,
+            "block": "",
+            "at": datetime.now().isoformat(timespec="seconds"),
+        }
+
+    def _backfill_stage_anchors(self) -> None:
+        """轮闭合后回填阶段锚点的 `block`（块切分完成才有答案）。
+
+        两个消费者：轮上的 `checkpoints`（人视图/仪器）与 `todo.history`
+        （阶段账本）。都是同一份事实，故一次回填两处。
+        """
+        r = self.current_round
+        if r is None:
+            return
+        anchors: list[dict] = list(r.get("checkpoints") or [])
+        if self.task is not None:
+            for entry in (self.task.todo or {}).get("history") or []:
+                if isinstance(entry.get("anchor"), dict):
+                    anchors.append(entry["anchor"])
+        for anchor in anchors:
+            if not isinstance(anchor, dict) or anchor.get("block"):
+                continue
+            event_id = str(anchor.get("event") or "")
+            if not event_id:
+                continue
+            anchor["block"] = self._block_id_of_event(r, event_id)
+
+    @staticmethod
+    def _block_id_of_event(r: dict, event_id: str) -> str:
+        """事件落在哪个块（块由文件边界切分，事件 → 块是机械可算的）。"""
+        for b in r.get("blocks") or []:
+            if not isinstance(b, dict):
+                continue
+            ids = b.get("events") or []
+            if ids:
+                if event_id in [str(i) for i in ids]:
+                    return str(b.get("id") or "")
+                continue
+            start = str(b.get("start_event") or "")
+            end = str(b.get("end_event") or "")
+            if start and end and start <= event_id <= end:   # 同轮内补零可比
+                return str(b.get("id") or "")
+        return ""
 
     def _registry_entry(self, ref: str) -> Optional[dict]:
         """按 id 或名称查注册表条目。"""
