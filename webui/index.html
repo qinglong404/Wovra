@@ -651,7 +651,10 @@ function applyChunk(c){
   }
   else if(c.k==='status'){
     LIVE.mode='status';LIVE.status=c.s;dirty=true;
-    if(/等待模型/.test(c.s)){   // 新一步开始：上一段思考/正文原地折叠留档
+    // 折叠时机=该段已完结：新一步开始（等待模型响应）或本步已产出动作
+    // （工具名到达——思考必然已流完）。否则工具执行期间，已落账卡片上方
+    // 的折叠块之外，直播区还会把同一段思考重复挂在卡片下方
+    if(/等待模型/.test(c.s)||/^正在/.test(c.s)){
       if(LIVE.think)LIVE.done.push({t:'think',text:LIVE.think});
       if(LIVE.ans)LIVE.done.push({t:'ans',text:LIVE.ans});
       LIVE.think='';LIVE.ans='';
@@ -1049,6 +1052,10 @@ setInterval(async()=>{
         const inc=await api(`/api/sessions/${CUR}/rounds/${lastSeq}?after=${lastId}`);
         d.events.push(...inc.events);
         if(inc.blocks&&inc.blocks.length)d.blocks=inc.blocks;
+        drawConv($('#content'),FOLLOW);
+      }else if(LIVE.job){
+        // 轮在跑但没有新事件：也要重绘——运行中卡片的时长按"至今"实时算，
+        // 不重绘就冻在上一次的数字上（用户得手动刷新才看到结果/计时）
         drawConv($('#content'),FOLLOW);
       }
     }
