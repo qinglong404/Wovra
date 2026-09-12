@@ -1200,14 +1200,15 @@ function renderCtxbar(){
     bar.innerHTML=VIEWSIZES.agents.map(a=>{
       const col=agentColor(a.id||a.name);
       const win=((META.registry||[]).find(e=>e.id===a.id||e.name===a.name)||{}).window||1000000;
-      const share=win?a.total_chars/win*100:0;
+      const tk=a.tokens||Math.round((a.total_chars||0)/3);
+      const share=win?tk/win*100:0;
       const lab=a.is_main?'主 agent':(a.id||'');
-      return `<div class="ctx-cell" title="${esc(a.name||'')}（${esc(a.id||'')}）&#10;重组后视图 ${fmtN(a.total_chars)} 字符（≈${fmtN(Math.round(a.total_chars/3))} tok · ${a.count} 条）${a.alt_chars?`
+      return `<div class="ctx-cell" title="${esc(a.name||'')}（${esc(a.id||'')}）&#10;重组后视图 ≈${fmtN(tk)} tok · ${a.count} 条（${fmtN(a.total_chars)} 字符）&#10;各视图各自带一份系统提示词与全局职责表，故相加≠原全量${a.alt_chars?`
 对照：全量装配 ${fmtN(a.alt_chars)} 字符`:''}">
         <span class="ctx-dot" style="background:${col}"></span>
         <span class="mono" style="color:${col}">${esc(lab)}</span>
         <span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${col}"></i></span>
-        <span class="mono">${fmtN(a.total_chars)}/${fmtN(win)}</span>
+        <span class="mono">${fmtN(tk)}/${fmtN(win)}</span>
         </div>`;
     }).join('');
     return;
@@ -1726,11 +1727,10 @@ function pendingAgentCards(reg){
       out.push(`<div class="agent"><div class="top">
         <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="分裂产出"></span>
         <span class="id">${esc((sz&&sz.id)||'?')}</span><span class="nm">${esc(d.name)}</span>
-        ${sz?`<span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">${fmtN(sz.total_chars)} 字符 · ${sz.count} 条</span>`:''}
+        ${sz?`<span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">≈${fmtN(sz.tokens||Math.round((sz.total_chars||0)/3))} tok · ${sz.count} 条</span>`:''}
         </div>
         <div class="desc">${esc((d.description||'').slice(0,140))}</div>
-        ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}
-        <div style="margin-top:9px"><span class="chip acc" style="cursor:pointer" onclick="openPendingView('${esc(d.name)}')">查看上下文</span></div></div>`);
+        ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`);
     }
   }
   return out.join('');
@@ -1827,10 +1827,9 @@ function renderProject(c){
       <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="${esc(a.status)}"></span>
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
-      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">R${a.rounds||0} · 步${fmtN(a.steps||0)}${a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''}</span></div>
+      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">R${a.rounds||0} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));if(pv)return ' · 重组后 ≈'+fmtN(pv.tokens||Math.round((pv.total_chars||0)/3))+' tok';return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''})()}</span></div>
       <div class="desc">${esc(a.description||'')}</div>
-      ${dom.map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="在左树中过滤">${esc(f)}</span>`).join('')}
-      <div style="margin-top:9px"><span class="chip acc" style="cursor:pointer" onclick="openViewDrawer('${esc(a.name||a.id)}','${esc(a.id)}')">查看上下文</span></div></div>`;
+      ${dom.map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="在左树中过滤">${esc(f)}</span>`).join('')}</div>`;
   }).join('')||'<div class="empty" style="padding:14px 0">无注册表（未发生分裂）</div>';
   c.innerHTML=`
     <div class="proj">
@@ -1940,7 +1939,7 @@ async function openPendingView(name){
     const fds=((pick.file_domains||[]).length)
       ?`<div class="ctx-note">文件域：${pick.file_domains.map(esc).join('、')}</div>`:'';
     $('#d-body').innerHTML=
-      `<div class="ctx-stat">${pick.is_main?'主 agent':esc(pick.id||'')} ${esc(pick.name||'')} · ${pick.count} 条 / ${fmtN(pick.total_chars)} 字符（≈${fmtN(Math.round(pick.total_chars/3))} tok）${cmp}</div>`
+      `<div class="ctx-stat">${pick.is_main?'主 agent':esc(pick.id||'')} ${esc(pick.name||'')} · ${pick.count} 条 · ≈${fmtN(pick.tokens||Math.round((pick.total_chars||0)/3))} tok（${fmtN(pick.total_chars)} 字符）${cmp}</div>`
       + fds
       + `<div class="ctx-note">${esc(d.note||'')}</div>`
       + ctxMsgHtml(pick.messages);

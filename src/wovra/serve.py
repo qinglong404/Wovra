@@ -544,6 +544,10 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                 break
         if got is None:
             continue
+        try:
+            tok = int(agent._estimate_messages(got))   # 与运行时同口径（防单位混用）
+        except Exception:  # noqa: BLE001
+            tok = sum(len(str(m.get("content") or "")) for m in got) // 3
         msgs, total, trunc = [], 0, 0
         for m in got:
             raw = str(m.get("content") or "")
@@ -560,7 +564,7 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                     "description": str(e.get("description") or "")[:160],
                     "file_domains": list(e.get("file_domains") or []),
                     "messages": msgs, "count": len(msgs),
-                    "total_chars": total, "truncated": trunc})
+                    "total_chars": total, "tokens": tok, "truncated": trunc})
     if out:
         full = agent._assemble_messages()
         out[0]["alt_chars"] = sum(len(m.get("content") or "") for m in full)
@@ -580,7 +584,7 @@ def view_sizes(task_id: str) -> dict | None:
         return None
     return {"agents": [{k: a.get(k) for k in
                         ("id", "name", "is_main", "count", "total_chars",
-                         "alt_count", "alt_chars")}
+                         "tokens", "alt_count", "alt_chars")}
                        for a in got.get("agents") or []],
             "pending": True, "note": got.get("note")}
 
