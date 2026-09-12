@@ -582,12 +582,14 @@ def test_http_shutdown(server):
 def test_http_live_stream_and_live_job(server):
     """轮直播：job.live 增量按 after 取；会话元数据带运行中作业 id。"""
     serve._JOBS["jt"] = {"task_id": "s1", "status": "running",
+                         "pending": {"type": "confirm", "question": "跑 git tag？"},
                          "live": [{"k": "think", "s": "想"},
                                   {"k": "ans", "s": "答"}]}
     try:
         code, body = _get(server + "/api/jobs/jt/live?after=0")
         assert code == 200 and body["status"] == "running"
         assert len(body["chunks"]) == 2 and body["next"] == 2
+        assert body["pending"]["type"] == "confirm"   # 审批栏由轮询驱动
         code, body = _get(server + "/api/jobs/jt/live?after=1")
         assert body["chunks"] == [{"k": "ans", "s": "答"}] and body["next"] == 2
         code, body = _get(server + "/api/jobs/ghost/live")

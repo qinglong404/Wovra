@@ -664,6 +664,7 @@ class _Handler(BaseHTTPRequestHandler):
             after = int((qs.get("after") or ["0"])[0] or 0)
             chunks = job.get("live") or []
             return self._json({"status": job["status"],
+                               "pending": job.get("pending"),
                                "chunks": chunks[after:],
                                "next": len(chunks)})
         mss = re.fullmatch(r"/api/jobs/([^/]+)/stream", path)
