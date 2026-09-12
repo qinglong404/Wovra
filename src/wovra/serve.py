@@ -158,6 +158,7 @@ def _round_meta(r: dict) -> dict:
         "org_state": r.get("org_state"),
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
+        "active_view": r.get("active_view") or "",
         "events": len(r.get("events") or []),
         "blocks": r.get("blocks") or [],
     }
