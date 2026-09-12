@@ -140,6 +140,7 @@ def round_detail(data: dict, seq: int) -> dict | None:
                 "status": e.get("status", ""), "role": msg.get("role"),
                 "content": msg.get("content", ""),
                 "tool_calls": msg.get("tool_calls"),
+                "tool_call_id": msg.get("tool_call_id"),
             })
         return {"seq": seq,
                 "user_input": (r.get("user_input") or {}).get("original", ""),

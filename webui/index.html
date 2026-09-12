@@ -77,6 +77,32 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 h3.sec{font-size:12px;color:var(--tx3);letter-spacing:1.5px;margin:20px 0 10px;font-weight:600}
 pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 
+/* ---------- 对话流 ---------- */
+#conv .rsep{display:flex;align-items:center;gap:10px;margin:20px 0 12px;color:var(--tx3);font-family:var(--mono);font-size:11px}
+#conv .rsep::before,#conv .rsep::after{content:'';flex:1;height:1px;background:var(--line)}
+#conv .rsep .rs{color:var(--acc)}
+#conv .rsep .rb{display:flex;gap:5px}
+.msg{display:flex;margin-bottom:12px}
+.msg.user{justify-content:flex-end}
+.msg.user .bub{max-width:70%;background:linear-gradient(180deg,#1d2745,#19223a);border:1px solid #2d3c66;border-radius:14px 14px 4px 14px;padding:10px 14px;font-size:13.5px;line-height:1.65;white-space:pre-wrap;word-break:break-word}
+.msg.assistant{justify-content:flex-start}
+.msg.assistant .bub{max-width:86%;background:var(--bg2);border:1px solid var(--line);border-radius:4px 14px 14px 14px;padding:11px 15px;font-size:13.5px;line-height:1.7;white-space:pre-wrap;word-break:break-word}
+.sysline{text-align:center;color:var(--tx3);font-size:11px;margin:9px 0;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tcard{background:var(--bg1);border:1px solid var(--line);border-radius:9px;margin:4px 0 10px;max-width:86%;overflow:hidden}
+.tcard.open{border-color:var(--line2)}
+.tcard .t-head{display:flex;align-items:center;gap:9px;padding:8px 12px;cursor:pointer;font-size:12.5px}
+.tcard .t-head:hover{background:var(--bg3)}
+.tcard .t-icon{width:22px;height:22px;border-radius:6px;background:var(--bg4);display:flex;align-items:center;justify-content:center;font-size:12px;flex-shrink:0}
+.tcard .t-name{font-family:var(--mono);color:var(--acc);font-weight:600;flex-shrink:0}
+.tcard .t-sum{flex:1;min-width:0;color:var(--tx2);font-family:var(--mono);font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.tcard .t-st{font-size:10px;font-family:var(--mono);flex-shrink:0}
+.st-ok{color:var(--teal)} .st-bad{color:var(--red)} .st-deny{color:var(--gold)} .st-run{color:var(--tx3)}
+.tcard .t-args{border-top:1px solid var(--line);padding:8px 12px;font-family:var(--mono);font-size:11px;color:var(--tx2);white-space:pre-wrap;word-break:break-all;max-height:200px;overflow-y:auto;background:var(--bg0)}
+.tcard .t-result{border-top:1px solid var(--line);padding:8px 12px;font-size:12px;color:var(--tx2);line-height:1.6;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto}
+.tcard:not(.open) .t-args,.tcard:not(.open) .t-result{display:none}
+.more-btn{display:block;margin:4px auto 18px;padding:7px 20px;background:var(--bg2);border:1px solid var(--line2);border-radius:20px;color:var(--tx2);font-size:12px;cursor:pointer}
+.more-btn:hover{color:var(--tx);border-color:var(--acc-dim)}
+
 /* ---------- 时间线 ---------- */
 .round{border-left:3px solid var(--bg4)}
 .round.org-done{border-left-color:var(--teal)}
@@ -202,7 +228,8 @@ const fmtP=(a,b)=>b>0?(a/b*100).toFixed(1)+'%':'—';
 const fmtT=t=>{const m=String(t||'').match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);return m?m[1]+'-'+m[2]+' '+m[3]:t||''};
 const wsBase=w=>String(w||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop()||'—';
 
-let SESSIONS=[],CUR=null,META=null,TAB='timeline',POLL=null;
+let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null;
+let CONV={session:null,seqs:[],cache:{}};
 
 async function api(p){const r=await fetch(p);if(!r.ok)throw new Error(p+' → '+r.status);return r.json()}
 
@@ -260,7 +287,7 @@ function renderHeader(){
     ['轮次',META.rounds,'轮'], ['总步数',fmtN(steps),'步'],
     ['TTFT 均值',(u.calls?((u.ttft_sum||0)/u.calls).toFixed(1):'—'),'s'],
   ].map(([k,v,s])=>`<div class="kpi${k==='缓存命中'?' acc':''}"><div class="v">${v}<small>${s}</small></div><div class="k">${k}</div></div>`).join('');
-  const tabs=[['timeline','时间线'],['ledger','账本'],['todo','计划'],['registry','域注册表'],['usage','用量']];
+  const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['registry','域注册表'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
     `<div style="margin-left:auto;padding:6px 0"><span class="chip" style="cursor:pointer" onclick="select(CUR)">↻ 刷新</span></div>`;
 }
@@ -269,6 +296,7 @@ function setTab(t){TAB=t;renderHeader();renderTab()}
 /* ---------- 视图 ---------- */
 function renderTab(){
   const c=$('#content');
+  if(TAB==='conv')return renderConv(c);
   if(TAB==='timeline')return renderTimeline(c);
   if(TAB==='ledger')return renderLedger(c);
   if(TAB==='todo')return renderTodo(c);
@@ -384,6 +412,113 @@ function renderUsage(c){
      <h3 class="sec">最近调用</h3>
      <div class="lcard"><ul style="max-height:300px">${[...rows].reverse().slice(0,40).map(r=>
        `<li><span class="n">${esc(fmtT(r.time))}</span><pre class="mono" style="font-size:11px">[${esc(r.purpose)}] prompt=${fmtN(r.prompt||0)} cached=${fmtN(r.cached||0)} ttft=${r.ttft??'—'}s dur=${r.dur??'—'}s finish=${esc(r.finish||'')}</pre></li>`).join('')}</ul></div>`;
+}
+
+/* ---------- 对话流（C 线：终端所见皆网页所见；思考不落盘故回放无思考） ---------- */
+const TOOL_ICON={read_file:'👁',write_file:'✎',edit_file:'✎',replace_lines:'☰',run_command:'▶',
+  search_files:'⌕',glob_files:'＊',list_files:'▤',delete_file:'✕',move_file:'⇄',
+  todo:'☑',notify:'✉',consult:'💬',web_search:'🌐',web_fetch:'⤓',checkpoint:'⟲',restore_file:'⟲'};
+
+function convAllSeqs(){return (META.round_list||[]).map(r=>r.seq).sort((a,b)=>a-b)}
+function prettyArgs(raw){try{return JSON.stringify(JSON.parse(raw||'{}'),null,1)}catch(e){return raw||''}}
+function argSummary(name,raw){
+  let a;
+  try{a=JSON.parse(raw||'{}')}catch(e){return String(raw||'').slice(0,90)}
+  if(name==='run_command')return a.command||'';
+  if(name==='todo')return [a.action,a.goal,a.text].filter(Boolean).map(x=>String(x).slice(0,60)).join(' · ');
+  if(a.path)return String(a.path);
+  if(a.question)return String(a.question).slice(0,80);
+  if(a.query)return String(a.query).slice(0,80);
+  const v=Object.values(a).find(x=>typeof x==='string'&&x);
+  return v?String(v).slice(0,90):'';
+}
+function resultStatus(content){
+  const s=String(content||'');
+  if(/已拒绝执行/.test(s))return['🚫 已拒绝','st-deny'];
+  if(/exit_code=0/.test(s)||/^ok\b/.test(s))return['✓ 成功','st-ok'];
+  if(/(错误|失败|Error|Traceback|路径越界|文件不存在)/.test(s))return['✗ 出错','st-bad'];
+  return['✓ 成功','st-ok'];
+}
+
+async function renderConv(c,fresh){
+  if(CONV.session!==CUR||fresh){
+    CONV={session:CUR,seqs:[],cache:{}};
+    const batch=convAllSeqs().slice(-5);
+    if(!batch.length){c.innerHTML='<div class="empty">此会话还没有对话</div>';return}
+    c.innerHTML='<div class="empty">装载对话…</div>';
+    const got=await Promise.all(batch.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
+    got.forEach(([s,d])=>{CONV.cache[s]=d;CONV.seqs.push(s)});
+  }
+  drawConv(c,true);
+}
+async function loadEarlier(){
+  const before=convAllSeqs().filter(s=>s<CONV.seqs[0]).slice(-5);
+  if(!before.length)return;
+  const sc=$('#content');const prevH=sc.scrollHeight;
+  const got=await Promise.all(before.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
+  got.forEach(([s,d])=>{CONV.cache[s]=d;CONV.seqs.unshift(s)});
+  drawConv($('#content'),false);
+  sc.scrollTop+=sc.scrollHeight-prevH;   // 前插后钉住视口
+}
+
+function drawConv(c,toBottom){
+  const rl=CONV.seqs;
+  if(!rl.length){c.innerHTML='<div class="empty">此会话还没有对话</div>';return}
+  const metaBy={};(META.round_list||[]).forEach(r=>metaBy[r.seq]=r);
+  const calls={};
+  const remain=convAllSeqs().filter(s=>s<rl[0]).length;
+  let html='';
+  if(remain)html+=`<button class="more-btn" onclick="loadEarlier()">▲ 加载更早 ${Math.min(5,remain)} 轮（还剩 ${remain} 轮）</button>`;
+  for(const seq of rl){
+    const d=CONV.cache[seq],m=metaBy[seq]||{};
+    const ob=ORG_BADGE[m.org_state||'raw']||ORG_BADGE.raw;
+    html+=`<div class="rsep"><span class="rs">R${seq}</span><span class="rb">${ob}`+
+      (m.steps_used?`<span>步${m.steps_used}</span>`:'')+`<span>${(d.events||[]).length} 事件</span></span></div>`;
+    for(const e of d.events||[]){
+      const role=e.role,content=e.content,tcs=e.tool_calls||[];
+      if(e.type==='runtime_note'||(role==='user'&&String(content||'').startsWith('<runtime-reminder>'))){
+        const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,140);
+        html+=`<div class="sysline" title="${esc(String(content||''))}">⚙ ${esc(inner)}</div>`;continue;
+      }
+      if(e.type==='tool_call'){
+        if(content)html+=`<div class="msg assistant"><div class="bub">${esc(content)}</div></div>`;
+        for(const tc of tcs){
+          const name=tc.function?.name||'?';
+          calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
+          html+=`<div class="tcard" data-call="${esc(tc.id)}">
+            <div class="t-head" onclick="this.parentNode.classList.toggle('open')">
+              <span class="t-icon">${TOOL_ICON[name]||'◆'}</span><span class="t-name">${esc(name)}</span>
+              <span class="t-sum" title="${esc(argSummary(name,tc.function?.arguments))}">${esc(argSummary(name,tc.function?.arguments))}</span>
+              <span class="t-st st-run">…</span></div>
+            <div class="t-args">${esc(prettyArgs(tc.function?.arguments))}</div>
+            <div class="t-result"></div></div>`;
+        }
+        continue;
+      }
+      if(role==='tool'){
+        const ci=calls[e.tool_call_id];
+        if(ci){ci.result=content||'';continue}
+        html+=`<div class="sysline">（接上轮调用结果）${esc(String(content||'').slice(0,100))}</div>`;continue;
+      }
+      if(role==='assistant'&&content){
+        html+=`<div class="msg assistant"><div class="bub">${esc(content)}</div></div>`;continue;
+      }
+      if(role==='user'){
+        html+=`<div class="msg user"><div class="bub">${esc(content)}</div></div>`;continue;
+      }
+    }
+  }
+  c.innerHTML=html;
+  for(const [id,ci] of Object.entries(calls)){
+    const el=c.querySelector(`[data-call="${CSS.escape(id)}"]`);if(!el)continue;
+    const stEl=el.querySelector('.t-st'),resEl=el.querySelector('.t-result');
+    if(ci.result!=null){
+      resEl.textContent=ci.result;
+      const [txt,cls]=resultStatus(ci.result);
+      stEl.textContent=txt;stEl.className='t-st '+cls;
+    }else{stEl.textContent='无结果';stEl.className='t-st st-run'}
+  }
+  if(toBottom)c.scrollTop=c.scrollHeight;
 }
 
 /* ---------- 抽屉 ---------- */

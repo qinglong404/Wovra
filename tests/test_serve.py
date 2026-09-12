@@ -88,7 +88,7 @@ def test_round_detail_flattens_events():
     assert d["user_input"] == "干活"
     assert d["events"][0] == {"id": "R1-E01", "type": "user", "status": "",
                               "role": "user", "content": "干活",
-                              "tool_calls": None}
+                              "tool_calls": None, "tool_call_id": None}
     assert d["blocks"][0]["file"] == "a.py"
     assert serve.round_detail(_fake_task(), 99) is None
 
