@@ -19,7 +19,7 @@ import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 from . import registry as registry_module
 from . import task as task_module
@@ -62,7 +62,7 @@ def agent_stats(
     ctx_cur/ctx_peak/window，`registry.runtime_stats`），那才是权威口径——
     本函数在聚合出用量后用它覆盖轮次/步数/当前占比，字段只增不改。
     """
-    main_id = main_id or MAIN_AGENT_ID
+    main_id = main_id or registry_module.MAIN_AGENT_ID
     rounds = data.get("rounds") or []
     per: dict[str, dict] = {}
     order: list[str] = []
@@ -312,6 +312,30 @@ def round_detail(data: dict, seq: int,
     return None
 
 
+def view_messages(task_id: str, view: str) -> dict | None:
+    """物化某个 agent 的上下文视图（= 路由到它时模型所见，确定性派生）。
+
+    用于人工检查分裂/重组后的视图是否正确。view 先按域名再按 id 尝试。
+    """
+    from .agent import MODE_MANAGED
+    from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
+    try:
+        task = task_module.Task.load(task_id)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    agent = _build_agent(task, mode=task.mode or MODE_MANAGED)
+    agent.current_round = None
+    msgs = agent._assemble_view_messages(view, task.rounds or [])
+    if msgs is None:
+        return {"view": view, "available": False, "messages": [],
+                "total_chars": 0,
+                "note": "无分裂产物或视图降级：装配走全量路径（无独立视图）"}
+    return {"view": view, "available": True,
+            "messages": [{"role": m.get("role"),
+                          "content": m.get("content", "")} for m in msgs],
+            "total_chars": sum(len(m.get("content", "")) for m in msgs)}
+
+
 class SummaryCache:
     """mtime 缓存：文件没变不重解析；摘要常驻，原文按需重读。"""
 
@@ -433,6 +457,13 @@ class _Handler(BaseHTTPRequestHandler):
             if data is None:
                 return self._json({"error": "session not found"}, 404)
             return self._json(session_meta(m.group(1), data))
+        m = re.fullmatch(r"/api/sessions/([^/]+)/views/(.+)", path)
+        if m:
+            view = unquote(m.group(2))
+            result = view_messages(m.group(1), view)
+            if result is None:
+                return self._json({"error": "session not found"}, 404)
+            return self._json(result)
         m = re.fullmatch(r"/api/sessions/([^/]+)/rounds/(\d+)", path)
         if m:
             data = self._load_task(m.group(1))

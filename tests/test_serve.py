@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from wovra import serve
+from wovra import task as task_module
 
 
 def test_parse_llm_call_full_row():
@@ -217,3 +218,47 @@ def test_http_serves_index(server):
     with urllib.request.urlopen(server + "/", timeout=5) as r:
         html = r.read().decode("utf-8")
     assert r.status == 200 and "WOVRA" in html
+
+
+def test_http_view_endpoint(tmp_path, monkeypatch):
+    """上下文视图端点：物化某 agent 的装配（检查分裂/重组用）。"""
+    import urllib.error
+    import urllib.parse
+
+    tasks = tmp_path / "tasks"
+    (tasks / "s1").mkdir(parents=True)
+    data = _fake_task()
+    data["registry"] = [{"id": "A", "name": "主agent", "status": "active"}]
+    data["rounds"][0]["domains"] = [
+        {"name": "工具层", "description": "工具实现",
+         "file_domains": ["src/wovra/tools/"], "block_ids": ["R1-B1"]}]
+    (tasks / "s1" / "task.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+
+    class _H(serve._Handler):
+        pass
+
+    _H.cache = serve.SummaryCache(tasks)
+    _H.tasks_root = tasks
+    httpd = serve.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{port}"
+    try:
+        url = base + "/api/sessions/s1/views/" + urllib.parse.quote("工具层")
+        with urllib.request.urlopen(url, timeout=10) as r:
+            assert r.status == 200
+            body = json.loads(r.read().decode("utf-8"))
+        assert body["available"] is True
+        assert body["messages"], "视图物化应至少产出系统/职责表段"
+        assert body["total_chars"] > 0
+        # 不存在的会话 → 404
+        try:
+            urllib.request.urlopen(base + "/api/sessions/nope/views/x",
+                                   timeout=5)
+            raise AssertionError("应 404")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        httpd.shutdown()

@@ -766,13 +766,36 @@ function renderTodo(c){
 function renderRegistry(c){
   const reg=META.registry||[];
   if(!reg.length){c.innerHTML='<div class="empty">无注册表（未发生分裂）</div>';return}
-  c.innerHTML='<h3 class="sec">Agent 注册表 · '+reg.length+'</h3><div class="reg-grid">'+
+  c.innerHTML='<h3 class="sec">Agent 注册表 · '+reg.length+'（查看上下文 = 路由到它时模型所见，用于检查分裂/重组）</h3><div class="reg-grid">'+
     reg.map(a=>`<div class="agent"><div class="top">
       <span class="st" style="background:${agentColor(a.id)};box-shadow:0 0 8px ${agentColor(a.id)}66" title="${esc(a.status)}"></span>
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}</div>
       <div class="desc">${esc(a.description)}</div>
-      ${(a.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`).join('')+'</div>';
+      ${(a.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}
+      <div style="margin-top:9px"><span class="chip acc" style="cursor:pointer" onclick="openViewDrawer('${esc(a.name||a.id)}','${esc(a.id)}')">查看上下文</span></div></div>`).join('')+'</div>';
+}
+async function openViewDrawer(view,id){
+  $('#mask').classList.add('open');$('#drawer').classList.add('open');
+  $('#d-title').textContent='上下文视图 · '+(id||view);
+  $('#d-sub').textContent='加载中…';
+  $('#d-body').innerHTML='<div class="empty">物化视图…</div>';
+  try{
+    const d=await api(`/api/sessions/${CUR}/views/${encodeURIComponent(view)}`);
+    if(!d.available){
+      $('#d-sub').textContent='';
+      $('#d-body').innerHTML='<div class="empty">'+esc(d.note)+'</div>';return;
+    }
+    $('#d-sub').textContent=d.messages.length+' 条消息 · '+fmtN(d.total_chars)+' 字符（≈'+fmtN(Math.round(d.total_chars/3))+' tok）';
+    $('#d-body').innerHTML=d.messages.map((m,i)=>{
+      const body=String(m.content||'');
+      const long=body.length>1500;
+      return `<div class="ev"><div class="e-head"><b>#${i+1}</b>
+        <span class="e-role role-${esc(m.role||'user')}">${esc(m.role||'?')}</span>
+        <span style="margin-left:auto">${fmtN(body.length)} 字符</span></div>
+        <div class="e-body">${esc(body.slice(0,1500))}${long?'<i style="color:var(--tx3)">…（截断展示，原文 '+fmtN(body.length)+' 字符）</i>':''}</div></div>`;
+    }).join('')||'<div class="empty">空视图</div>';
+  }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
 }
 
 /* ---------- 用量 ---------- */
