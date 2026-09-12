@@ -241,14 +241,30 @@ class _MaintenanceMixin:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
 
-    def organize_backlog(self) -> None:
-        """立即整理全部未整理轮（同步）——run 模式进程收尾用。
+    def organize_backlog(self, *, force: bool = False) -> None:
+        """整理未整理轮（同步）。
 
-        chat 模式不调用：水位设计允许小会话全程不整理（成本归零）；
-        run 是一次性任务单元，退出前补整理，TaskState 才能跟得上
-        下一次自主推进（"根据任务状态决定下一步"依赖这本账）。
+        两种语义（2026-09-12 分岔，为一个实测缺陷）：
+
+        * `force=True`：**run 模式进程收尾**用——无视水位/宽限/冷却，退出前把
+          账补齐（TaskState 才能跟得上下一次自主推进）。一次性进程没有"下一次
+          轮闭合"，所以那时唯一的时机就是退出前。
+        * 默认（`force=False`）：**走与 `_maybe_organize_batch` 同一套水位闸门**
+          （水位 + 宽限 + 冷却）。
+
+        为什么要分岔（现场：会话 20260912-151325-22671f）：C4 网页输入在**每一轮
+        之后**调本函数（`serve._run_turn`），而旧实现无视水位 → 网页里"只聊一轮
+        就被整理并压缩"：上下文峰值 1.7 万、水位线 10 万，org+split 双调用照样
+        发出去（org prompt 22,776 + split 26,310 tok，miss 19,134），且每轮都打断
+        一次前缀缓存。CLI 侧的两道门（水位 + 宽限 3 轮）根本不可能在 R1 放行——
+        故触发只能来自这里。默认走闸门后，`serve` 侧的调用无需改动即变安全。
         """
         if self.context_mode != MODE_MANAGED or self.task is None:
+            return
+        if not force:
+            # 水位检查本身就是"够不够格整理"的唯一判据（含宽限与冷却），
+            # 故不复制一份条件，直接委托——两处口径不可能再走岔。
+            self._maybe_organize_batch()
             return
         while True:
             unorganized = self._unorganized_rounds()

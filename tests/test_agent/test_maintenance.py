@@ -1437,6 +1437,37 @@ def test_maint_snapshot_taken_when_protocol_complete(monkeypatch, tmp_path):
     assert len(agent.llm.calls) == 1       # 即时发起
 
 
+def test_organize_backlog_respects_watermark_unless_forced(monkeypatch, tmp_path):
+    """收尾整理默认走**水位闸门**；`force=True`（run 模式退出）才无视水位。
+
+    2026-09-12 实测缺陷（会话 20260912-151325-22671f）：C4 网页输入在**每一轮**
+    之后调 `organize_backlog()`，而旧实现无视水位/宽限/冷却 → 网页里"只聊一轮
+    就被整理并压缩"（上下文峰值 1.7 万、水位线 10 万，org+split 照发：org
+    prompt 22,776 + split 26,310 tok）。CLI 侧两道门都挡得住 R1，故触发只能来自
+    这个调用点——默认走闸门后，`serve` 的既有调用无需改动即变安全。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.rounds = [_round(1, "甲", "乙")]
+    task.rounds[0]["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_batch_org_json([1])))]]),
+        tools=[], task=task, async_organization=False,
+        org_grace_rounds=0, org_cooldown_rounds=0,   # 只留水位这一道门
+    )
+    agent.last_context_estimate = 17_000             # 远低于默认水位 100,000
+
+    agent.organize_backlog()                         # 默认：走闸门
+
+    assert agent.llm.calls == []                     # 未到线：一次调用都不发
+    assert task.rounds[0]["org_state"] == ""
+
+    agent.organize_backlog(force=True)               # run 模式退出：无视水位
+
+    assert task.rounds[0]["org_state"] == "done"
+    assert len(agent.llm.calls) == 1
+
+
 def test_backlog_skips_incomplete_protocol(monkeypatch, tmp_path):
     """收尾整理（run 模式退出）同走协议闸门：装配不完整时宁可不整理，
     也不发出必然 400 的请求——收尾整理失败不该由协议问题引起。"""

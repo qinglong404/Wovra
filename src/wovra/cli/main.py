@@ -41,8 +41,10 @@ def cmd_run(args: argparse.Namespace) -> None:
             task.save()
         _run_turn(agent, instruction)
         # 一次性进程收尾：水位未触发的剩余未整理轮补一批整理——
-        # TaskState 跟上进度，下一次自主推进才有准确的"任务状态"
-        agent.organize_backlog()
+        # TaskState 跟上进度，下一次自主推进才有准确的"任务状态"。
+        # `force=True`：这是"进程退出前"这个唯一时机，故无视水位闸门
+        # （2026-09-12 分岔；默认走闸门，供长驻的 serve 网页通道复用）。
+        agent.organize_backlog(force=True)
         _record_leftover_maintenance(agent, task, "收尾补整理记账")
     finally:
         # 一次性进程：会话结束，其后台任务一并收掉
