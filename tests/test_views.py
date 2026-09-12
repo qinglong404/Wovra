@@ -305,6 +305,121 @@ def test_view_text_contains_card_history_and_no_pointers():
     assert "[外域块]" not in text                 # 指针清单已作废（隔离第一）
 
 
+def _route_round(seq: int, target: str, files: list[str] | None = None) -> dict:
+    """造一个**回合内转交**的轮：主 agent 转给 target，target 答话。
+
+    事件序（步 = 一条 assistant 事件）：Main 写文件 → Main 转交 → target 答复。
+    故答复轮归 target、转出记给 Main、步数按转交点切成两段。
+    """
+    import json as _json
+
+    events = [{"id": f"R{seq}-E01", "type": "user",
+               "message": {"role": "user", "content": "干活"}}]
+    eid = 2
+    for i, path in enumerate(files or [], start=1):
+        cid = f"c{seq}_{i}"
+        events.append({
+            "id": f"R{seq}-E{eid:02d}", "type": "tool_call",
+            "message": {"role": "assistant", "content": "", "tool_calls": [{
+                "id": cid, "type": "function",
+                "function": {"name": "write_file",
+                             "arguments": _json.dumps({"path": path, "content": "x"})},
+            }]},
+        })
+        eid += 1
+        events.append({
+            "id": f"R{seq}-E{eid:02d}", "type": "tool_result",
+            "message": {"role": "tool", "tool_call_id": cid, "content": "已写入"},
+        })
+        eid += 1
+    cid = f"c{seq}_route"
+    events.append({
+        "id": f"R{seq}-E{eid:02d}", "type": "tool_call",
+        "message": {"role": "assistant", "content": "", "tool_calls": [{
+            "id": cid, "type": "function",
+            "function": {"name": "route_to",
+                         "arguments": _json.dumps({"agent": target, "reason": "归它"})},
+        }]},
+    })
+    eid += 1
+    events.append({
+        "id": f"R{seq}-E{eid:02d}", "type": "tool_result",
+        "message": {"role": "tool", "tool_call_id": cid, "content": "已转交"},
+    })
+    events.append({"id": f"R{seq}-E99", "type": "final_answer",
+                   "message": {"role": "assistant", "content": "完成"}})
+    return {
+        "seq": seq,
+        "user_input": {"original": "干活", "normalized": "干活"},
+        "events": events,
+        "end_state": "completed",
+    }
+
+
+def test_agent_ledger_splits_carrier_answer_and_steps():
+    """派生账：承载轮 / 答复轮 / 步数三问分答（2026-09-12 用户拍板）。
+
+    为什么必须分：**承载**是"这份材料现在在谁手里"（随分裂变），**答复**是
+    "谁真的答的话"（发生过的事实、不该被后来的分裂改写）。旧口径把两者塞进
+    同一个存量字段，第一次分裂之后就再也说不清了。
+    """
+    rounds = [
+        _block_round(1, ["src/wovra/tools/a.py"]),   # Main 起手，自己答完
+        _route_round(2, "工具层", ["src/wovra/tools/b.py"]),  # Main 转出，工具层答
+        _block_round(3, ["notes.md"]),               # 不属任何域的文件 → 归 Main
+        _block_round(4, ["src/wovra/tools/c.py", "notes.md"]),  # 一轮里两个 agent 都有块
+    ]
+    domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+    ledger = views_module.agent_ledger(rounds, domains)
+
+    main, tools = ledger["Main"], ledger["工具层"]
+    # 答复：R1/R3/R4 是 Main 答的，R2 由工具层接手答完
+    assert main["answer_rounds"] == 3 and tools["answer_rounds"] == 1
+    # 答复轮相加 == 会话轮数（这是**唯一**可以相加的口径）
+    assert main["answer_rounds"] + tools["answer_rounds"] == len(rounds)
+    # 承载：R1/R2/R4 有域内文件块；R3/R4 有归主 agent 的块——R4 两边都承载
+    assert tools["carrier_seqs"] == [1, 2, 4] and main["carrier_seqs"] == [3, 4]
+    assert tools["carrier_blocks"] == 3 and main["carrier_blocks"] == 2
+    # → **承载轮之和 5 > 会话 4 轮**：一轮的块可以分给两个 agent，故禁止求和
+    assert tools["carrier_rounds"] + main["carrier_rounds"] > len(rounds)
+    # 步数：按转交点分段——R2 里 Main 执行了写文件与转交两步，工具层执行答复一步
+    assert main["steps"] == 9 and tools["steps"] == 1
+    assert main["handoffs"] == 1 and tools["handoffs"] == 0
+    # 观测字段（不落盘的那三样之外）也在：没给注册表就全是 0，不编数
+    assert main["window"] == 0 and main["share"] == 0.0
+    # 双键：名字与 ID 都查得到同一条
+    assert ledger["A"] is tools
+
+
+def test_agent_ledger_counts_only_answered_rounds_as_answers():
+    """中断轮有步数、没有答复：不进答复轮，但也别把它的步丢了。"""
+    r = _block_round(1, ["src/wovra/tools/a.py"])
+    r["end_state"] = "open"
+    r["events"] = r["events"][:-1]          # 剥掉 final_answer
+    ledger = views_module.agent_ledger([r], [{"name": "工具层",
+                                              "file_domains": ["src/wovra/tools/"]}])
+    assert ledger["Main"]["answer_rounds"] == 0
+    assert ledger["Main"]["steps"] == 1     # 那次写文件调用照记
+    assert ledger["工具层"]["carrier_rounds"] == 1
+
+
+def test_agent_ledger_ignores_settled_active_view_for_answers():
+    """**回归**：渐近归属补判改写 `active_view` 之后，答复归属不受影响。
+
+    这是本次改动的要害：旧账本存的是"闭合那一刻的 active_view"，而补判会在
+    之后把它改掉（材料归位），于是存账描述的归属**已经不存在了**（实测 §55：
+    主 agent 记 13 轮却只承载 2 块）。派生口径下答复走事件流——`active_view`
+    怎么被补判改，答复数都不动。
+    """
+    r = _block_round(1, ["src/wovra/tools/a.py"])
+    domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+    before = views_module.agent_ledger([r], domains)["Main"]["answer_rounds"]
+    r["active_view"] = "工具层"              # 模拟补判
+    after = views_module.agent_ledger([r], domains)["Main"]["answer_rounds"]
+    assert before == after == 1
+    assert views_module.agent_ledger([r], domains)["工具层"]["answer_rounds"] == 0
+
+
 def test_human_report_reports_completeness():
     """人视图摘要：块总数 + 归属完整性 + 每域体量。"""
     rounds = [_block_round(1, ["src/wovra/tools/a.py"])]

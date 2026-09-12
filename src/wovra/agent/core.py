@@ -552,24 +552,12 @@ class _CoreMixin:
         # 语义纠正后要随活动自然迁移到真实窗口，不能被旧值占住
         entry["window"] = self._agent_window()
 
-    def _account_agent_activity(self) -> None:
-        """轮闭合时的 per-agent 记账（3a）：轮次 + 步数落到**最终接手方**。
-
-        口径：一轮算一个轮次、该轮全部步数，都记给轮闭合时 `active_view` 的
-        那个 agent（真正答话的那个）；主 agent 的参与度另有 `handoffs`
-        （它转出过多少轮）——两本账分开，避免既当轮次又当转出重复计数。
-        """
-        if self.task is None or self.current_round is None:
-            return
-        r = self.current_round
-        view = str(r.get("active_view") or "") or views_module.MAIN_AGENT_ID
-        entry = self._registry_entry_for(view)
-        if entry is None:
-            return
-        entry["rounds"] = int(entry.get("rounds") or 0) + 1
-        entry["steps"] = int(entry.get("steps") or 0) + int(r.get("steps_used") or 0)
-        # 窗口无条件校正（同 _touch_view_context：老值可能是误存的水位）
-        entry["window"] = self._agent_window()
+    # `_account_agent_activity()`（轮闭合时把轮次/步数写进注册表条目）已删除
+    # ——2026-09-12 用户拍板：账本**派生、不落盘**。写入式账有两个死结：
+    # ①闭合那一刻的快照会被后来的分裂/渐近归属补判回溯作废（存的是不再存在
+    # 的归属状态）；②中断轮 `finalize_round` 与续跑闭合 `close_round` 各记一次
+    # （实测 Σ14 vs 会话 13 轮）。现在由 `views.agent_ledger` 现场算承载轮/
+    # 答复轮/步数，条目上只留 ctx_cur/ctx_peak/window 这些**观测**字段。
 
     def _route_hint_lines(self) -> list[str]:
         """主 agent 起手时的**路由建议**（规则层给的起点，不是命令）。"""
@@ -612,11 +600,9 @@ class _CoreMixin:
         self.current_round["route_hops"] = int(
             self.current_round.get("route_hops") or 0
         ) + 1
-        # per-agent 参与度账（3a）：转出记给**转出方**（通常是主 agent）——
-        # 与"轮次归最终接手方"分开，两本账各说各的。
-        source = self._registry_entry_for(before)
-        if source is not None:
-            source["handoffs"] = int(source.get("handoffs") or 0) + 1
+        # per-agent 参与度**不再记账**（2026-09-12 用户拍板：账本派生）：
+        # 转出次数由 `views.agent_ledger` 从事件流里的 route_to 事件数出来
+        # （每一次换手都算一次，一轮可转多次），比在这里 +1 更准也更抗补判。
         if self.task is not None:
             self.task.record(
                 "route",
@@ -722,7 +708,6 @@ class _CoreMixin:
         )
         # 阶段锚点回填（§53）：块切分完成才能说清"这次阶段验收落在哪个块"。
         self._backfill_stage_anchors()
-        self._account_agent_activity()   # 3a：轮次/步数落到最终接手方
         self.current_round = None
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:
@@ -741,7 +726,6 @@ class _CoreMixin:
             return
         self.current_round["end_state"] = "open"
         self._usage_record_and_drain(closed=False)
-        self._account_agent_activity()   # 3a：中断轮照记（花的钱是真的）
         self._persist_rounds()
         self.current_round = None
 

@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import registry as registry_module
 from . import task as task_module
+from . import views as views_module
 
 _WEBUI = Path(__file__).resolve().parents[2] / "webui" / "index.html"
 _STARTED = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -52,9 +53,10 @@ def parse_usage_row(detail: str) -> dict | None:
 
 
 def round_usage_map(data: dict) -> dict[int, dict]:
-    """每轮的用量账（steps 签名归属，与 agent_stats 同一口径）。
+    """每轮的用量账（steps 签名归属，见 agent_stats）。
 
-    一轮只在一个 active_view 上跑——轮级账天然就是该轮 agent 的账。
+    一轮**可能不止一个 agent 在跑**（回合内 `route_to` 转交），但分段级费用
+    账还没做，故本函数的粒度为轮：整轮费用记在该轮的答复方名下（近似）。
     context = 轮内各分段上下文峰值。
     """
     rows = [parse_usage_row(h.get("detail", ""))
@@ -81,97 +83,87 @@ def round_usage_map(data: dict) -> dict[int, dict]:
     return out
 
 
-_ATTR_RE = re.compile(r"R(\d+)→([^、（）]+)")
-
-
-def attributed_seqs(data: dict) -> dict:
-    """渐近归属补判过的轮（seq → 补判到的视图），从 history 的 route 行机械解析。
-
-    这些轮**实际由主 agent 执行**（它们到达时域树尚不存在），只是材料归属
-    后来补判给了某个域。故计数与用量都该记在实际执行方，归属另列。
-    """
-    out: dict = {}
-    for h in data.get("history") or []:
-        if h.get("kind") != "route":
-            continue
-        detail = str(h.get("detail") or "")
-        if "渐近归属" not in detail:
-            continue
-        for m in _ATTR_RE.finditer(detail):
-            out[int(m.group(1))] = m.group(2).strip()
-    return out
+# （原 `attributed_seqs()`：用正则从 history 的 route 行里解析"渐近归属补判过的
+#   轮"。已删除——渐近归属现在直接体现为派生账的「答复轮 vs 承载轮」两个字段，
+#   不必再解析日志文本：材料的归属由块归属给出，答话的归属由事件流给出。）
 
 
 def agent_stats(
     data: dict, main_id: str = "", registry: list | None = None
 ) -> list[dict]:
-    """按 agent 聚合：轮次/步数（精确，来自轮元数据 active_view）+ 用量。
+    """按 agent 聚合：轮次/步数（**派生**）+ 用量。
 
-    用量归属是**近似口径**：usage 落账行按 steps 签名顺序归属到轮
-    （轮的 steps_used 累计值 = 该轮各分段 usage 行 steps 之和）；中断
-    分段并帐，漂移只可能出现在未闭合会话尾部。上下文窗口 = 该 agent
-    各轮 context 峰值；单轮消费 = Σprompt / 有账轮数。
+    账本口径（2026-09-12 用户拍板，worklog §55）：**派生、不落盘**——
+    承载轮/承载块/答复轮/步数/转出全部来自 `views.agent_ledger`（承载轮与
+    装配同一套块归属判据；答复轮与步数走事件流、按 `route_to` 转交点分段）。
+    本函数只负责把它与用量账并起来。
 
-    3a（2026-09-12）：注册表条目自带**运行时账**（rounds/steps/handoffs/
-    ctx_cur/ctx_peak/window，`registry.runtime_stats`），那才是权威口径——
-    本函数在聚合出用量后用它覆盖轮次/步数/当前占比，字段只增不改。
+    字段语义（两个**不同**的问题，禁止相加）：
+    * `rounds` = **答复轮**（谁真的答的话）；
+    * `carrier_rounds` / `carrier_blocks` = **承载**（这份材料现在在谁手里）。
+
+    用量归属是**近似口径**：usage 落账行按 steps 签名顺序归属到轮（轮的
+    steps_used 累计值 = 该轮各分段 usage 行 steps 之和）；有转交的轮整轮费用
+    记在最终答复方名下；中断分段并帐，漂移只可能出现在未闭合会话尾部。
+    上下文窗口 = 该 agent 各轮 context 峰值；单轮消费 = Σprompt / 有账轮数。
     """
     main_id = main_id or registry_module.MAIN_AGENT_ID
-    rounds = data.get("rounds") or []
+    rounds = [r for r in (data.get("rounds") or []) if isinstance(r, dict)]
+    reg = registry if registry is not None else (data.get("registry") or [])
+    domains = registry_module.latest_domains(rounds)
+    ledger = views_module.agent_ledger(rounds, domains, reg)
+    lookup = views_module.agent_lookup(domains, reg)
+
     per: dict[str, dict] = {}
     order: list[str] = []
 
-    def bucket(aid: str) -> dict:
-        if aid not in per:
-            per[aid] = {"agent": aid, "rounds": 0, "steps": 0, "prompt": 0,
-                        "cached": 0, "miss": 0, "completion": 0,
-                        "ctx_peak": 0, "billed_rounds": 0,
-                        "attributed_rounds": 0, "attributed_steps": 0}
-            order.append(aid)
-        return per[aid]
+    def bucket(name: str) -> dict:
+        if name not in per:
+            per[name] = {"agent": name, "id": "", "display": name, "rounds": 0,
+                         "carrier_rounds": 0, "carrier_blocks": 0, "steps": 0,
+                         "handoffs": 0, "prompt": 0, "cached": 0, "miss": 0,
+                         "completion": 0, "ctx_peak": 0, "billed_rounds": 0}
+            order.append(name)
+        return per[name]
+
+    # 名册先建全（没干过活的 agent 也要有格子，不能被聚合悄悄漏掉）
+    seen_names: set[str] = set()
+    for rec in ledger.values():
+        if rec["name"] in seen_names:
+            continue
+        seen_names.add(rec["name"])
+        b = bucket(rec["name"])
+        b["id"] = rec["id"]
+        b["display"] = rec["display"]
+        b["rounds"] = rec["answer_rounds"]
+        b["carrier_rounds"] = rec["carrier_rounds"]
+        b["carrier_blocks"] = rec["carrier_blocks"]
+        b["steps"] = rec["steps"]
+        b["handoffs"] = rec["handoffs"]
+        b["ctx_cur"] = rec["ctx_cur"]
+        b["ctx_peak"] = rec["ctx_peak"]
+        b["window"] = rec["window"]
+        b["share"] = rec["share"]
 
     usage = round_usage_map(data)
-    attr = attributed_seqs(data)
     for r in rounds:
-        view = r.get("active_view") or main_id
-        # 渐近归属补判的轮：实际执行方是主 agent（到达时域树还没建），
-        # 计数与用量都记它；补判到的域另计 attributed_*（只归位、没干活）
-        executor = main_id if r.get("seq") in attr else view
-        b = bucket(executor)
-        b["rounds"] += 1
-        b["steps"] += r.get("steps_used") or 0
+        owner = views_module.answer_view(r, lookup)
+        b = bucket(owner)
         agg = usage.get(r.get("seq")) or {}
         if agg.get("calls"):
             b["billed_rounds"] += 1
         for k in _USAGE_KEYS:
             b[k] += agg.get(k, 0)
         b["ctx_peak"] = max(b["ctx_peak"], agg.get("context", 0))
-        if r.get("seq") in attr and view != executor:
-            ab = bucket(view)
-            ab["attributed_rounds"] += 1
-            ab["attributed_steps"] += r.get("steps_used") or 0
 
     out = []
-    runtime = registry_module.runtime_stats(
-        registry if registry is not None else (data.get("registry") or [])
-    )
-    for aid in order:
-        b = per[aid]
+    for name in order:
+        b = per[name]
         b["avg_prompt"] = (b["prompt"] // b["billed_rounds"]) if b["billed_rounds"] else 0
-        # 运行时账覆盖（3a）：注册表是权威口径；缺账的历史会话保留聚合值。
-        stat = runtime.get(aid)
-        if stat:
-            b["id"] = stat["id"]
-            if stat["rounds"]:
-                b["rounds"] = stat["rounds"]
-            if stat["steps"]:
-                b["steps"] = stat["steps"]
-            b["handoffs"] = stat["handoffs"]
-            b["ctx_cur"] = stat["ctx_cur"]
-            b["window"] = stat["window"]
-            b["share"] = stat["share"]
-            if stat["ctx_peak"]:
-                b["ctx_peak"] = max(b["ctx_peak"], stat["ctx_peak"])
+        b.setdefault("ctx_cur", 0)
+        b.setdefault("ctx_peak", 0)
+        b.setdefault("window", 0)
+        b.setdefault("share", 0.0)
         out.append(b)
     return out
 
@@ -754,6 +746,29 @@ def session_meta(task_id: str, data: dict) -> dict:
         if isinstance(e, dict) and (not int(e.get("window") or 0)
                                     or int(e["window"]) == 100_000):
             e["window"] = _DEFAULT_CONTEXT_LIMIT
+    # per-agent 账**派生后补进条目**（2026-09-12 用户拍板：账本不落盘）——
+    # 前端照旧读 `rounds`/`steps`/`handoffs`，但那些值现在是现场算的；
+    # 新增 `carrier_rounds`/`carrier_blocks`（承载＝材料在谁手里）。
+    # 老会话的条目上没有旧字段，正好：ledger 里就有权威值。
+    ledger = views_module.agent_ledger(
+        data.get("rounds") or [],
+        registry_module.latest_domains(data.get("rounds") or []),
+        data.get("registry") or [],
+    )
+    for e in meta["registry"] or []:
+        if not isinstance(e, dict):
+            continue
+        rec = ledger.get(str(e.get("name") or "")) or ledger.get(str(e.get("id") or ""))
+        if rec is None:
+            continue
+        e["rounds"] = rec["answer_rounds"]          # 兼容旧字段名 = **答复轮**
+        e["steps"] = rec["steps"]
+        e["handoffs"] = rec["handoffs"]
+        e["carrier_rounds"] = rec["carrier_rounds"]
+        e["carrier_blocks"] = rec["carrier_blocks"]
+        if not e.get("ctx_peak"):
+            e["ctx_peak"] = rec["ctx_peak"]
+        e["share"] = rec["share"] if rec["window"] else 0.0
     usage = round_usage_map(data)
     meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")))
                           for r in data.get("rounds") or []]

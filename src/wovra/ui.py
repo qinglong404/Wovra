@@ -359,7 +359,7 @@ def status(status_value: str, width: int | None = None) -> str:
 # ---- 人机协同报告（组织运行时 V1）：机械渲染，零模型成本 ---------------------
 
 
-def _registry_lines(registry: list | None) -> list[str]:
+def _registry_lines(registry: list | None, ledger: dict | None = None) -> list[str]:
     """机械渲染 Agent 注册表（零 LLM）。
 
     注册表是"分裂产物的下游消费者"最早的一处：域树由分裂分析产出，
@@ -367,11 +367,14 @@ def _registry_lines(registry: list | None) -> list[str]:
     描述与所有权文件域是路由的依据，必须可见——否则用户无法判断
     分裂质量（"分出来之后能不能用"）。缩进按路径 ID 的层级。
 
-    3a（2026-09-12 用户口径「每个子 agent 有自己的轮次、步数、上下文窗口与
-    占比」）：条目自带运行时账，这里一并打出来——没账的历史会话不打（不编 0）。
+    per-agent 账（2026-09-12 用户口径「每个子 agent 有自己的轮次、步数、
+    上下文窗口与占比」）来自 `views.agent_ledger`——**派生**：**答复轮** = 谁
+    真的答的话，**承载轮** = 这份材料现在在谁手里。历史会话同样算得出来
+    （不再有"没这本账就不显示"的情况）。
     """
     if not registry:
         return ["-（无）"]
+    ledger = ledger or {}
     lines: list[str] = []
     for entry in registry:
         if not isinstance(entry, dict):
@@ -382,7 +385,7 @@ def _registry_lines(registry: list | None) -> list[str]:
         name = str(entry.get("name") or "")
         status = str(entry.get("status") or "")
         lines.append(f"{indent}- {path_id}（{name}｜{status}）")
-        stat = _agent_stat_line(entry)
+        stat = _agent_stat_line(ledger.get(name) or ledger.get(path_id) or {})
         if stat:
             lines.append(f"{indent}  {stat}")
         desc = " ".join(str(entry.get("description") or "").split())
@@ -396,17 +399,44 @@ def _registry_lines(registry: list | None) -> list[str]:
     return lines
 
 
-def _agent_stat_line(entry: dict) -> str:
-    """该 agent 的运行时账行（3a）：轮次 / 步数 / 上下文 / 窗口占比 / 转出。"""
-    rounds = int(entry.get("rounds") or 0)
-    steps = int(entry.get("steps") or 0)
-    cur = int(entry.get("ctx_cur") or 0)
-    peak = int(entry.get("ctx_peak") or 0)
-    window = int(entry.get("window") or 0)
-    handoffs = int(entry.get("handoffs") or 0)
-    if not any((rounds, steps, cur, peak, window, handoffs)):
+def _task_ledger(task) -> dict:
+    """该任务的 per-agent 派生账（零 LLM；取不到就返回空——渲染层降级）。
+
+    账本不再落盘（2026-09-12 用户拍板），故这里现场算；派生口径见
+    `views.agent_ledger`（承载轮与装配同一判据，答复轮走事件流）。
+    """
+    try:
+        from .views import agent_ledger
+    except Exception:  # noqa: BLE001
+        return {}
+    try:
+        return agent_ledger(
+            getattr(task, "rounds", None), None, getattr(task, "registry", None)
+        )
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+def _agent_stat_line(stat: dict) -> str:
+    """该 agent 的账行：答复轮 / 承载轮 / 步数 / 上下文 / 窗口占比 / 转出。
+
+    两个数是**两个不同的问题**（用户口径：分列）：答复轮 = 谁真的答的话，
+    承载轮 = 这份材料现在在谁手里。分裂之后两者会差很多（实测：主 agent
+    答复 13 轮、承载 2 轮），这正是"轮被拆散"的可见面。
+    """
+    if not stat:
         return ""
-    parts = [f"轮 {rounds}", f"步 {steps}"]
+    answers = int(stat.get("answer_rounds") or 0)
+    carriers = int(stat.get("carrier_rounds") or 0)
+    steps = int(stat.get("steps") or 0)
+    cur = int(stat.get("ctx_cur") or 0)
+    peak = int(stat.get("ctx_peak") or 0)
+    window = int(stat.get("window") or 0)
+    handoffs = int(stat.get("handoffs") or 0)
+    if not any((answers, carriers, steps, cur, peak, window, handoffs)):
+        return ""
+    parts = [f"答复 {answers} 轮", f"承载 {carriers} 轮（{int(stat.get('carrier_blocks') or 0)} 块）",
+             f"步 {steps}"]
     if cur or peak:
         share = f"（{cur / window:.0%}）" if window else ""
         parts.append(f"上下文 {cur:,}{share}／峰值 {peak:,} tok")
@@ -487,7 +517,7 @@ def report_view(task, children: list[dict] | None = None) -> str:
         lines.append("-（无）")
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
-    lines += _registry_lines(task.registry)
+    lines += _registry_lines(task.registry, _task_ledger(task))
 
     lines += ["", "## 域视图（Level 1 第二步：装配按域分化的材料）"]
     lines += _domain_view_lines(task)
@@ -614,7 +644,7 @@ def maint_view(task) -> str:
                 lines.append(f"  未归属（归主 agent）：{len(un_ids)} 块")
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
-    lines += _registry_lines(getattr(task, "registry", None))
+    lines += _registry_lines(getattr(task, "registry", None), _task_ledger(task))
 
     lines += ["", "## 域视图（Level 1 第二步：装配按域分化的材料）"]
     lines += _domain_view_lines(task)

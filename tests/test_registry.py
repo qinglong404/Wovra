@@ -35,8 +35,10 @@ def test_build_entries_generates_path_ids_from_tree():
     assert top["goal"] == "加固"
     assert top["status"] == "dormant"          # 休眠是默认态（零成本）
     assert top["inbox"] == []
-    # per-agent 运行时账（3a）：新条目从 0 起
-    assert (top["rounds"], top["steps"], top["ctx_cur"], top["window"]) == (0, 0, 0, 0)
+    # 只留观测字段（2026-09-12 用户拍板：账本派生、不落盘）——
+    # 轮次/步数/承载由 views.agent_ledger 现场算，条目上不再有这三个键
+    assert (top["ctx_cur"], top["ctx_peak"], top["window"]) == (0, 0, 0)
+    assert not {"rounds", "steps", "handoffs"} & set(top)
     child = entries[1]
     assert child["name"] == "探针"
     assert child["file_domains"] == ["experiments/"]

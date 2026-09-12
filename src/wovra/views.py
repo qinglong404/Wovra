@@ -55,11 +55,12 @@
 `verify_completeness()` 把这个不变量变成可断言的事实（整理/分裂的污染就是
 从"块没有归宿、静默消失"开始的）。
 """
+import json
 from typing import Iterable, Optional
 
 from . import blocks as blocks_module
 from . import tokens as tokens
-from .registry import MAIN_AGENT_ID, latest_domains, runtime_stats
+from .registry import MAIN_AGENT_ID, build_entries, latest_domains
 
 # 模型侧注入的账本分片口径（与 `task._MODEL_SIDE_SECTIONS` 对齐）：
 # 全局节每轮都进每个视图（目标/现状是"我在干什么"的最小上下文；
@@ -453,6 +454,236 @@ def view_blocks_by_round(
     return out
 
 
+# ---- per-agent 运行时账（派生，不落盘）---------------------------------------
+
+def _tool_call_names(message: dict) -> list[str]:
+    return [
+        str((c.get("function") or {}).get("name") or "")
+        for c in (message.get("tool_calls") or [])
+        if isinstance(c, dict)
+    ]
+
+
+def round_step_segments(r: dict, lookup: Optional[dict] = None) -> list[tuple[str, int]]:
+    """一轮里「谁执行了几步」的分段（走事件流，零 LLM）。
+
+    * **步** = 一条 `assistant` 事件（`tool_call` 或 `final_answer`），也就是
+      一次模型往返——与轮上累计的 `steps_used` 是同一件东西（空响应重试
+      不产生事件，故这里只会略少、不会多）。
+    * **转交点** = 事件流里那个 `route_to` 工具调用事件：调用者执行了它，
+      从下一条事件起归接手方。**所以轮上不必另存交接锚点**——锚点本来就在
+      事件流里，而且这样天然支持一轮内多次转交（`route_hops` 上限之内）；
+      历史轮同样能算。
+    * **起点** = 显式转交（`switch_view`/`notify` 写下的意志）的轮由目标起手，
+      其余一律主 agent 起手（2026-09-12 用户口径：每轮恒由主 agent 先触发）。
+
+    这条口径落在**事件流**上，而不是落在 `active_view` 上——后者会被渐近归属
+    补判回溯改写（`core._settle_views`），那是**材料归属**；"谁答的话"是发生过
+    的事实，不该被后来的分裂改写。两问分开，各有各的算据。
+    """
+    lookup = lookup or {}
+    cur = str(lookup.get(str(r.get("route_explicit") or "").strip()) or MAIN_AGENT_ID)
+    segs: list[tuple[str, int]] = []
+    for event in r.get("events") or []:
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message") or {}
+        if str(message.get("role") or "") != "assistant":
+            continue
+        if segs and segs[-1][0] == cur:
+            segs[-1] = (cur, segs[-1][1] + 1)
+        else:
+            segs.append((cur, 1))
+        if _tool_call_names(message) != ["route_to"]:
+            continue
+        for call in message.get("tool_calls") or []:
+            arguments = (call.get("function") or {}).get("arguments") or "{}"
+            try:
+                target = str((json.loads(arguments) or {}).get("agent") or "")
+            except (TypeError, ValueError):
+                target = ""
+            cur = str(lookup.get(target) or cur)
+    return segs
+
+
+def answer_view(r: dict, lookup: Optional[dict] = None) -> str:
+    """一轮**答话的那个 agent**（口径见 `round_step_segments`）。"""
+    segs = round_step_segments(r, lookup)
+    if segs:
+        return segs[-1][0]
+    return str(lookup.get(str(r.get("route_explicit") or "").strip()) or MAIN_AGENT_ID)
+
+
+def _has_final_answer(r: dict) -> bool:
+    return any(
+        isinstance(e, dict) and str(e.get("type") or "") == "final_answer"
+        for e in (r.get("events") or [])
+    )
+
+
+def _ledger_roster(
+    domains: Iterable[dict] | None, registry: Iterable[dict] | None
+) -> tuple[list[dict], dict[str, str]]:
+    """agent 名册 + 「视图串 → 名册名」查表（名字与 ID 两种写法都认）。
+
+    主 agent 的名册名恒为哨兵 ID `Main`（机器键要稳定，别随注册表里的显示名
+    漂移——历史数据里 `active_view` 存的一直是哨兵）；它的显示名另放
+    `display`（注册表里通常叫「主agent」）。查表把哨兵与显示名都指向 `Main`。
+    """
+    roster: list[dict] = []
+    lookup: dict[str, str] = {}
+    main_display = MAIN_AGENT_ID
+    for e in registry or []:
+        if isinstance(e, dict) and str(e.get("id") or "") == MAIN_AGENT_ID:
+            main_display = str(e.get("name") or main_display)
+    roster.append({
+        "id": MAIN_AGENT_ID, "name": MAIN_AGENT_ID,
+        "view": MAIN_AGENT_ID, "display": main_display,
+    })
+    lookup[MAIN_AGENT_ID] = MAIN_AGENT_ID
+    lookup[main_display] = MAIN_AGENT_ID
+    by_name = {
+        str(e.get("name")): str(e.get("id") or "")
+        for e in registry or []
+        if isinstance(e, dict) and e.get("name")
+    }
+    if not by_name:
+        # 注册表没给（离线检视/尚未 promote）：用同一套机械翻译就地派生路径 ID
+        # ——账本的 ID 必须与视图表、人视图一致，否则同一个域在两处显示成两个
+        # 身份（`build_views` 同一个坑，同一个解法）。
+        by_name = {str(e["name"]): str(e["id"]) for e in build_entries(domains)}
+    for d in domains or []:
+        if not isinstance(d, dict) or not d.get("name"):
+            continue
+        name = str(d["name"])
+        if name in lookup:
+            continue
+        aid = by_name.get(name, name)
+        roster.append({"id": aid, "name": name, "view": name, "display": name})
+        lookup[name] = name
+        if aid:
+            lookup[aid] = name
+    return roster, lookup
+
+
+def agent_lookup(
+    domains: Iterable[dict] | None = None, registry: Iterable[dict] | None = None
+) -> dict[str, str]:
+    """「视图串（域名或 ID）→ 名册名」查表——消费方复用同一套归属判据。"""
+    return _ledger_roster(domains, registry)[1]
+
+
+def agent_ledger(
+    rounds: Iterable[dict] | None,
+    domains: Iterable[dict] | None = None,
+    registry: Iterable[dict] | None = None,
+) -> dict[str, dict]:
+    """每个 agent 的运行时账——**派生，不落盘**（2026-09-12 用户拍板）。
+
+    为什么派生：轮/步不只是一个计数，它自带**归属**，而归属会被分裂回溯改写
+    （`_settle_views` 的渐近归属补判把历史轮的材料归给新域）。存下来的账是
+    轮闭合那一刻的快照，第一次分裂之后就描述了一个**不再存在的状态**——
+    实测（worklog §55）：13 轮会话存账 Σ14（中断轮被 `finalize_round` 与
+    `close_round` 各记一次），主 agent 记「13 轮 / 117 步」而实际只承载 2 块；
+    81 轮的老会话整个账本全 0（早于账本机制，没人回填）。派生之后
+    「哪些事件之后要重算」这个问题直接消失：归属一动，账自动跟着动；
+    压缩是 A→A（归属不变），自然不用算——那不是另一条规则，是同一条规则的
+    特例。
+
+    两个**不同的问题**分开答（用户口径：承载轮与答复轮分列）：
+
+    * **承载轮 / 块数**：这份材料现在在谁手里——用与装配逐字相同的判据
+      （`ownership` + `view_blocks_by_round`）。一个轮里的块可以分给两个
+      agent（文件块跟文件域、保底块跟本轮视图），故 **Σ承载轮 ≠ 会话轮数**，
+      这是正常的：仓里禁止对 per-agent 数字求和，会话总轮数永远取
+      `len(rounds)`（§53 的教训：Σ`steps_used`=111 而 usage=109）。
+    * **答复轮 / 步数 / 转出**：谁真的答的话、谁真的执行了那几步——走事件流，
+      见 `round_step_segments`。只统计真的产出过 `final_answer` 的轮为答复轮
+      （中断轮有步数、没有答复）。
+
+    `ctx_cur` / `ctx_peak` / `window` 是**观测**不是投影——"最近一次装配多大 /
+    历史峰值多大"是运行时事实，不是材料的函数，而且峰值单调、不该随分裂下调，
+    故仍从注册表条目读取；本函数只算不写。
+
+    返回按**名字与 ID 双键**给出同一条目（消费方两种写法都会查）。
+    """
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    domains = list(domains) if domains is not None else latest_domains(rounds)
+    index = block_index(rounds)
+    owners = ownership(domains, index)
+    roster, lookup = _ledger_roster(domains, registry)
+
+    def blank(entry: dict) -> dict:
+        return {
+            "id": entry["id"],
+            "name": entry["name"],
+            "display": entry["display"],
+            "carrier_rounds": 0,
+            "carrier_blocks": 0,
+            "carrier_seqs": [],
+            "answer_rounds": 0,
+            "steps": 0,
+            "handoffs": 0,
+        }
+
+    by_view = {entry["view"]: blank(entry) for entry in roster}
+    by_name = {entry["name"]: by_view[entry["view"]] for entry in roster}
+
+    # 承载：与装配同一套判据（块作筛子、轮作单位）
+    for entry in roster:
+        buckets = view_blocks_by_round(
+            rounds, domains, entry["view"], index, owners
+        )
+        rec = by_view[entry["view"]]
+        rec["carrier_seqs"] = sorted(int(k) for k in buckets)
+        rec["carrier_rounds"] = len(rec["carrier_seqs"])
+        rec["carrier_blocks"] = sum(len(b.get("own_ids") or []) for b in buckets.values())
+
+    # 答复与步数：走事件流，按转交点分段
+    for r in rounds:
+        segs = round_step_segments(r, lookup)
+        answered = _has_final_answer(r)
+        for name, count in segs:
+            rec = by_name.get(name)
+            if rec is not None:
+                rec["steps"] += count
+        if segs:
+            # 转出记给**转出方**（每一次换手都算一次；一轮可转多次）
+            for name, _count in segs[:-1]:
+                rec = by_name.get(name)
+                if rec is not None:
+                    rec["handoffs"] += 1
+        if answered:
+            rec = by_name.get(segs[-1][0] if segs else MAIN_AGENT_ID)
+            if rec is not None:
+                rec["answer_rounds"] += 1
+
+    # 观测字段（存的是事实，不是投影）+ 双键
+    seen = {
+        str(e.get("id") or ""): e
+        for e in registry or []
+        if isinstance(e, dict) and e.get("id")
+    }
+    obs = {}
+    for e in registry or []:
+        if isinstance(e, dict) and e.get("name"):
+            obs[str(e["name"])] = e
+    out: dict[str, dict] = {}
+    for entry in roster:
+        rec = by_view[entry["view"]]
+        source = seen.get(str(entry["id"])) or obs.get(entry["name"]) or {}
+        window = int(source.get("window") or 0)
+        cur = int(source.get("ctx_cur") or 0)
+        rec["ctx_cur"] = cur
+        rec["ctx_peak"] = int(source.get("ctx_peak") or 0)
+        rec["window"] = window
+        rec["share"] = (cur / window) if window else 0.0
+        out[entry["name"]] = rec
+        if entry["id"] and entry["id"] != entry["name"]:
+            out[str(entry["id"])] = rec
+    return out
+
+
 def files_by_domain(
     rounds: Iterable[dict],
     domains: Iterable[dict] | None,
@@ -705,6 +936,9 @@ def build_views(
         "owners": owners,
         "domains": domains,
         "completeness": verify_completeness(index, owners, views),
+        # per-agent 派生账（承载轮/答复轮/步数）——与视图同一套 index/owners
+        # 就地算出来，故不可能与上面各视图各说各话。
+        "ledger": agent_ledger(rounds, domains, registry),
     }
 
 
@@ -734,13 +968,13 @@ def verify_completeness(
 def human_report(built: dict, registry: list | None = None) -> list[str]:
     """域视图的人视图摘要（零 LLM；`wovra report` / `wovra maint` 共用）。
 
-    `registry` 给了就带上各 agent 的**运行时账**（3a：轮次/步数/上下文占比）
-    ——"每个子 agent 有自己的轮次、步数、窗口"必须看得见；历史会话没这本账
-    时留空（不编数）。
+    agent 账取自 `built["ledger"]`（**派生**，见 `agent_ledger`）：承载轮 = 这份
+    材料现在在谁手里，答复轮 = 谁真的答的话。历史会话同样算得出来（不再有
+    "没这本账就留空"的情况）。
     """
     if not built or not built.get("views"):
         return []
-    runtime = runtime_stats(registry)
+    runtime = built.get("ledger") or {}
     lines = [
         "## 域视图（Level 1 第二步：装配按域分化的材料）",
         "",
@@ -754,8 +988,12 @@ def human_report(built: dict, registry: list | None = None) -> list[str]:
             f"本域 {c['own']} 块、约 {v['est_tokens']:,} tok"
         )
         stat = runtime.get(name) or {}
-        if stat.get("rounds") or stat.get("steps"):
-            line += f"｜agent 账：轮 {stat['rounds']}／步 {stat['steps']}"
+        if stat:
+            line += (
+                f"｜agent 账：答复 {stat['answer_rounds']} 轮／承载 "
+                f"{stat['carrier_rounds']} 轮（{stat['carrier_blocks']} 块）"
+                f"／步 {stat['steps']}"
+            )
             if stat.get("handoffs"):
                 line += f"／转出 {stat['handoffs']}"
             if stat.get("window"):

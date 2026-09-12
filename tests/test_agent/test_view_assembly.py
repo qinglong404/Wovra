@@ -64,11 +64,12 @@ def test_route_hint_is_injected_into_main_agent_context(monkeypatch):
     assert "[路由建议]" not in off
 
 
-def test_per_agent_runtime_accounting(monkeypatch):
-    """3a：每个 agent 自己的轮次/步数/上下文体量与窗口（2026-09-12 用户口径）。
+def test_per_agent_account_is_derived_not_stored(monkeypatch):
+    """账本**派生、不落盘**（2026-09-12 用户拍板）：条目只留观测字段。
 
-    口径：一轮算一个轮次、该轮全部步数，都记给轮闭合时 `active_view` 的那个
-    agent（真正答话的那个）；转出记给转出方（主 agent 的参与度账）。
+    条目上还能站的只有 `ctx_cur`/`ctx_peak`/`window`（"最近一次装配多大 /
+    历史峰值 / 窗口"是运行时事实，不是材料的函数）；轮次/步数/转出全由
+    `views.agent_ledger` 现场算——它们带**归属**，而归属会被分裂改写。
     """
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
@@ -79,20 +80,52 @@ def test_per_agent_runtime_accounting(monkeypatch):
     main_entry = agent._registry_entry_for(routing_module.MAIN_AGENT_ID)
     # window = 模型上下文窗口（context_limit），不是整理水位（2026-09-12 纠正）
     assert main_entry["ctx_cur"] > 0 and main_entry["window"] == agent.context_limit
+    # 写入式账已退役：条目上不再有这三样
+    assert not {"rounds", "steps", "handoffs"} & set(main_entry)
 
-    # 主 agent 照建议转出 → 转出记账给主 agent，轮次/步数记给接手方
     agent._pending_route = "工具层"
     agent._apply_pending_route()
-    assert main_entry["handoffs"] == 1
+    assert not {"rounds", "steps", "handoffs"} & set(agent._registry_entry_for("工具层"))
     agent.close_round()
 
-    tools_entry = agent._registry_entry_for("工具层")
-    assert tools_entry["rounds"] == 1
-    assert tools_entry["steps"] == 4
-    assert main_entry["rounds"] == 0                 # 这一轮不是它答的
-    stats = registry_module.runtime_stats(task.registry)
-    assert stats["工具层"]["rounds"] == 1 and stats["工具层"]["window"] > 0
-    assert abs(stats["Main"]["share"] - main_entry["ctx_cur"] / main_entry["window"]) < 1e-9
+    ledger = views_module.agent_ledger(task.rounds, None, task.registry)
+    # 承载：R1 的域内文件块归工具层；本轮（纯对话轮）的保底块跟本轮视图走
+    # → 也归工具层（`_apply_pending_route` 已把本轮视图换成它）
+    assert ledger["工具层"]["carrier_rounds"] == 2
+    assert ledger["工具层"]["carrier_blocks"] == 2
+    # 答复：本轮转交是测试直接改的标记，事件流里没有 route_to 事件（真实
+    # 流程里它是主 agent 的一次工具调用）→ 答复仍算主 agent
+    assert ledger["Main"]["answer_rounds"] == 1
+    assert ledger["工具层"]["answer_rounds"] == 0
+    # 观测字段经注册表透出（校验过的窗口 + 占比）
+    assert ledger["Main"]["window"] == agent.context_limit
+    assert abs(ledger["Main"]["share"] - main_entry["ctx_cur"] / agent.context_limit) < 1e-9
+
+
+def test_settle_views_moves_material_not_answers(monkeypatch):
+    """**回归**：渐近归属补判只改材料归属，不改"谁答的话"。
+
+    旧口径把答复归属也写进注册表条目，而补判会在闭合之后回溯改写轮上的
+    `active_view` → 存账立刻描述了一个不再存在的状态（实测 §55：13 轮会话
+    里主 agent 记 13 轮却只承载 2 块、另一个域记 0 轮却承载 4 块）。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    task = _task_with_domains([
+        _mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"]),
+        _mk_file_round(2, "safety.py 再改一处", ["src/wovra/tools/safety.py"]),
+    ])
+    agent = _agent(task)
+    before = views_module.agent_ledger(task.rounds, None, task.registry)
+    assert before["Main"]["answer_rounds"] == 2      # 两轮都是主 agent 答的
+
+    changed = agent._settle_views()                  # 材料归位（补判）
+    assert changed == 2
+    assert task.rounds[1]["active_view"] == "工具层"
+
+    after = views_module.agent_ledger(task.rounds, None, task.registry)
+    assert after["Main"]["answer_rounds"] == 2       # 答复归属不动
+    assert after["工具层"]["answer_rounds"] == 0
+    assert after["工具层"]["carrier_rounds"] == 2     # 材料归位了
 
 
 def _agent(task: Task) -> Agent:

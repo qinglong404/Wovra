@@ -105,10 +105,15 @@ def build_entries(domains: Iterable[dict] | None) -> list[dict]:
 
     顶层域取字母（`A`、`B`、`C`…），子域 `A-1`、`A-2`…（见模块 docstring）。
 
-    条目上带 **per-agent 运行时账**（3a，2026-09-12 用户口径：每个子 agent
-    有自己的轮次/步数/上下文窗口与占比）：`rounds` / `steps` / `ctx_cur` /
-    `ctx_peak` / `window` / `handoffs`。新建条目从 0 起；既有条目由
-    `merge_into` 保留（它们是运行时状态，重放产物不该抹掉）。
+    条目上只留**观测字段**（2026-09-12 用户拍板：账本派生、不落盘）：
+    `ctx_cur` / `ctx_peak` / `window`——"最近一次装配多大 / 历史峰值多大 / 窗口
+    多大"。这三样是运行时事实，不是材料的函数（峰值还单调、不该随分裂下调），
+    故仍然存。
+
+    `rounds` / `steps` / `handoffs` **不再写进条目**：它们是"谁手里有料、谁答的
+    话、谁转过手"，随分裂/补判变动，存下来必然过期（实测：13 轮会话存账 Σ14、
+    主 agent 记 13 轮却只承载 2 块；老会话全 0）。现在由 `views.agent_ledger`
+    从轮与事件流现场派生。历史 task.json 里的旧字段留着不读、也不改写。
     """
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     if not domains:
@@ -143,10 +148,7 @@ def build_entries(domains: Iterable[dict] | None) -> list[dict]:
             # 路由/装配分化接入后才会有节点进入 active（后续步骤）
             "status": "dormant",
             "inbox": [],
-            # ---- per-agent 运行时账（3a）----
-            "rounds": 0,      # 该 agent 名下的闭合轮数（按轮闭合时的 active_view）
-            "steps": 0,       # 该 agent 累计步数（同上归属）
-            "handoffs": 0,    # 它转出（route_to）了多少轮——主 agent 的参与度账
+            # ---- 观测字段（不落"账"，见 docstring）----
             "ctx_cur": 0,     # 它那份上下文最近一次装配的体量（tok）
             "ctx_peak": 0,    # 峰值
             "window": 0,      # 它自己的水位/窗口（0 = 用全局默认，见 support）
@@ -159,34 +161,10 @@ def build_entries(domains: Iterable[dict] | None) -> list[dict]:
     return entries
 
 
-def runtime_stats(registry: Iterable[dict] | None) -> dict[str, dict]:
-    """各 agent 的运行时账（3a）：轮次/步数/转出/上下文体量与窗口占比。
-
-    **按名字与 ID 双键**：`active_view` 上主 agent 存的是哨兵 ID（`Main`），
-    子域存的是名字——消费方（CLI 人视图、serve/agent_stats）两种键都会查，
-    这里一次给全，免得各自再猜一遍。
-    """
-    out: dict[str, dict] = {}
-    for entry in registry or []:
-        if not isinstance(entry, dict) or not entry.get("name"):
-            continue
-        cur = int(entry.get("ctx_cur") or 0)
-        window = int(entry.get("window") or 0)
-        stat = {
-            "id": str(entry.get("id") or ""),
-            "name": str(entry.get("name") or ""),
-            "rounds": int(entry.get("rounds") or 0),
-            "steps": int(entry.get("steps") or 0),
-            "handoffs": int(entry.get("handoffs") or 0),
-            "ctx_cur": cur,
-            "ctx_peak": int(entry.get("ctx_peak") or 0),
-            "window": window,
-            "share": (cur / window) if window else 0.0,
-        }
-        out[stat["name"]] = stat
-        if stat["id"] and stat["id"] != stat["name"]:
-            out[stat["id"]] = stat
-    return out
+# 曾经的 `runtime_stats()`（写入式 per-agent 账）已删除：账本改为**派生**
+# ——见 `views.agent_ledger`（承载轮/答复轮/步数/转出从轮与事件流现场算）。
+# 这里不再提供同名函数，是为了让"读存下来的账"这条路彻底断掉：留着它，
+# 早晚有人接回去，然后又一次在第一次分裂之后读到过期的数。
 
 
 

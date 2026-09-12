@@ -30,7 +30,7 @@ JSON"的机械派生；页面零构建（单文件 HTML + 原生 JS），`wovra 
 | 时间线（默认） | 轮卡片流：R{seq} + 用户输入 + 状态徽章（end_state / org_state / 代次 / steps_used）+ 块列表（文件 × 生命周期标签 × 操作）| rounds |
 | 账本 | TaskState 七列表 + 升级置顶（决策升级=等你拍板，视觉最高权重）| task_state |
 | 计划 | 当前阶段（`M{n}`）/ 工作项 + 验收标准 + history（evidence 与检查点锚点折叠展开）+ todo 调用流水 | todo / todo_log |
-| 域注册表 | agent 卡片（id/名称/状态点/文件域/收件箱），分裂判据摘录 | registry + 近轮 split_assessment |
+| 域注册表 | agent 卡片（id/名称/状态点/文件域/收件箱），分裂判据摘录；账本**派生**显示「答复轮 / 承载轮（块） / 步 / 转出」（§55：答复＝谁答的话，承载＝材料在谁手里，两者不可相加） | registry + 近轮 split_assessment + views.agent_ledger |
 | 用量 | KPI（Σprompt / 命中率 / 调用数 / TTFT 均值）+ 命中率条 + 逐调用序列（SVG）+ finish 分布 | history.llm_call 逐行解析 |
 
 事件级查看（M2）：点块 → 抽屉拉取该轮事件原文，块内事件 ID 高亮。

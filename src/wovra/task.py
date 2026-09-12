@@ -652,7 +652,8 @@ class Task:
                 "id": registry_module.MAIN_AGENT_ID, "name": "主agent",
                 "description": "全局协调与未归属事务",
                 "file_domains": [], "status": "active", "inbox": [],
-                "rounds": 0, "steps": 0, "handoffs": 0,
+                # 只留**观测**字段（2026-09-12 用户拍板：账本派生、不落盘）：
+                # 轮次/步数/承载由 `views.agent_ledger` 现场算，不在这里存。
                 "ctx_cur": 0, "ctx_peak": 0, "window": 0,
             }],
             agent_id_scheme=registry_module.AGENT_ID_SCHEME,
