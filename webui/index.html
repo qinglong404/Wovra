@@ -139,8 +139,8 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .mtime{font-size:10.5px;color:var(--tx3);text-align:right;margin:3px 2px 0 0;font-family:var(--mono);line-height:1.3}
 .crow.user .mtime{margin:4px 2px 10px 0}   /* 用户气泡下留够空隙，时间行不被回复挤住 */
 .tcard .t-when{font-size:10px;font-family:var(--mono);color:var(--tx3);flex-shrink:0;white-space:nowrap}
-.ctx-strip{position:sticky;top:0;z-index:6;display:flex;gap:16px;flex-wrap:wrap;align-items:center;padding:8px 26px;background:var(--bg1);border-bottom:1px solid var(--line);margin:-18px -26px 14px;font-size:11px}
-.ctx-strip:empty{display:none}
+#ctxbar{display:none;flex-wrap:wrap;gap:16px;align-items:center;padding:7px 26px;background:var(--bg1);border-bottom:1px solid var(--line);font-size:11px}
+#ctxbar.show{display:flex}
 .ctx-cell{display:flex;align-items:center;gap:6px}
 .ctx-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .ctx-bar{width:64px;height:5px;border-radius:3px;background:var(--bg4);overflow:hidden;flex-shrink:0}
@@ -311,6 +311,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
     <div id="kpis"></div>
     <div id="tabs"></div>
   </div>
+  <div id="ctxbar"></div>
   <div id="content"><div class="empty">等待选择会话…</div></div>
   <div id="composer">
     <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 续跑开放轮）"></textarea>
@@ -538,6 +539,7 @@ function renderHeader(){
     `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
     `<span class="chip" style="cursor:pointer;align-self:center;margin-left:6px" onclick="select(CUR)">↻ 刷新</span>`;
   renderFollowChip();
+  renderCtxbar();
 }
 function setTab(t){TAB=t;renderHeader();renderTab()}
 function copySid(el){
@@ -874,7 +876,7 @@ function drawConv(c,toBottom){
   }
   flush();
 
-  let html=ctxStrip();
+  let html='';
   const mtm=tm=>tm?`<div class="mtime">${esc(tm)}</div>`:'';
   for(const row of rows){
     if(row.kind==='more'){html+=`<button class="more-btn" onclick="loadEarlier()">▲ 加载更早 ${Math.min(5,row.remain)} 轮（还剩 ${row.remain} 轮）</button>`;continue}
@@ -967,10 +969,12 @@ function ci_status(ci){
 
 /* ---- 对话页顶部的 agent 上下文条（注册表运行时账）----
    分母 window = 模型上下文窗口（WOVRA_CONTEXT_LIMIT，默认 1M），不是整理水位 */
-function ctxStrip(){
-  const entries=(META.registry||[]).filter(e=>e&&e.name);
-  if(!entries.length)return'';
-  return `<div class="ctx-strip">`+entries.map(e=>{
+function renderCtxbar(){
+  const bar=document.getElementById('ctxbar');
+  const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
+  bar.classList.toggle('show',!!entries.length);
+  if(!entries.length){bar.innerHTML='';return}
+  bar.innerHTML=entries.map(e=>{
     const col=agentColor(e.id||e.name);
     const cur=e.ctx_cur||0,win=e.window||0,share=win?cur/win*100:0;
     const pct=share>=10?share.toFixed(1):share.toFixed(2);
@@ -979,7 +983,7 @@ function ctxStrip(){
     return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · R${e.rounds||0} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
       <span class="ctx-dot" style="background:${col}"></span>
       <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${bar}</div>`;
-  }).join('')+`</div>`;
+  }).join('');
 }
 
 async function loadEarlier_ref(){return loadEarlier()}
