@@ -63,6 +63,13 @@ ttft/dur/finish）——解析只在 serve 侧做一次，前端不重复实现�
 | `POST /api/sessions/{id}/turn` `{content}` | 追加一轮对话（复用 CLI agent 管线，懒导入） | 三道：进程内单飞全局锁 / CLI 会话锁文件（与 chat/run 互斥，被占返回 409）/ 任务级 job 去重；返回 202 + job_id，`GET /api/jobs/{job_id}` 轮询状态 |
 | 其余一切写路径 | 404 | — |
 
+**轮直播（读，GET）——思考/回答流式**：
+
+| 端点 | 返回 | 说明 |
+|---|---|---|
+| `GET /api/jobs/{id}/live?after=N` | `{status, chunks, next}` | 轮内流式增量：`chunks:[{k:'think'\|'ans'\|'status', s}]`（agent 的 on_thinking/on_answer_delta/on_progress 直通），`after`=已取下标；页面刷新后经会话元数据 `live_job` 重新挂上 |
+| （事件落盘）`GET /api/sessions/{id}/rounds/{seq}` | 事件含 `thinking` | 思考全文随 tool_call / final_answer 事件持久化（只进 event 不进 message，上下文零影响），历史轮渲染可折叠思考块 |
+
 **写侧（DELETE）——删除**：
 
 | 端点 | 语义 | 互斥 |

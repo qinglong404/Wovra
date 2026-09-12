@@ -71,6 +71,7 @@ def _fake_task() -> dict:
              "org_state": "done", "org_generation": 2, "steps_used": 7,
              "events": [{"id": "R1-E01", "type": "user", "status": "",
                          "timestamp": "2026-09-12T10:59:14",
+                         "thinking": "推理全文",
                          "message": {"role": "user", "content": "干活"}}],
              "blocks": [{"id": "R1-B1", "file": "a.py", "kind": "file",
                          "events": ["R1-E01"]}]},
@@ -104,7 +105,8 @@ def test_round_detail_flattens_events():
     d = serve.round_detail(_fake_task(), 1)
     assert d["user_input"] == "干活"
     assert d["events"][0] == {"id": "R1-E01", "type": "user",
-                              "time": "2026-09-12T10:59:14", "status": "",
+                              "time": "2026-09-12T10:59:14",
+                              "thinking": "推理全文", "status": "",
                               "role": "user", "content": "干活",
                               "tool_calls": None, "tool_call_id": None}
     assert d["blocks"][0]["file"] == "a.py"
@@ -493,3 +495,24 @@ def test_http_batch_delete(server, tmp_path):
     assert (tmp_path / "tasks" / "s3").exists()   # 未列入的不动
     code, body = _get(server + "/api/sessions", method="DELETE", body={"ids": []})
     assert code == 400
+
+
+def test_http_live_stream_and_live_job(server):
+    """轮直播：job.live 增量按 after 取；会话元数据带运行中作业 id。"""
+    serve._JOBS["jt"] = {"task_id": "s1", "status": "running",
+                         "live": [{"k": "think", "s": "想"},
+                                  {"k": "ans", "s": "答"}]}
+    try:
+        code, body = _get(server + "/api/jobs/jt/live?after=0")
+        assert code == 200 and body["status"] == "running"
+        assert len(body["chunks"]) == 2 and body["next"] == 2
+        code, body = _get(server + "/api/jobs/jt/live?after=1")
+        assert body["chunks"] == [{"k": "ans", "s": "答"}] and body["next"] == 2
+        code, body = _get(server + "/api/jobs/ghost/live")
+        assert code == 404
+        code, body = _get(server + "/api/sessions/s1")
+        assert body["live_job"] == "jt"      # 页面刷新后据此重挂直播
+    finally:
+        serve._JOBS.pop("jt", None)
+    code, body = _get(server + "/api/sessions/s1")
+    assert body["live_job"] is None

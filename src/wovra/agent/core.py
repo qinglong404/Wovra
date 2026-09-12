@@ -179,6 +179,9 @@ class _CoreMixin:
         # 最近一次流式调用的 finish_reason（stop/length/tool_calls/未返回）：
         # 流被掐断时 usage 也缺失，这是唯一诊断线索（空响应防护用）
         self._last_finish_reason: Optional[str] = None
+        # 最近一步的思考全文（随 tool_call / final_answer 事件落盘，只进
+        # event 不进 message——装配读 message，上下文不受影响）
+        self._last_thinking = ""
 
         # baseline 记账：累计输入 token（触发阈值压缩）
         self._baseline_prompt_used = task.baseline_prompt_used if task else 0
@@ -801,7 +804,7 @@ class _CoreMixin:
 
             if ordered:
                 empty_streak = 0
-                self._record_event(
+                ev = self._record_event(
                     "tool_call",
                     {
                         "role": "assistant",
@@ -819,6 +822,10 @@ class _CoreMixin:
                         ],
                     },
                 )
+                if self._last_thinking:
+                    # 思考过程随事件落盘（零截断口径）；只进 event 不进
+                    # message——装配读 message，上下文内容不受影响
+                    ev["thinking"] = self._last_thinking
                 self.last_stats["tool_calls"] += len(ordered)
                 self._run_tool_batch(ordered)
                 # 回合内转交（route_to）：工具批次跑完才换视图——批次执行
@@ -862,7 +869,10 @@ class _CoreMixin:
                 if self.on_progress:
                     self.on_progress("响应为空（流被中断），自动重试…")
                 continue
-            self._record_event("final_answer", {"role": "assistant", "content": answer})
+            ev_ans = self._record_event(
+                "final_answer", {"role": "assistant", "content": answer})
+            if self._last_thinking:
+                ev_ans["thinking"] = self._last_thinking
             if self.task is not None:
                 self.task.record("final_answer", answer)
             self.close_round()
@@ -1043,6 +1053,8 @@ class _CoreMixin:
                 )
             stream = self.llm.chat(messages, tools=tools, stream=True)
         content_parts: list[str] = []
+        thinking_parts: list[str] = []
+        self._last_thinking = ""   # 流错误中途抛出时不得残留上一步的思考
         tool_calls_acc: dict[int, dict] = {}
         usage = None
         first_token_at: Optional[float] = None
@@ -1075,6 +1087,7 @@ class _CoreMixin:
             thinking = reasoning_of(delta)
             if thinking:
                 thinking = sanitize_surrogates(thinking)
+                thinking_parts.append(thinking)
                 if on_thinking:
                     on_thinking(thinking)
 
@@ -1110,6 +1123,7 @@ class _CoreMixin:
         elapsed = time.monotonic() - start
         ttft = (first_token_at - start) if first_token_at is not None else elapsed
         self._last_finish_reason = finish_reason
+        self._last_thinking = "".join(thinking_parts)
         if usage is not None:
             self._accumulate_usage(usage, purpose)
             # 逐调用用量落账（2026-09-09 缓存法医的产物）：usage 行按轮

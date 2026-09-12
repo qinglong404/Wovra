@@ -229,7 +229,19 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
             try:
                 agent = _build_agent(task, mode=task.mode or MODE_MANAGED,
                                      async_organization=False)
-                answer = agent.run(content)
+
+                def _live(chunk: dict) -> None:
+                    # 轮直播流（思考/回答增量、步骤状态）。单消费者轮询读，
+                    # append 原子足够；量级 = 单轮流式分片，无需封顶。
+                    job["live"].append(chunk)
+
+                job["live"] = []
+                agent.on_progress = lambda s: _live({"k": "status", "s": s})
+                answer = agent.run(
+                    content,
+                    on_thinking=lambda d: _live({"k": "think", "s": d}),
+                    on_answer_delta=lambda d: _live({"k": "ans", "s": d}),
+                )
                 agent.organize_backlog()
             finally:
                 _release_session_lock(task)
@@ -415,6 +427,7 @@ def round_detail(data: dict, seq: int,
             events.append({
                 "id": e.get("id"), "type": e.get("type"),
                 "time": e.get("timestamp", ""),
+                "thinking": e.get("thinking", ""),
                 "status": e.get("status", ""), "role": msg.get("role"),
                 "content": msg.get("content", ""),
                 "tool_calls": msg.get("tool_calls"),
@@ -576,7 +589,13 @@ class _Handler(BaseHTTPRequestHandler):
             data = self._load_task(m.group(1))
             if data is None:
                 return self._json({"error": "session not found"}, 404)
-            return self._json(session_meta(m.group(1), data))
+            meta = session_meta(m.group(1), data)
+            with _job_lock:   # 页面刷新后重新挂上运行中轮的直播流
+                live = [jid for jid, j in _JOBS.items()
+                        if j["task_id"] == m.group(1)
+                        and j["status"] in ("queued", "running")]
+            meta["live_job"] = live[0] if live else None
+            return self._json(meta)
         m = re.fullmatch(r"/api/sessions/([^/]+)/views/(.+)", path)
         if m:
             view = unquote(m.group(2))
@@ -603,6 +622,17 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({k: job.get(k)
                                for k in ("status", "answer", "error",
                                          "pending")})
+        ml = re.fullmatch(r"/api/jobs/([^/]+)/live", path)
+        if ml:
+            job = _JOBS.get(ml.group(1))
+            if job is None:
+                return self._json({"error": "job not found"}, 404)
+            qs = parse_qs(urlparse(self.path).query)
+            after = int((qs.get("after") or ["0"])[0] or 0)
+            chunks = job.get("live") or []
+            return self._json({"status": job["status"],
+                               "chunks": chunks[after:],
+                               "next": len(chunks)})
         return self._json({"error": "not found"}, 404)
 
     # ---- C4：受控写通道（唯一的写形态 = 新建会话 / 追加一轮对话） ----

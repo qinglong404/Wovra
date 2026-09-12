@@ -109,10 +109,13 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .md hr{border:none;border-top:1px solid var(--line);margin:10px 0}
 
 /* ---------- 对话流（群聊：每个发言者带身份） ---------- */
-#conv .rsep{display:flex;align-items:center;gap:10px;margin:7px 0 12px;color:var(--tx3);font-family:var(--mono);font-size:11px}
-#conv .rsep::before,#conv .rsep::after{content:'';flex:1;height:1px;background:var(--line)}
-#conv .rsep .rs{color:var(--acc)}
-#conv .rsep .rb{display:flex;gap:5px;align-items:center}
+.rsep{display:flex;align-items:center;gap:12px;margin:7px 0 12px;color:var(--tx3);font-family:var(--mono);font-size:11px}
+.rsep::before,.rsep::after{content:'';flex:1;height:1px;background:var(--line)}
+.rsep .rs{color:var(--acc)}
+.rsep .rb{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.rsep .rb .seg{background:var(--bg2);border:1px solid var(--line);border-radius:10px;padding:2px 9px;color:var(--tx2);white-space:nowrap}
+.rsep .rb .seg.acc{color:var(--teal);border-color:#1f4a3a}
+.rs-dot{color:var(--tx2);opacity:.55}
 .crow{display:flex;gap:10px;margin-bottom:3px}
 .crow.user{flex-direction:row-reverse}
 .avatar{width:34px;height:34px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0d13;margin-top:2px;font-family:var(--mono)}
@@ -138,6 +141,16 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .ctx-bar{width:64px;height:5px;border-radius:3px;background:var(--bg4);overflow:hidden;flex-shrink:0}
 .ctx-bar i{display:block;height:100%}
 .rsep .ra{font-weight:600}
+#livebox{margin:6px 0 6px}
+.live-line{display:flex;align-items:center;gap:8px;color:var(--acc);font-size:12px;margin:10px 0;font-family:var(--mono)}
+.live-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:pulse 1.2s infinite;flex-shrink:0}
+.think-live{white-space:pre-wrap;word-break:break-word;font-size:11.5px;color:var(--tx3);background:var(--bg2);border-left:2px solid var(--acc-dim);border-radius:0 8px 8px 0;padding:8px 12px;max-height:200px;overflow-y:auto;line-height:1.6;font-family:var(--mono)}
+.ans-live{white-space:pre-wrap;margin-top:8px}
+.think-box{background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin:3px 0;overflow:hidden}
+.think-head{padding:5px 11px;font-size:11px;color:var(--tx3);cursor:pointer;font-family:var(--mono);user-select:none}
+.think-head:hover{color:var(--tx2)}
+.think-body{display:none;padding:8px 12px 10px;font-size:11.5px;color:var(--tx3);white-space:pre-wrap;word-break:break-word;line-height:1.6;max-height:240px;overflow-y:auto;border-top:1px solid var(--line)}
+.think-box.open .think-body{display:block}
 .more-btn{display:block;margin:4px auto 18px;padding:7px 20px;background:var(--bg2);border:1px solid var(--line2);border-radius:20px;color:var(--tx2);font-size:12px;cursor:pointer}
 .more-btn:hover{color:var(--tx);border-color:var(--acc-dim)}
 .tcard{background:var(--bg1);border:1px solid var(--line);border-radius:9px;margin:3px 0;overflow:hidden}
@@ -335,7 +348,12 @@ function highlightIn(root){
     try{hljs.highlightElement(b)}catch(e){}
   });
 }
-const fmtN=n=>{n=Number(n)||0;if(n>=1e8)return(n/1e8).toFixed(2)+'亿';if(n>=1e4)return(n/1e4).toFixed(1)+'万';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n)};
+const fmtN=n=>{n=Number(n)||0;const s=n<0?'-':'';n=Math.abs(n);
+  if(n>=1e12)return s+(n/1e12).toFixed(2)+'T';
+  if(n>=1e9)return s+(n/1e9).toFixed(2)+'B';
+  if(n>=1e6)return s+(n/1e6).toFixed(1)+'M';
+  if(n>=1e3)return s+(n/1e3).toFixed(1)+'K';
+  return s+String(n)};
 const fmtP=(a,b)=>b>0?(a/b*100).toFixed(1)+'%':'—';
 const fmtT=t=>{const m=String(t||'').match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);return m?m[1]+'-'+m[2]+' '+m[3]:t||''};
 const fmtClock=iso=>{const m=String(iso||'').match(/T(\d{2}:\d{2}:\d{2})/);return m?m[1]:''};
@@ -387,7 +405,7 @@ function agentStatChip(key){
   const hit=fmtP(st.cached||0,(st.cached||0)+(st.miss||0));
   const tip=`缓存输入 ${fmtN(st.cached||0)} tok · 输入(miss) ${fmtN(st.miss||0)} tok · 输出 ${fmtN(st.completion||0)} tok · 命中率 ${hit}`
     +`\n轮 ${st.rounds} · 步 ${fmtN(st.steps||0)} · 上下文窗口峰值 ${fmtN(st.ctx_peak||0)} tok · 单轮消费 ${fmtN(st.avg_prompt||0)} tok`
-    +(st.window?`\n当前上下文 ${fmtN(st.ctx_cur||0)} / ${fmtN(st.window)} tok（${((st.share||0)*100).toFixed(1)}%）`:'');
+    +(st.window?`\n当前上下文 ${fmtN(st.ctx_cur||0)} tok · 整理水位 ${fmtN(st.window)}（达 ${((st.share||0)*100).toFixed(1)}%）`:'');
   return `<span class="stat-chip" title="${esc(tip)}">Σ ${fmtN(total)}</span>`;
 }
 
@@ -474,6 +492,7 @@ async function select(id){
   try{META=await api('/api/sessions/'+id)}catch(e){$('#content').innerHTML='<div class="empty">加载失败</div>';return}
   buildReg();
   AGENT_STATS=META.agent_stats||[];
+  if(META.live_job&&!LIVE.job)liveAttach(META.live_job);   // 页面刷新后重新挂上直播
   renderHeader();renderTab();
 }
 function renderHeader(){
@@ -571,6 +590,53 @@ function consultSender(content){
   return null;
 }
 
+/* ---- 轮直播（思考/回答流式 + 步骤状态）：serve 把 agent 流式回调写进 job.live ---- */
+const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:''};
+function liveAttach(jobId){
+  Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',status:''});
+}
+function liveDetach(){
+  LIVE.job=null;LIVE.cur=null;
+  document.getElementById('livebox')?.remove();
+}
+async function pollLive(){
+  if(!LIVE.job||document.hidden)return;
+  let d;
+  try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}catch(e){return}
+  let dirty=false;
+  for(const c of d.chunks||[]){
+    if(c.k==='think'){LIVE.think+=c.s;dirty=true}
+    else if(c.k==='ans'){LIVE.ans+=c.s;dirty=true}
+    else if(c.k==='status'){
+      LIVE.status=c.s;dirty=true;
+      if(/等待模型/.test(c.s)){LIVE.think='';LIVE.ans=''}   // 新一步开始，清上一屏
+    }
+  }
+  LIVE.next=d.next||LIVE.next;
+  if(CUR===LIVE.cur&&(dirty||!document.getElementById('livebox')))renderLive();
+  if(d.status&&d.status!=='running'&&d.status!=='queued'){
+    const wasCur=CUR===LIVE.cur,viaSend=LIVE.viaSend;
+    liveDetach();
+    if(wasCur&&!viaSend){   // send 自带的轮询负责它发起的轮；这里兜刷新页面中途挂上的
+      FOLLOW=true;$('#send').disabled=false;await refreshAfterTurn();
+    }
+  }
+}
+setInterval(pollLive,800);
+function renderLive(){
+  if(TAB!=='conv'||CUR!==LIVE.cur)return;
+  let el=document.getElementById('livebox');
+  if(!el){el=document.createElement('div');el.id='livebox';$('#content').appendChild(el)}
+  el.innerHTML=`<div class="live-line"><span class="live-dot"></span>${esc(LIVE.status||'思考中…')}</div>`+
+    (LIVE.think?`<div class="think-live" id="live-think">${esc(LIVE.think.slice(-4000))}</div>`:'')+
+    (LIVE.ans?`<div class="bub ans-live">${esc(LIVE.ans)}</div>`:'');
+  if(FOLLOW){
+    const c=$('#content');c.scrollTop=c.scrollHeight;
+    const tb=document.getElementById('live-think');
+    if(tb)tb.scrollTop=tb.scrollHeight;
+  }
+}
+
 async function renderConv(c,fresh){
   if(CONV.session!==CUR||fresh){
     CONV={session:CUR,seqs:[],cache:{}};
@@ -643,6 +709,7 @@ function drawConv(c,toBottom){
         push({kind:'sys',text:`⚙ ${inner}`,title:String(content||''),tm:when(ei)});continue;
       }
       if(e.type==='tool_call'){
+        if(e.thinking)feed(sender,{t:'think',text:e.thinking});
         if(String(content||'').trim())feed(sender,{t:'text',text:content,tm:when(ei)});
         for(const tc of tcs){
           const name=tc.function?.name||'?';
@@ -661,6 +728,7 @@ function drawConv(c,toBottom){
         push({kind:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`,tm:when(ei)});continue;
       }
       if(role==='assistant'&&content){
+        if(e.thinking)feed(sender,{t:'think',text:e.thinking});
         feed(sender,{t:'text',text:content,md:e.type==='final_answer',tm:when(ei)});continue;
       }
       if(role==='user'){
@@ -682,14 +750,16 @@ function drawConv(c,toBottom){
       const settle=(u.steps!=null&&row.steps!=null&&u.steps<row.steps)
         ?` · 已结算 ${u.steps}/${row.steps} 步（其余调用轮尾才落账）`:'';
       const tip=tot?`本轮输入 ${fmtN(tot)} tok（缓存命中 ${fmtN(u.cached||0)} · 未命中 ${fmtN(u.miss||0)}）· 输出 ${fmtN(u.completion||0)} tok · LLM 调用 ${u.calls||0} 次 · 上下文峰值 ${fmtN(u.context||0)} tok${settle}`:'';
+      const segs=[
+        row.ob,
+        (row.steps!=null&&row.steps!=='')?`<span class="seg">${row.steps} 步</span>`:'',
+        `<span class="seg">${row.n} 事件</span>`,
+        tot?`<span class="seg acc" title="${esc(tip)}">Σ ${fmtN(tot)} tok · 命中 ${hit}</span>`:'',
+        row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
+      ].filter(Boolean);
       html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+
         (row.aid?`<span class="ra" style="color:${agentColor(row.aid)}">⬤ ${esc(row.aid)}</span>`:'')+
-        `<span class="rb">${row.ob}`+
-        (row.steps?`<span>${row.steps} 步</span>`:'')+
-        `<span>${row.n} 事件</span>`+
-        (tot?`<span title="${esc(tip)}">Σ ${fmtN(tot)} tok · 命中 ${hit}</span>`:'')+
-        (row.t0?`<span>${esc(row.t0)} 起${row.rd?' · 历时 '+esc(row.rd):''}</span>`:'')+
-        `</span></div>`;continue}
+        `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`;continue}
     if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}`+
       (row.tm?`<span class="stime">${esc(row.tm)}</span>`:'')+`</div>`;continue}
     const s=row.sender;
@@ -702,6 +772,11 @@ function drawConv(c,toBottom){
       <div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}<span style="color:var(--tx3);font-weight:400"> · ${esc(s.id)}</span>${agentStatChip(s.key)}</div>
       <div class="gbox" style="border-color:${s.color}55">`+
       row.items.map(it=>{
+        if(it.t==='think'){
+          return `<div class="think-box" onclick="this.classList.toggle('open')">
+            <div class="think-head">💭 思考过程 · ${fmtN(it.text.length)} 字（点击展开）</div>
+            <div class="think-body">${esc(it.text)}</div></div>`;
+        }
         if(it.t==='text'){
           const inner=it.md?md(it.text):esc(it.text);
           return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
@@ -732,13 +807,15 @@ function drawConv(c,toBottom){
   }
   highlightIn(c);
   if(toBottom)c.scrollTop=c.scrollHeight;
+  if(LIVE.job&&CUR===LIVE.cur)renderLive();   // 重绘后把直播区接回来
 }
 function ci_status(ci){
   if(!ci||ci.result==null)return['无结果','st-run'];
   const [t,c]=resultStatus(ci.result);return[t,c];
 }
 
-/* ---- 对话页顶部的 agent 上下文窗口条（注册表运行时账，权威口径） ---- */
+/* ---- 对话页顶部的 agent 上下文条（注册表运行时账）----
+   分母 window = 整理水位（_agent_window 目前取 org watermark），不是模型窗口 */
 function ctxStrip(){
   const entries=(META.registry||[]).filter(e=>e&&e.name);
   if(!entries.length)return'';
@@ -746,8 +823,8 @@ function ctxStrip(){
     const col=agentColor(e.id||e.name);
     const cur=e.ctx_cur||0,win=e.window||0,share=win?cur/win*100:0;
     const bar=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`+
-      `<span class="mono">${fmtN(cur)}/${fmtN(win)}</span>`:'';
-    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} / ${fmtN(win)} tok（${share.toFixed(1)}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · R${e.rounds||0} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
+      `<span class="mono">${fmtN(cur)}/水位${fmtN(win)}</span>`:'';
+    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok · 整理水位 ${fmtN(win)} tok（达 ${share.toFixed(1)}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · R${e.rounds||0} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
       <span class="ctx-dot" style="background:${col}"></span>
       <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${bar}</div>`;
   }).join('')+`</div>`;
@@ -843,6 +920,7 @@ async function send(){
     const j=await r.json();
     if(r.status===409){$('#pend-run').textContent='⚠ '+j.error;return}
     if(r.status!==202){$('#pend-run').textContent='⚠ '+(j.error||('HTTP '+r.status));return}
+    LIVE.viaSend=true;liveAttach(j.job_id);
     let pendSig='';
     const iv=setInterval(async()=>{
       try{
@@ -893,6 +971,7 @@ async function answerJob(jobId,ans){
 
 async function refreshAfterTurn(){
   META=await api('/api/sessions/'+CUR);buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
+  if(META.live_job&&!LIVE.job)liveAttach(META.live_job);
   const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
   if(fresh.length){
     const got=await Promise.all(fresh.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
