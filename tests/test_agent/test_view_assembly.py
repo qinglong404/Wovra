@@ -89,43 +89,42 @@ def test_per_agent_account_is_derived_not_stored(monkeypatch):
     agent.close_round()
 
     ledger = views_module.agent_ledger(task.rounds, None, task.registry)
-    # 承载：R1 的域内文件块归工具层；本轮（纯对话轮）的保底块跟本轮视图走
-    # → 也归工具层（`_apply_pending_route` 已把本轮视图换成它）
-    assert ledger["工具层"]["carrier_rounds"] == 2
-    assert ledger["工具层"]["carrier_blocks"] == 2
-    # 答复：本轮转交是测试直接改的标记，事件流里没有 route_to 事件（真实
-    # 流程里它是主 agent 的一次工具调用）→ 答复仍算主 agent
-    assert ledger["Main"]["answer_rounds"] == 1
-    assert ledger["工具层"]["answer_rounds"] == 0
+    # 轮按落点：本轮转交后落点是工具层（R2 就是刚闭合的这一轮）
+    assert 2 in ledger["工具层"]["seqs"]
+    # 步按执行者：R1 那次写文件是主 agent 走的两步，跟落点无关
+    assert ledger["Main"]["steps"] == 2
     # 观测字段经注册表透出（校验过的窗口 + 占比）
     assert ledger["Main"]["window"] == agent.context_limit
     assert abs(ledger["Main"]["share"] - main_entry["ctx_cur"] / agent.context_limit) < 1e-9
+    # 恒等式：Σ活轮 + 已压缩 + 无落点 == 总轮数
+    acc = views_module.round_account(task.rounds, None, task.registry)
+    assert acc["total"] == 2 and acc["balanced"] is True
 
 
-def test_settle_views_moves_material_not_answers(monkeypatch):
-    """**回归**：渐近归属补判只改材料归属，不改"谁答的话"。
+def test_settle_views_moves_round_landing(monkeypatch):
+    """渐近归属补判改的是**落点**——落点一动，轮账跟着动（用户口径）。
 
-    旧口径把答复归属也写进注册表条目，而补判会在闭合之后回溯改写轮上的
-    `active_view` → 存账立刻描述了一个不再存在的状态（实测 §55：13 轮会话
-    里主 agent 记 13 轮却只承载 2 块、另一个域记 0 轮却承载 4 块）。
+    "这一轮被附加到哪个 agent 的上下文"就是轮上的 `active_view`；补判把材料
+    归到域之后，那几轮就记在域名下。旧写入式账的毛病不是"归属会变"，而是
+    **变了标记却不搬已经写下的账**——派生之后不存在这个裂缝。
     """
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     task = _task_with_domains([
-        _mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"]),
+        _mk_file_round(1, "改 safety.py", ["src/wovra/tools/safety.py"]),
         _mk_file_round(2, "safety.py 再改一处", ["src/wovra/tools/safety.py"]),
     ])
     agent = _agent(task)
     before = views_module.agent_ledger(task.rounds, None, task.registry)
-    assert before["Main"]["answer_rounds"] == 2      # 两轮都是主 agent 答的
+    assert before["工具层"]["seqs"] == []            # 补判前还没有落点
 
     changed = agent._settle_views()                  # 材料归位（补判）
     assert changed == 2
     assert task.rounds[1]["active_view"] == "工具层"
 
     after = views_module.agent_ledger(task.rounds, None, task.registry)
-    assert after["Main"]["answer_rounds"] == 2       # 答复归属不动
-    assert after["工具层"]["answer_rounds"] == 0
-    assert after["工具层"]["carrier_rounds"] == 2     # 材料归位了
+    assert after["工具层"]["seqs"] == [1, 2]          # 落点搬到域名下
+    # 但**步**不搬：那两轮的文件是谁写的就是谁写的（R1/R2 各两步，都归主 agent）
+    assert after["Main"]["steps"] == 4
 
 
 def _agent(task: Task) -> Agent:

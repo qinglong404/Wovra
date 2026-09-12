@@ -507,18 +507,11 @@ def round_step_segments(r: dict, lookup: Optional[dict] = None) -> list[tuple[st
 
 
 def answer_view(r: dict, lookup: Optional[dict] = None) -> str:
-    """一轮**答话的那个 agent**（口径见 `round_step_segments`）。"""
+    """一轮**最后由谁在干活**（事件流分段里的最后一段）。"""
     segs = round_step_segments(r, lookup)
     if segs:
         return segs[-1][0]
     return str(lookup.get(str(r.get("route_explicit") or "").strip()) or MAIN_AGENT_ID)
-
-
-def _has_final_answer(r: dict) -> bool:
-    return any(
-        isinstance(e, dict) and str(e.get("type") or "") == "final_answer"
-        for e in (r.get("events") or [])
-    )
 
 
 def _ledger_roster(
@@ -573,44 +566,108 @@ def agent_lookup(
     return _ledger_roster(domains, registry)[1]
 
 
+def compressed_span(rounds: Iterable[dict] | None) -> dict:
+    """**已压缩段**：已经被整理/压缩覆盖掉的轮（用户口径：整段记，不拆给 agent）。
+
+    判据是轮上自带的 `org_state`（整理产物生效过的轮就是 `done`）——"旧轮，
+    整理压缩后，就重新记了"：它们从各 agent 的**活账**里退出去，整段记一个数
+    （仍留下 R 区间与当时的归属快照，供追溯与展开）。
+
+    为什么不用"第一次分裂之前"当界线：分裂产物落在哪一轮不等于它何时生效
+    （实测 `20260912-181611-886f42` 的域树挂在 R1 上，而实际是会话中途才分出来的），
+    拿它当界线既不准也不稳。
+    """
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    seqs: list[int] = []
+    by_agent: dict[str, list[int]] = {}
+    for r in rounds:
+        if str(r.get("org_state") or "") != "done":
+            continue
+        try:
+            seq = int(r.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        seqs.append(seq)
+        landing = str(r.get("active_view") or "").strip() or MAIN_AGENT_ID
+        by_agent.setdefault(landing, []).append(seq)
+    seqs.sort()
+    for v in by_agent.values():
+        v.sort()
+    return {
+        "rounds": len(seqs),
+        "seqs": seqs,
+        "first": seqs[0] if seqs else 0,
+        "last": seqs[-1] if seqs else 0,
+        # 冻结快照：这一段当时归过谁（"你也可以记"——只作追溯，不进活账）
+        "by_agent": by_agent,
+    }
+
+
+def round_account(
+    rounds: Iterable[dict] | None,
+    domains: Iterable[dict] | None = None,
+    registry: Iterable[dict] | None = None,
+) -> dict:
+    """会话级轮账：总轮数 = 最大 R 号 = 已压缩段 + 各 agent 名下活轮（恒等式）。
+
+    活账口径：**只记新轮**——还没被压缩掉的轮按落点归 agent；被压缩掉的整段记。
+    没有落点的轮（`active_view` 为空：机制生效前闭合的老轮）另记"无落点"，
+    不硬塞给主 agent 充数。
+    """
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    span = compressed_span(rounds)
+    ledger = agent_ledger(rounds, domains, registry)
+    live = 0
+    seen: set[int] = set()
+    for key, rec in ledger.items():
+        if key == "__unassigned__":
+            continue
+        if id(rec) in seen:
+            continue
+        seen.add(id(rec))
+        live += int(rec.get("rounds") or 0)
+    total = max((int(r.get("seq") or 0) for r in rounds), default=0)
+    return {
+        "total": total,
+        "compressed": span["rounds"],
+        "compressed_span": span,
+        "attributed": live,
+        "unassigned": int((ledger.get("__unassigned__") or {}).get("rounds") or 0),
+        "balanced": span["rounds"] + live
+        + int((ledger.get("__unassigned__") or {}).get("rounds") or 0) == total,
+    }
+
+
 def agent_ledger(
     rounds: Iterable[dict] | None,
     domains: Iterable[dict] | None = None,
     registry: Iterable[dict] | None = None,
 ) -> dict[str, dict]:
-    """每个 agent 的运行时账——**派生，不落盘**（2026-09-12 用户拍板）。
+    """每个 agent 名下的**新轮**（按落点）+ 步（按执行者）——派生，不落盘。
 
-    为什么派生：轮/步不只是一个计数，它自带**归属**，而归属会被分裂回溯改写
-    （`_settle_views` 的渐近归属补判把历史轮的材料归给新域）。存下来的账是
-    轮闭合那一刻的快照，第一次分裂之后就描述了一个**不再存在的状态**——
-    实测（worklog §55）：13 轮会话存账 Σ14（中断轮被 `finalize_round` 与
-    `close_round` 各记一次），主 agent 记「13 轮 / 117 步」而实际只承载 2 块；
-    81 轮的老会话整个账本全 0（早于账本机制，没人回填）。派生之后
-    「哪些事件之后要重算」这个问题直接消失：归属一动，账自动跟着动；
-    压缩是 A→A（归属不变），自然不用算——那不是另一条规则，是同一条规则的
-    特例。
+    口径（2026-09-12 用户拍板，worklog §56）——**轮数统一，不按 agent 重算**：
 
-    两个**不同的问题**分开答（用户口径：承载轮与答复轮分列）：
+    * **轮**：`R{n}` 是会话级唯一序列，只增、不重编；一轮**恰好归一个**落点，
+      即"它被附加到哪个 agent 的上下文"（轮上的 `active_view`）。实时落定，
+      **只记新轮**——分裂/重组之后不回算旧轮；被压缩掉的轮整段记
+      （`compressed_span`），不拆给任何 agent。故
+      **Σ该 agent 名下活轮 + 已压缩段 + 无落点轮 = 会话总轮数 = 最大 R 号**。
+    * **步**：一次模型调用 = 一步，归**执行它的那个 agent**（同一轮里可有
+      多家：主 agent 走路由那一步算它的，接手方走的算接手方的）。轮的总步
+      = 各执行方之和。步数按事件流里的 `route_to` 转交点分段，历史轮同样能算；
+      该轮的步**不因后来被压缩而改**（谁花的手是事实）。
+    * **钱**：不在这里——每次调用在 `core._accumulate_usage` 就按执行方落账
+      （`by=` 段），轮的总消费 = 各调用方之和；整理/压缩/分裂开销单列运行时账。
 
-    * **承载轮 / 块数**：这份材料现在在谁手里——用与装配逐字相同的判据
-      （`ownership` + `view_blocks_by_round`）。一个轮里的块可以分给两个
-      agent（文件块跟文件域、保底块跟本轮视图），故 **Σ承载轮 ≠ 会话轮数**，
-      这是正常的：仓里禁止对 per-agent 数字求和，会话总轮数永远取
-      `len(rounds)`（§53 的教训：Σ`steps_used`=111 而 usage=109）。
-    * **答复轮 / 步数 / 转出**：谁真的答的话、谁真的执行了那几步——走事件流，
-      见 `round_step_segments`。只统计真的产出过 `final_answer` 的轮为答复轮
-      （中断轮有步数、没有答复）。
+    对外显示一律用**总轮（R 号）**：`seqs` 就是这个 agent 名下的号，
+    `first`/`last` 给"计数 + 首末范围"用（号多了不至于把页面撑爆），
+    点开列具体号——**号本身就是展开入口**，显示层与展开层同一套编号。
 
-    `ctx_cur` / `ctx_peak` / `window` 是**观测**不是投影——"最近一次装配多大 /
-    历史峰值多大"是运行时事实，不是材料的函数，而且峰值单调、不该随分裂下调，
-    故仍从注册表条目读取；本函数只算不写。
-
-    返回按**名字与 ID 双键**给出同一条目（消费方两种写法都会查）。
+    `ctx_cur` / `ctx_peak` / `window` 是**观测**不是投影，仍从注册表条目读取
+    （"最近装配多大 / 历史峰值 / 窗口"是运行时事实，且峰值单调、不该下调）。
     """
     rounds = [r for r in (rounds or []) if isinstance(r, dict)]
     domains = list(domains) if domains is not None else latest_domains(rounds)
-    index = block_index(rounds)
-    owners = ownership(domains, index)
     roster, lookup = _ledger_roster(domains, registry)
 
     def blank(entry: dict) -> dict:
@@ -618,45 +675,56 @@ def agent_ledger(
             "id": entry["id"],
             "name": entry["name"],
             "display": entry["display"],
-            "carrier_rounds": 0,
-            "carrier_blocks": 0,
-            "carrier_seqs": [],
-            "answer_rounds": 0,
+            "rounds": 0,
+            "seqs": [],
+            "first": 0,
+            "last": 0,
             "steps": 0,
             "handoffs": 0,
         }
 
     by_view = {entry["view"]: blank(entry) for entry in roster}
     by_name = {entry["name"]: by_view[entry["view"]] for entry in roster}
+    unassigned: list[int] = []
 
-    # 承载：与装配同一套判据（块作筛子、轮作单位）
-    for entry in roster:
-        buckets = view_blocks_by_round(
-            rounds, domains, entry["view"], index, owners
-        )
-        rec = by_view[entry["view"]]
-        rec["carrier_seqs"] = sorted(int(k) for k in buckets)
-        rec["carrier_rounds"] = len(rec["carrier_seqs"])
-        rec["carrier_blocks"] = sum(len(b.get("own_ids") or []) for b in buckets.values())
-
-    # 答复与步数：走事件流，按转交点分段
     for r in rounds:
+        try:
+            seq = int(r.get("seq") or 0)
+        except (TypeError, ValueError):
+            seq = 0
         segs = round_step_segments(r, lookup)
-        answered = _has_final_answer(r)
+        # 步：按执行者（一轮里可以多家）——**不论该轮是否已被压缩**都记，
+        # 因为"谁花的手"是发生过的事实，不会因为后来被压缩而改变。
         for name, count in segs:
             rec = by_name.get(name)
             if rec is not None:
                 rec["steps"] += count
         if segs:
-            # 转出记给**转出方**（每一次换手都算一次；一轮可转多次）
+            # 转出记给**转出方**（每一次换手算一次；一轮可转多次）
             for name, _count in segs[:-1]:
                 rec = by_name.get(name)
                 if rec is not None:
                     rec["handoffs"] += 1
-        if answered:
-            rec = by_name.get(segs[-1][0] if segs else MAIN_AGENT_ID)
-            if rec is not None:
-                rec["answer_rounds"] += 1
+        # 轮：只算**活轮**（还没被压缩掉的）。被压缩的整段记（compressed_span），
+        # 没有落点的（机制生效前闭合的老轮）另记，不硬塞给主 agent 充数。
+        if str(r.get("org_state") or "") == "done":
+            continue
+        landing = str(r.get("active_view") or "").strip()
+        if not landing:
+            unassigned.append(seq)
+            continue
+        rec = by_name.get(str(lookup.get(landing) or landing)) or by_view.get(landing)
+        if rec is None:                      # 落点是个名册里没有的域（产物未入册）
+            rec = blank({"id": landing, "name": landing, "display": landing})
+            by_view[landing] = rec
+            by_name[landing] = rec
+        rec["seqs"].append(seq)
+
+    for rec in by_view.values():
+        rec["seqs"].sort()
+        rec["rounds"] = len(rec["seqs"])
+        rec["first"] = rec["seqs"][0] if rec["seqs"] else 0
+        rec["last"] = rec["seqs"][-1] if rec["seqs"] else 0
 
     # 观测字段（存的是事实，不是投影）+ 双键
     seen = {
@@ -681,6 +749,14 @@ def agent_ledger(
         out[entry["name"]] = rec
         if entry["id"] and entry["id"] != entry["name"]:
             out[str(entry["id"])] = rec
+    out["__unassigned__"] = {
+        "id": "", "name": "", "display": "无落点（机制生效前）",
+        "rounds": len(unassigned), "seqs": sorted(unassigned),
+        "first": min(unassigned) if unassigned else 0,
+        "last": max(unassigned) if unassigned else 0,
+        "steps": 0, "handoffs": 0,
+        "ctx_cur": 0, "ctx_peak": 0, "window": 0, "share": 0.0,
+    }
     return out
 
 
@@ -936,9 +1012,9 @@ def build_views(
         "owners": owners,
         "domains": domains,
         "completeness": verify_completeness(index, owners, views),
-        # per-agent 派生账（承载轮/答复轮/步数）——与视图同一套 index/owners
-        # 就地算出来，故不可能与上面各视图各说各话。
+        # per-agent 派生账（名下 R 号 + 步）+ 会话级轮账（总轮 = 最大 R 号）
         "ledger": agent_ledger(rounds, domains, registry),
+        "account": round_account(rounds, domains, registry),
     }
 
 
@@ -968,9 +1044,9 @@ def verify_completeness(
 def human_report(built: dict, registry: list | None = None) -> list[str]:
     """域视图的人视图摘要（零 LLM；`wovra report` / `wovra maint` 共用）。
 
-    agent 账取自 `built["ledger"]`（**派生**，见 `agent_ledger`）：承载轮 = 这份
-    材料现在在谁手里，答复轮 = 谁真的答的话。历史会话同样算得出来（不再有
-    "没这本账就留空"的情况）。
+    agent 账取自 `built["ledger"]`（派生）：**一律按总轮（R 号）显示**——
+    每个 agent 名下是一串 R 号（默认给「计数 + 首末范围」），加上"已压缩段"
+    一行。Σ各 agent 轮数 + 已压缩段 = 会话总轮数（恒等式，不是巧合）。
     """
     if not built or not built.get("views"):
         return []
@@ -989,11 +1065,7 @@ def human_report(built: dict, registry: list | None = None) -> list[str]:
         )
         stat = runtime.get(name) or {}
         if stat:
-            line += (
-                f"｜agent 账：答复 {stat['answer_rounds']} 轮／承载 "
-                f"{stat['carrier_rounds']} 轮（{stat['carrier_blocks']} 块）"
-                f"／步 {stat['steps']}"
-            )
+            line += f"｜名下 {_seq_range(stat)}｜步 {stat['steps']}"
             if stat.get("handoffs"):
                 line += f"／转出 {stat['handoffs']}"
             if stat.get("window"):
@@ -1003,3 +1075,14 @@ def human_report(built: dict, registry: list | None = None) -> list[str]:
         lost = built["completeness"]["missing"] + built["completeness"]["dropped_from_views"]
         lines.append(f"- ⚠ 未归属/未渲染块：{'、'.join(lost[:10])}")
     return lines
+
+
+def _seq_range(stat: dict) -> str:
+    """「N 轮（R21–R30）」——号多了不逐条列，首末给范围（用户口径）。"""
+    n = int(stat.get("rounds") or 0)
+    if not n:
+        return "0 轮"
+    first, last = int(stat.get("first") or 0), int(stat.get("last") or 0)
+    if first == last:
+        return f"{n} 轮（R{first}）"
+    return f"{n} 轮（R{first}–R{last}）"

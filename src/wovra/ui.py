@@ -417,26 +417,38 @@ def _task_ledger(task) -> dict:
         return {}
 
 
-def _agent_stat_line(stat: dict) -> str:
-    """该 agent 的账行：答复轮 / 承载轮 / 步数 / 上下文 / 窗口占比 / 转出。
+def _seq_range(stat: dict) -> str:
+    """「N 轮（R21–R30）」——一律按**总轮 R 号**显示；号多了不逐条列。"""
+    n = int(stat.get("rounds") or 0)
+    if not n:
+        return "0 轮"
+    first, last = int(stat.get("first") or 0), int(stat.get("last") or 0)
+    if first == last:
+        return f"{n} 轮（R{first}）"
+    return f"{n} 轮（R{first}–R{last}）"
 
-    两个数是**两个不同的问题**（用户口径：分列）：答复轮 = 谁真的答的话，
-    承载轮 = 这份材料现在在谁手里。分裂之后两者会差很多（实测：主 agent
-    答复 13 轮、承载 2 轮），这正是"轮被拆散"的可见面。
+
+def _agent_stat_line(stat: dict) -> str:
+    """该 agent 的账行（2026-09-12 用户口径，worklog §56）。
+
+    **轮数与显示都按总轮（R 号）**：名下轮 = 落点归属（"这轮被附加到谁的
+    上下文"）；步归**执行它的那个 agent**（同一轮可以多家）。消费按调用方
+    实记（落账时就带执行方），整理开销不在这里。
     """
     if not stat:
         return ""
-    answers = int(stat.get("answer_rounds") or 0)
-    carriers = int(stat.get("carrier_rounds") or 0)
+    rounds = int(stat.get("rounds") or 0)
     steps = int(stat.get("steps") or 0)
+    prompt = int(stat.get("prompt") or 0)
     cur = int(stat.get("ctx_cur") or 0)
     peak = int(stat.get("ctx_peak") or 0)
     window = int(stat.get("window") or 0)
     handoffs = int(stat.get("handoffs") or 0)
-    if not any((answers, carriers, steps, cur, peak, window, handoffs)):
+    if not any((rounds, steps, prompt, cur, peak, window, handoffs)):
         return ""
-    parts = [f"答复 {answers} 轮", f"承载 {carriers} 轮（{int(stat.get('carrier_blocks') or 0)} 块）",
-             f"步 {steps}"]
+    parts = [f"名下 {_seq_range(stat)}", f"步 {steps}"]
+    if prompt:
+        parts.append(f"Σprompt {prompt:,} tok")
     if cur or peak:
         share = f"（{cur / window:.0%}）" if window else ""
         parts.append(f"上下文 {cur:,}{share}／峰值 {peak:,} tok")
@@ -445,6 +457,30 @@ def _agent_stat_line(stat: dict) -> str:
     if handoffs:
         parts.append(f"转出 {handoffs}")
     return "｜".join(parts)
+
+
+def _round_account_line(task) -> str:
+    """会话级轮账一行：总轮 = 已压缩段 + 各 agent 名下轮（恒等式）。"""
+    try:
+        from .views import round_account
+    except Exception:  # noqa: BLE001
+        return ""
+    try:
+        acc = round_account(
+            getattr(task, "rounds", None), None, getattr(task, "registry", None)
+        )
+    except Exception:  # noqa: BLE001
+        return ""
+    if not acc.get("total"):
+        return ""
+    span = acc.get("compressed_span") or {}
+    line = f"轮账：总 {acc['total']} 轮 = 已压缩 {acc['compressed']} 轮"
+    if span.get("rounds"):
+        line += f"（R{span['first']}–R{span['last']}）"
+    line += f" + 名下 {acc['attributed']} 轮"
+    if not acc.get("balanced"):
+        line += "　⚠ 不配平（有名下账缺失）"
+    return line
 
 
 def _domain_view_lines(task) -> list[str]:
@@ -517,6 +553,9 @@ def report_view(task, children: list[dict] | None = None) -> str:
         lines.append("-（无）")
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
+    acc_line = _round_account_line(task)
+    if acc_line:
+        lines.append(f"- {acc_line}")
     lines += _registry_lines(task.registry, _task_ledger(task))
 
     lines += ["", "## 域视图（Level 1 第二步：装配按域分化的材料）"]
@@ -644,6 +683,9 @@ def maint_view(task) -> str:
                 lines.append(f"  未归属（归主 agent）：{len(un_ids)} 块")
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
+    acc_line = _round_account_line(task)
+    if acc_line:
+        lines.append(f"- {acc_line}")
     lines += _registry_lines(getattr(task, "registry", None), _task_ledger(task))
 
     lines += ["", "## 域视图（Level 1 第二步：装配按域分化的材料）"]

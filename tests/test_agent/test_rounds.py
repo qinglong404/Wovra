@@ -6,6 +6,7 @@ import json
 import pytest
 from wovra import task as task_module
 from wovra.agent import Agent
+from wovra.registry import MAIN_AGENT_ID
 from wovra.task import Task
 
 # 共享夹具/工具（_helpers.py 是原文件的公共头部）
@@ -89,6 +90,37 @@ def test_open_round_records_usage_on_finalize(monkeypatch, tmp_path):
     detail = usage_events[-1]["detail"]
     assert "total=15" in detail
     assert "轮未闭合" in detail
+
+
+def test_usage_row_carries_per_agent_breakdown(monkeypatch, tmp_path):
+    """「钱，谁花的，消费时就记录啊」：落账行尾带**按调用方分账**段。
+
+    一次调用落一次账，键是那一刻的执行方（`core._accumulate_usage`）；轮的总
+    消费 = 各调用方之和。同一轮里换过手就有两段（主 agent 走路由那一步、
+    接手方走剩下的）。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+
+    def noop():
+        """什么也不做。"""
+
+    responses = [
+        [
+            _chunk(_delta(tool_calls=[_fragment(0, id="c1", name="noop", arguments="{}")])),
+            _chunk(usage=_usage(10, 5, 15, cached=8)),
+        ]
+    ]
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM(responses), tools=[noop], task=task, max_turns=1)
+    with pytest.raises(RuntimeError):
+        agent.run("问")
+    agent.finalize_round("open")
+
+    detail = [e for e in task.history if e["kind"] == "usage"][-1]["detail"]
+    assert " by=[" in detail
+    assert "steps=" in detail and "prompt=10" in detail and "cached=8" in detail
+    # 分账的执行方 = 那一刻的视图（没开路由时是主 agent 哨兵）
+    assert f"[{MAIN_AGENT_ID} " in detail
 
 
 def test_resume_continues_open_round_without_new_user_message(monkeypatch, tmp_path):

@@ -250,6 +250,11 @@ class _CoreMixin:
             "ttft_seconds": 0.0,
             "ttft_max": 0.0,
             "mode": self.context_mode,
+            # **按调用方分账**（2026-09-12 用户口径：「钱，谁花的，消费时就记录啊」）：
+            # 一次调用落一次账，键是那一刻的执行方（视图名/`Main`）。轮的总消费
+            # = 各调用方之和（A 300K + B 400K = 700K）。整理/压缩/分裂的开销
+            # 不在这里——它们走 `_maint_usage`（运行时账），不摊给任何 agent。
+            "by_agent": {},
             "purpose": {
                 "working": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
                 "organization": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
@@ -798,6 +803,14 @@ class _CoreMixin:
             steps_used += 1
             if self.current_round is not None:
                 self.current_round["steps_used"] = steps_used
+            # 步归**执行它的那个 agent**（2026-09-12 用户口径）：一次模型调用
+            # = 一步，在同一轮里可以有多家（主 agent 走路由那一步算它的，
+            # 接手方走的算接手方的）。轮的总步 = 各执行方之和。
+            self.last_stats["by_agent"].setdefault(
+                self._active_view(),
+                {"steps": 0, "calls": 0, "prompt": 0, "cached": 0, "miss": 0,
+                 "completion": 0},
+            )["steps"] += 1
             if self.cancel_check is not None and self.cancel_check():
                 raise KeyboardInterrupt   # ⏹ 与 Ctrl+C 同语义：轮保持开放
             if self.on_progress:
@@ -1234,8 +1247,28 @@ class _CoreMixin:
             f"compaction={maint['compaction']['total']:,} "
             f"prompt={prompt:,} completion={stats['completion_tokens']:,} "
             f"total={stats['total_tokens']:,}（思考 {stats['reasoning_tokens']:,}）"
-            f"{cache_info}{ttft_info}{suffix}",
+            f"{cache_info}{ttft_info}{suffix}"
+            + self._by_agent_segment(),
         )
+
+    def _by_agent_segment(self) -> str:
+        """落账行尾的**按调用方分账**段（零 LLM；没分账就不加尾巴）。
+
+        形态：` by=[Main steps=12 prompt=1000 cached=900 miss=100 completion=50] [A …]`
+        ——每个执行方一段，段内键值固定（数字不带千分位，便于机械解析）。
+        轮的总消费 = 各段之和（用户口径：A 300K + B 400K = 700K）。
+        """
+        buckets = (self.last_stats or {}).get("by_agent") or {}
+        if not buckets:
+            return ""
+        parts = []
+        for name, b in buckets.items():
+            parts.append(
+                f"[{name} steps={b.get('steps', 0)} prompt={b.get('prompt', 0)}"
+                f" cached={b.get('cached', 0)} miss={b.get('miss', 0)}"
+                f" completion={b.get('completion', 0)}]"
+            )
+        return " by=" + " ".join(parts)
 
     def _accumulate_usage(self, usage, purpose: str) -> None:
         """把一次调用的 usage 记进账本。
@@ -1272,3 +1305,13 @@ class _CoreMixin:
         self.last_stats["cache_miss_tokens"] += max(
             0, (usage.prompt_tokens or 0) - cached
         )
+        # 按调用方分账：谁在花，记谁（消费发生时即记，不做事后归属推断）
+        bucket = self.last_stats["by_agent"].setdefault(
+            self._active_view(),
+            {"steps": 0, "calls": 0, "prompt": 0, "cached": 0, "miss": 0, "completion": 0},
+        )
+        bucket["calls"] += 1
+        bucket["prompt"] += usage.prompt_tokens or 0
+        bucket["cached"] += cached
+        bucket["miss"] += max(0, (usage.prompt_tokens or 0) - cached)
+        bucket["completion"] += usage.completion_tokens or 0

@@ -533,10 +533,12 @@ function agentStatChip(key){
   if(!st||(!st.prompt&&!st.completion))return'';
   const total=(st.prompt||0)+(st.completion||0);
   const hit=fmtP(st.cached||0,(st.cached||0)+(st.miss||0));
+  const seqs=(st.seqs||[]);
+  const range=seqs.length?(seqs.length===1?`R${seqs[0]}`:`R${seqs[0]}–R${seqs[seqs.length-1]}`):'—';
   const tip=`缓存输入 ${fmtN(st.cached||0)} tok · 输入(miss) ${fmtN(st.miss||0)} tok · 输出 ${fmtN(st.completion||0)} tok · 命中率 ${hit}`
-    +`\n答复 ${st.rounds||0} 轮 · 承载 ${st.carrier_rounds||0} 轮（${st.carrier_blocks||0} 块） · 步 ${fmtN(st.steps||0)} · 上下文窗口峰值 ${fmtN(st.ctx_peak||0)} tok · 单轮消费 ${fmtN(st.avg_prompt||0)} tok`
+    +`\n名下 ${st.rounds||0} 轮（${range}） · 步 ${fmtN(st.steps||0)} · 上下文窗口峰值 ${fmtN(st.ctx_peak||0)} tok · 单轮消费 ${fmtN(st.avg_prompt||0)} tok`
     +(st.window?`\n当前上下文 ${fmtN(st.ctx_cur||0)} tok / 窗口 ${fmtN(st.window)}（${((st.share||0)*100).toFixed(1)}%）`:'')
-    +`\n答复轮=谁答的话；承载轮=材料在谁手里（一个轮的块可同时归两个 agent，故两者不可相加）`;
+    +`\n轮按总轮 R 号显示（号即展开入口）；消费按调用方实记${st.cost_known?'':'（本会话未分账）'}`;
   return `<span class="stat-chip" title="${esc(tip)}">Σ ${fmtN(total)}</span>`;
 }
 
@@ -1230,6 +1232,14 @@ function renderCtxbar(){
   }
   renderCtxbarReg();
 }
+/* 名下轮的**总轮 R 号**区间（默认「计数 + 首末范围」，号多了不逐条列） */
+function seqRangeOf(o){
+  const s=(o&&o.seqs)||[];
+  if(s.length)return s.length===1?`（R${s[0]}）`:`（R${s[0]}–R${s[s.length-1]}）`;
+  const f=(o&&o.first)||0,l=(o&&o.last)||0;
+  if(!f)return '';
+  return f===l?`（R${f}）`:`（R${f}–R${l}）`;
+}
 function renderCtxbarReg(){
   const bar=document.getElementById('ctxbar');
   const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
@@ -1241,7 +1251,7 @@ function renderCtxbarReg(){
     const pct=share>=10?share.toFixed(1):share.toFixed(2);
     const bar=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`+
       `<span class="mono">${fmtN(cur)}/${fmtN(win)}（${pct}%）</span>`:'';
-    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · 答复 ${e.rounds||0} 轮 · 承载 ${e.carrier_rounds||0} 轮（${e.carrier_blocks||0} 块） · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
+    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · 名下 ${e.rounds||0} 轮${seqRangeOf(e)} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
       <span class="ctx-dot" style="background:${col}"></span>
       <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${bar}</div>`;
   }).join('');
@@ -1780,7 +1790,7 @@ function ctxViz(){
     const gen=(e.generation||'');
     return `<div class="viz-view"><span class="mono" style="color:${col};flex-shrink:0">${esc(e.id||e.name)}</span>
       <span class="viz-bar"><i style="width:${share.toFixed(1)}%;background:${col}"></i></span>
-      <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">${fmtN(cur)}/${fmtN(win)} · 峰${fmtN(e.ctx_peak||0)} · 答复${e.rounds||0}/承载${e.carrier_rounds||0} · 转出${e.handoffs||0}</span></div>`;
+      <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">${fmtN(cur)}/${fmtN(win)} · 峰${fmtN(e.ctx_peak||0)} · 名下${e.rounds||0}轮${seqRangeOf(e)} · 转出${e.handoffs||0}</span></div>`;
   }).join('');
   // ③ 维护开销账（按用途聚合）
   const by={};
@@ -1855,7 +1865,7 @@ function renderProject(c){
       <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="${esc(a.status)}"></span>
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
-      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">答复${a.rounds||0} · 承载${a.carrier_rounds||0} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));
+      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">名下${a.rounds||0}轮${seqRangeOf(a)} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));
       if(pv){const before=pv.alt_tokens||a.ctx_cur||0;return ` · 整理后 ≈${fmtN(before)} tok → 重组后 ≈${fmtN(pv.tokens||Math.round((pv.total_chars||0)/3))} tok`}
       return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''})()}</span></div>
       <div class="desc desc-clamp">${esc(a.description||'')}</div>
@@ -2046,31 +2056,35 @@ function renderUsage(c){
     seenVs.add(x.id||x.name);
     rowsAll.push({kind:'pending',x});
   }
+  const acc=(META&&META.round_account)||null;
+  const accSpan=(acc&&acc.compressed_span)||{};
+  const accTip=acc?`总 ${acc.total} 轮 = 已压缩 ${acc.compressed} 轮${accSpan.first?`（R${accSpan.first}–R${accSpan.last}）`:''} + 名下 ${acc.attributed} 轮${acc.unassigned?` + 无落点 ${acc.unassigned} 轮`:''}`:'';
   const agentTable=!rowsAll.length?'':`
-    <h3 class="sec">按 agent 聚合（账本**派生**：答复轮 = 谁答的话，承载轮 = 材料在谁手里；两者不可相加——一轮的块可同时归两个 agent）</h3>
+    <h3 class="sec">按 agent 聚合${accTip?` · ${esc(accTip)}`:''}（轮数统一按**总轮 R 号**；消费按**调用方实记**——整理开销单列，不摊给任何 agent）</h3>
     <table class="tbl"><thead><tr>
-      <th>agent</th><th>答复轮</th><th>承载轮（块）</th><th>步数</th><th>上下文峰值 tok</th>
+      <th>agent</th><th>名下轮（R 号）</th><th>步数</th><th>上下文峰值 tok</th>
       <th>单轮消费 tok</th><th>重组后视图 tok</th><th>Σprompt tok</th><th>Σ输出 tok</th><th>命中率</th></tr></thead>
       <tbody>${rowsAll.map(r=>{
         if(r.kind==='pending'){
           const x=r.x;
           return `<tr><td><span class="mono" style="color:${agentColor(x.id||x.name)}">${esc(x.id||'')}</span> <span class="mono" style="color:var(--tx3)">${esc(x.name||'')}</span></td>
-            <td class="mono" colspan="5" style="color:var(--tx3)">尚未接活（分裂产出，待路由到它才有轮次与用量）</td>
+            <td class="mono" colspan="4" style="color:var(--tx3)">尚未接活（分裂产出，待路由到它才有轮次与用量）</td>
             <td class="mono" style="color:var(--acc)">${fmtN(x.tokens||0)}</td>
             <td class="mono">—</td><td class="mono">—</td><td class="mono">—</td></tr>`;
         }
         const a=r.a;
         const hitA=fmtP(a.cached||0,(a.cached||0)+(a.miss||0));
         const vTok=r.vs?(r.vs.tokens||0):(a.ctx_cur||0);
-        const CARRIER_TIP='承载轮 = 这一轮的材料现在在它手里（按文件域/视图归属，与装配同一套判据）。它可能从没被说过话，却承载着很多轮——这正是"轮被拆散了"的可见面';
+        const R_TIP='名下轮 = 这一轮被附加到它的上下文（落点归属），按总轮 R 号显示；号本身就是展开入口（时间线按 R 号取原文）。被整理压缩掉的轮整段记，不在名下。';
+        const nums=(a.seqs||[]).length?(a.seqs||[]).map(s=>`R${s}`).join('、'):'—';
         return `<tr><td><span class="mono" style="color:${agentColor(a.agent)}">${esc(prettyName(a.agent))}</span> <span class="mono" style="color:var(--tx3)">${esc(a.agent)}</span></td>
-          <td class="mono">${a.rounds||0}</td>
-          <td class="mono" title="${esc(CARRIER_TIP)}">${a.carrier_rounds||0}<span style="color:var(--tx3)">（${a.carrier_blocks||0} 块）</span></td>
+          <td class="mono" title="${esc(R_TIP)}&#10;${esc(nums)}">${a.rounds||0}<span style="color:var(--tx3)">${seqRangeOf(a)}</span></td>
           <td class="mono">${fmtN(a.steps||0)}</td>
           <td class="mono">${fmtN(a.ctx_peak||0)}</td><td class="mono">${fmtN(a.avg_prompt||0)}</td>
           <td class="mono" style="color:${vTok?'var(--acc)':'var(--tx3)'}">${vTok?fmtN(vTok):'未接活'}</td>
-          <td class="mono">${fmtN(a.prompt||0)}</td><td class="mono">${fmtN(a.completion||0)}</td>
-          <td class="mono" style="color:var(--teal)">${hitA}</td></tr>`}).join('')}</tbody></table>`;
+          <td class="mono">${a.cost_known?fmtN(a.prompt||0):'<span style="color:var(--tx3)" title="该会话的落账行没有分账段（机制生效前）">未分账</span>'}</td>
+          <td class="mono">${a.cost_known?fmtN(a.completion||0):'—'}</td>
+          <td class="mono" style="color:var(--teal)">${a.cost_known?hitA:'—'}</td></tr>`}).join('')}</tbody></table>`;
   c.innerHTML=
     agentTable+
     `<h3 class="sec">缓存命中（口径 = llm.py 落账）</h3>

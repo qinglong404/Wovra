@@ -356,68 +356,89 @@ def _route_round(seq: int, target: str, files: list[str] | None = None) -> dict:
     }
 
 
-def test_agent_ledger_splits_carrier_answer_and_steps():
-    """派生账：承载轮 / 答复轮 / 步数三问分答（2026-09-12 用户拍板）。
+def test_agent_ledger_rounds_by_landing_steps_by_executor():
+    """轮按**落点**归账、步按**执行者**归账（2026-09-12 用户拍板，worklog §56）。
 
-    为什么必须分：**承载**是"这份材料现在在谁手里"（随分裂变），**答复**是
-    "谁真的答的话"（发生过的事实、不该被后来的分裂改写）。旧口径把两者塞进
-    同一个存量字段，第一次分裂之后就再也说不清了。
+    轮数统一：`R{n}` 是会话级唯一序列，一轮恰好归一个落点（"它被附加到谁的
+    上下文"）；步则归真的走那一步的 agent——同一轮里可以两家都有步
+    （主 agent 走路由那一步算它的，接手方走的算接手方的）。
     """
     rounds = [
-        _block_round(1, ["src/wovra/tools/a.py"]),   # Main 起手，自己答完
-        _route_round(2, "工具层", ["src/wovra/tools/b.py"]),  # Main 转出，工具层答
-        _block_round(3, ["notes.md"]),               # 不属任何域的文件 → 归 Main
-        _block_round(4, ["src/wovra/tools/c.py", "notes.md"]),  # 一轮里两个 agent 都有块
+        _block_round(1, ["src/wovra/tools/a.py"]),            # 归工具层
+        _route_round(2, "工具层", ["src/wovra/tools/b.py"]),   # 主 agent 转出 → 归工具层
+        _block_round(3, ["notes.md"]),                        # 没有落点（老轮）
     ]
+    rounds[2].pop("active_view", None)
+    rounds[0]["active_view"] = "工具层"
+    rounds[1]["active_view"] = "工具层"
     domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
     ledger = views_module.agent_ledger(rounds, domains)
 
-    main, tools = ledger["Main"], ledger["工具层"]
-    # 答复：R1/R3/R4 是 Main 答的，R2 由工具层接手答完
-    assert main["answer_rounds"] == 3 and tools["answer_rounds"] == 1
-    # 答复轮相加 == 会话轮数（这是**唯一**可以相加的口径）
-    assert main["answer_rounds"] + tools["answer_rounds"] == len(rounds)
-    # 承载：R1/R2/R4 有域内文件块；R3/R4 有归主 agent 的块——R4 两边都承载
-    assert tools["carrier_seqs"] == [1, 2, 4] and main["carrier_seqs"] == [3, 4]
-    assert tools["carrier_blocks"] == 3 and main["carrier_blocks"] == 2
-    # → **承载轮之和 5 > 会话 4 轮**：一轮的块可以分给两个 agent，故禁止求和
-    assert tools["carrier_rounds"] + main["carrier_rounds"] > len(rounds)
-    # 步数：按转交点分段——R2 里 Main 执行了写文件与转交两步，工具层执行答复一步
-    assert main["steps"] == 9 and tools["steps"] == 1
-    assert main["handoffs"] == 1 and tools["handoffs"] == 0
-    # 观测字段（不落盘的那三样之外）也在：没给注册表就全是 0，不编数
-    assert main["window"] == 0 and main["share"] == 0.0
+    tools = ledger["工具层"]
+    # 轮：按落点——R1、R2 都落在工具层的上下文里
+    assert tools["rounds"] == 2 and tools["seqs"] == [1, 2]
+    assert tools["first"] == 1 and tools["last"] == 2
+    # 无落点的轮既不归工具层、也不硬塞给主 agent 充数
+    assert ledger["Main"]["rounds"] == 0
+    assert ledger["__unassigned__"]["seqs"] == [3]
+    # 步：按执行者——R1/R3 各两步全归主 agent；R2 里主 agent 走写文件与转交两步、
+    # 工具层走答复一步
+    assert ledger["Main"]["steps"] == 6 and tools["steps"] == 1
+    assert ledger["Main"]["handoffs"] == 1 and tools["handoffs"] == 0
+    # 观测字段照旧透出；没给注册表就全是 0，不编数
+    assert tools["window"] == 0 and tools["share"] == 0.0
     # 双键：名字与 ID 都查得到同一条
     assert ledger["A"] is tools
 
 
-def test_agent_ledger_counts_only_answered_rounds_as_answers():
-    """中断轮有步数、没有答复：不进答复轮，但也别把它的步丢了。"""
-    r = _block_round(1, ["src/wovra/tools/a.py"])
-    r["end_state"] = "open"
-    r["events"] = r["events"][:-1]          # 剥掉 final_answer
-    ledger = views_module.agent_ledger([r], [{"name": "工具层",
-                                              "file_domains": ["src/wovra/tools/"]}])
-    assert ledger["Main"]["answer_rounds"] == 0
-    assert ledger["Main"]["steps"] == 1     # 那次写文件调用照记
-    assert ledger["工具层"]["carrier_rounds"] == 1
+def test_round_account_is_balanced_and_compaction_moves_rounds():
+    """恒等式：Σ名下活轮 + 已压缩段 + 无落点 == 总轮数（= 最大 R 号）。
+
+    口径：**只记新轮**——被整理/压缩覆盖掉的轮（`org_state=done`）从各 agent
+    的活账里退出去、整段记一个数（用户口径「旧轮，整理压缩后，就重新记了」）；
+    但**步数不因被压缩而改**（谁花的手是发生过的事实）。
+    """
+    rounds = [
+        _block_round(1, ["src/wovra/tools/a.py"]),
+        _route_round(2, "工具层", ["src/wovra/tools/b.py"]),
+        _block_round(3, ["src/wovra/tools/c.py"]),
+    ]
+    for r in rounds:
+        r["active_view"] = "工具层"
+    rounds[0]["org_state"] = "done"          # R1 已被压缩
+    domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+
+    ledger = views_module.agent_ledger(rounds, domains)
+    span = views_module.compressed_span(rounds)
+    acc = views_module.round_account(rounds, domains)
+
+    assert span["rounds"] == 1 and span["seqs"] == [1]
+    assert span["by_agent"] == {"工具层": [1]}      # 冻结快照：当时归谁
+    assert ledger["工具层"]["seqs"] == [2, 3]      # 活账里只剩没被压缩的
+    assert ledger["工具层"]["steps"] == 1
+    # 步**不因被压缩而改**（谁花的手是发生过的事实）：主 agent 那 6 步照记，
+    # 其中 R1 的两步虽然在已压缩段里
+    assert ledger["Main"]["steps"] == 6 and ledger["Main"]["seqs"] == []
+    assert acc["total"] == 3 and acc["compressed"] == 1
+    assert acc["attributed"] == 2 and acc["unassigned"] == 0
+    assert acc["balanced"] is True
+    assert acc["compressed"] + acc["attributed"] + acc["unassigned"] == acc["total"]
 
 
-def test_agent_ledger_ignores_settled_active_view_for_answers():
-    """**回归**：渐近归属补判改写 `active_view` 之后，答复归属不受影响。
+def test_agent_ledger_landing_follows_settle():
+    """落点就是轮上的 `active_view`——渐近归属补判改了它，账就跟着改。
 
-    这是本次改动的要害：旧账本存的是"闭合那一刻的 active_view"，而补判会在
-    之后把它改掉（材料归位），于是存账描述的归属**已经不存在了**（实测 §55：
-    主 agent 记 13 轮却只承载 2 块）。派生口径下答复走事件流——`active_view`
-    怎么被补判改，答复数都不动。
+    这正是用户口径（"这一轮被附加到哪个上下文"）：重组前由主 agent 答的轮，
+    重组后材料归了域，那这轮就记在域名下。旧写入式账的问题不是"改了归属"，
+    而是**改了轮上的标记却不搬已经写下的账**——派生之后不存在这个裂缝。
     """
     r = _block_round(1, ["src/wovra/tools/a.py"])
     domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
-    before = views_module.agent_ledger([r], domains)["Main"]["answer_rounds"]
-    r["active_view"] = "工具层"              # 模拟补判
-    after = views_module.agent_ledger([r], domains)["Main"]["answer_rounds"]
-    assert before == after == 1
-    assert views_module.agent_ledger([r], domains)["工具层"]["answer_rounds"] == 0
+    r["active_view"] = "Main"
+    assert views_module.agent_ledger([r], domains)["Main"]["seqs"] == [1]
+    r["active_view"] = "工具层"              # 模拟补判（材料归位）
+    after = views_module.agent_ledger([r], domains)
+    assert after["工具层"]["seqs"] == [1] and after["Main"]["seqs"] == []
 
 
 def test_human_report_reports_completeness():

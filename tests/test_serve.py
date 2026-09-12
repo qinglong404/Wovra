@@ -59,7 +59,9 @@ def _fake_task() -> dict:
                     {"kind": "usage", "time": "t2",
                      "detail": "[managed] steps=5 context=50,000 prompt=45,000 "
                                "completion=1,200 缓存命中 43,000 tok（95.6%） "
-                               "未命中 2,000 tok（4.4%）"},
+                               "未命中 2,000 tok（4.4%）"
+                               " by=[Main steps=5 prompt=45,000 cached=43,000"
+                               " miss=2,000 completion=1,200]"},
                     {"kind": "usage", "time": "t3",
                      "detail": "[managed] steps=2 context=60,000 prompt=30,000 "
                                "completion=800 缓存命中 29,000 tok 未命中 1,000 tok"},
@@ -253,9 +255,15 @@ def test_session_meta_round_list_has_usage():
     meta = serve.session_meta("s1", _fake_task())
     assert meta["round_list"][0]["usage"]["prompt"] == 75000
     assert meta["round_list"][1]["usage"]["calls"] == 1
-    # agent_stats 与轮级账同源：无 active_view 的轮归主 agent（哨兵 ID）
+    # 消费**按调用方实记**（落账行尾的 by= 段），不做事后按轮推断
     a = meta["agent_stats"][0]
-    assert a["agent"] == "Main" and a["prompt"] == 95000 and a["billed_rounds"] == 2
+    assert a["agent"] == "Main" and a["prompt"] == 45000 and a["cost_known"] is True
+    assert a["steps"] == 5 and a["billed_rounds"] == 2
+    # 轮账恒等式：总轮 = 已压缩段 + 名下活轮 + 无落点（夹具里 R1 已整理、
+    # R2 还没有落点）
+    acc = meta["round_account"]
+    assert acc["total"] == 2 and acc["compressed"] == 1 and acc["unassigned"] == 1
+    assert acc["balanced"] is True
 
 
 def test_round_detail_after_filter():

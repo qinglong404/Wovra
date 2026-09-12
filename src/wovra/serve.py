@@ -35,6 +35,13 @@ _KV = re.compile(r"(\w+)=([\d,]+(?:\.\d+)?)")
 _FINISH = re.compile(r"finish=(\S+)")
 _USAGE_HIT = re.compile(r"缓存命中 ([\d,]+) tok")
 _USAGE_MISS = re.compile(r"未命中 ([\d,]+) tok")
+# 落账行尾的**按调用方分账**段（core._by_agent_segment 写的）：
+# ` by=[Main steps=12 prompt=1000 cached=900 miss=100 completion=50] [A …]`
+# 数字容忍千分位（写侧不带，读侧宽容——历史/手改都不至于静默丢段）。
+_USAGE_BY_AGENT = re.compile(
+    r"\[([^\]\s]+) steps=([\d,]+) prompt=([\d,]+) cached=([\d,]+)"
+    r" miss=([\d,]+) completion=([\d,]+)\]"
+)
 
 
 def parse_usage_row(detail: str) -> dict | None:
@@ -88,56 +95,88 @@ def round_usage_map(data: dict) -> dict[int, dict]:
 #   不必再解析日志文本：材料的归属由块归属给出，答话的归属由事件流给出。）
 
 
+def agent_cost_map(data: dict) -> dict[str, dict]:
+    """**按调用方**的消费账（2026-09-12 用户口径：「谁花的，消费时就记录啊」）。
+
+    来源是落账行尾的分账段（每次调用发生时即归到那一刻的执行方），故这是
+    **实记**，不是事后按轮推断：一轮里主 agent 走路由那一步、接手方干剩下的，
+    同轮两个 agent 各记各的（A 300K + B 400K = 轮总 700K）。
+
+    历史会话（分账段之前落的账）没有这段 → 该轮只有总数、没有分账，
+    消费方据此显示"未分账"，不编数。
+    """
+    out: dict[str, dict] = {}
+    for h in data.get("history") or []:
+        if h.get("kind") != "usage":
+            continue
+        detail = str(h.get("detail") or "")
+        for m in _USAGE_BY_AGENT.finditer(detail):
+            name = m.group(1)
+            nums = [int(v.replace(",", "")) for v in m.groups()[1:]]
+            b = out.setdefault(name, {
+                "steps": 0, "calls": 0, "prompt": 0, "cached": 0, "miss": 0,
+                "completion": 0,
+            })
+            b["steps"] += nums[0]
+            b["calls"] += 1
+            b["prompt"] += nums[1]
+            b["cached"] += nums[2]
+            b["miss"] += nums[3]
+            b["completion"] += nums[4]
+    return out
+
+
 def agent_stats(
     data: dict, main_id: str = "", registry: list | None = None
 ) -> list[dict]:
-    """按 agent 聚合：轮次/步数（**派生**）+ 用量。
+    """按 agent 聚合：**名下的轮（R 号）/ 步 / 消费**（全部按用户口径）。
 
-    账本口径（2026-09-12 用户拍板，worklog §55）：**派生、不落盘**——
-    承载轮/承载块/答复轮/步数/转出全部来自 `views.agent_ledger`（承载轮与
-    装配同一套块归属判据；答复轮与步数走事件流、按 `route_to` 转交点分段）。
-    本函数只负责把它与用量账并起来。
-
-    字段语义（两个**不同**的问题，禁止相加）：
-    * `rounds` = **答复轮**（谁真的答的话）；
-    * `carrier_rounds` / `carrier_blocks` = **承载**（这份材料现在在谁手里）。
-
-    用量归属是**近似口径**：usage 落账行按 steps 签名顺序归属到轮（轮的
-    steps_used 累计值 = 该轮各分段 usage 行 steps 之和）；有转交的轮整轮费用
-    记在最终答复方名下；中断分段并帐，漂移只可能出现在未闭合会话尾部。
-    上下文窗口 = 该 agent 各轮 context 峰值；单轮消费 = Σprompt / 有账轮数。
+    * **轮**：落点归属（"这轮被附加到谁的上下文"），只记新轮；已压缩段单列
+      （`round_account`）。显示一律用总轮 R 号 —— `seqs` 是号清单，
+      `first`/`last` 供"计数 + 首末范围"。
+    * **步**：归执行它的那个 agent（同轮可分属两家），走事件流按 `route_to`
+      转交点分段。
+    * **消费**：实记（`agent_cost_map`，落账时就带执行方）；历史轮没有分账段
+      时该 agent 的消费为 0 且 `cost_known=False`，不编数。
+    * 整理/压缩/分裂开销**不在这里**：那是运行时账（`org=`/`compaction=`），
+      不摊给任何 agent。
     """
     main_id = main_id or registry_module.MAIN_AGENT_ID
     rounds = [r for r in (data.get("rounds") or []) if isinstance(r, dict)]
     reg = registry if registry is not None else (data.get("registry") or [])
     domains = registry_module.latest_domains(rounds)
     ledger = views_module.agent_ledger(rounds, domains, reg)
-    lookup = views_module.agent_lookup(domains, reg)
+    account = views_module.round_account(rounds, domains, reg)
+    cost = agent_cost_map(data)
 
     per: dict[str, dict] = {}
     order: list[str] = []
 
     def bucket(name: str) -> dict:
         if name not in per:
-            per[name] = {"agent": name, "id": "", "display": name, "rounds": 0,
-                         "carrier_rounds": 0, "carrier_blocks": 0, "steps": 0,
-                         "handoffs": 0, "prompt": 0, "cached": 0, "miss": 0,
-                         "completion": 0, "ctx_peak": 0, "billed_rounds": 0}
+            per[name] = {
+                "agent": name, "id": "", "display": name,
+                "rounds": 0, "seqs": [], "first": 0, "last": 0,
+                "steps": 0, "handoffs": 0,
+                "prompt": 0, "cached": 0, "miss": 0, "completion": 0,
+                "cost_known": False, "ctx_peak": 0, "ctx_cur": 0,
+                "window": 0, "share": 0.0,
+            }
             order.append(name)
         return per[name]
 
-    # 名册先建全（没干过活的 agent 也要有格子，不能被聚合悄悄漏掉）
     seen_names: set[str] = set()
     for rec in ledger.values():
-        if rec["name"] in seen_names:
+        if rec["name"] in seen_names or rec["name"] == "":
             continue
         seen_names.add(rec["name"])
         b = bucket(rec["name"])
         b["id"] = rec["id"]
         b["display"] = rec["display"]
-        b["rounds"] = rec["answer_rounds"]
-        b["carrier_rounds"] = rec["carrier_rounds"]
-        b["carrier_blocks"] = rec["carrier_blocks"]
+        b["rounds"] = rec["rounds"]
+        b["seqs"] = list(rec["seqs"])
+        b["first"] = rec["first"]
+        b["last"] = rec["last"]
         b["steps"] = rec["steps"]
         b["handoffs"] = rec["handoffs"]
         b["ctx_cur"] = rec["ctx_cur"]
@@ -145,27 +184,48 @@ def agent_stats(
         b["window"] = rec["window"]
         b["share"] = rec["share"]
 
+    for name, c in cost.items():
+        b = bucket(name)
+        b["cost_known"] = True
+        b["prompt"] = c["prompt"]
+        b["cached"] = c["cached"]
+        b["miss"] = c["miss"]
+        b["completion"] = c["completion"]
+        b["billed_calls"] = c["calls"]
+        # 分账的步数是**实记**（含空响应重试）；事件流口径只数到真的执行步。
+        # 两者不同源时以实记为准（那才是真正发生的调用次数）。
+        if c["steps"] > b["steps"]:
+            b["steps"] = c["steps"]
+
     usage = round_usage_map(data)
     for r in rounds:
-        owner = views_module.answer_view(r, lookup)
-        b = bucket(owner)
         agg = usage.get(r.get("seq")) or {}
-        if agg.get("calls"):
-            b["billed_rounds"] += 1
-        for k in _USAGE_KEYS:
-            b[k] += agg.get(k, 0)
-        b["ctx_peak"] = max(b["ctx_peak"], agg.get("context", 0))
+        if not agg.get("calls"):
+            continue
+        b = bucket(_main_or_landing(r, ledger, main_id))
+        b["billed_rounds"] = int(b.get("billed_rounds") or 0) + 1
+        b["ctx_peak"] = max(int(b.get("ctx_peak") or 0), agg.get("context", 0))
 
     out = []
     for name in order:
         b = per[name]
-        b["avg_prompt"] = (b["prompt"] // b["billed_rounds"]) if b["billed_rounds"] else 0
-        b.setdefault("ctx_cur", 0)
-        b.setdefault("ctx_peak", 0)
-        b.setdefault("window", 0)
-        b.setdefault("share", 0.0)
+        calls = int(b.get("billed_calls") or b.get("billed_rounds") or 0)
+        b["avg_prompt"] = (int(b.get("prompt") or 0) // calls) if calls else 0
         out.append(b)
+    out.sort(key=lambda x: (-int(x.get("rounds") or 0), str(x.get("agent"))))
     return out
+
+
+def _main_or_landing(r: dict, ledger: dict, main_id: str) -> str:
+    """该轮的落点名（用于把轮级用量挂到名下；查不到就给主 agent）。"""
+    try:
+        seq = int(r.get("seq") or 0)
+    except (TypeError, ValueError):
+        return main_id
+    for rec in ledger.values():
+        if seq in (rec.get("seqs") or []):
+            return str(rec.get("name") or main_id)
+    return main_id
 
 
 
@@ -747,13 +807,16 @@ def session_meta(task_id: str, data: dict) -> dict:
                                     or int(e["window"]) == 100_000):
             e["window"] = _DEFAULT_CONTEXT_LIMIT
     # per-agent 账**派生后补进条目**（2026-09-12 用户拍板：账本不落盘）——
-    # 前端照旧读 `rounds`/`steps`/`handoffs`，但那些值现在是现场算的；
-    # 新增 `carrier_rounds`/`carrier_blocks`（承载＝材料在谁手里）。
-    # 老会话的条目上没有旧字段，正好：ledger 里就有权威值。
+    # 前端照旧读 `rounds`/`steps`/`handoffs`，但那些值现在是现场算的：
+    # `rounds` = 名下轮数（落点归属），`seqs` 是**总轮 R 号**清单（显示与展开
+    # 共用同一套号），消费按调用方实记（`by=` 段）。
+    rounds = data.get("rounds") or []
     ledger = views_module.agent_ledger(
-        data.get("rounds") or [],
-        registry_module.latest_domains(data.get("rounds") or []),
-        data.get("registry") or [],
+        rounds, registry_module.latest_domains(rounds), data.get("registry") or []
+    )
+    cost = agent_cost_map(data)
+    meta["round_account"] = views_module.round_account(
+        rounds, registry_module.latest_domains(rounds), data.get("registry") or []
     )
     for e in meta["registry"] or []:
         if not isinstance(e, dict):
@@ -761,11 +824,19 @@ def session_meta(task_id: str, data: dict) -> dict:
         rec = ledger.get(str(e.get("name") or "")) or ledger.get(str(e.get("id") or ""))
         if rec is None:
             continue
-        e["rounds"] = rec["answer_rounds"]          # 兼容旧字段名 = **答复轮**
+        e["rounds"] = rec["rounds"]
+        e["seqs"] = list(rec["seqs"])
+        e["first"] = rec["first"]
+        e["last"] = rec["last"]
         e["steps"] = rec["steps"]
         e["handoffs"] = rec["handoffs"]
-        e["carrier_rounds"] = rec["carrier_rounds"]
-        e["carrier_blocks"] = rec["carrier_blocks"]
+        c = cost.get(str(e.get("name") or "")) or {}
+        if c:
+            e["prompt"] = c.get("prompt", 0)
+            e["cached"] = c.get("cached", 0)
+            e["miss"] = c.get("miss", 0)
+            e["completion"] = c.get("completion", 0)
+            e["cost_known"] = True
         if not e.get("ctx_peak"):
             e["ctx_peak"] = rec["ctx_peak"]
         e["share"] = rec["share"] if rec["window"] else 0.0
