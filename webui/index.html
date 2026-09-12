@@ -1721,10 +1721,12 @@ function ctxViz(){
     const ok=a.splittable===true;
     const badge=ok?`<span class="fbadge t-create">可分裂</span>`
                   :`<span class="fbadge t-read">不可分裂</span>`;
-    const pend=lastSplit.pending?`<span class="fbadge t-modify">待下一轮落实</span>`:
+    const PEND_TIP='轮内装配必须保持原样（连贯性 + 缓存前缀稳定），产物已就绪、暂存在 pending_org，下一轮开启时自动并入注册表（与整理同一时序）';
+    const pend=lastSplit.pending?`<span class="fbadge t-modify" title="${esc(PEND_TIP)}">待下一轮落实</span>`:
                                 `<span class="fbadge t-create">已落实</span>`;
     splitHtml=`<div class="split-head">${badge}${pend}
       <span class="mono" style="color:var(--tx3);font-size:10px">产出 ${lastSplit.domains.length} 域 · 未归属块 ${lastSplit.unassigned}</span></div>`+
+      (lastSplit.pending?`<div style="font-size:10.5px;color:var(--tx3);margin-top:5px;line-height:1.6">产物已就绪并暂存；因“轮内装配不可变 + 前缀缓存稳定”，下一轮开启时自动并入注册表（与整理同一时序，无需额外操作）。</div>`:'')+
       (a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">为什么这样判定</summary>
         <div class="ev"><pre>${esc(a.reason)}</pre></div></details>`:'')+
       lastSplit.domains.map(d=>{
