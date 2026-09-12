@@ -806,7 +806,7 @@ def _event_agents(r: dict, main_id: str) -> list[str]:
 
     口径（2026-09-12 用户拍板 + `route_to` 实现）：每轮恒由主 agent 起手并路由
     原话；换手点是 `route_to` 的**工具调用事件之后**（调用者执行了那次调用）；
-    `switch_view` 只管下一轮，不在本规则内。
+    历史数据里的 `route_explicit` 只管老轮，不影响本规则。
 
     单点实现的理由：步数分段（`views.round_step_segments`）与对话页的事件标签
     必须说同一件事，否则会出现"这一步算 A 的步，但气泡挂在 B 名下"。

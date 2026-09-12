@@ -304,16 +304,24 @@ def test_route_writes_active_view_on_round_open(monkeypatch):
     assert agent.current_round["route_hint"]["view"] == "工具层"
 
 
-def test_switch_view_sets_pending_and_next_round_takes_it(monkeypatch):
-    """显式转交：switch_view 写 pending_view，下一轮路由最高优先采信。"""
+def test_switch_view_is_gone(monkeypatch):
+    """**`switch_view` 已删除**（2026-09-12 用户口径：agent 不能决定下一轮归谁）。
+
+    所有权只由"这一轮实际是谁在做"产生（轮上的 `active_view`），不由任何人
+    预约；转交只有 `route_to`（本回合内生效）。故工具面里不该再有它，
+    `Task.pending_view` 也不该再被写。
+    """
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
     agent = _agent(task)
-    out = agent.switch_view(agent="前端", reason="这活是页面的")
-    assert "已转交" in out
+    assert not hasattr(agent, "switch_view")
+    names = [s["function"]["name"] for s in agent._schemas]
+    assert "switch_view" not in names and "route_to" in names
     agent._open_or_reuse_round("随便一句话")
-    assert agent.current_round["active_view"] == "前端"
-    assert task.pending_view == ""  # 消费即清
+    # 本轮恒由主 agent 起手（规则只给建议），没有任何"预约下一轮"的入口
+    assert agent.current_round["active_view"] == routing_module.MAIN_AGENT_ID
+    assert "route_explicit" not in agent.current_round
+    assert task.pending_view == ""
 
 
 def test_list_agents_renders_responsibility_table():
@@ -327,12 +335,12 @@ def test_list_agents_renders_responsibility_table():
 
 
 def test_tool_batch_helpers_are_json_serializable():
-    """新工具的 schema 是纯 dict（注册路径不引入序列化差异）。"""
-    from wovra.agent import _LIST_AGENTS_SCHEMA, _SWITCH_VIEW_SCHEMA
+    """工具 schema 是纯 dict（注册路径不引入序列化差异）。"""
+    from wovra.agent import _LIST_AGENTS_SCHEMA, _ROUTE_TO_SCHEMA
 
-    for schema in (_LIST_AGENTS_SCHEMA, _SWITCH_VIEW_SCHEMA):
+    for schema in (_LIST_AGENTS_SCHEMA, _ROUTE_TO_SCHEMA):
         assert json.dumps(schema, ensure_ascii=False)
-        assert schema["function"]["name"] in ("list_agents", "switch_view")
+        assert schema["function"]["name"] in ("list_agents", "route_to")
 
 
 def test_view_tiering_rewrites_only_on_own_watermark_advance(monkeypatch):

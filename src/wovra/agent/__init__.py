@@ -27,7 +27,6 @@ from .prompts import (  # noqa: F401
     _LIST_AGENTS_SCHEMA,
     _NOTIFY_SCHEMA,
     _ROUTE_TO_SCHEMA,
-    _SWITCH_VIEW_SCHEMA,
     _ORG_DOMAINS_SCHEMA,
     _ORG_META_INFO,
     _ORG_SUBMIT_SCHEMA,

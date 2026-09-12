@@ -509,8 +509,9 @@ class Task:
     # 2 = 新（主 agent = `Main`，顶层域 `A`、`B`、`C`…）。缺省按 1 读，
     # 加载期迁移一次后落 2（迁移**非幂等**，故必须靠这个标记把住）。
     agent_id_scheme: int = 1
-    # 显式转交的落点（2026-09-12，Level 1 第三步路由）：`switch_view` 工具
-    # 与接活视图的 notify 都写这里，路由时作为最高优先判定，消费后清空。
+    # **已废弃**（2026-09-12 用户口径：agent 不能决定下一轮归谁——写它的
+    # `switch_view` 工具已删）：只剩历史 task.json 里可能有的旧值，加载期
+    # 迁移仍会把旧体系的 `A` 归一到 `Main`（数据卫生），但**没有任何读取方**。
     pending_view: str = ""
     created_at: str = ""
     updated_at: str = ""

@@ -468,7 +468,8 @@ def event_owners(r: dict, lookup: Optional[dict] = None) -> list[str]:
     """轮内**逐事件的执行方**（与 `round_step_segments` 同一套判据，一处实现）。
 
     换手点在 `route_to` 的**工具调用事件之后**（调用者执行了那次调用，故调用
-    自身仍归上一手）；`switch_view`/`notify` 只管下一轮，不在本规则内。
+    自身仍归上一手）；历史数据里的 `route_explicit`（那个已删除的"预约下一轮"
+    工具写下的）只管那几轮的起点，不影响本规则。
     消费方：对话页逐事件的 agent 标签（`serve.round_detail`）与步数分段。
     """
     lookup = lookup or {}
@@ -506,8 +507,9 @@ def round_step_segments(r: dict, lookup: Optional[dict] = None) -> list[tuple[st
       从下一条事件起归接手方。**所以轮上不必另存交接锚点**——锚点本来就在
       事件流里，而且这样天然支持一轮内多次转交（`route_hops` 上限之内）；
       历史轮同样能算。
-    * **起点** = 显式转交（`switch_view`/`notify` 写下的意志）的轮由目标起手，
-      其余一律主 agent 起手（2026-09-12 用户口径：每轮恒由主 agent 先触发）。
+    * **起点** = 历史轮上的 `route_explicit`（老数据里由已删除的"预约下一轮"
+      工具写下；新轮不再产生）——其余一律主 agent 起手（2026-09-12 用户口径：
+      每轮恒由主 agent 先触发）。
 
     归的是**执行步**（谁花的手）；**轮**的归属是另一件事——按落点（轮上的
     `active_view`），见 `agent_ledger`。

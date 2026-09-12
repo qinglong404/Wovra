@@ -1,5 +1,5 @@
 """Agent 账本类工具：todo（阶段/工作项）、notify/consult（跨 agent 通信）、
-route_to/switch_view（路由与转交）、submit_organization / submit_domains
+route_to（回合内转交）、submit_organization / submit_domains
 （维护管线的提交守卫）。
 """
 from datetime import datetime
@@ -368,11 +368,13 @@ class _LedgerMixin:
         return "[agent 职责表]\n" + "\n".join(lines)
 
     def route_to(self, agent: str, reason: str) -> str:
-        """回合内转交（主 agent 的本职动作，2026-09-12 用户拍板）。
+        """回合内转交（**唯一的转交工具**，2026-09-12 用户拍板）。
 
-        与 `switch_view` 的区别是**生效时刻**：switch_view 只管下一轮，
-        route_to 让目标**在同一个用户回合内**接手把活干完——用户不必等
-        两个回合才看到结果，主 agent 也不必替目标复述一遍。
+        与已删除的 `switch_view` 的区别（那是错误实现）：agent **不能决定
+        下一轮归谁**——所有权只由"这一轮实际是谁在做"产生（轮上的
+        `active_view`），不由任何人预约。故本工具只作用于**本回合**：
+        目标接手把活干完，用户不必等两个回合才看到结果，主 agent 也不必
+        替目标复述一遍。
 
         工具方法体只登记意图（`_pending_route`），实际换视图由 `_work_loop`
         在**工具批次跑完后**执行：批次执行期间改装配会让同批里后面的工具
@@ -426,35 +428,6 @@ class _LedgerMixin:
             f"已转交 {entry.get('id')}（{target}）：它在本回合内直接接手"
             "并把结果给用户。**就此停手**——不要再自己动手、不要复述用户的话、"
             "不要写方案或解释；下一步就是它干活。"
-        )
-
-    def switch_view(self, agent: str, reason: str) -> str:
-        """显式转交：让**下一轮**由目标 agent 接手（本轮上下文不改写）。
-
-        与 notify 的分工：notify 是往对方收件箱塞一条消息（对方激活时
-        收到），switch_view 是连"下一轮归谁"一起定下来——路由的最高优先
-        判据（`routing.route` 的第一步）。走轮开启时刻这一个切换点，
-        故本轮装配纹丝不动（缓存前缀与连贯性都不受影响）。
-        """
-        if self.task is None:
-            return "switch_view：当前无任务绑定。"
-        entry = self._registry_entry(agent)
-        if entry is None:
-            known = "、".join(
-                f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
-            )
-            return f"未找到 agent：{agent}。现存：{known}"
-        note = str(reason or "").strip()
-        self.task.pending_view = str(entry.get("name") or entry.get("id"))
-        entry.setdefault("inbox", []).append({
-            "from": "上一轮接手方", "message": f"[转交] {note or '（未给理由）'}",
-        })
-        self.task.save()
-        if self.on_progress:
-            self.on_progress(f"🔀 转交 → {entry.get('name')}：{note[:60]}")
-        return (
-            f"已转交：下一轮起由 {entry.get('id')}（{entry.get('name')}）接活"
-            "（本轮上下文不改写）。交接说明已放进它的收件箱。"
         )
 
     def notify(self, agent: str, message: str) -> str:

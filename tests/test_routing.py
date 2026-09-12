@@ -125,12 +125,21 @@ def test_responsibility_lines_are_self_contained():
 
 
 def test_identity_card_states_isolation_and_handoff():
-    """身份段必须同时给出两件事：隔离是设计（不是缺失）+ 接错活怎么转。"""
+    """身份段必须同时给出三件事：隔离是设计（不是缺失）+ 接活**只看交付物落哪**
+    + 新需求就地干（不许读别域就转走）。
+
+    2026-09-12 用户口径改词：旧文案说"要读别人的代码/文件才做得成 → 转走"，
+    那会把**新需求**（产出在我的域、但要参考别处现状）逼成"没人执行"或
+    "退回主 agent 让它去读别人的内容"。文件系统是共享的，读不改归属。
+    """
     card = "\n".join(routing_module.identity_card("工具层", _registry()))
     assert "所有权文件域：src/wovra/tools/" in card
     assert "隔离纪律" in card
+    assert "文件系统是共享的" in card
     assert "route_to" in card and "consult" in card
-    assert "接活先验 ownership" in card
+    assert "接活判据" in card and "交付物" in card
+    assert "新需求尤其如此" in card            # 新需求就地干，别转走
+    assert "拿不准 → **就地干**" in card        # 兜底：不许因犹豫而转走
 
 
 def test_identity_card_for_main_agent_is_router():

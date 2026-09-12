@@ -41,7 +41,6 @@ from .prompts import (
     _ORG_DOMAINS_SCHEMA,
     _ORG_SUBMIT_SCHEMA,
     _ROUTE_TO_SCHEMA,
-    _SWITCH_VIEW_SCHEMA,
     _TODO_SCHEMA,
 )
 
@@ -211,11 +210,8 @@ class _CoreMixin:
             # 跨 agent 通信（机制五）：单向 notify / 双向 consult
             self.register(self.notify, schema=_NOTIFY_SCHEMA)
             self.register(self.consult, schema=_CONSULT_SCHEMA)
-            # 路由（Level 1 第三步）：拉职责表 + 显式转交
-            # （2026-09-12 用户拍板「可以加工具」——隔离后这是唯一的
-            # 跨 agent 公共信息面与纠错通道）
+            # 路由（Level 1 第三步）：拉职责表（跨 agent 唯一的公共信息面）
             self.register(self.list_agents, schema=_LIST_AGENTS_SCHEMA)
-            self.register(self.switch_view, schema=_SWITCH_VIEW_SCHEMA)
             # 回合内转交（2026-09-12 用户拍板）：主 agent 的**本职动作**——
             # 收到消息、对职责表、把用户原话转给对应 agent，由它在本回合内
             # 直接接续干活（不需要再回主 agent 转述）。只在 managed 下注册：
@@ -315,9 +311,6 @@ class _CoreMixin:
             # 本回合已转交次数（route_to 跳数上限的落点，随轮持久化——
             # `\c` 续跑不会把上限重置掉，见 support._MAX_ROUTE_HOPS）
             "route_hops": 0,
-            # 显式转交的原始意志（switch_view / notify 写明的那次）——补判时
-            # 复用，使"转交"不会因为中间插了一次 promote 而丢失。
-            "route_explicit": self._take_pending_view(),
         }
         self.rounds.append(self.current_round)
         self.messages = []
@@ -326,15 +319,6 @@ class _CoreMixin:
         # 覆盖代价为零，且让"没有待生效产物"的常规路径一次到位）
         self._route_view(user_input)
         return True
-
-    def _take_pending_view(self) -> str:
-        """取走并清空显式转交意志（一次性；放在轮上以便补判复用）。"""
-        if self.task is None:
-            return ""
-        pending = str(getattr(self.task, "pending_view", "") or "")
-        if pending:
-            self.task.pending_view = ""
-        return pending
 
     def _view_file_hints(self) -> dict[str, list[str]]:
         """域 → 该域真实出现过的文件（路由的文件名命中判据；机械、带缓存）。
@@ -393,9 +377,10 @@ class _CoreMixin:
         ```
 
         故规则路由（文件命中/粘滞）**不再直接落子域**，只作为 `route_hint`
-        塞进主 agent 的运行时信封（[路由建议]）供它参考。唯一例外是**显式
-        转交**（`switch_view` / `notify` 写下的意志）——那是上一轮已经做出的
-        决定（"以后这摊都交给 X"），直接生效，不走主 agent 绕一圈。
+        塞进主 agent 的运行时信封（[路由建议]）供它参考。**没有任何例外**：
+        原来的"显式转交"（`switch_view`：上一轮预约下一轮归谁）已按用户口径
+        删除——agent 不能决定下一轮归谁，所有权只由"这一轮实际是谁在做"
+        产生（轮上的 `active_view`）。
 
         调用点两处：新轮开启（产物生效之后，见 `_settle_and_route`）与渐近
         归属补判（`_settle_views`，record=False 时只补判不逐条留痕）。
@@ -409,22 +394,6 @@ class _CoreMixin:
             target["active_view"] = views_module.MAIN_AGENT_ID
             target["route_hint"] = {}
             return views_module.MAIN_AGENT_ID
-        explicit = str(target.get("route_explicit") or "") or self._take_pending_view()
-        entry = (
-            routing_module.resolve_agent(self.task.registry, explicit)
-            if explicit else None
-        )
-        if entry is not None:
-            view = str(entry.get("name") or entry.get("id"))
-            target["active_view"] = view
-            target["route_hint"] = {}
-            if record and view != views_module.MAIN_AGENT_ID:
-                self.task.record(
-                    "route",
-                    f"R{target.get('seq')} → {view}"
-                    f"（显式转交 {entry.get('id')}）",
-                )
-            return view
         result = self._rule_view(user_input, target)
         target["active_view"] = views_module.MAIN_AGENT_ID
         if result["view"] == views_module.MAIN_AGENT_ID:
@@ -505,6 +474,8 @@ class _CoreMixin:
             # 补判用**规则建议**（不是 `_route_view`）：新一轮流程是"恒由主
             # agent 起手"，而补判补的是**材料归属**——那几轮到达时域树还不存在，
             # 只能由主 agent 答；产物生效后按规则把它们的材料归到对应域视图。
+            # `route_explicit` 只作**历史数据**的读取（那个工具已删）：老会话
+            # 里由它预约过归属的轮，补判按当时的意志走，不改写历史归属。
             after = str(
                 self._rule_view(
                     text, r, explicit=str(r.get("route_explicit") or "")
