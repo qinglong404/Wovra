@@ -205,6 +205,11 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .hitbar .m{background:linear-gradient(180deg,#5c1d28,#4a1720);display:flex;align-items:center;justify-content:center;color:#ffd9de;min-width:36px}
 .spark{background:var(--bg1);border:1px solid var(--line);border-radius:var(--r);padding:10px}
 .finish-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px;margin-bottom:8px}
+.tbl th{text-align:left;font-size:11px;color:var(--tx3);letter-spacing:.5px;padding:7px 10px;border-bottom:1px solid var(--line2)}
+.tbl td{padding:8px 10px;border-bottom:1px solid var(--line)}
+.tbl tr:hover td{background:var(--bg2)}
+.stat-chip{font-size:10px;color:var(--tx2);border:1px solid var(--line2);border-radius:5px;padding:1px 7px;margin-left:7px;font-family:var(--mono);cursor:help;background:var(--bg1)}
 
 /* ---------- 输入条 ---------- */
 #composer{display:none;gap:10px;padding:10px 26px;border-top:1px solid var(--line);background:var(--bg1)}
@@ -283,6 +288,7 @@ const wsBase=w=>String(w||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop()||'—';
 let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true;
 let CONV={session:null,seqs:[],cache:{}};
 let REG={};   // agent 身份表：id/name → registry 条目
+let AGENT_STATS=[];   // 按 agent 聚合（serve 端计算）
 
 function buildReg(){
   REG={};
@@ -298,9 +304,21 @@ function avatarText(id){
   return String(id).slice(0,2);
 }
 function senderOf(roundMeta){
-  const v=String((roundMeta&&roundMeta.active_view)||'A').trim()||'A';
-  const a=REG[v]||{id:v,name:v};
-  return{id:a.id,name:a.name||a.id,color:agentColor(a.id)};
+  const v=String((roundMeta&&roundMeta.active_view)||'').trim();
+  const a=REG[v]||null;
+  const key=v||'A';                      // 统计聚合键 = 原始 active_view 标记
+  const name=a?.name||(v||'主agent');
+  const id=a?.id||key;
+  return{key,id,name,color:agentColor(a?.id||key)};
+}
+function agentStatChip(key){
+  const st=(AGENT_STATS||[]).find(x=>x.agent===key);
+  if(!st||(!st.prompt&&!st.completion))return'';
+  const total=(st.prompt||0)+(st.completion||0);
+  const hit=fmtP(st.cached||0,(st.cached||0)+(st.miss||0));
+  const tip=`缓存输入 ${fmtN(st.cached||0)} tok · 输入(miss) ${fmtN(st.miss||0)} tok · 输出 ${fmtN(st.completion||0)} tok · 命中率 ${hit}`
+    +`\n轮 ${st.rounds} · 步 ${fmtN(st.steps||0)} · 上下文窗口峰值 ${fmtN(st.ctx_peak||0)} tok · 单轮消费 ${fmtN(st.avg_prompt||0)} tok`;
+  return `<span class="stat-chip" title="${esc(tip)}">Σ ${fmtN(total)}</span>`;
 }
 
 async function api(p){const r=await fetch(p);if(!r.ok)throw new Error(p+' → '+r.status);return r.json()}
@@ -339,6 +357,7 @@ async function select(id){
   CUR=id;renderList();
   try{META=await api('/api/sessions/'+id)}catch(e){$('#content').innerHTML='<div class="empty">加载失败</div>';return}
   buildReg();
+  AGENT_STATS=META.agent_stats||[];
   renderHeader();renderTab();
 }
 function renderHeader(){
@@ -510,7 +529,7 @@ function drawConv(c,toBottom){
       continue;
     }
     html+=`<div class="crow agent"><div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>
-      <div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}<span style="color:var(--tx3);font-weight:400"> · ${esc(s.id)}</span></div>
+      <div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}<span style="color:var(--tx3);font-weight:400"> · ${esc(s.id)}</span>${agentStatChip(s.key)}</div>
       <div class="gbox" style="border-color:${s.color}55">`+
       row.items.map(it=>{
         if(it.t==='text'){
@@ -595,7 +614,7 @@ setInterval(async()=>{
     const lst=await api('/api/sessions');
     const s=(lst.sessions||[]).find(x=>x.id===CUR);if(!s)return;
     if(s.rounds>(META.round_list||[]).length){
-      META=await api('/api/sessions/'+CUR);buildReg();renderHeader();
+      META=await api('/api/sessions/'+CUR);buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
       const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
       const got=await Promise.all(fresh.map(async x=>[x,await api(`/api/sessions/${CUR}/rounds/${x}`)]));
       got.forEach(([x,d])=>{CONV.cache[x]=d;if(!CONV.seqs.includes(x))CONV.seqs.push(x)});
@@ -652,7 +671,7 @@ async function send(){
   }catch(e){$('#send').disabled=false;$('#pend-run').textContent='✗ '+e.message}
 }
 async function refreshAfterTurn(){
-  META=await api('/api/sessions/'+CUR);buildReg();renderHeader();
+  META=await api('/api/sessions/'+CUR);buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
   const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
   if(fresh.length){
     const got=await Promise.all(fresh.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
@@ -770,7 +789,22 @@ function renderUsage(c){
     const col=ratio>0.9?'#3ddc97':ratio>0.5?'#ffb454':'#ff6b7a';
     return `<rect x="${(i*W/rows.length).toFixed(1)}" y="${(H-16-h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${col}" opacity=".85"><title>${esc(r.time||'')} · ${esc(r.purpose)} prompt=${fmtN(p)} 命中=${fmtP(ratio,1)} ttft=${r.ttft??'—'}s finish=${esc(r.finish||'')}</title></rect>`;
   }).join('');
+  const astats=META.agent_stats||[];
+  const prettyName=k=>REG[k]?.name||REG[k]?.id||k;
+  const agentTable=!astats.length?'':`
+    <h3 class="sec">按 agent 聚合（轮次/步数精确；用量按 steps 签名归属，近似口径）</h3>
+    <table class="tbl"><thead><tr>
+      <th>agent</th><th>轮次</th><th>步数</th><th>上下文峰值 tok</th>
+      <th>单轮消费 tok</th><th>Σprompt tok</th><th>Σ输出 tok</th><th>命中率</th></tr></thead>
+      <tbody>${astats.map(a=>{
+        const hitA=fmtP(a.cached||0,(a.cached||0)+(a.miss||0));
+        return `<tr><td><span class="mono" style="color:${agentColor(a.agent)}">${esc(prettyName(a.agent))}</span> <span class="mono" style="color:var(--tx3)">${esc(a.agent)}</span></td>
+          <td class="mono">${a.rounds}</td><td class="mono">${fmtN(a.steps||0)}</td>
+          <td class="mono">${fmtN(a.ctx_peak||0)}</td><td class="mono">${fmtN(a.avg_prompt||0)}</td>
+          <td class="mono">${fmtN(a.prompt||0)}</td><td class="mono">${fmtN(a.completion||0)}</td>
+          <td class="mono" style="color:var(--teal)">${hitA}</td></tr>`}).join('')}</tbody></table>`;
   c.innerHTML=
+    agentTable+
     `<h3 class="sec">缓存命中（口径 = llm.py 落账）</h3>
      <div class="hitbar"><div class="c" style="flex:${Math.max(hit,0.0001)}">${tot&&hit/tot>0.15?`命中 ${fmtN(hit)}`:''}</div>
      <div class="m" style="flex:${Math.max(miss,0.0001)}">${tot&&miss/tot>0.15?`未命中 ${fmtN(miss)}`:''}</div></div>

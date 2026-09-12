@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from . import registry as registry_module
 from . import task as task_module
 
 _WEBUI = Path(__file__).resolve().parents[2] / "webui" / "index.html"
@@ -28,7 +29,105 @@ _ID_SAFE = re.compile(r"^[0-9A-Za-z_-]+$")
 _LLM_CALL = re.compile(r"^\[(\w+)\]\s+(.*)$")
 _KV = re.compile(r"(\w+)=([\d,]+(?:\.\d+)?)")
 _FINISH = re.compile(r"finish=(\S+)")
-_ORG_STATES = ("done", "pending", "failed")
+_USAGE_HIT = re.compile(r"缓存命中 ([\d,]+) tok")
+_USAGE_MISS = re.compile(r"未命中 ([\d,]+) tok")
+
+
+def parse_usage_row(detail: str) -> dict | None:
+    """解析轮尾 usage 落账行（steps/context/prompt/completion + 中文命中段）。"""
+    out: dict = {}
+    for k, v in _KV.findall(detail or ""):
+        v = v.replace(",", "")
+        out[k] = float(v) if "." in v else int(v)
+    if "prompt" not in out:
+        return None
+    mh = _USAGE_HIT.search(detail)
+    mm = _USAGE_MISS.search(detail)
+    out["cached"] = int(mh.group(1).replace(",", "")) if mh else 0
+    out["miss"] = int(mm.group(1).replace(",", "")) if mm else 0
+    return out
+
+
+def agent_stats(
+    data: dict, main_id: str = "", registry: list | None = None
+) -> list[dict]:
+    """按 agent 聚合：轮次/步数（精确，来自轮元数据 active_view）+ 用量。
+
+    用量归属是**近似口径**：usage 落账行按 steps 签名顺序归属到轮
+    （轮的 steps_used 累计值 = 该轮各分段 usage 行 steps 之和）；中断
+    分段并帐，漂移只可能出现在未闭合会话尾部。上下文窗口 = 该 agent
+    各轮 context 峰值；单轮消费 = Σprompt / 有账轮数。
+
+    3a（2026-09-12）：注册表条目自带**运行时账**（rounds/steps/handoffs/
+    ctx_cur/ctx_peak/window，`registry.runtime_stats`），那才是权威口径——
+    本函数在聚合出用量后用它覆盖轮次/步数/当前占比，字段只增不改。
+    """
+    main_id = main_id or MAIN_AGENT_ID
+    rounds = data.get("rounds") or []
+    per: dict[str, dict] = {}
+    order: list[str] = []
+
+    def bucket(aid: str) -> dict:
+        if aid not in per:
+            per[aid] = {"agent": aid, "rounds": 0, "steps": 0, "prompt": 0,
+                        "cached": 0, "miss": 0, "completion": 0,
+                        "ctx_peak": 0, "billed_rounds": 0}
+            order.append(aid)
+        return per[aid]
+
+    for r in rounds:
+        aid = r.get("active_view") or main_id
+        b = bucket(aid)
+        b["rounds"] += 1
+        b["steps"] += r.get("steps_used") or 0
+
+    rows = [parse_usage_row(h.get("detail", ""))
+            for h in data.get("history") or [] if h.get("kind") == "usage"]
+    rows = [x for x in rows if x]
+    it = iter(rows)
+    for r in rounds:
+        aid = r.get("active_view") or main_id
+        b = bucket(aid)
+        target = r.get("steps_used") or 0
+        acc = 0
+        while acc < target:
+            row = next(it, None)
+            if row is None:
+                break
+            acc += row.get("steps", 0)
+            b["prompt"] += row.get("prompt", 0)
+            b["cached"] += row.get("cached", 0)
+            b["miss"] += row.get("miss", 0)
+            b["completion"] += row.get("completion", 0)
+            b["ctx_peak"] = max(b["ctx_peak"], row.get("context", 0))
+            b["billed_rounds"] += 1
+
+    out = []
+    runtime = registry_module.runtime_stats(
+        registry if registry is not None else (data.get("registry") or [])
+    )
+    for aid in order:
+        b = per[aid]
+        b["avg_prompt"] = (b["prompt"] // b["billed_rounds"]) if b["billed_rounds"] else 0
+        # 运行时账覆盖（3a）：注册表是权威口径；缺账的历史会话保留聚合值。
+        stat = runtime.get(aid)
+        if stat:
+            b["id"] = stat["id"]
+            if stat["rounds"]:
+                b["rounds"] = stat["rounds"]
+            if stat["steps"]:
+                b["steps"] = stat["steps"]
+            b["handoffs"] = stat["handoffs"]
+            b["ctx_cur"] = stat["ctx_cur"]
+            b["window"] = stat["window"]
+            b["share"] = stat["share"]
+            if stat["ctx_peak"]:
+                b["ctx_peak"] = max(b["ctx_peak"], stat["ctx_peak"])
+        out.append(b)
+    return out
+
+
+
 
 # ---- C4：受控写通道的作业系统 --------------------------------------------
 # 唯一的写形态 = 新建会话 / 给会话追加一轮对话。轮执行复用 CLI 的 agent
@@ -68,6 +167,8 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
     except Exception as error:  # noqa: BLE001——错误原样回给发起页
         job["status"] = "error"
         job["error"] = f"{type(error).__name__}: {error}"
+
+_ORG_STATES = ("done", "pending", "failed")
 
 
 
@@ -171,6 +272,7 @@ def session_meta(task_id: str, data: dict) -> dict:
     meta["todo"] = data.get("todo") or {}
     meta["registry"] = data.get("registry") or []
     meta["round_list"] = [_round_meta(r) for r in data.get("rounds") or []]
+    meta["agent_stats"] = agent_stats(data)
     return meta
 
 
