@@ -288,6 +288,82 @@ def report(task_id: str) -> None:
             sticky = (len(seq_views) - switches) / len(seq_views) if seq_views else 0.0
             print(f"active_view 序列 {len(seq_views)} 轮　切换 {switches} 次　"
                   f"粘滞率 {sticky:.1%}（目标 >80%）")
+            # 视图装配 A/B（步 2 验收第 2 条的实测口径：路由到某域时装配体量
+            # 应 ≤ 今天的 70%）。只读派生：直接调 _assemble_view_messages，
+            # 不落盘、不改材料、不碰 env（故与开关状态无关）。
+            #
+            # 口径：**扣掉当前轮**再比。当前轮是轮内赦免的（不分档、不被隔离），
+            # 两边都原样带它，不扣掉就会把"当前轮很大"读成"视图没瘦"。
+            base = max(total - cur_tok, 1)
+            rows = []
+            for name in sorted(
+                views, key=lambda n: -int((views[n] or {}).get("est_tokens") or 0)
+            ):
+                if name == views_module.MAIN_AGENT_ID:
+                    continue          # 主 agent 视图瘦身是已知缺口（§38.4-2）
+                if len(rows) >= 5:
+                    break
+                try:
+                    view_msgs = agent._assemble_view_messages(name, agent.rounds)
+                except Exception as error:  # noqa: BLE001
+                    rows.append(f"{name}：派生失败 {error!r}")
+                    continue
+                if not view_msgs:
+                    rows.append(f"{name}：无产物降级")
+                    continue
+                tok = max(Agent._estimate_messages(view_msgs) - cur_tok, 0)
+                rows.append(f"{name} {tok:,}（{tok / base:.0%}）")
+            if rows:
+                print(f"视图装配 A/B（今天历史+信封 {base:,} tok ＝100%，"
+                      f"已扣当前轮）：" + "　".join(rows))
+            # 隔离否定断言（真实会话材料，步 2 验收第 2 条的后半句）：
+            # 子视图字节里**非本域**的块 ID、块描述、轮号零出现；
+            # 本域块 ID 保留（expand_history 的锚）。
+            index = built.get("index") or {}
+            leaks: list[str] = []
+            kept = 0
+            for name, view in views.items():
+                if name == views_module.MAIN_AGENT_ID:
+                    continue          # 主 agent 全量是已知缺口（§38.4-2）
+                text = str(view.get("text") or "")
+                own = {str(b) for b in (view.get("own_ids") or [])}
+                kept += len(own & {str(b) for b in index})
+                for bid, item in index.items():
+                    if str(bid) in own:
+                        continue
+                    # **按渲染形态**判，不用裸子串：`R1-B1` 是 `R1-B10` 的
+                    # 子串，裸包含会报出一堆假泄漏（本仪器第一版就踩了：
+                    # 64 条"泄漏"里绝大多数是这种前缀假阳性）。
+                    # 块在视图里的渲染形态恒为 `▸ {bid}（…`。
+                    if f"{bid}（" in text:
+                        leaks.append(f"{name} 泄漏块 ID {bid}")
+                        continue
+                    summary = str(item.get("summary") or "")
+                    if len(summary) >= 8 and summary in text:
+                        leaks.append(f"{name} 泄漏块描述 {bid}")
+                # 非本域轮号：本视图的命中轮号集合之外，不应出现轮头行。
+                # **行锚定**判定：轮头在视图里的渲染形态是**独占一行**的
+                # `[R{seq}]`（或合并组锚点 `[R1-2]`）。不能用裸包含——块描述
+                # 文本里可能引用字面 `[R2]`（instrument 第一版就报出一条
+                # 假泄漏：R70-B20 的描述里引用了测试断言原文）。
+                hit_seqs = {
+                    int(item["seq"]) for bid, item in index.items()
+                    if str(bid) in own and item.get("seq")
+                }
+                head_lines = {
+                    line.strip() for line in text.splitlines()
+                    if line.strip().startswith("[R")
+                }
+                for r in task.rounds:
+                    seq = r.get("seq")
+                    if not seq or int(seq) in hit_seqs:
+                        continue
+                    if f"[R{seq}]" in head_lines:
+                        leaks.append(f"{name} 泄漏轮头 R{seq}")
+            print(f"隔离否定断言：子视图 {len(views) - 1} 个，"
+                  f"泄漏 {len(leaks)} 条"
+                  + ("　" + "；".join(leaks[:4]) if leaks else "（干净）")
+                  + f"　本域块 ID 保留 {kept} 个")
         except Exception as error:  # noqa: BLE001——体检不该因某节不可用而失败
             print(f"（域视图不可用：{error!r}）")
 
