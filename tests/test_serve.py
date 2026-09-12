@@ -522,6 +522,32 @@ def test_http_undo_and_local_cmd(server):
     assert code == 400
 
 
+def test_project_tree_prunes_and_lists(tmp_path):
+    """项目树：列文件、剪掉 .git/node_modules 等重型目录、路径相对化。"""
+    root = tmp_path / "proj"
+    (root / "src").mkdir(parents=True)
+    (root / "src" / "a.py").write_text("x", encoding="utf-8")
+    (root / "README.md").write_text("y", encoding="utf-8")
+    (root / ".git").mkdir()
+    (root / ".git" / "config").write_text("z", encoding="utf-8")
+    (root / "node_modules").mkdir()
+    (root / "node_modules" / "big.js").write_text("q", encoding="utf-8")
+    out = serve.project_tree(str(root))
+    paths = [f["p"] for f in out["files"]]
+    assert paths == ["README.md", "src/a.py"]          # 排序 + 相对路径
+    assert out["truncated"] is False
+    assert serve.project_tree(str(tmp_path / "nope"))["error"]
+
+
+def test_http_tree_endpoint(server, tmp_path):
+    """GET /tree 用会话 workspace 出树；无 workspace 给空表 + 报因。"""
+    code, body = _get(server + "/api/sessions/s1/tree")
+    assert code == 200 and "files" in body
+    assert body["error"]                               # s1 的 workspace 不存在
+    code, body = _get(server + "/api/sessions/ghost/tree")
+    assert code == 404
+
+
 def test_split_choices_fullwidth_separators():
     """选项分割：全角分号/竖线也要拆（实测模型写成一整句的情况）。"""
     from wovra.tools.interaction import _split_choices

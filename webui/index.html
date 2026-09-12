@@ -320,6 +320,46 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 @media (max-height:880px){:root{--goal-fs:16px}
   #topbar{padding-top:12px}#kpis{margin:9px 0 9px;gap:8px}.kpi{padding:7px 11px}.kpi .v{font-size:17px}}
 @media (max-height:760px){#kpis{display:none}#goal{-webkit-line-clamp:1}}
+
+/* ---------- 项目页（文件树 + agent 职责） ---------- */
+.proj{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(0,1fr);gap:18px;align-items:start}
+@media (max-width:1240px){.proj{grid-template-columns:1fr}}
+.proj-left,.proj-right{min-width:0}
+.tree-bar{display:flex;gap:8px;align-items:center;margin:0 0 10px}
+.tree-bar input{background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:7px 11px;font-size:12.5px;outline:none}
+.tree-body{border:1px solid var(--line);border-radius:10px;background:var(--bg1);max-height:62vh;overflow-y:auto}
+.frow{display:flex;align-items:center;gap:8px;padding:5px 11px;font-size:12.5px;font-family:var(--mono);cursor:pointer;border-bottom:1px solid #161a22}
+.frow:last-child{border-bottom:none}
+.frow:hover{background:var(--bg2)}
+.frow.on{background:rgba(124,156,255,.13);box-shadow:inset 3px 0 0 var(--acc)}
+.frow .ficon{flex-shrink:0;font-size:12px;width:16px;text-align:center}
+.frow .fpath{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--tx2)}
+.frow:hover .fpath{color:var(--tx)}
+.frow .fmeta{display:flex;align-items:center;gap:5px;flex-shrink:0}
+.fbadge{font-size:9.5px;padding:1px 5px;border-radius:6px;border:1px solid var(--line2);color:var(--tx3)}
+.fbadge.t-read{color:#7f8ea8}
+.fbadge.t-modify{color:var(--gold);border-color:#4a3a1f}
+.fbadge.t-create{color:var(--teal);border-color:#1f4a3a}
+.fbadge.t-delete{color:var(--red);border-color:#4a1f26}
+.frow .fsz{font-size:9.5px;color:var(--tx3);min-width:34px;text-align:right}
+.adot{width:7px;height:7px;border-radius:50%;display:inline-block}
+.tree-foot{font-size:10.5px;color:var(--tx3);margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#toast{position:fixed;left:50%;bottom:34px;transform:translateX(-50%) translateY(14px);background:#1c2740;border:1px solid var(--acc-dim);color:var(--tx);padding:9px 18px;border-radius:10px;font-size:12.5px;font-family:var(--mono);opacity:0;pointer-events:none;transition:opacity .18s,transform .18s;z-index:60;max-width:70vw;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* 目录树 */
+.tree-pad{padding:4px 0}
+.tdir>summary{display:flex;align-items:center;gap:7px;padding:5px 11px;cursor:pointer;font-size:12.5px;font-family:var(--mono);color:var(--tx2);list-style:none;border-bottom:1px solid #161a22}
+.tdir>summary::-webkit-details-marker{display:none}
+.tdir>summary:hover{background:var(--bg2);color:var(--tx)}
+.tdir[open]>summary .tcaret{transform:rotate(90deg)}
+.tcaret{display:inline-block;transition:transform .15s;color:var(--tx3);font-size:9px;width:9px}
+.tname{color:var(--tx)}
+.tcount{margin-left:auto;font-size:9.5px;color:var(--tx3);background:var(--bg2);border:1px solid var(--line);border-radius:8px;padding:0 7px}
+.tkids{padding-left:14px;border-left:1px solid var(--line);margin-left:14px}
+.frow .fname{color:var(--tx2);flex-shrink:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.frow .fpath2{flex:1;min-width:0;color:var(--tx3);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85}
+.frow:hover .fname{color:var(--tx)}
 </style>
 </head>
 <body>
@@ -569,6 +609,7 @@ async function loadSessions(){
 
 /* ---------- 会话选择 ---------- */
 async function select(id){
+  if(CUR!==id){TREESEL.clear();window._treeQ=''}
   CUR=id;renderList();
   try{META=await api('/api/sessions/'+id)}catch(e){$('#content').innerHTML='<div class="empty">加载失败</div>';return}
   buildReg();
@@ -600,7 +641,7 @@ function renderHeader(){
     ['轮次',META.rounds,'轮'], ['总步数',fmtN(steps),'步'],
     ['TTFT 均值',(u.calls?((u.ttft_sum||0)/u.calls).toFixed(1):'—'),'s'],
   ].map(([k,v,s])=>`<div class="kpi${k==='缓存命中'?' acc':''}"><div class="v">${v}<small>${s}</small></div><div class="k">${k}</div></div>`).join('');
-  const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['registry','域注册表'],['usage','用量']];
+  const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['project','项目'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
     `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
     `<span class="chip" style="cursor:pointer;align-self:center;margin-left:6px" onclick="select(CUR)">↻ 刷新</span>`;
@@ -639,7 +680,7 @@ function renderTab(){
   if(TAB==='timeline')return renderTimeline(c);
   if(TAB==='ledger')return renderLedger(c);
   if(TAB==='todo')return renderTodo(c);
-  if(TAB==='registry')return renderRegistry(c);
+  if(TAB==='project')return loadTree().then(()=>{if(TAB==='project')renderProject(c)});
   if(TAB==='usage')return renderUsage(c);
 }
 
@@ -1445,6 +1486,158 @@ function renderTodo(c){
 }
 
 /* ---------- 域注册表 ---------- */
+/* ---------- 项目页：文件树（点击复制相对路径/多选）+ agent 职责 + 文件状态 ---------- */
+let TREE={root:'',files:[],truncated:false,loading:false,err:''};
+let TREESEL=new Set();
+const TREE_ICON={py:'🐍',js:'🟨',ts:'🟦',md:'📝',json:'⚙',html:'🌐',css:'🎨',txt:'📄',
+  toml:'⚙',yaml:'⚙',yml:'⚙',sh:'⌨',ps1:'⌨',png:'🖼',jpg:'🖼',svg:'🖼',lock:'🔒'};
+function fileIcon(name){
+  const ext=String(name).split('.').pop().toLowerCase();
+  return TREE_ICON[ext]||'📄';
+}
+function fileStatusIndex(){   // 从各轮 blocks 聚合每个文件的操作与经手 agent
+  // 块结构：{kind:'file', file, ops:[{e, op, ...}]}——操作在 ops 里
+  const idx={};
+  for(const r of META.round_list||[]){
+    const aid=r.active_view||'Main';
+    for(const b of r.blocks||[]){
+      if(!b.file)continue;
+      const key=String(b.file).split(String.fromCharCode(92)).join('/');
+      const e=idx[key]||(idx[key]={ops:{},agents:new Set()});
+      const ops=(b.ops||[]).map(o=>o.op).filter(Boolean);
+      if(!ops.length)e.ops.read=(e.ops.read||0)+1;
+      for(const k of ops)e.ops[k]=(e.ops[k]||0)+1;
+      e.agents.add(aid);
+    }
+  }
+  return idx;
+}
+function fileRowHtml(f,status){
+  const st=status[f.p]||null;
+  const ops=st?Object.entries(st.ops).map(([k,n])=>{
+    const m=OP_TAG[k]||[k,'t-read'];
+    return `<span class="fbadge ${m[1]}" title="${esc(k)} ×${n}">${m[0]}${n>1?n:''}</span>`;
+  }).join(''):'';
+  const agents=st?[...st.agents].map(a=>
+    `<span class="adot" style="background:${agentColor(a)}" title="${esc(a)}"></span>`).join(''):'';
+  const on=TREESEL.has(f.p)?' on':'';
+  const name=f.p.split('/').pop();
+  return `<div class="frow${on}" data-path="${esc(f.p)}" onclick="pickPath(event,this.dataset.path)" title="${esc(f.p)} · 点击复制相对路径 · Ctrl/⌘ 点击多选">
+    <span class="ficon">${fileIcon(name)}</span><span class="fname">${esc(name)}</span>
+    <span class="fpath2">${esc(f.p)}</span>
+    <span class="fmeta">${agents}${ops}<span class="fsz">${fmtBytes(f.s)}</span></span></div>`;
+}
+function buildTree(files){
+  const root={dirs:new Map(),files:[]};
+  for(const f of files){
+    const parts=f.p.split('/');let node=root;
+    for(let i=0;i<parts.length-1;i++){
+      if(!node.dirs.has(parts[i]))node.dirs.set(parts[i],{dirs:new Map(),files:[]});
+      node=node.dirs.get(parts[i]);
+    }
+    node.files.push(f);
+  }
+  return root;
+}
+function treeCount(node){
+  let n=node.files.length;
+  for(const c of node.dirs.values())n+=treeCount(c);
+  return n;
+}
+function treeHtml(node,status,filtering,depth){
+  const dirs=[...node.dirs.entries()].sort((a,b)=>a[0].localeCompare(b[0]));
+  const files=node.files.slice().sort((a,b)=>a.p.localeCompare(b.p));
+  let html=dirs.map(([name,child])=>
+    `<details class="tdir"${(filtering||depth<1)?' open':''}>
+      <summary><span class="tcaret">▸</span><span class="tname">${esc(name)}</span><span class="tcount">${treeCount(child)}</span></summary>
+      <div class="tkids">${treeHtml(child,status,filtering,depth+1)}</div>
+    </details>`).join('');
+  html+=files.map(f=>fileRowHtml(f,status)).join('');
+  return html;
+}
+function renderProject(c){
+  const reg=META.registry||[];
+  const status=fileStatusIndex();
+  const q=(window._treeQ||'').toLowerCase();
+  const files=TREE.files.filter(f=>!q||f.p.toLowerCase().includes(q));
+  const rows=treeHtml(buildTree(files),status,q,0);
+  const agents=reg.map(a=>{
+    const col=agentColor(a.id);
+    const dom=(a.file_domains||[]);
+    return `<div class="agent"><div class="top">
+      <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="${esc(a.status)}"></span>
+      <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
+      ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
+      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">R${a.rounds||0} · 步${fmtN(a.steps||0)}${a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''}</span></div>
+      <div class="desc">${esc(a.description||'')}</div>
+      ${dom.map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="在左树中过滤">${esc(f)}</span>`).join('')}
+      <div style="margin-top:9px"><span class="chip acc" style="cursor:pointer" onclick="openViewDrawer('${esc(a.name||a.id)}','${esc(a.id)}')">查看上下文</span></div></div>`;
+  }).join('')||'<div class="empty" style="padding:14px 0">无注册表（未发生分裂）</div>';
+  c.innerHTML=`
+    <div class="proj">
+      <div class="proj-left">
+        <h3 class="sec">项目文件树 · ${TREE.files.length} 个文件${TREE.truncated?'（已截断）':''}
+          <span style="font-weight:400;color:var(--tx3)"> · 点击复制相对路径 · Ctrl/⌘ 多选</span></h3>
+        <div class="tree-bar">
+          <input id="tree-q" placeholder="过滤文件名…" value="${esc(window._treeQ||'')}"
+            oninput="window._treeQ=this.value;renderTab()" style="flex:1;min-width:0">
+          <span class="chip" style="cursor:pointer" onclick="treeReload()">↻ 刷新</span>
+          ${TREESEL.size?`<span class="chip acc" style="cursor:pointer" onclick="copySelected()">复制所选 ${TREESEL.size} 条</span>
+          <span class="chip" style="cursor:pointer" onclick="TREESEL.clear();renderTab()">清空</span>`:''}
+        </div>
+        <div class="tree-body tree-pad">${TREE.err?`<div class="empty">${esc(TREE.err)}</div>`:
+          (rows||'<div class="empty">没有匹配的文件</div>')}</div>
+        <div class="tree-foot mono">根目录：${esc(TREE.root||'—')}</div>
+      </div>
+      <div class="proj-right">
+        <h3 class="sec">多 agent 职责划分 · ${reg.length}</h3>
+        <div class="reg-grid">${agents}</div>
+      </div>
+    </div>`;
+}
+async function loadTree(force){
+  if(TREE.loading)return;
+  if(!force&&TREE.cur===CUR&&TREE.root)return;   // 同会话复用
+  TREE.loading=true;
+  try{
+    const d=await api(`/api/sessions/${CUR}/tree`);
+    TREE={cur:CUR,root:d.root||'',files:d.files||[],truncated:!!d.truncated,loading:false,err:d.error||''};
+  }catch(e){TREE={cur:CUR,root:'',files:[],truncated:false,loading:false,err:'加载失败：'+e.message}}
+}
+function treeReload(){TREESEL.clear();loadTree(true).then(()=>renderTab())}
+async function pickPath(ev,path){
+  if(ev.ctrlKey||ev.metaKey){
+    TREESEL.has(path)?TREESEL.delete(path):TREESEL.add(path);
+    renderTab();return;
+  }
+  await copyText(path);
+  toast('已复制：'+path);
+}
+async function copySelected(){
+  const list=[...TREESEL].sort();
+  await copyText(list.join('\n'));
+  toast('已复制 '+list.length+' 条相对路径');
+}
+async function copyText(text){
+  try{await navigator.clipboard.writeText(text);return true}catch(e){}
+  const ta=document.createElement('textarea');ta.value=text;
+  ta.style.position='fixed';ta.style.opacity='0';document.body.appendChild(ta);
+  ta.select();try{document.execCommand('copy')}catch(e){}
+  document.body.removeChild(ta);
+}
+function toast(msg){
+  let el=document.getElementById('toast');
+  if(!el){el=document.createElement('div');el.id='toast';document.body.appendChild(el)}
+  el.textContent=msg;el.classList.add('on');
+  clearTimeout(el._t);el._t=setTimeout(()=>el.classList.remove('on'),1600);
+}
+function fmtBytes(n){
+  n=Number(n)||0;
+  if(n>=1048576)return (n/1048576).toFixed(1)+'M';
+  if(n>=1024)return (n/1024).toFixed(0)+'K';
+  return n+'B';
+}
+
 function renderRegistry(c){
   const reg=META.registry||[];
   if(!reg.length){c.innerHTML='<div class="empty">无注册表（未发生分裂）</div>';return}

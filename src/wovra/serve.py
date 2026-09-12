@@ -290,6 +290,46 @@ _WEB_HELP = """网页斜杠命令（零模型成本，除 /c 续跑外均为本�
 
 _USAGE_KEYS = ("prompt", "cached", "miss", "completion")
 
+# 项目树排除目录（重型/生成物；工作区里这些没有浏览价值）
+_IGNORE_DIRS = frozenset({
+    ".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv",
+    "env", "dist", "build", "target", ".pytest_cache", ".mypy_cache",
+    ".shots",   # 本会话前端截图的临时目录（工作区噪声）
+    ".ruff_cache", ".idea", ".vscode", ".tox", "site-packages",
+})
+
+_TREE_MAX = 4000
+
+
+def project_tree(workspace: str) -> dict:
+    """会话工作区的文件树（扁平相对路径列表，前端建树）。
+
+    排除重型/生成目录（.git、node_modules、虚拟环境、构建产物…）；
+    条数上限 _TREE_MAX，超出标注 truncated（大仓不拖垮页面）。
+    """
+    root = Path(workspace or "")
+    if not workspace or not root.is_dir():
+        return {"root": workspace, "files": [], "error": "工作目录不存在"}
+    files: list[dict] = []
+    truncated = False
+    for cur, dirs, names in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in _IGNORE_DIRS]
+        for n in names:
+            p = Path(cur) / n
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            files.append({"p": str(p.relative_to(root)).replace("\\", "/"),
+                          "s": st.st_size})
+            if len(files) >= _TREE_MAX:
+                truncated = True
+                break
+        if truncated:
+            break
+    files.sort(key=lambda x: x["p"].lower())
+    return {"root": str(root), "files": files, "truncated": truncated}
+
 
 def fs_list(path: str | None) -> dict:
     """目录浏览（新建会话选工作目录用）：只列子目录，只读。
@@ -636,6 +676,12 @@ class _Handler(BaseHTTPRequestHandler):
             if result is None:
                 return self._json({"error": "session not found"}, 404)
             return self._json(result)
+        mtree = re.fullmatch(r"/api/sessions/([^/]+)/tree", path)
+        if mtree:
+            data = self._load_task(mtree.group(1))
+            if data is None:
+                return self._json({"error": "session not found"}, 404)
+            return self._json(project_tree(str(data.get("workspace") or "")))
         m = re.fullmatch(r"/api/sessions/([^/]+)/rounds/(\d+)", path)
         if m:
             data = self._load_task(m.group(1))
