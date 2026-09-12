@@ -36,6 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from . import registry as registry_module
 from . import tools as tools_module
 from .tools import FAILURE_MARKERS
 
@@ -495,8 +496,13 @@ class Task:
     pending_instruction: str = ""
     todo: dict = field(default_factory=dict)  # 大步/小步计划账本（深度恒 1）
     # agent 注册表（机制三）：路径 ID / 类别描述 / 所有权文件域 / 状态 /
-    # 收件箱（单向通信的落信处）。默认只有主 agent；分裂执行时扩充
+    # 收件箱（单向通信的落信处）+ per-agent 运行时账（轮次/步数/上下文体量/
+    # 窗口，2026-09-12 3a）。默认只有主 agent；分裂执行时扩充
     registry: list[dict] = field(default_factory=list)
+    # ID 体系版本（2026-09-12）：1 = 旧（主 agent 占 `A`，顶层域 `A-1`…），
+    # 2 = 新（主 agent = `Main`，顶层域 `A`、`B`、`C`…）。缺省按 1 读，
+    # 加载期迁移一次后落 2（迁移**非幂等**，故必须靠这个标记把住）。
+    agent_id_scheme: int = 1
     # 显式转交的落点（2026-09-12，Level 1 第三步路由）：`switch_view` 工具
     # 与接活视图的 notify 都写这里，路由时作为最高优先判定，消费后清空。
     pending_view: str = ""
@@ -625,12 +631,17 @@ class Task:
             goal=goal,
             requirements=list(requirements or []),
             workspace=str(tools_module.safety.PROJECT_ROOT),
-            # 注册表默认只有主 agent；分裂执行时扩充（机制三/四）
+            # 注册表默认只有主 agent；分裂执行时扩充（机制三/四）。
+            # ID 体系 v2（2026-09-12 用户拍板）：主 agent = `Main`，第一次
+            # 分裂的顶层域取 `A`、`B`、`C`…，A 满了才在 A 内裂 `A-1`。
             registry=[{
-                "id": "A", "name": "主agent",
+                "id": registry_module.MAIN_AGENT_ID, "name": "主agent",
                 "description": "全局协调与未归属事务",
                 "file_domains": [], "status": "active", "inbox": [],
+                "rounds": 0, "steps": 0, "handoffs": 0,
+                "ctx_cur": 0, "ctx_peak": 0, "window": 0,
             }],
+            agent_id_scheme=registry_module.AGENT_ID_SCHEME,
             created_at=now.isoformat(timespec="seconds"),
             updated_at=now.isoformat(timespec="seconds"),
         )
@@ -672,6 +683,30 @@ class Task:
                 "load：丢弃已删字段的遗留键（"
                 + "、".join(dropped)
                 + "）——字段已从 Task 删除，加载期兼容过滤",
+            )
+            task.save()
+        # Agent ID 体系迁移（2026-09-12 用户拍板：主 agent = `Main`，顶层域
+        # `A`、`B`、`C`…——旧体系把主 agent 占成 `A`，顶层域只能是 `A-1`，
+        # 与 `docs/思考内容与AI对话.md` §五（A=大类、A-1=子类）差一级）。
+        # 走加载期自愈（与下方块迁移/回填同一模式），但**必须先看版本标记**：
+        # 迁移非幂等（新体系里 `A-1` = "域 A 的子域 1"），重复迁移会把子域
+        # 读成顶层域。故只在 `agent_id_scheme < 2` 时做一次，做完落 2。
+        if int(getattr(task, "agent_id_scheme", 1) or 1) < registry_module.AGENT_ID_SCHEME:
+            moved, samples = registry_module.migrate_agent_ids(
+                task.registry, task.rounds
+            )
+            if str(getattr(task, "pending_view", "") or "") == (
+                registry_module.LEGACY_MAIN_AGENT_ID
+            ):
+                task.pending_view = registry_module.MAIN_AGENT_ID
+                moved += 1
+            task.agent_id_scheme = registry_module.AGENT_ID_SCHEME
+            task.record(
+                "maintenance",
+                f"agent ID 体系迁移：v1 → v2（主 agent `{registry_module.LEGACY_MAIN_AGENT_ID}` "
+                f"→ `{registry_module.MAIN_AGENT_ID}`，顶层域改用 A/B/C…），"
+                f"改动 {moved} 处"
+                + (f"（{'、'.join(samples)}）" if samples else ""),
             )
             task.save()
         # 注册表回填（2026-09-11，Level 1 视图分化第一步的补网）：注册表

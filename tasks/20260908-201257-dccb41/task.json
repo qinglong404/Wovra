@@ -12558,7 +12558,7 @@
   },
   "registry": [
     {
-      "id": "A",
+      "id": "Main",
       "name": "主agent",
       "description": "全局协调与未归属事务",
       "file_domains": [],
@@ -12567,5 +12567,6 @@
     }
   ],
   "created_at": "2026-09-08T20:12:57",
-  "updated_at": "2026-09-11T21:22:54"
+  "updated_at": "2026-09-11T21:22:54",
+  "agent_id_scheme": 2
 }

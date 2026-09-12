@@ -82,7 +82,7 @@ def test_route_to_switches_view_within_same_turn(monkeypatch):
     body = "\n".join(str(m.get("content") or "") for m in second)
     assert "把那块安全逻辑收一收" in body
     # 且装配已切到工具层身份（不是主 agent）
-    assert "[当前身份] A-1（工具层）" in body
+    assert "[当前身份] A（工具层）" in body
 
 
 def test_route_to_only_registers_intent_until_batch_finishes(monkeypatch):
@@ -131,7 +131,7 @@ def test_route_to_rejects_self_and_unknown_target(monkeypatch):
     agent._open_or_reuse_round("随便说句")
 
     assert "没有可转的对象" in agent.route_to(agent="主agent", reason="x")
-    assert "没有可转的对象" in agent.route_to(agent="A", reason="x")
+    assert "没有可转的对象" in agent.route_to(agent="Main", reason="x")
     unknown = agent.route_to(agent="不存在的域", reason="x")
     assert "未找到 agent" in unknown and "工具层" in unknown
     assert agent._pending_route == ""
@@ -157,7 +157,7 @@ def test_handoff_target_does_not_see_router_steps(monkeypatch):
     )
     # 该在的：用户原话、接手方身份、一条明确的转交说明
     assert "把那块安全逻辑收一收" in body
-    assert "[当前身份] A-1（工具层）" in body
+    assert "[当前身份] A（工具层）" in body
     assert "[回合内转交]" in body and "安全层归它" in body
     # 不该在的：路由调用、它的回执、以及主 agent 转交前的过渡话
     assert "就此停手" not in body

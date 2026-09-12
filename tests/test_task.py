@@ -16,6 +16,44 @@ def _use_tmp_root(monkeypatch, tmp_path):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
 
 
+def test_load_migrates_legacy_agent_ids_exactly_once(monkeypatch, tmp_path):
+    """加载期把 v1 的 Agent ID 迁到 v2（主 agent `A` → `Main`），且**只迁一次**。
+
+    v1：主 agent 占 `A`，第一次分裂的顶层域只能叫 `A-1`；v2：主 agent = `Main`，
+    顶层域取 `A`、`B`、`C`…。迁移**非幂等**（v2 里 `A-1` 已是"域 A 的子域 1"），
+    故靠 `agent_id_scheme` 把住——第二次加载必须原样，否则子域会被读成顶层域。
+    """
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="g")
+    task.rounds = [{
+        "seq": 1, "user_input": {"original": "写工具", "normalized": ""},
+        "events": [], "end_state": "completed", "org_state": "done",
+        "active_view": "A",                       # v1 的主 agent 哨兵
+        "domains": [{"name": "工具层", "file_domains": ["a.py"]}],
+    }]
+    task.registry = [
+        {"id": "A", "name": "主agent", "status": "active", "inbox": []},
+        {"id": "A-1", "name": "工具层", "status": "dormant", "inbox": []},
+        {"id": "A-1-1", "name": "子域", "status": "dormant", "inbox": []},
+    ]
+    task.agent_id_scheme = 1                      # 老数据（缺省即 1）
+    task.save()
+
+    loaded = Task.load(task.id)
+    assert [e["id"] for e in loaded.registry] == ["Main", "A", "A-1"]
+    assert loaded.rounds[0]["active_view"] == "Main"
+    assert loaded.agent_id_scheme == 2
+    assert any(
+        "agent ID 体系迁移" in str(h.get("detail"))
+        for h in loaded.history if h.get("kind") == "maintenance"
+    )
+
+    # 二次加载：scheme 已是 2 → 一字不动（`A-1` 不许再被读成顶层域）
+    again = Task.load(task.id)
+    assert [e["id"] for e in again.registry] == ["Main", "A", "A-1"]
+    assert again.agent_id_scheme == 2
+
+
 def test_create_and_save_load_roundtrip(monkeypatch, tmp_path):
     _use_tmp_root(monkeypatch, tmp_path)
 

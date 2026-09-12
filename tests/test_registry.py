@@ -11,7 +11,12 @@ from wovra import registry as registry_module
 
 
 def test_build_entries_generates_path_ids_from_tree():
-    """顶层域 → A-1/A-2；子域 → A-1-1（路径 ID 是职责路径，非管理树）。"""
+    """顶层域 → A/B（字母）；子域 → A-1（路径 ID 是职责路径，非管理树）。
+
+    2026-09-12 改版：主 agent 不再占 `A`（它是 `Main`），于是第一次分裂的
+    顶层域拿到 A、B、C…——与 `docs/思考内容与AI对话.md` §五（A=大类、
+    A-1=子类）一致。
+    """
     domains = [
         {"name": "工具层", "description": "路径与命令边界",
          "file_domains": ["src/wovra/tools/"], "goal": "加固"},
@@ -23,13 +28,15 @@ def test_build_entries_generates_path_ids_from_tree():
     entries = registry_module.build_entries(domains)
 
     ids = [e["id"] for e in entries]
-    assert ids == ["A-1", "A-1-1", "A-2"]
+    assert ids == ["A", "A-1", "B"]
     top = entries[0]
     assert top["name"] == "工具层"
     assert top["file_domains"] == ["src/wovra/tools/"]
     assert top["goal"] == "加固"
     assert top["status"] == "dormant"          # 休眠是默认态（零成本）
     assert top["inbox"] == []
+    # per-agent 运行时账（3a）：新条目从 0 起
+    assert (top["rounds"], top["steps"], top["ctx_cur"], top["window"]) == (0, 0, 0, 0)
     child = entries[1]
     assert child["name"] == "探针"
     assert child["file_domains"] == ["experiments/"]
@@ -43,7 +50,7 @@ def test_build_entries_empty_and_dirty_parent():
         {"name": "孤儿", "parent": "不存在的父"},
         {"name": "正常", "description": "d"},
     ])
-    assert [e["id"] for e in entries] == ["A-1", "A-2"]   # 两个顶层，不丢
+    assert [e["id"] for e in entries] == ["A", "B"]   # 两个顶层，不丢
 
 
 def test_build_entries_breaks_cycles():
@@ -58,13 +65,14 @@ def test_build_entries_breaks_cycles():
 
 def test_merge_into_is_idempotent_and_preserves_runtime_state():
     """重复 promote 只更新描述，不重复追加；status/inbox 不被抹掉。"""
-    registry = [{"id": "A", "name": "主agent", "description": "全局协调",
+    registry = [{"id": registry_module.MAIN_AGENT_ID, "name": "主agent",
+                 "description": "全局协调",
                  "file_domains": [], "status": "active", "inbox": []}]
     domains = [{"name": "工具层", "description": "旧描述",
                 "file_domains": ["tools/"]}]
 
     added, updated = registry_module.merge_into(registry, domains)
-    assert added == ["A-1"] and updated == []
+    assert added == ["A"] and updated == []
     assert len(registry) == 2
 
     # 运行时状态（路由激活后的 status 与收件箱）必须活过重放
@@ -81,7 +89,7 @@ def test_merge_into_is_idempotent_and_preserves_runtime_state():
     domains[0]["description"] = "新描述"
     domains[0]["file_domains"] = ["tools/", "blocks/"]
     added3, updated3 = registry_module.merge_into(registry, domains)
-    assert added3 == [] and updated3 == ["A-1"]
+    assert added3 == [] and updated3 == ["A"]
     assert len(registry) == 2
     assert registry[1]["description"] == "新描述"
     assert registry[1]["file_domains"] == ["tools/", "blocks/"]
@@ -91,7 +99,7 @@ def test_merge_into_handles_missing_registry_and_empty_domains():
     """registry 为 None（旧任务）时能就地建表；空域不产生条目。"""
     registry: list = []
     added, updated = registry_module.merge_into(registry, [{"name": "单域"}])
-    assert added == ["A-1"] and updated == []
+    assert added == ["A"] and updated == []
     assert registry_module.merge_into(registry, []) == ([], [])
 
 
@@ -123,14 +131,52 @@ def test_backfill_materializes_history_once():
             {"name": "探针", "parent": "工具层"},
         ]},
     ]
-    registry = [{"id": "A", "name": "主agent", "description": "全局协调",
+    registry = [{"id": registry_module.MAIN_AGENT_ID, "name": "主agent",
+                 "description": "全局协调",
                  "file_domains": [], "status": "active", "inbox": []}]
 
     added, updated = registry_module.backfill(registry, rounds)
-    assert added == ["A-1", "A-1-1"] and updated == []
+    assert added == ["A", "A-1"] and updated == []
     assert "旧域" not in [e["name"] for e in registry]   # 旧批次被取代
     assert registry[-1]["name"] == "探针"
 
     # 幂等：再回填一次不动
     assert registry_module.backfill(registry, rounds) == ([], [])
     assert len(registry) == 3
+
+
+def test_top_id_and_legacy_migration():
+    """ID 体系 v1 → v2 的机械迁移（2026-09-12 用户拍板）。
+
+    v1：主 agent 占 `A`，第一次分裂产出 `A-1`、`A-2`…（看起来像主 agent 的
+    子目录）；v2：主 agent = `Main`，顶层域取 `A`、`B`、`C`…，`A` 满了才在
+    A 内裂 `A-1`。
+    """
+    assert [registry_module.top_id(i) for i in (1, 2, 26, 27, 28)] == [
+        "A", "B", "Z", "AA", "AB",
+    ]
+    assert registry_module.migrate_legacy_id("A") == "Main"
+    assert registry_module.migrate_legacy_id("A-1") == "A"
+    assert registry_module.migrate_legacy_id("A-2") == "B"
+    assert registry_module.migrate_legacy_id("A-1-2") == "A-2"
+    # 已经是新体系/自由文本 → 原样（迁移靠 scheme 标记把住，不看形状猜）
+    assert registry_module.migrate_legacy_id("Main") == "Main"
+    assert registry_module.migrate_legacy_id("工具层") == "工具层"
+
+    registry = [
+        {"id": "A", "name": "主agent", "inbox": []},
+        {"id": "A-1", "name": "工具层", "inbox": [{"from": "A-2", "message": "x"}]},
+        {"id": "A-1-1", "name": "装配与视图分化", "inbox": []},
+    ]
+    rounds = [
+        {"seq": 1, "active_view": "A", "route_handoff": {"from": "A", "to": "工具层"}},
+        {"seq": 2, "active_view": "工具层", "route_explicit": "A"},
+    ]
+    moved, _samples = registry_module.migrate_agent_ids(registry, rounds)
+    assert [e["id"] for e in registry] == ["Main", "A", "A-1"]
+    assert registry[1]["inbox"][0]["from"] == "B"      # 收件箱里的旧 ID 形态也迁
+    assert rounds[0]["active_view"] == "Main"          # 哨兵换名
+    assert rounds[0]["route_handoff"]["from"] == "Main"
+    assert rounds[1]["active_view"] == "工具层"         # 域名不动
+    assert rounds[1]["route_explicit"] == "Main"
+    assert moved >= 5

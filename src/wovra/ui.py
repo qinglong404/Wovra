@@ -366,6 +366,9 @@ def _registry_lines(registry: list | None) -> list[str]:
     promote 时翻译成条目（`registry.build_entries`），这里给人看。
     描述与所有权文件域是路由的依据，必须可见——否则用户无法判断
     分裂质量（"分出来之后能不能用"）。缩进按路径 ID 的层级。
+
+    3a（2026-09-12 用户口径「每个子 agent 有自己的轮次、步数、上下文窗口与
+    占比」）：条目自带运行时账，这里一并打出来——没账的历史会话不打（不编 0）。
     """
     if not registry:
         return ["-（无）"]
@@ -379,6 +382,9 @@ def _registry_lines(registry: list | None) -> list[str]:
         name = str(entry.get("name") or "")
         status = str(entry.get("status") or "")
         lines.append(f"{indent}- {path_id}（{name}｜{status}）")
+        stat = _agent_stat_line(entry)
+        if stat:
+            lines.append(f"{indent}  {stat}")
         desc = " ".join(str(entry.get("description") or "").split())
         if desc:
             cut = desc[:160]
@@ -388,6 +394,27 @@ def _registry_lines(registry: list | None) -> list[str]:
             shown = "、".join(files[:6]) + ("…" if len(files) > 6 else "")
             lines.append(f"{indent}  所有权文件域：{shown}")
     return lines
+
+
+def _agent_stat_line(entry: dict) -> str:
+    """该 agent 的运行时账行（3a）：轮次 / 步数 / 上下文 / 窗口占比 / 转出。"""
+    rounds = int(entry.get("rounds") or 0)
+    steps = int(entry.get("steps") or 0)
+    cur = int(entry.get("ctx_cur") or 0)
+    peak = int(entry.get("ctx_peak") or 0)
+    window = int(entry.get("window") or 0)
+    handoffs = int(entry.get("handoffs") or 0)
+    if not any((rounds, steps, cur, peak, window, handoffs)):
+        return ""
+    parts = [f"轮 {rounds}", f"步 {steps}"]
+    if cur or peak:
+        share = f"（{cur / window:.0%}）" if window else ""
+        parts.append(f"上下文 {cur:,}{share}／峰值 {peak:,} tok")
+    if window:
+        parts.append(f"窗口 {window:,}")
+    if handoffs:
+        parts.append(f"转出 {handoffs}")
+    return "｜".join(parts)
 
 
 def _domain_view_lines(task) -> list[str]:
@@ -405,7 +432,7 @@ def _domain_view_lines(task) -> list[str]:
         built = build_views(task.rounds, task.get_state(), registry=task.registry)
     except Exception as exc:  # noqa: BLE001
         return [f"-（域视图派生失败：{exc!r}）"]
-    lines = human_report(built)
+    lines = human_report(built, registry=task.registry)
     return lines[2:] if len(lines) > 2 else ["-（无域视图）"]
 
 

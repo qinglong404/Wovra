@@ -64,6 +64,13 @@ def _find(registry: Optional[Iterable[dict]], ref: str) -> Optional[dict]:
     return None
 
 
+def resolve_agent(
+    registry: Optional[Iterable[dict]], ref: str
+) -> Optional[dict]:
+    """按 id 或名字解析注册表条目（显式转交的落点判定，公开入口）。"""
+    return _find(_entries(registry), ref)
+
+
 def _needles(file_domains: Iterable[str], extra_files: Iterable[str] = ()) -> list[str]:
     """文件域 → 可在用户消息里直接找的串。
 
@@ -216,7 +223,7 @@ def identity_card(name: str, registry: Optional[Iterable[dict]]) -> list[str]:
     """
     if str(name) == MAIN_AGENT_ID:
         return [
-            "[当前身份] A（主agent）：**路由器 + 兜底执行者**。"
+            f"[当前身份] {MAIN_AGENT_ID}（主agent）：**路由器 + 兜底执行者**。"
             "收到用户消息先对职责表问一句「这活落在谁的域里」：\n"
             "1. 落得到 → 用 route_to 把**用户原话**转给它，"
             "然后就此停手（不要自己动手、不要复述、不要写方案或解释）——"

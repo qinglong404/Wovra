@@ -2,6 +2,7 @@
 
 本模块：test_ledger。"""
 
+from wovra import registry as registry_module
 from wovra import task as task_module
 from wovra.agent import Agent
 from wovra.task import Task
@@ -221,11 +222,11 @@ def test_milestone_map_lines_rounds_to_milestones(monkeypatch, tmp_path):
 def test_registry_default_and_comm_guards():
     """注册表默认主 agent；自咨询拒绝；未知 agent 列出现存条目。"""
     task = Task.create(goal="x")
-    assert task.registry[0]["id"] == "A"
+    assert task.registry[0]["id"] == registry_module.MAIN_AGENT_ID
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
-    assert "不要 consult 主 agent" in agent.consult(agent="A", question="?")
+    assert "不要 consult 主 agent" in agent.consult(agent="Main", question="?")
     assert "未找到 agent：Z" in agent.notify(agent="Z", message="m")
-    assert "A(主agent)" in agent.notify(agent="Z", message="m")
+    assert "Main(主agent)" in agent.notify(agent="Z", message="m")
 
 
 def test_notify_and_consult_direct_to_user():

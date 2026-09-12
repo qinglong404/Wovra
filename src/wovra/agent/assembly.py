@@ -23,6 +23,9 @@ class _AssemblyMixin:
         """装配本轮请求的上下文，并记录体量估算（终端展示与窗口保底同口径）。"""
         msgs = self._assemble_messages_impl()
         self.last_context_estimate = self._estimate_messages(msgs)
+        # 3a：per-agent 上下文账（每个 agent 自己的体量与窗口占比）——记的是
+        # **本轮真实生效的那个视图**（开关关掉时 = 主 agent）。
+        self._touch_view_context(self._active_view(), self.last_context_estimate)
         return msgs
 
     def _assemble_full_messages(self) -> list[dict]:
@@ -280,6 +283,10 @@ class _AssemblyMixin:
 
         # [4] 运行时信封（绝对尾部）
         block: list[str] = []
+        if str(view_name) == views_module.MAIN_AGENT_ID:
+            # 主 agent 起手：把规则层的起点建议摆给它（2026-09-12 用户口径：
+            # 每轮都是"主 agent 先触发 → 路由原话 → 子 agent 回复"）。
+            block.extend(self._route_hint_lines())
         lines = self._todo_tail_lines()
         if lines:
             block = list(lines)

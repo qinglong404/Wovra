@@ -104,7 +104,7 @@ def cmd_views(args: argparse.Namespace) -> None:
     built = build_views(task.rounds, task.get_state(), registry=task.registry)
     if not args.domain:
         print(ui.rule("域视图摘要"))
-        for line in human_report(built):
+        for line in human_report(built, registry=task.registry):
             if line.startswith("- "):
                 print(line)
         print(ui.info("\n用 `wovra views <域id或名字>` 看某个域的完整视图。"))
@@ -267,7 +267,7 @@ def main(argv: list[str] | None = None) -> None:
         "views", help="查看按域分化的上下文视图（机械渲染，零模型成本）"
     )
     p_views.add_argument("domain", nargs="?", default="",
-                         help="域 id（如 A-1）或域名；省略则列全部域摘要")
+                         help="域 id（如 A、A-1）或域名；省略则列全部域摘要")
     p_views.add_argument("task_id", nargs="?", default="",
                          help="任务 id 或列表编号；省略取最近更新的会话")
     p_views.set_defaults(func=cmd_views)

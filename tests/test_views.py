@@ -316,7 +316,7 @@ def test_human_report_reports_completeness():
     joined = "\n".join(lines)
     assert "域视图" in joined
     assert "归属完整：是" in joined
-    assert "A-1（工具层）" in joined
+    assert "A（工具层）" in joined
 
 
 def test_view_watermarks_reports_per_view_tokens_rounds_and_over_flag():
@@ -411,12 +411,12 @@ def test_subdomain_gets_its_own_view_and_watermark():
     assert marks["检测加固"]["blocks"] == 1
     assert marks["工具层"]["blocks"] == 1
 
-    # 路径 ID 是职责路径（A-1 → A-1-1），由注册表机械生成
+    # 路径 ID 是职责路径（A → A-1），由注册表机械生成
     from wovra import registry as registry_module
     ids = {e["name"]: e["id"] for e in registry_module.build_entries(domains)}
-    assert ids == {"工具层": "A-1", "检测加固": "A-1-1"}
+    assert ids == {"工具层": "A", "检测加固": "A-1"}
     built = views_module.build_views(rounds, TaskState(), domains=domains)
-    assert built["views"]["检测加固"]["path_id"] == "A-1-1"
+    assert built["views"]["检测加固"]["path_id"] == "A-1"
     # 隔离不因层级而破例：子域视图里不含父域那一轮的内容
     child_text = built["views"]["检测加固"]["text"]
     assert "canary.py" in child_text

@@ -282,7 +282,10 @@ class _CoreMixin:
             # 除尾部追加外字节不变）；开关关闭或缺省时恒为主 agent，装配
             # 与今天逐字节相同。若紧接着有分裂产物生效，`_settle_views`
             # 会按新职责表补判（渐近归属：先归位、再干活）。
+            # 2026-09-12 改版：**恒由主 agent 起手**，规则结果只作为
+            # `route_hint` 建议（见 `_route_view`）。
             "active_view": "",
+            "route_hint": {},
             # 本回合已转交次数（route_to 跳数上限的落点，随轮持久化——
             # `\c` 续跑不会把上限重置掉，见 support._MAX_ROUTE_HOPS）
             "route_hops": 0,
@@ -326,45 +329,93 @@ class _CoreMixin:
         self._hints_cache = (key, hints)
         return hints
 
+    def _rule_view(
+        self, user_input: str, target: Optional[dict] = None, *, explicit: str = ""
+    ) -> dict:
+        """规则路由的**建议**（纯函数、零 LLM）：显式转交 → 文件命中 → 粘滞 → 主 agent。
+
+        见 `routing.route`。2026-09-12 改版后它不再是"直接落地"的判定，
+        而是喂给主 agent 的起点建议（`route_hint`）——判断权归主 agent 的模型。
+        """
+        from .. import routing as routing_module
+
+        if self.task is None:
+            return {
+                "view": views_module.MAIN_AGENT_ID,
+                "reason": "无任务绑定",
+                "matched": [],
+            }
+        return routing_module.route(
+            user_input,
+            self.task.registry,
+            sticky=self._sticky_view_before(target or self.current_round or {}),
+            explicit=explicit,
+            file_hints=self._view_file_hints(),
+        )
+
     def _route_view(
         self, user_input: str, round_: Optional[dict] = None, *, record: bool = True
     ) -> str:
-        """给某一轮定视图（纯函数路由；开关关闭时恒为主 agent）。
+        """给某一轮定**起手视图**——2026-09-12 用户口径：**每轮恒由主 agent 起手**。
 
-        隔离生效后主 agent 看不到子域内容，路由的输入只有**职责表**
-        （注册表的 name/description/file_domains）。判定顺序见 routing.route：
-        显式转交 → 文件命中（多命中交主 agent）→ 粘滞上一视图 → 主 agent。
-        误路由可纠正：接活方用 switch_view/notify 转出去，下一轮即切换。
+        固定流程（用户原话：「分裂后，每次输入，都是主agent先触发，然后路由
+        原话给对应agent，然后子agent进行回复。每轮都是这个流程」）：
 
-        调用点两处：新轮开启（**产物生效之后**，见 `_settle_and_route`）
-        与渐近归属补判（`_settle_views`，record=False 时只补判不逐条留痕）。
+        ```text
+        用户输入 → 主 agent（Main）收到 → 用 route_to 把原话转给对应域
+                 → 子 agent 在本回合内直接回答
+        ```
+
+        故规则路由（文件命中/粘滞）**不再直接落子域**，只作为 `route_hint`
+        塞进主 agent 的运行时信封（[路由建议]）供它参考。唯一例外是**显式
+        转交**（`switch_view` / `notify` 写下的意志）——那是上一轮已经做出的
+        决定（"以后这摊都交给 X"），直接生效，不走主 agent 绕一圈。
+
+        调用点两处：新轮开启（产物生效之后，见 `_settle_and_route`）与渐近
+        归属补判（`_settle_views`，record=False 时只补判不逐条留痕）。
         """
         from .. import routing as routing_module
 
         target = round_ if round_ is not None else self.current_round
         if target is None:
             return views_module.MAIN_AGENT_ID
-        if self.task is None:
+        if self.task is None or not routing_module.active_view_enabled():
             target["active_view"] = views_module.MAIN_AGENT_ID
+            target["route_hint"] = {}
             return views_module.MAIN_AGENT_ID
         explicit = str(target.get("route_explicit") or "") or self._take_pending_view()
-        if not routing_module.active_view_enabled():
-            target["active_view"] = views_module.MAIN_AGENT_ID
-            return views_module.MAIN_AGENT_ID
-        result = routing_module.route(
-            user_input,
-            self.task.registry,
-            sticky=self._sticky_view_before(target),
-            explicit=explicit,
-            file_hints=self._view_file_hints(),
+        entry = (
+            routing_module.resolve_agent(self.task.registry, explicit)
+            if explicit else None
         )
-        target["active_view"] = str(result["view"])
-        if record and (result["view"] != views_module.MAIN_AGENT_ID or explicit):
-            self.task.record(
-                "route",
-                f"R{target.get('seq')} → {result['view']}（{result['reason']}）",
-            )
-        return target["active_view"]
+        if entry is not None:
+            view = str(entry.get("name") or entry.get("id"))
+            target["active_view"] = view
+            target["route_hint"] = {}
+            if record and view != views_module.MAIN_AGENT_ID:
+                self.task.record(
+                    "route",
+                    f"R{target.get('seq')} → {view}"
+                    f"（显式转交 {entry.get('id')}）",
+                )
+            return view
+        result = self._rule_view(user_input, target)
+        target["active_view"] = views_module.MAIN_AGENT_ID
+        if result["view"] == views_module.MAIN_AGENT_ID:
+            target["route_hint"] = {}
+        else:
+            target["route_hint"] = {
+                "view": str(result["view"]),
+                "reason": str(result.get("reason") or ""),
+                "matched": list(result.get("matched") or []),
+            }
+            if record:
+                self.task.record(
+                    "route",
+                    f"R{target.get('seq')} 起手 {views_module.MAIN_AGENT_ID}；"
+                    f"规则建议 → {result['view']}（{result.get('reason')}）",
+                )
+        return views_module.MAIN_AGENT_ID
 
     def _sticky_view_before(self, target: dict) -> str:
         """target 之前最近一个已归域的轮（粘滞判据；时序号为准）。"""
@@ -425,8 +476,16 @@ class _CoreMixin:
                 continue  # 已归域：不推翻
             text = str((r.get("user_input") or {}).get("original") or "")
             before = str(r.get("active_view") or "")
-            after = self._route_view(text, r, record=False)
+            # 补判用**规则建议**（不是 `_route_view`）：新一轮流程是"恒由主
+            # agent 起手"，而补判补的是**材料归属**——那几轮到达时域树还不存在，
+            # 只能由主 agent 答；产物生效后按规则把它们的材料归到对应域视图。
+            after = str(
+                self._rule_view(
+                    text, r, explicit=str(r.get("route_explicit") or "")
+                )["view"]
+            )
             if after != before:
+                r["active_view"] = after
                 changed.append(f"R{r.get('seq')}→{after}")
         if changed:
             self.task.record(
@@ -436,6 +495,74 @@ class _CoreMixin:
             )
             self._persist_rounds()
         return len(changed)
+
+    def _registry_entry_for(self, view: str) -> Optional[dict]:
+        """按视图名或 ID 取注册表条目（`active_view` 两种形态都可能出现）。"""
+        want = str(view or "").strip()
+        if not want or self.task is None:
+            return None
+        for entry in self.task.registry or []:
+            if not isinstance(entry, dict):
+                continue
+            if want in (str(entry.get("id") or ""), str(entry.get("name") or "")):
+                return entry
+        return None
+
+    def _agent_window(self) -> int:
+        """该 agent 的上下文窗口（3a）：目前取整理水位，后续可按域单独调。"""
+        return int(self._org_watermark or 0)
+
+    def _touch_view_context(self, view: str, size: int) -> None:
+        """记下某视图这次装配的体量（3a：每个 agent 自己的上下文与占比）。
+
+        每次装配都调（一轮内多步、每步都装配）——故只更新最新值与峰值，
+        不落盘；落盘由轮闭合时的 `save()` 一并带走（零额外 I/O）。
+        """
+        entry = self._registry_entry_for(view)
+        if entry is None:
+            return
+        size = int(size or 0)
+        entry["ctx_cur"] = size
+        if size > int(entry.get("ctx_peak") or 0):
+            entry["ctx_peak"] = size
+        if not int(entry.get("window") or 0):
+            entry["window"] = self._agent_window()
+
+    def _account_agent_activity(self) -> None:
+        """轮闭合时的 per-agent 记账（3a）：轮次 + 步数落到**最终接手方**。
+
+        口径：一轮算一个轮次、该轮全部步数，都记给轮闭合时 `active_view` 的
+        那个 agent（真正答话的那个）；主 agent 的参与度另有 `handoffs`
+        （它转出过多少轮）——两本账分开，避免既当轮次又当转出重复计数。
+        """
+        if self.task is None or self.current_round is None:
+            return
+        r = self.current_round
+        view = str(r.get("active_view") or "") or views_module.MAIN_AGENT_ID
+        entry = self._registry_entry_for(view)
+        if entry is None:
+            return
+        entry["rounds"] = int(entry.get("rounds") or 0) + 1
+        entry["steps"] = int(entry.get("steps") or 0) + int(r.get("steps_used") or 0)
+        if not int(entry.get("window") or 0):
+            # 窗口随首次活动落定：没装配过（ctx 还是 0）也要能算"占比"分母
+            entry["window"] = self._agent_window()
+
+    def _route_hint_lines(self) -> list[str]:
+        """主 agent 起手时的**路由建议**（规则层给的起点，不是命令）。"""
+        hint = (self.current_round or {}).get("route_hint") or {}
+        view = str(hint.get("view") or "")
+        if not view or view == views_module.MAIN_AGENT_ID:
+            return []
+        reason = str(hint.get("reason") or "")
+        return [
+            "[路由建议]（规则层按文件域/粘滞给的起点，**不是命令**）",
+            f"这一轮按规则更像 {view} 的活"
+            + (f"（{reason}）" if reason else "")
+            + "。你若同意就用 route_to 把**用户原话**转给它（它本回合内直接"
+            "接手回话）；不同意就自己干——判断权在你，规则只是起点，转错了"
+            "对方会自己转出去。",
+        ]
 
     def _apply_pending_route(self) -> bool:
         """把 `route_to` 登记的转交落到本轮 `active_view` 上（回合内换视图）。
@@ -462,6 +589,11 @@ class _CoreMixin:
         self.current_round["route_hops"] = int(
             self.current_round.get("route_hops") or 0
         ) + 1
+        # per-agent 参与度账（3a）：转出记给**转出方**（通常是主 agent）——
+        # 与"轮次归最终接手方"分开，两本账各说各的。
+        source = self._registry_entry_for(before)
+        if source is not None:
+            source["handoffs"] = int(source.get("handoffs") or 0) + 1
         if self.task is not None:
             self.task.record(
                 "route",
@@ -558,6 +690,7 @@ class _CoreMixin:
         self.current_round["blocks"] = blocks_module.segment_round_by_file(
             self.current_round
         )
+        self._account_agent_activity()   # 3a：轮次/步数落到最终接手方
         self.current_round = None
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:
@@ -573,6 +706,7 @@ class _CoreMixin:
             return
         self.current_round["end_state"] = "open"
         self._usage_record_and_drain(closed=False)
+        self._account_agent_activity()   # 3a：中断轮照记（花的钱是真的）
         self._persist_rounds()
         self.current_round = None
 

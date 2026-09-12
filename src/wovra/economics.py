@@ -26,6 +26,8 @@
 """
 from typing import Iterable, Optional
 
+from .registry import MAIN_AGENT_ID
+
 # 一次前缀断裂的等效输入（worklog §19 定价：净 18,830 tok 未命中 @ 0.4 元/M
 # ≈ 0.0075 元/次）。用等效输入而不是钱：算式两侧同单位才可比。
 PREFIX_BREAK_TOKENS = 18_830
@@ -115,6 +117,6 @@ def assess_from_watermarks(
         {"name": name, "tokens": (wm or {}).get("tokens", 0),
          "rounds": (wm or {}).get("rounds", 0)}
         for name, wm in (watermarks or {}).items()
-        if name != "A"          # 主 agent 是兜底桶，不参与"要不要拆出它"
+        if name != MAIN_AGENT_ID   # 主 agent 是兜底桶，不参与"要不要拆出它"
     ]
     return assess(b_before, items, c_split=c_split)

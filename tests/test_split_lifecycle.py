@@ -60,7 +60,7 @@ def test_assess_uses_max_view_as_conservative_lower_bound():
 def test_assess_from_watermarks_skips_main_agent_bucket():
     """主 agent 是兜底桶，不参与"要不要把它拆出来"。"""
     marks = {
-        "A": {"tokens": 90_000, "rounds": 30},
+        "Main": {"tokens": 90_000, "rounds": 30},
         "工具层": {"tokens": 12_000, "rounds": 6},
     }
     assessed = economics_module.assess_from_watermarks(100_000, marks)

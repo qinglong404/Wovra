@@ -65,11 +65,11 @@ def test_ownership_rules_for_block_kinds():
                   "block": {"kind": "file", "file": "notes.md"}, "summary": ""},
     }
     owners = views_module.ownership(domains, index)
-    assert owners["R1-B1"] == "A"            # 环境块恒归主 agent
+    assert owners["R1-B1"] == registry_module.MAIN_AGENT_ID   # 环境块恒归主 agent
     assert owners["R1-B2"] == "工具层"        # 文件命中
     assert owners["R1-B3"] == "工具层"        # 保底块跟本轮 active_view 走
-    assert owners["R1-B4"] == "A"            # 用户块：随命中轮渲染（归属仍主 agent）
-    assert owners["R1-B5"] == "A"            # 不属任何域的文件 → 残留桶
+    assert owners["R1-B4"] == registry_module.MAIN_AGENT_ID   # 用户块：随命中轮渲染（归属仍主 agent）
+    assert owners["R1-B5"] == registry_module.MAIN_AGENT_ID   # 不属任何域的文件 → 残留桶
 
 
 def test_settle_views_reattributes_maintenance_window_rounds(monkeypatch):
@@ -93,7 +93,7 @@ def test_settle_views_reattributes_maintenance_window_rounds(monkeypatch):
     task.rounds[0]["domains"] = _domains()      # 产物已生效（落到轮上）
     registry_module.merge_into(task.registry, _domains())
     for r in task.rounds:
-        r["active_view"] = "A"                  # 但当时（旧注册表下）都判主 agent
+        r["active_view"] = registry_module.MAIN_AGENT_ID   # 但当时（旧注册表下）都判主 agent
     agent = Agent(llm=stub, tools=[], task=task)
     agent.current_round = None
 
@@ -136,14 +136,17 @@ def test_settle_and_route_orders_settle_before_current_round(monkeypatch):
     ]
     task.rounds[0]["domains"] = _domains()
     registry_module.merge_into(task.registry, _domains())
-    task.rounds[1]["active_view"] = "A"     # 产物生效前判的主 agent
+    task.rounds[1]["active_view"] = registry_module.MAIN_AGENT_ID   # 产物生效前判的主 agent
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
 
     agent._open_or_reuse_round("再收一收顺序")   # 新轮（暂判）
     agent._settle_and_route("再收一收顺序")      # 先补判 R2、再判本轮
 
-    assert task.rounds[1]["active_view"] == "工具层"     # 补判
-    assert agent.current_round["active_view"] == "工具层"  # 本轮粘滞接上补判结果
+    assert task.rounds[1]["active_view"] == "工具层"     # 补判（材料归位）
+    # 2026-09-12 改版：**每轮恒由主 agent 起手**——规则结果只当建议给它，
+    # 由主 agent 用 route_to 把原话转出去。
+    assert agent.current_round["active_view"] == registry_module.MAIN_AGENT_ID
+    assert agent.current_round["route_hint"]["view"] == "工具层"
 
 
 def test_settle_is_noop_when_switch_off(monkeypatch):

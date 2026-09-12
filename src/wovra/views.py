@@ -59,7 +59,7 @@ from typing import Iterable, Optional
 
 from . import blocks as blocks_module
 from . import tokens as tokens
-from .registry import MAIN_AGENT_ID, latest_domains
+from .registry import MAIN_AGENT_ID, latest_domains, runtime_stats
 
 # 模型侧注入的账本分片口径（与 `task._MODEL_SIDE_SECTIONS` 对齐）：
 # 全局节每轮都进每个视图（目标/现状是"我在干什么"的最小上下文；
@@ -731,10 +731,16 @@ def verify_completeness(
     }
 
 
-def human_report(built: dict) -> list[str]:
-    """域视图的人视图摘要（零 LLM；`wovra report` / `wovra maint` 共用）。"""
+def human_report(built: dict, registry: list | None = None) -> list[str]:
+    """域视图的人视图摘要（零 LLM；`wovra report` / `wovra maint` 共用）。
+
+    `registry` 给了就带上各 agent 的**运行时账**（3a：轮次/步数/上下文占比）
+    ——"每个子 agent 有自己的轮次、步数、窗口"必须看得见；历史会话没这本账
+    时留空（不编数）。
+    """
     if not built or not built.get("views"):
         return []
+    runtime = runtime_stats(registry)
     lines = [
         "## 域视图（Level 1 第二步：装配按域分化的材料）",
         "",
@@ -743,10 +749,18 @@ def human_report(built: dict) -> list[str]:
     ]
     for name, v in built["views"].items():
         c = v["counts"]
-        lines.append(
+        line = (
             f"- {v['path_id']}（{name}）：命中 {c['rounds']} 轮、"
             f"本域 {c['own']} 块、约 {v['est_tokens']:,} tok"
         )
+        stat = runtime.get(name) or {}
+        if stat.get("rounds") or stat.get("steps"):
+            line += f"｜agent 账：轮 {stat['rounds']}／步 {stat['steps']}"
+            if stat.get("handoffs"):
+                line += f"／转出 {stat['handoffs']}"
+            if stat.get("window"):
+                line += f"／上下文 {stat['ctx_cur']:,}（{stat['share']:.0%}）"
+        lines.append(line)
     if not built["completeness"]["ok"]:
         lost = built["completeness"]["missing"] + built["completeness"]["dropped_from_views"]
         lines.append(f"- ⚠ 未归属/未渲染块：{'、'.join(lost[:10])}")

@@ -1185,14 +1185,14 @@ def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
         org_pool=[[_chunk(_delta(content=_org_json()))]],
         split_pool=[[_domains_chunk()]],
     )
-    assert [e["id"] for e in task.registry] == ["A"]   # promote 前只有主 agent
+    assert [e["id"] for e in task.registry] == ["Main"]   # promote 前只有主 agent
     agent._maybe_organize_batch()
     # 产物仍在暂存区——注册表此刻还不该动（原子生效协议）
-    assert [e["id"] for e in task.registry] == ["A"]
+    assert [e["id"] for e in task.registry] == ["Main"]
 
     agent._promote_org_results()
     ids = [e["id"] for e in task.registry]
-    assert ids == ["A", "A-1"]                          # 域树 → 路径 ID
+    assert ids == ["Main", "A"]                         # 域树 → 路径 ID（顶层 A/B/C）
     entry = task.registry[1]
     assert entry["name"] == "web 演示"
     assert entry["description"] == "纯 HTML 演示页，产出可视化灵感"
@@ -1206,7 +1206,7 @@ def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
 
     # 幂等：重复 promote（模拟崩溃补做）不重复追加，条目数不变
     agent._promote_org_results()
-    assert [e["id"] for e in task.registry] == ["A", "A-1"]
+    assert [e["id"] for e in task.registry] == ["Main", "A"]
 
 
 def test_split_skipped_when_org_fails(monkeypatch, tmp_path):
@@ -1287,7 +1287,7 @@ def test_promote_records_economics_and_lifecycle(monkeypatch, tmp_path):
     assert "发现职责≠创建 Agent" in details
     assert "C_split" in details and "18,830" in details
     # 域已进注册表（机械翻译仍走 registry.merge_into）
-    assert [e["id"] for e in task.registry] == ["A", "A-1"]
+    assert [e["id"] for e in task.registry] == ["Main", "A"]
 
 
 def test_split_hard_data_lists_live_files(monkeypatch, tmp_path):

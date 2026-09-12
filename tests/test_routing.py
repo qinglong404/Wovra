@@ -52,7 +52,7 @@ def test_route_does_not_overmatch_extensionless_dir_names():
     交主 agent（有转交兜底）。
     """
     out = routing_module.route("工具这块要不要再收一收", _registry())
-    assert out["view"] == "A"
+    assert out["view"] == routing_module.MAIN_AGENT_ID
 
 
 def test_route_multi_hit_goes_to_main_agent():
@@ -66,7 +66,7 @@ def test_route_multi_hit_goes_to_main_agent():
         _registry(),
         file_hints={"工具层": ["src/wovra/tools/safety.py"]},
     )
-    assert out["view"] == "A"
+    assert out["view"] == routing_module.MAIN_AGENT_ID
     assert set(out["matched"]) == {"工具层", "前端"}
     assert "多域命中" in out["reason"]
     assert "转出" in out["reason"]      # 交主 agent 是"让它转"，不是"让它做"
@@ -91,8 +91,8 @@ def test_route_sticky_keeps_previous_view():
 
 def test_route_sticky_to_main_agent_is_not_reported_as_sticky():
     """上一轮是主 agent 时不算粘滞——兜底就是主 agent，不必美化口径。"""
-    out = routing_module.route("继续", _registry(), sticky="A")
-    assert out["view"] == "A"
+    out = routing_module.route("继续", _registry(), sticky="Main")
+    assert out["view"] == routing_module.MAIN_AGENT_ID
     assert "粘滞" not in out["reason"]
 
 
@@ -111,7 +111,7 @@ def test_active_view_switch_defaults_on(monkeypatch):
 
 
 def test_route_without_registry_falls_back_to_main_agent():
-    assert routing_module.route("干活", [])["view"] == "A"
+    assert routing_module.route("干活", [])["view"] == routing_module.MAIN_AGENT_ID
 
 
 def test_responsibility_lines_are_self_contained():
@@ -120,7 +120,7 @@ def test_responsibility_lines_are_self_contained():
     lines = routing_module.responsibility_lines(_registry())
     assert len(lines) == 3
     joined = "\n".join(lines)
-    for token in ("A-1", "工具层", "安全层与工具实现", "src/wovra/tools/", "dormant"):
+    for token in ("A", "工具层", "安全层与工具实现", "src/wovra/tools/", "dormant"):
         assert token in joined
 
 
@@ -136,10 +136,13 @@ def test_identity_card_states_isolation_and_handoff():
 def test_identity_card_for_main_agent_is_router():
     """主 agent 的身份卡必须写清本职是路由（不是干活），且给出兜底判据。
 
-    注册表里恒有 A 条目——身份卡必须先判主 agent，否则它会拿到与子域同款
-    的通用卡片，路由纪律永远下发不到它手上（机制在、纪律缺席）。
+    注册表里恒有主 agent 条目（v2 起 ID 是 `Main`）——身份卡必须先判主
+    agent，否则它会拿到与子域同款的通用卡片，路由纪律永远下发不到它手上
+    （机制在、纪律缺席）。
     """
-    card = "\n".join(routing_module.identity_card("A", _registry()))
+    card = "\n".join(
+        routing_module.identity_card(routing_module.MAIN_AGENT_ID, _registry())
+    )
     assert "主agent" in card
     assert "路由器" in card and "route_to" in card
     assert "完全不需要读任何域的代码" in card

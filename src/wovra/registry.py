@@ -160,15 +160,21 @@ def build_entries(domains: Iterable[dict] | None) -> list[dict]:
 
 
 def runtime_stats(registry: Iterable[dict] | None) -> dict[str, dict]:
-    """各 agent 的运行时账（3a）：轮次/步数/转出/上下文体量与窗口占比。"""
+    """各 agent 的运行时账（3a）：轮次/步数/转出/上下文体量与窗口占比。
+
+    **按名字与 ID 双键**：`active_view` 上主 agent 存的是哨兵 ID（`Main`），
+    子域存的是名字——消费方（CLI 人视图、serve/agent_stats）两种键都会查，
+    这里一次给全，免得各自再猜一遍。
+    """
     out: dict[str, dict] = {}
     for entry in registry or []:
         if not isinstance(entry, dict) or not entry.get("name"):
             continue
         cur = int(entry.get("ctx_cur") or 0)
         window = int(entry.get("window") or 0)
-        out[str(entry.get("name"))] = {
+        stat = {
             "id": str(entry.get("id") or ""),
+            "name": str(entry.get("name") or ""),
             "rounds": int(entry.get("rounds") or 0),
             "steps": int(entry.get("steps") or 0),
             "handoffs": int(entry.get("handoffs") or 0),
@@ -177,6 +183,9 @@ def runtime_stats(registry: Iterable[dict] | None) -> dict[str, dict]:
             "window": window,
             "share": (cur / window) if window else 0.0,
         }
+        out[stat["name"]] = stat
+        if stat["id"] and stat["id"] != stat["name"]:
+            out[stat["id"]] = stat
     return out
 
 

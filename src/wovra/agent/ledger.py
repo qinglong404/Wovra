@@ -304,7 +304,7 @@ class _LedgerMixin:
             )
             return f"未找到 agent：{agent}。现存：{known}"
         target = str(entry.get("name") or entry.get("id"))
-        if str(entry.get("id")) == "A" or target == MAIN_AGENT_ID:
+        if str(entry.get("id")) == MAIN_AGENT_ID or target == MAIN_AGENT_ID:
             return (
                 "route_to：目标就是主 agent（你自己）——没有可转的对象，"
                 "这一轮直接自己处理。"
@@ -329,7 +329,7 @@ class _LedgerMixin:
                 "reason": note,
             }
         entry.setdefault("inbox", []).append({
-            "from": "A（主agent·路由）",
+            "from": f"{MAIN_AGENT_ID}（主agent·路由）",
             "message": f"[转交] {note or '（未给理由）'}",
         })
         self.task.save()
@@ -401,7 +401,7 @@ class _LedgerMixin:
                 f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
             )
             return f"未找到 agent：{agent}。现存：{known}"
-        if entry.get("id") == "A":
+        if entry.get("id") == MAIN_AGENT_ID:
             return "不要 consult 主 agent（那就是你自己）——需要用户输入请用 ask_user。"
 
         system = (

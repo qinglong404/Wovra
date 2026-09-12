@@ -43,6 +43,57 @@ def _task_with_domains(rounds: list[dict]) -> Task:
     return task
 
 
+def test_route_hint_is_injected_into_main_agent_context(monkeypatch):
+    """规则建议进主 agent 的装配（2026-09-12 用户口径：每轮主 agent 先触发）。
+
+    路由不再直接落子域——它变成主 agent 上下文里的一条 [路由建议]，由主
+    agent 用 route_to 把原话转出去（判断权在它，规则只给起点）。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
+    agent = _agent(task)
+    agent._open_or_reuse_round("改下 src/wovra/tools/safety.py 的判定")
+    body = "\n".join(str(m.get("content") or "") for m in agent._assemble_messages())
+
+    assert "[路由建议]" in body
+    assert "工具层" in body and "文件命中" in body
+    assert "判断权在你" in body            # 建议不是命令
+    # 关掉开关：视图分化整条路径退场，建议也不该出现
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "0")
+    off = "\n".join(str(m.get("content") or "") for m in agent._assemble_messages())
+    assert "[路由建议]" not in off
+
+
+def test_per_agent_runtime_accounting(monkeypatch):
+    """3a：每个 agent 自己的轮次/步数/上下文体量与窗口（2026-09-12 用户口径）。
+
+    口径：一轮算一个轮次、该轮全部步数，都记给轮闭合时 `active_view` 的那个
+    agent（真正答话的那个）；转出记给转出方（主 agent 的参与度账）。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
+    agent = _agent(task)
+    agent._open_or_reuse_round("改下 src/wovra/tools/safety.py")
+    agent.current_round["steps_used"] = 4
+    agent._assemble_messages()                       # 记一次主 agent 的上下文
+    main_entry = agent._registry_entry_for(routing_module.MAIN_AGENT_ID)
+    assert main_entry["ctx_cur"] > 0 and main_entry["window"] == agent._org_watermark
+
+    # 主 agent 照建议转出 → 转出记账给主 agent，轮次/步数记给接手方
+    agent._pending_route = "工具层"
+    agent._apply_pending_route()
+    assert main_entry["handoffs"] == 1
+    agent.close_round()
+
+    tools_entry = agent._registry_entry_for("工具层")
+    assert tools_entry["rounds"] == 1
+    assert tools_entry["steps"] == 4
+    assert main_entry["rounds"] == 0                 # 这一轮不是它答的
+    stats = registry_module.runtime_stats(task.registry)
+    assert stats["工具层"]["rounds"] == 1 and stats["工具层"]["window"] > 0
+    assert abs(stats["Main"]["share"] - main_entry["ctx_cur"] / main_entry["window"]) < 1e-9
+
+
 def _agent(task: Task) -> Agent:
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
     return agent
@@ -175,16 +226,23 @@ def test_view_history_is_append_only_across_rounds(monkeypatch):
 
 
 def test_route_writes_active_view_on_round_open(monkeypatch):
-    """路由在轮开启时刻落一次（唯一切换点），随轮持久化。"""
+    """轮开启时**恒由主 agent 起手**，规则结果落成 `route_hint` 建议
+    （2026-09-12 用户口径：每轮都是"主 agent 先触发 → 路由原话 → 子 agent 回"）。"""
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
     agent = _agent(task)
     agent._open_or_reuse_round("改下 src/wovra/tools/safety.py 的判定")
+    assert agent.current_round["active_view"] == routing_module.MAIN_AGENT_ID
+    assert agent.current_round["route_hint"]["view"] == "工具层"   # 建议（不是决定）
+    # 主 agent 照建议转出去（真实流程）→ 本回合归工具层，下一轮才有粘滞可谈
+    agent._pending_route = "工具层"
+    agent._apply_pending_route()
     assert agent.current_round["active_view"] == "工具层"
-    # 下一轮无命中 → 粘滞在本域
+    # 下一轮无命中 → 规则建议粘滞在本域，但起手仍是主 agent
     agent.close_round()
     agent._open_or_reuse_round("继续")
-    assert agent.current_round["active_view"] == "工具层"
+    assert agent.current_round["active_view"] == routing_module.MAIN_AGENT_ID
+    assert agent.current_round["route_hint"]["view"] == "工具层"
 
 
 def test_switch_view_sets_pending_and_next_round_takes_it(monkeypatch):
