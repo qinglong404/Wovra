@@ -343,6 +343,7 @@ def session_summary(task_id: str, data: dict) -> dict:
 
 def _round_meta(r: dict) -> dict:
     """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。"""
+    evs = r.get("events") or []
     return {
         "seq": r.get("seq"),
         "user_input": (r.get("user_input") or {}).get("original", ""),
@@ -351,7 +352,9 @@ def _round_meta(r: dict) -> dict:
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",
-        "events": len(r.get("events") or []),
+        "events": len(evs),
+        "t0": (evs[0].get("timestamp") or "") if evs else "",
+        "t1": (evs[-1].get("timestamp") or "") if evs else "",
         "blocks": r.get("blocks") or [],
     }
 
@@ -392,6 +395,7 @@ def round_detail(data: dict, seq: int,
                 continue
             events.append({
                 "id": e.get("id"), "type": e.get("type"),
+                "time": e.get("timestamp", ""),
                 "status": e.get("status", ""), "role": msg.get("role"),
                 "content": msg.get("content", ""),
                 "tool_calls": msg.get("tool_calls"),
@@ -615,9 +619,27 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_DELETE(self):  # noqa: N802
         path = urlparse(self.path).path
+        if path == "/api/sessions":
+            n = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(n) or b"{}") if n else {}
+            except json.JSONDecodeError:
+                return self._json({"error": "bad json"}, 400)
+            ids = [str(x) for x in (body.get("ids") or [])][:500]
+            if not ids:
+                return self._json({"error": "ids 必填（要删的会话 id 列表）"}, 400)
+            deleted, failed = [], []
+            for tid in ids:
+                code, payload = self._try_delete(tid)
+                if code == 200:
+                    deleted.append(tid)
+                else:
+                    failed.append({"id": tid, "error": payload.get("error", "")})
+            return self._json({"ok": True, "deleted": deleted, "failed": failed})
         m = re.fullmatch(r"/api/sessions/([^/]+)", path)
         if m:
-            return self._delete_session(m.group(1))
+            code, payload = self._try_delete(m.group(1))
+            return self._json(payload, code)
         return self._json({"error": "not found"}, 404)
 
     def _create_session(self, body: dict) -> None:
@@ -646,22 +668,22 @@ class _Handler(BaseHTTPRequestHandler):
             task.save()
         return self._json({"id": task.id, "workspace": task.workspace}, 201)
 
-    def _delete_session(self, task_id: str) -> None:
-        """删除会话目录；有运行中作业或 CLI 持锁时拒绝。"""
+    def _try_delete(self, task_id: str) -> tuple[int, dict]:
+        """删除会话目录的共享判定（单个与批量共用）；返回 (HTTP 码, 响应体)。"""
         import shutil
 
         from .cli.session import _process_alive
         if not _ID_SAFE.match(task_id):
-            return self._json({"error": "not found"}, 404)
+            return 404, {"error": "not found"}
         with _job_lock:
             busy = any(j["task_id"] == task_id
                        and j["status"] in ("queued", "running")
                        for j in _JOBS.values())
         if busy:
-            return self._json({"error": "该会话有正在运行的轮，先等它结束"}, 409)
+            return 409, {"error": "该会话有正在运行的轮，先等它结束"}
         tdir = self.tasks_root / task_id
         if not tdir.is_dir():
-            return self._json({"error": "session not found"}, 404)
+            return 404, {"error": "session not found"}
         lock = tdir / ".lock"
         if lock.is_file():
             try:
@@ -669,13 +691,16 @@ class _Handler(BaseHTTPRequestHandler):
             except (OSError, ValueError):
                 pid = 0
             if _process_alive(pid):
-                return self._json(
-                    {"error": f"会话被进程 {pid} 占用（CLI 还开着），先关闭再删"},
-                    409)
+                return 409, {"error": f"会话被进程 {pid} 占用（CLI 还开着），先关闭再删"}
         shutil.rmtree(tdir, ignore_errors=True)
         with self.cache._lock:
             self.cache._cache.pop(task_id, None)
-        return self._json({"ok": True})
+        return 200, {"ok": True}
+
+    def _delete_session(self, task_id: str) -> None:
+        """删除会话目录；有运行中作业或 CLI 持锁时拒绝。"""
+        code, payload = self._try_delete(task_id)
+        self._json(payload, code)
 
     def _start_turn(self, task_id: str, content: str) -> None:
         """追加一轮对话：三道互斥（进程内单飞 / CLI 会话锁 / 任务级去重）。"""

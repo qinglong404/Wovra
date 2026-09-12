@@ -33,6 +33,7 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 .brand b{font-size:15px;letter-spacing:2px}
 .brand span{color:var(--tx3);font-size:12px;letter-spacing:1px}
 .newbtn{margin-left:auto;cursor:pointer;color:var(--tx2);font-size:16px;padding:2px 9px;border-radius:6px;border:1px solid var(--line)}
+.newbtn+.newbtn{margin-left:0}
 .newbtn:hover{color:var(--acc);border-color:var(--acc-dim)}
 #search{margin:4px 14px 10px;padding:8px 12px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--tx);font-size:13px;outline:none}
 #search:focus{border-color:var(--acc-dim)}
@@ -44,6 +45,12 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 .s-meta{display:flex;gap:8px;align-items:center;margin-top:5px;font-size:11px;color:var(--tx3);font-family:var(--mono)}
 .s-meta .esc{color:var(--red);font-weight:600}
 .s-meta .ms{color:var(--gold)}
+.batchbar{display:flex;gap:6px;flex-wrap:wrap;padding:6px 4px;position:sticky;top:0;background:var(--bg1);z-index:3;border-bottom:1px solid var(--line);margin-bottom:4px}
+.s-item{position:relative}
+.s-item.sel{border-color:var(--acc-dim);background:rgba(124,156,255,.09)}
+.s-item .cb{position:absolute;right:10px;top:11px;width:17px;height:17px;border:1px solid var(--line2);border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--acc);flex-shrink:0}
+.s-item.sel .cb{background:var(--acc);border-color:var(--acc);color:#0b0e14;font-weight:700}
+.s-item.bm .s-goal{padding-right:24px}
 .side-foot{padding:10px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--tx3);line-height:1.6}
 .sk{height:52px;border-radius:9px;margin:4px 6px;background:linear-gradient(90deg,var(--bg2) 25%,var(--bg3) 50%,var(--bg2) 75%);background-size:200% 100%;animation:sh 1.2s infinite}
 @keyframes sh{to{background-position:-200% 0}}
@@ -119,6 +126,9 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .gbox{border:1px solid var(--line2);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:7px}
 .crow,.tcard{content-visibility:auto;contain-intrinsic-size:auto 80px}
 .sysline{text-align:center;color:var(--tx3);font-size:11px;margin:9px 0;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.sysline .stime{margin-left:8px;font-size:10px;opacity:.65}
+.mtime{font-size:10px;color:var(--tx3);text-align:right;margin:-3px 2px 0 0;font-family:var(--mono);line-height:1.2;pointer-events:none}
+.tcard .t-when{font-size:10px;font-family:var(--mono);color:var(--tx3);flex-shrink:0;white-space:nowrap}
 .more-btn{display:block;margin:4px auto 18px;padding:7px 20px;background:var(--bg2);border:1px solid var(--line2);border-radius:20px;color:var(--tx2);font-size:12px;cursor:pointer}
 .more-btn:hover{color:var(--tx);border-color:var(--acc-dim)}
 .tcard{background:var(--bg1);border:1px solid var(--line);border-radius:9px;margin:3px 0;overflow:hidden}
@@ -254,7 +264,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 </head>
 <body>
 <aside id="side">
-  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span><span class="newbtn" onclick="newSession()" title="新建会话">＋</span></div>
+  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span><span class="newbtn" onclick="toggleBatch()" title="批量删除会话">🗑</span><span class="newbtn" onclick="newSession()" title="新建会话">＋</span></div>
   <input id="search" placeholder="搜索会话目标…">
   <div id="list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
   <div class="side-foot">task.json 单一事实源 · 读 GET / 写仅对话轮<br>
@@ -319,6 +329,15 @@ function highlightIn(root){
 const fmtN=n=>{n=Number(n)||0;if(n>=1e8)return(n/1e8).toFixed(2)+'亿';if(n>=1e4)return(n/1e4).toFixed(1)+'万';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n)};
 const fmtP=(a,b)=>b>0?(a/b*100).toFixed(1)+'%':'—';
 const fmtT=t=>{const m=String(t||'').match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);return m?m[1]+'-'+m[2]+' '+m[3]:t||''};
+const fmtClock=iso=>{const m=String(iso||'').match(/T(\d{2}:\d{2}:\d{2})/);return m?m[1]:''};
+const fmtDur=sec=>{                     // 秒 → 人话时长；null/负数 → 空
+  if(sec==null||!(sec>0))return '';
+  if(sec<1)return '<1s';
+  if(sec<60)return (Math.round(sec*10)/10)+'s';
+  const m=Math.floor(sec/60),s=Math.round(sec%60);
+  if(m<60)return m+'m'+String(s).padStart(2,'0')+'s';
+  return Math.floor(m/60)+'h'+String(m%60).padStart(2,'0')+'m';
+};
 const wsBase=w=>String(w||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop()||'—';
 
 let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true;
@@ -360,17 +379,60 @@ function agentStatChip(key){
 async function api(p){const r=await fetch(p);if(!r.ok)throw new Error(p+' → '+r.status);return r.json()}
 
 /* ---------- 侧栏 ---------- */
+let BATCH={on:false,sel:new Set()};
+function toggleBatch(force){
+  BATCH.on=force===undefined?!BATCH.on:!!force;
+  if(!BATCH.on)BATCH.sel.clear();
+  renderList();
+}
+function batchFilter(){
+  const q=$('#search').value.trim().toLowerCase();
+  return SESSIONS.filter(s=>!q||(s.goal||'').toLowerCase().includes(q)||(s.id||'').toLowerCase().includes(q));
+}
+function batchAll(){
+  const items=batchFilter();
+  const all=items.length&&items.every(s=>BATCH.sel.has(s.id));
+  items.forEach(s=>all?BATCH.sel.delete(s.id):BATCH.sel.add(s.id));
+  renderList();
+}
+function batchSingle(){   // 只选 rounds≤1 的会话（一次性测试残留）
+  batchFilter().filter(s=>(s.rounds||0)<=1).forEach(s=>BATCH.sel.add(s.id));
+  renderList();
+}
+async function batchDelete(){
+  const ids=[...BATCH.sel].filter(id=>SESSIONS.some(s=>s.id===id));
+  if(!ids.length)return;
+  if(!confirm(`删除 ${ids.length} 个会话？\n删除其全部本地数据，不可恢复。`))return;
+  const r=await fetch('/api/sessions',{method:'DELETE',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({ids})});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){alert(j.error||('HTTP '+r.status));return}
+  BATCH.sel.clear();BATCH.on=false;
+  if(j.failed&&j.failed.length)
+    alert(`已删除 ${j.deleted.length} 个，${j.failed.length} 个失败：\n`+
+      j.failed.map(f=>`${f.id}: ${f.error}`).join('\n'));
+  if(ids.includes(CUR))forgetCurrent();
+  loadSessions();
+}
 function renderList(){
   const q=$('#search').value.trim().toLowerCase();
-  const items=SESSIONS.filter(s=>!q||(s.goal||'').toLowerCase().includes(q)||(s.id||'').toLowerCase().includes(q));
+  const items=batchFilter();
   items.sort((a,b)=>String(b.updated_at||'').localeCompare(String(a.updated_at||'')));
-  $('#list').innerHTML=items.map(s=>{
+  const bar=BATCH.on?`<div class="batchbar">
+    <span class="chip" style="cursor:pointer" onclick="batchAll()">全选/反选</span>
+    <span class="chip" style="cursor:pointer" onclick="batchSingle()" title="rounds≤1 的测试会话">只选单轮</span>
+    <span class="chip bad" style="cursor:pointer" onclick="batchDelete()">删除所选（${BATCH.sel.size}）</span>
+    <span class="chip" style="cursor:pointer;margin-left:auto" onclick="toggleBatch(false)">退出</span></div>`:'';
+  $('#list').innerHTML=bar+items.map(s=>{
     const on=s.id===CUR?' on':'';
+    const picked=BATCH.sel.has(s.id)?' sel':'';
     const escN=s.escalations?`<span class="esc">◉${s.escalations}</span>`:'';
     const ms=s.todo_milestone?`<span class="ms" title="${esc(s.todo_milestone)}">◉大步</span>`:'';
     const title=s.goal||s.id;
     const hit=fmtP(s.usage?.cached||0,(s.usage?.cached||0)+(s.usage?.miss||0));
-    return `<div class="s-item${on}" onclick="select('${s.id}')">
+    const act=BATCH.on?`batchSel('${s.id}',this.classList.toggle('sel'))`:`select('${s.id}')`;
+    return `<div class="s-item${on}${picked}${BATCH.on?' bm':''}" onclick="${act}">
+      ${BATCH.on?`<span class="cb">${BATCH.sel.has(s.id)?'✓':''}</span>`:''}
       <div class="s-goal">${esc(title)}</div>
       <div class="s-meta"><span>R${s.rounds}·${fmtN(s.steps||0)}步</span><span title="Σ prompt">Σ${fmtN(s.usage?.prompt||0)}</span>
         <span title="缓存命中率">命中${hit}</span>${escN}${ms}
@@ -518,53 +580,70 @@ function drawConv(c,toBottom){
     flush();
     const d=CONV.cache[seq],m=metaBy[seq]||{};
     const ob=ORG_BADGE[m.org_state||'raw']||ORG_BADGE.raw;
-    push({kind:'sep',seq,ob,steps:m.steps_used,n:(d.events||[]).length});
+    const evs=d.events||[];
+    // 事件时间轴：开始 = 事件 timestamp；持续 = 距下一事件（工具卡即执行耗时）；
+    // 尾事件运行中显示已进行时长，历史尾事件无下一事件则不显示。
+    const T=evs.map(e=>Date.parse(e.time||''));
+    const durOf=i=>{
+      if(isNaN(T[i]))return null;
+      if(i+1<evs.length&&!isNaN(T[i+1]))return (T[i+1]-T[i])/1000;
+      if(META.status==='in_progress'&&i===evs.length-1)return (Date.now()-T[i])/1000;
+      return null;
+    };
+    const when=i=>{const c=fmtClock(evs[i]?.time),du=fmtDur(durOf(i));return c+(du?' · '+du:'')};
+    const rd=evs.length>1&&!isNaN(T[0])&&!isNaN(T[evs.length-1])
+      ?fmtDur((T[evs.length-1]-T[0])/1000):'';
+    push({kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,t0:fmtClock(evs[0]?.time),rd});
     const sender=senderOf(m);
-    for(const e of d.events||[]){
+    for(let ei=0;ei<evs.length;ei++){
+      const e=evs[ei];
       const role=e.role,content=e.content,tcs=e.tool_calls||[];
       if(e.type==='runtime_note'||(role==='user'&&String(content||'').startsWith('<runtime-reminder>'))){
         flush();
         const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,140);
-        push({kind:'sys',text:`⚙ ${inner}`,title:String(content||'')});continue;
+        push({kind:'sys',text:`⚙ ${inner}`,title:String(content||''),tm:when(ei)});continue;
       }
       if(e.type==='tool_call'){
-        if(String(content||'').trim())feed(sender,{t:'text',text:content});
+        if(String(content||'').trim())feed(sender,{t:'text',text:content,tm:when(ei)});
         for(const tc of tcs){
           const name=tc.function?.name||'?';
           calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
-          feed(sender,{t:'tool',id:tc.id,name,args:tc.function?.arguments||'',seq});
+          feed(sender,{t:'tool',id:tc.id,name,args:tc.function?.arguments||'',seq,tm:when(ei)});
         }
         continue;
       }
       if(role==='tool'){
         // consult 回复带身份归因；其余结果并入调用卡
         const sub=consultSender(content);
-        if(sub){flush();feed(sub,{t:'text',text:sub.body,note:'consult 回复'});continue}
+        if(sub){flush();feed(sub,{t:'text',text:sub.body,note:'consult 回复',tm:when(ei)});continue}
         const ci=calls[e.tool_call_id];
         if(ci){ci.result=content||'';continue}
         flush();
-        push({kind:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`});continue;
+        push({kind:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`,tm:when(ei)});continue;
       }
       if(role==='assistant'&&content){
-        feed(sender,{t:'text',text:content,md:e.type==='final_answer'});continue;
+        feed(sender,{t:'text',text:content,md:e.type==='final_answer',tm:when(ei)});continue;
       }
       if(role==='user'){
-        flush();feed(YOU,{t:'text',text:content,user:true});continue;
+        flush();feed(YOU,{t:'text',text:content,user:true,tm:when(ei)});continue;
       }
     }
   }
   flush();
 
   let html='';
+  const mtm=tm=>tm?`<div class="mtime">${esc(tm)}</div>`:'';
   for(const row of rows){
     if(row.kind==='more'){html+=`<button class="more-btn" onclick="loadEarlier()">▲ 加载更早 ${Math.min(5,row.remain)} 轮（还剩 ${row.remain} 轮）</button>`;continue}
     if(row.kind==='sep'){html+=`<div class="rsep"><span class="rs">R${row.seq}</span><span class="rb">${row.ob}`+
-      (row.steps?`<span>步${row.steps}</span>`:'')+`<span>${row.n} 事件</span></span></div>`;continue}
-    if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}</div>`;continue}
+      (row.steps?`<span>步${row.steps}</span>`:'')+`<span>${row.n} 事件</span>`+
+      (row.t0?`<span>${esc(row.t0)}${row.rd?' · 历时 '+esc(row.rd):''}</span>`:'')+`</span></div>`;continue}
+    if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}`+
+      (row.tm?`<span class="stime">${esc(row.tm)}</span>`:'')+`</div>`;continue}
     const s=row.sender;
     if(s.id==='__you'){
       html+=row.items.map(it=>`<div class="crow user"><div class="avatar" style="background:linear-gradient(135deg,#5a6fd6,#3d4f8f)">你</div>
-        <div class="ccol"><div class="bub">${esc(it.text)}</div></div></div>`).join('');
+        <div class="ccol"><div class="bub">${esc(it.text)}</div>${mtm(it.tm)}</div></div>`).join('');
       continue;
     }
     html+=`<div class="crow agent"><div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>
@@ -574,13 +653,14 @@ function drawConv(c,toBottom){
         if(it.t==='text'){
           const inner=it.md?md(it.text):esc(it.text);
           return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
-            `<div class="bub md">${inner}</div>`;
+            `<div class="bub md">${inner}</div>${mtm(it.tm)}`;
         }
         const st=ci_status(calls[it.id]);
         return `<div class="tcard" data-call="${esc(it.id)}" data-round="${it.seq}" data-event="">
           <div class="t-head" onclick="this.parentNode.classList.toggle('open')">
             <span class="t-icon">${TOOL_ICON[it.name]||'◆'}</span><span class="t-name">${esc(it.name)}</span>
             <span class="t-sum" title="${esc(argSummary(it.name,it.args))}">${esc(argSummary(it.name,it.args))}</span>
+            ${it.tm?`<span class="t-when" title="开始 · 持续（至下一事件）">${esc(it.tm)}</span>`:''}
             <span class="t-st ${st[1]}">${st[0]}</span>
             <span class="t-jump" title="在时间线中定位" onclick="event.stopPropagation();jumpToTimeline(${it.seq},'')">⇢</span></div>
           <div class="t-args">${esc(prettyArgs(it.args))}</div>
@@ -830,16 +910,20 @@ document.getElementById('ws-dirs').addEventListener('click', e => {
   const el = e.target.closest('[data-p]');
   if (el) browseTo(el.dataset.p);
 });
+function batchSel(id,on){on?BATCH.sel.add(id):BATCH.sel.delete(id)}
+function forgetCurrent(){
+  CUR=null;META=null;AGENT_STATS=[];
+  $('#goal').classList.add('empty');$('#goal').textContent='从左侧选择一个会话';
+  $('#chips').innerHTML='';$('#kpis').innerHTML='';$('#tabs').innerHTML='';
+  $('#content').innerHTML='<div class="empty">等待选择会话…</div>';
+  $('#composer').classList.remove('show');
+}
 async function deleteSession(id){
   if(!confirm('删除会话 '+id+'？\n删除其全部本地数据，不可恢复。'))return;
   const r=await fetch('/api/sessions/'+id,{method:'DELETE'});
   const j=await r.json().catch(()=>({}));
   if(!r.ok){alert(j.error||('HTTP '+r.status));return}
-  if(CUR===id){CUR=null;META=null;AGENT_STATS=[];
-    $('#goal').classList.add('empty');$('#goal').textContent='从左侧选择一个会话';
-    $('#chips').innerHTML='';$('#kpis').innerHTML='';$('#tabs').innerHTML='';
-    $('#content').innerHTML='<div class="empty">等待选择会话…</div>';
-    $('#composer').classList.remove('show');}
+  if(CUR===id)forgetCurrent();
   loadSessions();
 }
 
@@ -863,12 +947,14 @@ function renderTimeline(c){
     const org=ORG_BADGE[r.org_state||'raw']||ORG_BADGE.raw;
     const gen=r.org_generation>1?`<span class="badge b-gen">代${r.org_generation}</span>`:'';
     const steps=r.steps_used?`<span class="badge b-raw">步${r.steps_used}</span>`:'';
+    const t01=r.t0?`<span class="badge b-raw" title="本轮首末事件时间与历时">${esc(fmtClock(r.t0))}`+
+      (r.t1&&r.t1!==r.t0?` → ${esc(fmtClock(r.t1))} · ${esc(fmtDur((Date.parse(r.t1)-Date.parse(r.t0))/1000))}`:'')+`</span>`:'';
     const sender=senderOf(r);
     const blocks=(r.blocks||[]).map(blockChip).join('');
     return `<div class="card round org-${esc(r.org_state||'raw')}" data-seq="${r.seq}">
       <div class="r-head" onclick="openDrawer(${r.seq})">
         <span class="r-seq">R${r.seq}</span><span class="r-goal" title="${esc(r.user_input)}">${esc(r.user_input)}</span>
-        <span class="r-badges"><span class="badge" style="color:${sender.color};background:var(--bg4)">${esc(sender.id)}</span>${org}${gen}${steps}<span class="badge b-raw">${r.events}ev</span></span>
+        <span class="r-badges"><span class="badge" style="color:${sender.color};background:var(--bg4)">${esc(sender.id)}</span>${org}${gen}${steps}${t01}<span class="badge b-raw">${r.events}ev</span></span>
       </div>
       ${blocks&&r.user_input&&r.user_input.length>60?`<div class="r-body"><div class="u">${esc(r.user_input.slice(0,160))}</div><div class="blocks">${blocks}</div></div>`:(blocks?`<div class="r-body"><div class="blocks">${blocks}</div></div>`:'')}
     </div>`}).join('');

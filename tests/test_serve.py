@@ -60,6 +60,7 @@ def _fake_task() -> dict:
             {"seq": 1, "user_input": {"original": "干活"}, "end_state": "completed",
              "org_state": "done", "org_generation": 2, "steps_used": 7,
              "events": [{"id": "R1-E01", "type": "user", "status": "",
+                         "timestamp": "2026-09-12T10:59:14",
                          "message": {"role": "user", "content": "干活"}}],
              "blocks": [{"id": "R1-B1", "file": "a.py", "kind": "file",
                          "events": ["R1-E01"]}]},
@@ -81,6 +82,9 @@ def test_session_summary_derives_org_and_usage():
 def test_session_meta_strips_events_keeps_blocks():
     meta = serve.session_meta("s1", _fake_task())
     assert meta["round_list"][0]["events"] == 1          # 事件只留计数
+    assert meta["round_list"][0]["t0"] == "2026-09-12T10:59:14"  # 首末事件时间
+    assert meta["round_list"][0]["t1"] == "2026-09-12T10:59:14"
+    assert meta["round_list"][1]["t0"] == ""             # 无事件轮不瞎编
     assert meta["round_list"][0]["blocks"][0]["id"] == "R1-B1"
     assert meta["registry"][0]["id"] == "A"
     assert "escalations" in meta["task_state"]
@@ -89,7 +93,8 @@ def test_session_meta_strips_events_keeps_blocks():
 def test_round_detail_flattens_events():
     d = serve.round_detail(_fake_task(), 1)
     assert d["user_input"] == "干活"
-    assert d["events"][0] == {"id": "R1-E01", "type": "user", "status": "",
+    assert d["events"][0] == {"id": "R1-E01", "type": "user",
+                              "time": "2026-09-12T10:59:14", "status": "",
                               "role": "user", "content": "干活",
                               "tool_calls": None, "tool_call_id": None}
     assert d["blocks"][0]["file"] == "a.py"
@@ -131,8 +136,11 @@ def server(tmp_path):
     httpd.shutdown()
 
 
-def _get(url, method="GET"):
-    req = urllib.request.Request(url, method=method)
+def _get(url, method="GET", body=None):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    req = urllib.request.Request(
+        url, data=data, method=method,
+        headers={"Content-Type": "application/json"} if data else {})
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
             return r.status, json.loads(r.read().decode("utf-8"))
@@ -438,3 +446,20 @@ def test_http_delete_session(tmp_path, monkeypatch):
             assert e.code == 404
     finally:
         httpd.shutdown()
+
+
+def test_http_batch_delete(server, tmp_path):
+    """批量删除：逐个复用单删判定；失败项逐条报告，不拖累其余。"""
+    for sid in ("s2", "s3"):
+        d = tmp_path / "tasks" / sid
+        d.mkdir()
+        (d / "task.json").write_text("{}", encoding="utf-8")
+    code, body = _get(server + "/api/sessions", method="DELETE",
+                      body={"ids": ["s1", "s2", "ghost"]})
+    assert code == 200 and body["deleted"] == ["s1", "s2"]
+    assert body["failed"] == [{"id": "ghost", "error": "session not found"}]
+    assert not (tmp_path / "tasks" / "s1").exists()
+    assert not (tmp_path / "tasks" / "s2").exists()
+    assert (tmp_path / "tasks" / "s3").exists()   # 未列入的不动
+    code, body = _get(server + "/api/sessions", method="DELETE", body={"ids": []})
+    assert code == 400

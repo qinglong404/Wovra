@@ -45,8 +45,8 @@ JSON"的机械派生；页面零构建（单文件 HTML + 原生 JS），`wovra 
 | 端点 | 返回 | 说明 |
 |---|---|---|
 | `GET /api/sessions` | `{scanning, sessions:[…]}` | 摘要列表（后台按 mtime 增量解析，先到先显示） |
-| `GET /api/sessions/{id}` | 会话元数据 | 摘要 + task_state + todo + registry + **rounds 元数据（不含 events——task.json 可达 16MB，事件按需取）** |
-| `GET /api/sessions/{id}/rounds/{seq}` | `{events, blocks}` | 单轮完整事件与块；`?after=R{n}-E{m}` 只回之后的事件（C3 实时跟随增量） |
+| `GET /api/sessions/{id}` | 会话元数据 | 摘要 + task_state + todo + registry + **rounds 元数据（不含 events——task.json 可达 16MB，事件按需取；含 t0/t1 首末事件时间，供时间线轮历时）** |
+| `GET /api/sessions/{id}/rounds/{seq}` | `{events, blocks}` | 单轮完整事件与块；`?after=R{n}-E{m}` 只回之后的事件（C3 实时跟随增量）；事件含 `time`（落账 timestamp），前端派生开始时间与持续（=距下一事件） |
 
 摘要条目：`{id, goal, status, workspace, mode, created_at, updated_at,
 rounds, steps, org:{done,pending,failed,raw}, escalations, experiments,
@@ -62,6 +62,13 @@ ttft/dur/finish）——解析只在 serve 侧做一次，前端不重复实现�
 | `POST /api/sessions` `{goal}` | 新建会话 | — |
 | `POST /api/sessions/{id}/turn` `{content}` | 追加一轮对话（复用 CLI agent 管线，懒导入） | 三道：进程内单飞全局锁 / CLI 会话锁文件（与 chat/run 互斥，被占返回 409）/ 任务级 job 去重；返回 202 + job_id，`GET /api/jobs/{job_id}` 轮询状态 |
 | 其余一切写路径 | 404 | — |
+
+**写侧（DELETE）——删除**：
+
+| 端点 | 语义 | 互斥 |
+|---|---|---|
+| `DELETE /api/sessions/{id}` | 删除单个会话目录 | 运行中作业 / CLI 持锁 → 409 |
+| `DELETE /api/sessions` `{ids:[…]}` | 批量删除：逐个复用单删判定，失败项逐条报告不拖累其余 → `{deleted, failed}` | 同上（per-id） |
 
 缓存纪律：serve 进程内按 task.json mtime 缓存摘要（文件没变不重解析）；
 16MB 级会话的完整解析只发生在按需取轮时。
