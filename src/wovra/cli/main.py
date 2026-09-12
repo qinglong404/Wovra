@@ -10,6 +10,7 @@ from .. import task as task_module
 from .. import ui
 from ..agent import MODE_BASELINE, MODE_MANAGED
 from ..llm import LLMConfigError
+from ..serve import cmd_serve
 from ..tools import stop_session_backgrounds
 
 from .prompt import _build_agent
@@ -255,6 +256,12 @@ def main(argv: list[str] | None = None) -> None:
     p_maint.add_argument("task_id", nargs="?", default="",
                          help="任务 id 或列表编号；省略取最近更新的会话")
     p_maint.set_defaults(func=cmd_maint)
+
+    p_serve = sub.add_parser("serve", help="本地只读可视化（前端仪表盘，零模型成本）")
+    p_serve.add_argument("--host", default="127.0.0.1",
+                         help="绑定地址（默认 127.0.0.1，数据不对外网暴露）")
+    p_serve.add_argument("--port", type=int, default=8600, help="端口（默认 8600）")
+    p_serve.set_defaults(func=cmd_serve)
 
     p_views = sub.add_parser(
         "views", help="查看按域分化的上下文视图（机械渲染，零模型成本）"

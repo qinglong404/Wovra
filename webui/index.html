@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Wovra · 现场</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+:root{
+  --bg0:#0a0d13; --bg1:#0f131c; --bg2:#151a25; --bg3:#1b2230; --bg4:#222a3b;
+  --line:#212939; --line2:#2c3547;
+  --tx:#e8ebf2; --tx2:#9aa3b8; --tx3:#5f6880;
+  --acc:#7c9cff; --acc-dim:#3d4f8f; --teal:#3ddc97; --gold:#ffb454; --red:#ff6b7a;
+  --mono:"Cascadia Code","JetBrains Mono",Consolas,monospace;
+  --sans:"Segoe UI",system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif;
+  --r:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14px;display:flex;overflow:hidden}
+::-webkit-scrollbar{width:9px;height:9px}
+::-webkit-scrollbar-thumb{background:var(--bg4);border-radius:5px;border:2px solid var(--bg0)}
+::-webkit-scrollbar-track{background:transparent}
+::selection{background:#31437a}
+
+/* ---------- 侧栏 ---------- */
+#side{width:312px;min-width:312px;background:var(--bg1);border-right:1px solid var(--line);display:flex;flex-direction:column}
+.brand{display:flex;align-items:center;gap:10px;padding:16px 16px 12px}
+.brand .dot{width:11px;height:11px;border-radius:50%;background:linear-gradient(135deg,var(--acc),var(--teal));box-shadow:0 0 12px #7c9cff66}
+.brand b{font-size:15px;letter-spacing:2px}
+.brand span{color:var(--tx3);font-size:12px;letter-spacing:1px}
+#search{margin:4px 14px 10px;padding:8px 12px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;color:var(--tx);font-size:13px;outline:none}
+#search:focus{border-color:var(--acc-dim)}
+#list{flex:1;overflow-y:auto;padding:2px 8px 8px}
+.s-item{padding:10px 10px 9px;border-radius:9px;cursor:pointer;border:1px solid transparent;margin-bottom:2px}
+.s-item:hover{background:var(--bg2)}
+.s-item.on{background:var(--bg2);border-color:var(--line2);box-shadow:inset 2px 0 0 var(--acc)}
+.s-goal{font-size:13px;line-height:1.45;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+.s-meta{display:flex;gap:8px;align-items:center;margin-top:5px;font-size:11px;color:var(--tx3);font-family:var(--mono)}
+.s-meta .esc{color:var(--red);font-weight:600}
+.s-meta .ms{color:var(--gold)}
+.side-foot{padding:10px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--tx3);line-height:1.6}
+.sk{height:52px;border-radius:9px;margin:4px 6px;background:linear-gradient(90deg,var(--bg2) 25%,var(--bg3) 50%,var(--bg2) 75%);background-size:200% 100%;animation:sh 1.2s infinite}
+@keyframes sh{to{background-position:-200% 0}}
+
+/* ---------- 主区 ---------- */
+#main{flex:1;display:flex;flex-direction:column;min-width:0}
+#topbar{padding:18px 26px 0;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0d1119,var(--bg0))}
+#goal{font-size:17px;font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+#chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+.chip{font-size:11px;padding:3px 9px;border-radius:20px;border:1px solid var(--line2);color:var(--tx2);font-family:var(--mono)}
+.chip.ok{color:var(--teal);border-color:#1f4a3a}
+.chip.warn{color:var(--gold);border-color:#4a3a1f}
+.chip.bad{color:var(--red);border-color:#4a1f26}
+.chip.acc{color:var(--acc);border-color:#26345c}
+#kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0 12px}
+.kpi{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);padding:10px 14px}
+.kpi .v{font-family:var(--mono);font-size:20px;font-weight:600;letter-spacing:-.5px}
+.kpi .v small{font-size:12px;color:var(--tx3);font-weight:400;margin-left:2px}
+.kpi .k{font-size:11px;color:var(--tx3);margin-top:2px;letter-spacing:.5px}
+.kpi.acc .v{color:var(--acc)}
+#tabs{display:flex;gap:2px;padding:0 18px}
+.tab{padding:9px 16px;font-size:13px;color:var(--tx2);cursor:pointer;border-bottom:2px solid transparent;user-select:none}
+.tab:hover{color:var(--tx)}
+.tab.on{color:var(--acc);border-bottom-color:var(--acc)}
+#content{flex:1;overflow-y:auto;padding:18px 26px 60px}
+
+/* ---------- 通用 ---------- */
+.card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);margin-bottom:10px}
+.mono{font-family:var(--mono)}
+.badge{display:inline-block;font-size:10.5px;padding:2px 8px;border-radius:5px;font-family:var(--mono);letter-spacing:.3px}
+.b-done{background:#123527;color:var(--teal)}
+.b-pend{background:#3a2c12;color:var(--gold)}
+.b-fail{background:#3a1219;color:var(--red)}
+.b-raw{background:var(--bg4);color:var(--tx2)}
+.b-gen{background:#1c2540;color:var(--acc)}
+.empty{color:var(--tx3);text-align:center;padding:60px 0;font-size:13px}
+h3.sec{font-size:12px;color:var(--tx3);letter-spacing:1.5px;margin:20px 0 10px;font-weight:600}
+pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
+
+/* ---------- 时间线 ---------- */
+.round{border-left:3px solid var(--bg4)}
+.round.org-done{border-left-color:var(--teal)}
+.round.org-pending{border-left-color:var(--gold)}
+.round.org-failed{border-left-color:var(--red)}
+.r-head{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer}
+.r-head:hover{background:var(--bg3)}
+.r-seq{font-family:var(--mono);font-size:12px;color:var(--acc);background:#1c2540;padding:3px 8px;border-radius:6px;font-weight:600}
+.r-goal{flex:1;min-width:0;font-size:13px;color:var(--tx);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.r-badges{display:flex;gap:5px;align-items:center;flex-shrink:0}
+.r-body{padding:0 14px 12px;border-top:1px solid var(--line)}
+.r-body .u{font-size:12px;color:var(--tx2);padding:9px 0 4px;line-height:1.5}
+.blocks{display:flex;flex-wrap:wrap;gap:6px}
+.blk{display:inline-flex;align-items:center;gap:7px;background:var(--bg1);border:1px solid var(--line);border-radius:7px;padding:5px 10px;font-size:11.5px;cursor:pointer}
+.blk:hover{border-color:var(--acc-dim);background:var(--bg3)}
+.blk .f{font-family:var(--mono);color:var(--tx)}
+.blk .ops{color:var(--tx3);font-family:var(--mono);font-size:10px}
+.tag{font-size:10px;padding:1px 6px;border-radius:4px;font-family:var(--mono)}
+.t-create{background:#123527;color:var(--teal)}
+.t-modify{background:#1c2540;color:var(--acc)}
+.t-read{background:var(--bg4);color:var(--tx2)}
+.t-delete{background:#3a1219;color:var(--red)}
+.t-env{background:#33240f;color:var(--gold)}
+.t-fb{background:var(--bg4);color:var(--tx3)}
+
+/* ---------- 账本 ---------- */
+.ledger-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.lcard{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.lcard.full{grid-column:1/-1}
+.lcard h4{font-size:12px;letter-spacing:1px;padding:10px 14px;border-bottom:1px solid var(--line);color:var(--tx2)}
+.lcard.atten{border-color:#5c2530;background:linear-gradient(180deg,#241318,var(--bg2))}
+.lcard.atten h4{color:var(--red)}
+.lcard ul{list-style:none;padding:6px 0;max-height:420px;overflow-y:auto}
+.lcard li{padding:7px 14px 7px 12px;font-size:12.5px;line-height:1.55;border-left:2px solid transparent;display:flex;gap:8px}
+.lcard li:hover{background:var(--bg3)}
+.lcard li .n{color:var(--tx3);font-family:var(--mono);font-size:11px;flex-shrink:0;padding-top:1px}
+.lc-esc li{border-left-color:var(--red)}
+.lc-exp li{border-left-color:var(--gold)}
+.lc-dec li{border-left-color:var(--acc)}
+.lc-done li{border-left-color:var(--teal)}
+.lc-issue li{border-left-color:var(--red)}
+.lc-q li{border-left-color:var(--tx3)}
+.status-quote{padding:14px;font-size:13px;line-height:1.7;color:var(--tx);border-left:3px solid var(--acc);background:var(--bg2);border-radius:0 var(--r) var(--r) 0}
+
+/* ---------- 计划 ---------- */
+.ms-card{background:linear-gradient(180deg,#161d2c,var(--bg2));border:1px solid var(--line2);border-radius:var(--r);padding:16px 18px}
+.ms-card .g{font-size:15px;font-weight:600;line-height:1.5}
+.ms-card .lab{font-size:11px;color:var(--tx3);letter-spacing:1px;margin:12px 0 5px}
+.acc-list li,.step-list li{list-style:none;font-size:13px;padding:5px 0;display:flex;gap:9px;line-height:1.5}
+.step-list li.done{color:var(--tx3);text-decoration:line-through}
+.step-list li.done .box{background:var(--teal);border-color:var(--teal)}
+.box{width:14px;height:14px;border:1.5px solid var(--line2);border-radius:4px;flex-shrink:0;margin-top:3px}
+details.hist{border:1px solid var(--line);border-radius:var(--r);margin-bottom:8px;background:var(--bg2)}
+details.hist summary{padding:11px 14px;font-size:12.5px;cursor:pointer;color:var(--tx2);list-style:none}
+details.hist summary:hover{color:var(--tx)}
+details.hist .ev{padding:0 14px 12px;font-size:12px;color:var(--tx2);line-height:1.6;max-height:300px;overflow-y:auto;border-top:1px solid var(--line);padding-top:10px}
+
+/* ---------- 域 ---------- */
+.reg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:12px}
+.agent{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);padding:13px 15px}
+.agent .top{display:flex;align-items:center;gap:8px}
+.agent .st{width:8px;height:8px;border-radius:50%;background:var(--teal);box-shadow:0 0 8px #3ddc9766}
+.agent .st.dormant{background:var(--tx3);box-shadow:none}
+.agent .id{font-family:var(--mono);font-size:12px;color:var(--acc)}
+.agent .nm{font-size:13.5px;font-weight:600}
+.agent .desc{font-size:12px;color:var(--tx2);line-height:1.55;margin:8px 0}
+.fd{display:inline-block;font-family:var(--mono);font-size:10.5px;background:var(--bg1);border:1px solid var(--line);border-radius:5px;padding:2px 7px;margin:2px 3px 0 0;color:var(--tx2)}
+
+/* ---------- 用量 ---------- */
+.hitbar{display:flex;height:26px;border-radius:7px;overflow:hidden;font-family:var(--mono);font-size:11px}
+.hitbar .c{background:linear-gradient(180deg,#1d5c45,#17503c);display:flex;align-items:center;justify-content:center;color:#c8ffe9;min-width:36px}
+.hitbar .m{background:linear-gradient(180deg,#5c1d28,#4a1720);display:flex;align-items:center;justify-content:center;color:#ffd9de;min-width:36px}
+.spark{background:var(--bg1);border:1px solid var(--line);border-radius:var(--r);padding:10px}
+.finish-chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}
+
+/* ---------- 抽屉 ---------- */
+#drawer{position:fixed;top:0;right:-560px;width:560px;height:100%;background:var(--bg1);border-left:1px solid var(--line2);box-shadow:-18px 0 40px #0009;transition:right .18s ease;display:flex;flex-direction:column;z-index:30}
+#drawer.open{right:0}
+#drawer .d-head{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
+#drawer .d-head b{font-size:13px;flex:1}
+#drawer .d-close{cursor:pointer;color:var(--tx3);font-size:18px;padding:2px 8px;border-radius:6px}
+#drawer .d-close:hover{color:var(--tx);background:var(--bg3)}
+#drawer .d-body{flex:1;overflow-y:auto;padding:10px 12px}
+.ev{border:1px solid var(--line);border-radius:8px;margin-bottom:7px;overflow:hidden}
+.ev.hl{border-color:var(--acc-dim)}
+.ev .e-head{display:flex;gap:8px;padding:6px 10px;background:var(--bg2);font-family:var(--mono);font-size:10.5px;color:var(--tx3);align-items:center}
+.ev .e-role{padding:1px 6px;border-radius:4px;font-size:10px}
+.role-user{background:#1c2540;color:var(--acc)}
+.role-assistant{background:#123527;color:var(--teal)}
+.role-tool{background:#33240f;color:var(--gold)}
+.ev .e-body{padding:8px 10px;font-size:12px;line-height:1.6;white-space:pre-wrap;word-break:break-word;color:var(--tx);max-height:260px;overflow-y:auto}
+#mask{position:fixed;inset:0;background:#0007;z-index:25;display:none}
+#mask.open{display:block}
+</style>
+</head>
+<body>
+<aside id="side">
+  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span></div>
+  <input id="search" placeholder="搜索会话目标…">
+  <div id="list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
+  <div class="side-foot">只读投影 · task.json 单一事实源<br>GET-only · 不改任何会话数据</div>
+</aside>
+<main id="main">
+  <div id="topbar">
+    <div id="goal" class="empty">从左侧选择一个会话</div>
+    <div id="chips"></div>
+    <div id="kpis"></div>
+    <div id="tabs"></div>
+  </div>
+  <div id="content"><div class="empty">等待选择会话…</div></div>
+</main>
+<div id="mask"></div>
+<div id="drawer">
+  <div class="d-head"><b id="d-title">事件</b><span id="d-sub" class="mono" style="font-size:11px;color:var(--tx3)"></span><span class="d-close" onclick="closeDrawer()">✕</span></div>
+  <div class="d-body" id="d-body"></div>
+</div>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const fmtN=n=>{n=Number(n)||0;if(n>=1e8)return(n/1e8).toFixed(2)+'亿';if(n>=1e4)return(n/1e4).toFixed(1)+'万';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n)};
+const fmtP=(a,b)=>b>0?(a/b*100).toFixed(1)+'%':'—';
+const fmtT=t=>{const m=String(t||'').match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);return m?m[1]+'-'+m[2]+' '+m[3]:t||''};
+const wsBase=w=>String(w||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop()||'—';
+
+let SESSIONS=[],CUR=null,META=null,TAB='timeline',POLL=null;
+
+async function api(p){const r=await fetch(p);if(!r.ok)throw new Error(p+' → '+r.status);return r.json()}
+
+/* ---------- 侧栏 ---------- */
+function renderList(){
+  const q=$('#search').value.trim().toLowerCase();
+  const items=SESSIONS.filter(s=>!q||(s.goal||'').toLowerCase().includes(q)||(s.id||'').toLowerCase().includes(q));
+  items.sort((a,b)=>String(b.updated_at||'').localeCompare(String(a.updated_at||'')));
+  $('#list').innerHTML=items.map(s=>{
+    const on=s.id===CUR?' on':'';
+    const escN=s.escalations?`<span class="esc">◉${s.escalations}</span>`:'';
+    const ms=s.todo_milestone?`<span class="ms" title="${esc(s.todo_milestone)}">◉大步</span>`:'';
+    const title=s.goal||s.id;
+    const hit=fmtP(s.usage?.cached||0,(s.usage?.cached||0)+(s.usage?.miss||0));
+    return `<div class="s-item${on}" onclick="select('${s.id}')">
+      <div class="s-goal">${esc(title)}</div>
+      <div class="s-meta"><span>R${s.rounds}</span><span title="Σ prompt">Σ${fmtN(s.usage?.prompt||0)}</span>
+        <span title="缓存命中率">命中${hit}</span>${escN}${ms}
+        <span style="margin-left:auto">${fmtT(s.updated_at)}</span></div>
+    </div>`}).join('')||'<div class="empty">无匹配会话</div>';
+}
+$('#search').addEventListener('input',renderList);
+
+async function loadSessions(){
+  try{
+    const d=await api('/api/sessions');
+    SESSIONS=d.sessions;
+    renderList();
+    if(!CUR&&SESSIONS.length)select(SESSIONS[0].id);
+  }catch(e){$('#list').innerHTML='<div class="empty">API 不可达：'+esc(e.message)+'</div>'}
+}
+
+/* ---------- 会话选择 ---------- */
+async function select(id){
+  CUR=id;renderList();
+  try{META=await api('/api/sessions/'+id)}catch(e){$('#content').innerHTML='<div class="empty">加载失败</div>';return}
+  renderHeader();renderTab();
+}
+function renderHeader(){
+  const u=META.usage||{};
+  $('#goal').classList.remove('empty');
+  $('#goal').textContent=META.goal||META.id;
+  const st=META.status==='in_progress'?'<span class="chip ok">进行中</span>':'<span class="chip">完成</span>';
+  $('#chips').innerHTML=st+
+    `<span class="chip acc">${esc(META.mode||'managed')}</span>`+
+    `<span class="chip" title="${esc(META.workspace)}">${esc(wsBase(META.workspace))}</span>`+
+    `<span class="chip">更新 ${fmtT(META.updated_at)}</span>`+
+    (META.escalations?`<span class="chip bad">◉ ${META.escalations} 项待拍板</span>`:'')+
+    (META.todo_milestone?`<span class="chip warn">大步进行中</span>`:'');
+  const hit=fmtP(u.cached||0,(u.cached||0)+(u.miss||0));
+  $('#kpis').innerHTML=[
+    ['Σ prompt',fmtN(u.prompt||0),'tok'],
+    ['缓存命中',hit,''], ['LLM 调用',fmtN(u.calls||0),'次'],
+    ['轮次',META.rounds,'轮'], ['TTFT 均值',(u.calls?((u.ttft_sum||0)/u.calls).toFixed(1):'—'),'s'],
+  ].map(([k,v,s])=>`<div class="kpi${k==='缓存命中'?' acc':''}"><div class="v">${v}<small>${s}</small></div><div class="k">${k}</div></div>`).join('');
+  const tabs=[['timeline','时间线'],['ledger','账本'],['todo','计划'],['registry','域注册表'],['usage','用量']];
+  $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
+    `<div style="margin-left:auto;padding:6px 0"><span class="chip" style="cursor:pointer" onclick="select(CUR)">↻ 刷新</span></div>`;
+}
+function setTab(t){TAB=t;renderHeader();renderTab()}
+
+/* ---------- 视图 ---------- */
+function renderTab(){
+  const c=$('#content');
+  if(TAB==='timeline')return renderTimeline(c);
+  if(TAB==='ledger')return renderLedger(c);
+  if(TAB==='todo')return renderTodo(c);
+  if(TAB==='registry')return renderRegistry(c);
+  if(TAB==='usage')return renderUsage(c);
+}
+
+const ORG_BADGE={done:'<span class="badge b-done">已整理</span>',pending:'<span class="badge b-pend">整理中</span>',failed:'<span class="badge b-fail">整理失败</span>',raw:'<span class="badge b-raw">未整理</span>'};
+const OP_TAG={write:['创建','t-create'],edit:['修改','t-modify'],modify:['修改','t-modify'],replace:['修改','t-modify'],read:['只读','t-read'],delete:['删除','t-delete'],move:['移动','t-modify']};
+function blockChip(b){
+  if(!b||!b.id)return'';
+  if(b.kind==='environment')return `<span class="blk"><span class="f">⚙ 环境命令</span><span class="tag t-env">env</span></span>`;
+  if(b.kind==='fallback')return `<span class="blk"><span class="f">◇ 结论块</span></span>`;
+  const ops=(b.ops||[]).map(o=>o.op);
+  const kinds=[...new Set(ops)].map(o=>OP_TAG[o]||[o,'t-read']);
+  const tags=kinds.map(([n,c])=>`<span class="tag ${c}">${n}</span>`).join('');
+  const nOps=ops.length>1?`<span class="ops">×${ops.length}</span>`:'';
+  return `<span class="blk" onclick="openDrawer(${b.id.match(/^R(\d+)/)[1]},'${esc(b.id)}')" title="${esc(b.id)}">
+    <span class="f">${esc(b.file||b.id)}</span>${nOps}${tags}</span>`;
+}
+function renderTimeline(c){
+  const rl=META.round_list||[];
+  if(!rl.length){c.innerHTML='<div class="empty">此会话还没有轮次</div>';return}
+  c.innerHTML='<h3 class="sec">轮次时间线（新 → 旧）</h3>'+[...rl].reverse().map(r=>{
+    const org=ORG_BADGE[r.org_state||'raw']||ORG_BADGE.raw;
+    const gen=r.org_generation>1?`<span class="badge b-gen">代${r.org_generation}</span>`:'';
+    const steps=r.steps_used?`<span class="badge b-raw">步${r.steps_used}</span>`:'';
+    const blocks=(r.blocks||[]).map(blockChip).join('');
+    return `<div class="card round org-${esc(r.org_state||'raw')}">
+      <div class="r-head" onclick="openDrawer(${r.seq})">
+        <span class="r-seq">R${r.seq}</span><span class="r-goal" title="${esc(r.user_input)}">${esc(r.user_input)}</span>
+        <span class="r-badges">${org}${gen}${steps}<span class="badge b-raw">${r.events}ev</span></span>
+      </div>
+      ${blocks&&r.user_input&&r.user_input.length>60?`<div class="r-body"><div class="u">${esc(r.user_input.slice(0,160))}</div><div class="blocks">${blocks}</div></div>`:(blocks?`<div class="r-body"><div class="blocks">${blocks}</div></div>`:'')}
+    </div>`}).join('');
+}
+
+function renderLedger(c){
+  const t=META.task_state||{};
+  const list=(items,cls,title,empty)=>{
+    const arr=items||[];
+    return `<div class="lcard ${cls}"><h4>${title} · ${arr.length}</h4>`+
+      (arr.length?`<ul>${arr.map((x,i)=>`<li><span class="n">${String(i+1).padStart(2,'0')}</span><pre>${esc(x)}</pre></li>`).join('')}</ul>`
+      :`<div class="empty" style="padding:18px 0">${empty}</div>`)+`</div>`;
+  };
+  c.innerHTML=
+    (t.current_status?`<h3 class="sec">现状</h3><div class="status-quote">${esc(t.current_status)}</div>`:'')+
+    '<h3 class="sec">状态账本（TaskState）</h3><div class="ledger-grid">'+
+    list(t.escalations,'lcard esc atten full','决策升级 · 等你拍板','暂无待拍板事项')+
+    list(t.experiments,'lc-exp','待办实验','暂无')+
+    list(t.decisions,'lc-dec','已决策','暂无')+
+    list(t.known_issues,'lc-issue','已知问题','暂无')+
+    list(t.open_questions,'lc-q','待解决问题','暂无')+
+    list(t.completed,'lc-done full','已完成','暂无')+
+    '</div>';
+}
+
+function renderTodo(c){
+  const t=META.todo||{},m=t.milestone;
+  let html='<h3 class="sec">大步 / 小步（深度恒 1）</h3>';
+  if(m){
+    html+=`<div class="ms-card"><div class="g">🎯 ${esc(m.goal)}</div>
+      <div class="lab">验收标准</div><ul class="acc-list">${(m.acceptance||[]).map(a=>`<li><span class="box"></span>${esc(a)}</li>`).join('')}</ul>
+      ${(t.steps||[]).length?`<div class="lab">小步 · ${(t.steps||[]).filter(s=>s.done).length}/${t.steps.length}</div>
+      <ul class="step-list">${t.steps.map(s=>`<li class="${s.done?'done':''}"><span class="box"></span>${esc(s.text)}</li>`).join('')}</ul>`:''}
+    </div>`;
+  }else html+='<div class="empty" style="padding:26px 0">当前无开启中的大步</div>';
+  const hist=[...(t.history||[])].reverse();
+  html+='<h3 class="sec">已验收大步 · '+(hist.length)+'</h3>'+hist.map((h,i)=>
+    `<details class="hist"><summary>🏁 ${esc(h.goal)}</summary>
+     <div class="ev"><b>验收证据</b><pre>${esc(h.evidence)}</pre></div></details>`).join('')
+    ||'<div class="empty">暂无已验收大步</div>';
+  c.innerHTML=html;
+}
+
+function renderRegistry(c){
+  const reg=META.registry||[];
+  if(!reg.length){c.innerHTML='<div class="empty">无注册表（未发生分裂）</div>';return}
+  c.innerHTML='<h3 class="sec">Agent 注册表 · '+reg.length+'</h3><div class="reg-grid">'+
+    reg.map(a=>`<div class="agent"><div class="top">
+      <span class="st ${a.status==='active'?'':'dormant'}" title="${esc(a.status)}"></span>
+      <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
+      ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}</div>
+      <div class="desc">${esc(a.description)}</div>
+      ${(a.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`).join('')+'</div>';
+}
+
+function renderUsage(c){
+  const u=META.usage||{};
+  const hit=u.cached||0, miss=u.miss||0, tot=hit+miss;
+  const fin=u.finish||{};
+  const rows=u.rows||[];
+  const max=Math.max(1,...rows.map(r=>r.prompt||0));
+  const W=1000,H=130,bw=rows.length?Math.max(2,W/rows.length-1):0;
+  const bars=rows.map((r,i)=>{
+    const p=r.prompt||0, h=Math.max(2,Math.log10(p+1)/Math.log10(max+1)*(H-24));
+    const ratio=p?(r.cached||0)/p:0;
+    const col=ratio>0.9?'#3ddc97':ratio>0.5?'#ffb454':'#ff6b7a';
+    return `<rect x="${(i*W/rows.length).toFixed(1)}" y="${(H-16-h).toFixed(1)}" width="${bw.toFixed(1)}" height="${h.toFixed(1)}" fill="${col}" opacity=".85"><title>${esc(r.time||'')} · ${esc(r.purpose)} prompt=${fmtN(p)} 命中=${fmtP(ratio,1)} ttft=${r.ttft??'—'}s finish=${esc(r.finish||'')}</title></rect>`;
+  }).join('');
+  c.innerHTML=
+    `<h3 class="sec">缓存命中（口径 = llm.py 落账）</h3>
+     <div class="hitbar"><div class="c" style="flex:${Math.max(hit,0.0001)}">${tot&&hit/tot>0.15?`命中 ${fmtN(hit)}`:''}</div>
+     <div class="m" style="flex:${Math.max(miss,0.0001)}">${tot&&miss/tot>0.15?`未命中 ${fmtN(miss)}`:''}</div></div>
+     <div style="display:flex;gap:14px;margin-top:8px;font-size:12px;color:var(--tx2)">
+       <span>命中率 <b class="mono" style="color:var(--teal)">${fmtP(hit,tot)}</b></span>
+       <span class="mono">命中 ${fmtN(hit)} / 未命中 ${fmtN(miss)}</span>
+       <span>命中价按 WOVRA_CACHE_RATE 计——条形只看体量占比</span></div>
+     <h3 class="sec">逐调用 prompt 体量（对数高 · 颜色 = 命中率）· ${rows.length} 次</h3>
+     <div class="spark"><svg viewBox="0 0 ${W} ${H}" width="100%" height="${H}" preserveAspectRatio="none">${bars}</svg></div>
+     <h3 class="sec">结束原因分布</h3>
+     <div class="finish-chips">${Object.entries(fin).map(([k,n])=>`<span class="chip acc">${esc(k)} × ${n}</span>`).join('')||'<span class="chip">无数据</span>'}</div>
+     <h3 class="sec">最近调用</h3>
+     <div class="lcard"><ul style="max-height:300px">${[...rows].reverse().slice(0,40).map(r=>
+       `<li><span class="n">${esc(fmtT(r.time))}</span><pre class="mono" style="font-size:11px">[${esc(r.purpose)}] prompt=${fmtN(r.prompt||0)} cached=${fmtN(r.cached||0)} ttft=${r.ttft??'—'}s dur=${r.dur??'—'}s finish=${esc(r.finish||'')}</pre></li>`).join('')}</ul></div>`;
+}
+
+/* ---------- 抽屉 ---------- */
+let drawerSeq=null,drawerHl=null;
+async function openDrawer(seq,hl){
+  drawerSeq=seq;drawerHl=hl||null;
+  $('#mask').classList.add('open');$('#drawer').classList.add('open');
+  $('#d-title').textContent='R'+seq+' 事件原文';
+  $('#d-sub').textContent=hl||'';
+  $('#d-body').innerHTML='<div class="empty">加载中…</div>';
+  try{
+    const d=await api(`/api/sessions/${CUR}/rounds/${seq}`);
+    $('#d-body').innerHTML=(d.events||[]).map(e=>{
+      const tc=e.tool_calls?`<div class="mono" style="font-size:10.5px;color:var(--acc);padding:4px 10px 0">${esc(JSON.stringify(e.tool_calls)).slice(0,300)}</div>`:'';
+      const hlCls=drawerHl&&(e.id===drawerHl||(d.blocks||[]).some(b=>b.id===drawerHl&&(b.events||[]).includes(e.id)))?' hl':'';
+      const body=String(e.content||'').slice(0,1200);
+      return `<div class="ev${hlCls}"><div class="e-head"><b>${esc(e.id)}</b>
+        <span class="e-role role-${esc(e.role||'user')}">${esc(e.role||'?')}</span>
+        <span>${esc(e.type)}</span>${e.status?`<span>${esc(e.status)}</span>`:''}</div>
+        ${tc}<div class="e-body">${esc(body)||'<i style="color:var(--tx3)">（空）</i>'}${String(e.content||'').length>1200?'<i style="color:var(--tx3)">…（截断展示）</i>':''}</div></div>`;
+    }).join('')||'<div class="empty">此轮无事件</div>';
+    if(drawerHl){const el=$('#d-body .ev.hl');if(el)el.scrollIntoView({block:'center'})}
+  }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
+}
+function closeDrawer(){$('#drawer').classList.remove('open');$('#mask').classList.remove('open')}
+$('#mask').addEventListener('click',closeDrawer);
+document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+
+/* ---------- 启动 ---------- */
+loadSessions();
+POLL=setInterval(loadSessions,5000);
+</script>
+</body>
+</html>
