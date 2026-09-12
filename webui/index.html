@@ -229,6 +229,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #ws-input{width:100%;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:9px 12px;font-family:var(--mono);font-size:12.5px;outline:none}
 #ws-input:focus{border-color:var(--acc-dim)}
 .ws-card .chip{cursor:pointer}
+.ws-dir{padding:7px 12px;font-size:12.5px;cursor:pointer;font-family:var(--mono)}
+.ws-dir:hover{background:var(--bg3);color:var(--acc)}
 
 /* ---------- 抽屉 ---------- */
 #drawer{position:fixed;top:0;right:-560px;width:560px;height:100%;background:var(--bg1);border-left:1px solid var(--line2);box-shadow:-18px 0 40px #0009;transition:right .18s ease;display:flex;flex-direction:column;z-index:30}
@@ -276,9 +278,20 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div class="ws-card">
     <h4>新建会话 · 选择工作目录</h4>
     <div class="ws-hint">目标不填——随对话成形；所有文件工具与命令限定在该目录内（绝对路径，不存在会自动创建）。</div>
-    <input id="ws-input" placeholder="例如 D:\BC\my-project">
+    <div style="display:flex;gap:7px;align-items:center">
+      <input id="ws-input" style="flex:1" placeholder="例如 D:\BC\my-project">
+      <span class="chip" style="cursor:pointer;flex-shrink:0" onclick="toggleBrowser()">📁 浏览</span>
+    </div>
     <div id="ws-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
+    <div id="ws-browser" style="display:none">
+      <div class="mono" id="ws-cur" style="font-size:11px;color:var(--tx3);margin-bottom:5px;word-break:break-all"></div>
+      <div id="ws-dirs" style="max-height:200px;overflow-y:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg0)"></div>
+      <div style="display:flex;gap:7px;margin-top:7px">
+        <span class="chip" style="cursor:pointer" onclick="wsUp()">⬆ 上级</span>
+        <span class="chip ok" style="cursor:pointer;margin-left:auto" onclick="useBrowsed()">✓ 使用此目录</span>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
       <span class="chip" style="cursor:pointer" onclick="closeWsModal()">取消</span>
       <span class="chip acc" style="cursor:pointer" onclick="createSession()">创建</span>
     </div>
@@ -763,6 +776,60 @@ async function createSession(){
   }catch(e){$('#ws-err').textContent=e.message}
 }
 function closeWsModal(){$('#ws-modal').classList.remove('open');$('#mask').classList.remove('open')}
+const BS = String.fromCharCode(92);   // 反斜杠（源码里不写字面反斜杠）
+const trimSep = p => { let q = String(p); while (q.endsWith(BS) || q.endsWith('/')) q = q.slice(0, -1); return q; };
+let wsBrowsed = '';
+async function toggleBrowser(){
+  const b = document.getElementById('ws-browser');
+  if (b.style.display === 'none') {
+    b.style.display = 'block';
+    await browseTo(document.getElementById('ws-input').value.trim() || null);
+  } else b.style.display = 'none';
+}
+async function browseTo(path){
+  const d = await api('/api/fs/ls' + (path ? '?path=' + encodeURIComponent(path) : ''));
+  if (d.error) { document.getElementById('ws-err').textContent = d.error; return; }
+  wsBrowsed = d.path || '';
+  document.getElementById('ws-cur').textContent = '当前：' + (wsBrowsed || '（选一个盘）');
+  const box = document.getElementById('ws-dirs');
+  box.innerHTML = '';
+  const join = (base, name) => trimSep(base) ? trimSep(base) + BS + name : name;
+  (d.roots || []).forEach(r => {
+    const el = document.createElement('div');
+    el.className = 'ws-dir'; el.textContent = '💾 ' + r;
+    el.addEventListener('click', () => browseTo(r));
+    box.appendChild(el);
+  });
+  (d.dirs || []).forEach(n => {
+    const el = document.createElement('div');
+    el.className = 'ws-dir'; el.textContent = '📁 ' + n;
+    el.addEventListener('click', () => browseTo(join(wsBrowsed, n)));
+    box.appendChild(el);
+  });
+  if (!(d.roots || []).length && !(d.dirs || []).length)
+    box.innerHTML = '<div class="empty" style="padding:14px 0">（无子目录）</div>';
+}
+function wsUp(){
+  const cur = trimSep(wsBrowsed);
+  if (!cur || /^[A-Za-z]:$/.test(cur)) return browseTo(null);   // 已在盘名/盘根：回盘列表
+  const idx = Math.max(cur.lastIndexOf(BS), cur.lastIndexOf('/'));
+  if (idx === 2 && /^[A-Za-z]:/.test(cur)) return browseTo(cur.slice(0, 3));  // 盘根
+  browseTo(idx > 0 ? cur.slice(0, idx) : null);
+}
+function useBrowsed(){
+  if (!wsBrowsed) return;
+  document.getElementById('ws-input').value = wsBrowsed;
+  document.getElementById('ws-browser').style.display = 'none';
+}
+
+// 事件委托：目录行点击进子目录（路径走 dataset，不进内联属性）
+document.getElementById('ws-dirs').addEventListener('click', e => {
+  const el = e.target.closest('[data-p]');
+  if (el) browseTo(el.dataset.p);
+});document.getElementById('ws-dirs').addEventListener('click', e => {
+  const el = e.target.closest('[data-p]');
+  if (el) browseTo(el.dataset.p);
+});
 async function deleteSession(id){
   if(!confirm('删除会话 '+id+'？\n删除其全部本地数据，不可恢复。'))return;
   const r=await fetch('/api/sessions/'+id,{method:'DELETE'});

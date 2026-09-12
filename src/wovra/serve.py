@@ -237,6 +237,35 @@ _ORG_STATES = ("done", "pending", "failed")
 _USAGE_KEYS = ("prompt", "cached", "miss", "completion")
 
 
+def fs_list(path: str | None) -> dict:
+    """目录浏览（新建会话选工作目录用）：只列子目录，只读。
+
+    path 为空 → 列盘根（Windows）/文件系统根（POSIX）。
+    """
+    if not path:
+        if os.name == "nt":
+            roots = []
+            for L in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+                if Path(f"{L}:\\").exists():
+                    roots.append(f"{L}:\\")
+            return {"roots": roots, "dirs": [], "path": ""}
+        return {"roots": ["/"], "dirs": [], "path": ""}
+    p = Path(path)
+    if not p.is_absolute() or not p.is_dir():
+        return {"roots": [], "dirs": [], "path": str(p), "error": "目录不存在"}
+    dirs = []
+    try:
+        for child in p.iterdir():
+            try:
+                if child.is_dir():
+                    dirs.append(child.name)
+            except OSError:
+                continue
+    except OSError as e:
+        return {"roots": [], "dirs": [], "path": str(p), "error": str(e)}
+    return {"roots": [], "dirs": sorted(dirs, key=str.lower), "path": str(p)}
+
+
 def parse_llm_call(detail: str) -> dict | None:
     """把 llm_call 落账行解析成数值字典（口径 = llm.py 落账，零新口径）。
 
@@ -510,6 +539,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._bytes(f.read_bytes(), ctype)
             except OSError:
                 return self._json({"error": "not found"}, 404)
+        if path == "/api/fs/ls":
+            qs = parse_qs(urlparse(self.path).query)
+            return self._json(fs_list((qs.get("path") or [None])[0]))
         if path == "/api/sessions":
             self.cache.scan()  # 增量：mtime 没变的会话直接跳过（廉价）
             items = self.cache.snapshot()
