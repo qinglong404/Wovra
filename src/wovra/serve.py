@@ -569,6 +569,10 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
         full = agent._assemble_messages()
         out[0]["alt_chars"] = sum(len(m.get("content") or "") for m in full)
         out[0]["alt_count"] = len(full)
+        try:
+            out[0]["alt_tokens"] = int(agent._estimate_messages(full))
+        except Exception:  # noqa: BLE001
+            out[0]["alt_tokens"] = out[0]["alt_chars"] // 3
     return {"agents": out, "pending": True,
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 
@@ -584,7 +588,8 @@ def view_sizes(task_id: str) -> dict | None:
         return None
     return {"agents": [{k: a.get(k) for k in
                         ("id", "name", "is_main", "count", "total_chars",
-                         "tokens", "alt_count", "alt_chars")}
+                         "tokens", "alt_count", "alt_chars",
+                         "alt_tokens")}
                        for a in got.get("agents") or []],
             "pending": True, "note": got.get("note")}
 

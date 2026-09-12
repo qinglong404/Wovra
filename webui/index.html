@@ -393,6 +393,9 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .split-head{display:flex;align-items:center;gap:7px;flex-wrap:wrap}
 .split-dom{border-left:3px solid var(--line2);padding:6px 0 6px 10px;margin-top:8px;font-size:11.5px}
 .split-dom b{color:var(--tx)}
+
+.desc-clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.desc-open{display:block;-webkit-line-clamp:unset;overflow:visible}
 </style>
 </head>
 <body>
@@ -1666,6 +1669,12 @@ function fileStatusIndex(){   // 从各轮 blocks 聚合每个文件的操作与
   }
   return idx;
 }
+function toggleDesc(el){
+  const box=el.previousElementSibling;
+  if(!box)return;
+  const open=box.classList.toggle('desc-open');
+  el.textContent=open?'收起职责':'展开职责';
+}
 function fileRowHtml(f,status){
   const st=status[f.p]||null;
   const ops=st?Object.entries(st.ops).map(([k,n])=>{
@@ -1729,7 +1738,8 @@ function pendingAgentCards(reg){
         <span class="id">${esc((sz&&sz.id)||'?')}</span><span class="nm">${esc(d.name)}</span>
         ${sz?`<span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">≈${fmtN(sz.tokens||Math.round((sz.total_chars||0)/3))} tok · ${sz.count} 条</span>`:''}
         </div>
-        <div class="desc">${esc((d.description||'').slice(0,140))}</div>
+        <div class="desc desc-clamp" id="desc-${esc((d.name||'').slice(0,10))}">${esc(d.description||'')}</div>
+        ${(d.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
         ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`);
     }
   }
@@ -1827,8 +1837,11 @@ function renderProject(c){
       <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="${esc(a.status)}"></span>
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
-      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">R${a.rounds||0} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));if(pv)return ' · 重组后 ≈'+fmtN(pv.tokens||Math.round((pv.total_chars||0)/3))+' tok';return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''})()}</span></div>
-      <div class="desc">${esc(a.description||'')}</div>
+      <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">R${a.rounds||0} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));
+      if(pv){const before=pv.alt_tokens||a.ctx_cur||0;return ` · 整理后 ≈${fmtN(before)} tok → 重组后 ≈${fmtN(pv.tokens||Math.round((pv.total_chars||0)/3))} tok`}
+      return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''})()}</span></div>
+      <div class="desc desc-clamp">${esc(a.description||'')}</div>
+      ${(a.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
       ${dom.map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="在左树中过滤">${esc(f)}</span>`).join('')}</div>`;
   }).join('')||'<div class="empty" style="padding:14px 0">无注册表（未发生分裂）</div>';
   c.innerHTML=`
