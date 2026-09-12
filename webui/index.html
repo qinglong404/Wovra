@@ -504,23 +504,28 @@ let AGENT_STATS=[];   // 按 agent 聚合（serve 端计算）
 function buildReg(){
   REG={};
   for(const a of (META.registry||[])){REG[a.id]=a;if(a.name)REG[a.name]=a}
-  if(!REG['A'])REG['A']={id:'A',name:'主agent',status:'active'};
+  // 主 agent 的哨兵 ID 是 `Main`（ID 体系 v2）；`A` 是 v1 时代的旧标记，
+  // 老会话的落账里可能还有，留一个指向同一实体的兜底（不另起一个"主agent"）
+  if(!REG['Main'])REG['Main']={id:'Main',name:'主agent',status:'active'};
+  if(!REG['A'])REG['A']=REG['Main'];
 }
 const PALETTE=['#7c9cff','#3ddc97','#ffb454','#ff6b7a','#c792ea','#89ddff','#f07178','#c3e88d','#82aaff','#e8c268'];
 function agentColor(id){let h=0;for(const ch of String(id))h=(h*31+ch.charCodeAt(0))>>>0;return PALETTE[h%PALETTE.length]}
 function avatarText(id){
-  if(id==='A')return'主';
+  if(id==='Main'||id==='A')return'主';
   const m=String(id).match(/^A-(.+)$/);
   if(m)return m[1].replace(/-/g,'');
   return String(id).slice(0,2);
 }
 function senderOf(roundMeta){
-  const v=String((roundMeta&&roundMeta.active_view)||'').trim();
-  const a=REG[v]||null;
-  const key=v||'A';                      // 统计聚合键 = 原始 active_view 标记
-  const name=a?.name||(v||'主agent');
-  const id=a?.id||key;
-  return{key,id,name,color:agentColor(a?.id||key)};
+  // 落点 = 轮上的 active_view（"这一轮被附加到谁的上下文"）。为空 = 机制生效前
+  // 闭合的老轮，**不塞给主 agent 充数**（§56），显示成"无落点"。
+  const raw=String((roundMeta&&roundMeta.active_view)||'').trim();
+  if(!raw)return{key:'',id:'',name:'无落点（机制生效前）',color:'var(--tx3)',unassigned:true};
+  const a=REG[raw]||null;
+  const name=a?.name||(raw==='Main'?'主agent':raw);
+  const id=a?.id||raw;
+  return{key:raw,id,name,color:agentColor(id)};
 }
 function senderForAgent(agent,roundMeta){
   const v=String(agent||'').trim();
@@ -1043,7 +1048,9 @@ function drawConv(c,toBottom){
     // 无用户消息的轮（检查点续轮等）保持旧位（组前）。
     const sepRow={kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,
                   t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
-                  aid:(senderOf(m)||{}).id,hops:m.route_hops||0};
+                  aid:(senderOf(m)||{}).id,landing:String(m.active_view||''),
+                  unassigned:!(senderOf(m)||{}).id,compressed:!!m.compressed,
+                  hops:m.route_hops||0};
     let sepDone=false;
     const dropSep=()=>{if(!sepDone){flush();push(sepRow);sepDone=true}};
     if(!evs.some(e=>e.role==='user'))dropSep();
@@ -1097,22 +1104,35 @@ function drawConv(c,toBottom){
   for(const row of rows){
     if(row.kind==='more'){html+=`<button class="more-btn" onclick="loadEarlier()">▲ 加载更早 ${Math.min(5,row.remain)} 轮（还剩 ${row.remain} 轮）</button>`;continue}
     if(row.kind==='sep'){
-      // 轮头：R 序号 · 该轮 agent · 步数/事件 · 轮级用量（Σtok+命中率，悬停看明细）· 起止时间
+      // 轮头：R 序号（总轮号）· **落点**（这轮被附加到谁的上下文）· 步数/事件 ·
+      // 轮级用量（Σtok + 按调用方分账，悬停看明细）· 起止时间
       const u=row.usage||{};
       const tot=u.prompt||0;
       const hit=fmtP(u.cached||0,(u.cached||0)+(u.miss||0));
       const settle=(u.steps!=null&&row.steps!=null&&u.steps<row.steps)
         ?` · 已结算 ${u.steps}/${row.steps} 步（其余调用轮尾才落账）`:'';
-      const tip=tot?`本轮输入 ${fmtN(tot)} tok（缓存命中 ${fmtN(u.cached||0)} · 未命中 ${fmtN(u.miss||0)}）· 输出 ${fmtN(u.completion||0)} tok · LLM 调用 ${u.calls||0} 次 · 上下文峰值 ${fmtN(u.context||0)} tok${settle}`:'';
+      const byA=u.by_agent||{};
+      const byKeys=Object.keys(byA);
+      const byLine=byKeys.length
+        ?'分账（谁花的记谁）：'+byKeys.map(k=>`${esc(REG[k]?.name||k)} ${fmtN(byA[k].prompt||0)}`).join(' + ')
+          +` = 本轮 Σ ${fmtN(byKeys.reduce((a,k)=>a+(byA[k].prompt||0),0))} tok`
+        :'（本轮落账未分账：机制生效前的账）';
+      const tip=tot?`本轮输入 ${fmtN(tot)} tok（缓存命中 ${fmtN(u.cached||0)} · 未命中 ${fmtN(u.miss||0)}）· 输出 ${fmtN(u.completion||0)} tok · LLM 调用 ${u.calls||0} 次 · 上下文峰值 ${fmtN(u.context||0)} tok${settle}\n${byLine}`:'';
+      const landingTip=row.unassigned
+        ?'这一轮没有落点可归：它在机制生效前就闭合了，按口径不塞给主 agent 充数'
+        :`落点：这一轮被附加到 ${esc(row.landing)} 的上下文${row.hops?'（主 agent 路由转交）':''}${row.compressed?'；已被整理压缩，退出 per-agent 活账、整段记':''}`;
+      const chip=row.unassigned
+        ?`<span class="ra" style="color:var(--tx3)" title="${esc(landingTip)}">○ 无落点</span>`
+        :(row.aid?`<span class="ra" style="color:${agentColor(row.aid)}" title="${esc(landingTip)}">${row.hops?'Main → ':''}⬤ ${esc(row.aid)}</span>`:'');
       const segs=[
         row.ob,
         (row.steps!=null&&row.steps!=='')?`<span class="seg">${row.steps} 步</span>`:'',
         `<span class="seg">${row.n} 事件</span>`,
-        tot?`<span class="seg acc" title="${esc(tip)}">Σ ${fmtN(tot)} tok · 命中 ${hit}</span>`:'',
+        row.compressed?`<span class="seg" title="已被整理/压缩覆盖的轮：退出 per-agent 活账，整段记「已压缩」">已压缩</span>`:'',
+        tot?`<span class="seg acc" title="${esc(tip)}">Σ ${fmtN(tot)} tok · 命中 ${hit}${byKeys.length>1?' · 分账 '+byKeys.length+' 方':''}</span>`:'',
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
-      html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+
-        (row.aid?`<span class="ra" style="color:${agentColor(row.aid)}" title="${row.hops?'主 agent 路由 → 子 agent 接手':'单 agent 完成'}">${row.hops?'Main → ':''}⬤ ${esc(row.aid)}</span>`:'')+
+      html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+chip+
         `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`;continue}
     if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}`+
       (row.tm?`<span class="stime">${esc(row.tm)}</span>`:'')+`</div>`;continue}
@@ -1776,11 +1796,14 @@ function ctxViz(){
   const rl=META.round_list||[];
   const reg=META.registry||[];
   const rows=(META.usage||{}).rows||[];
-  // ① 轮整理状态条
+  // ① 轮整理状态条（悬停看：落点（这轮归谁）+ 步数 + 是否已压缩）
   const strip=rl.map(r=>{
     const st=r.org_state||'raw';
+    const land=r.active_view?`落点 ${esc(REG[r.active_view]?.name||r.active_view)}`:'无落点（机制生效前）';
+    const urs=r.usage?.by_agent?Object.keys(r.usage.by_agent):[];
+    const byTip=urs.length?' · 分账 '+urs.map(k=>`${esc(REG[k]?.name||k)} ${fmtN(r.usage.by_agent[k].prompt||0)}`).join(' + '):'';
     return `<span class="orgsq" style="background:${ORG_COLOR[st]||'#3a4356'}"
-      title="R${r.seq} · ${ORG_NAME[st]||st}${r.org_generation>1?' · 第'+r.org_generation+'代':''} · 步${r.steps_used||0} · ${r.events}事件"></span>`;
+      title="R${r.seq} · ${ORG_NAME[st]||st}${r.org_generation>1?' · 第'+r.org_generation+'代':''} · ${land} · 步${r.steps_used||0} · ${r.events}事件${byTip}"></span>`;
   }).join('');
   const counts={};rl.forEach(r=>{const k=r.org_state||'raw';counts[k]=(counts[k]||0)+1});
   // ② 各视图体量
@@ -2085,8 +2108,22 @@ function renderUsage(c){
           <td class="mono">${a.cost_known?fmtN(a.prompt||0):'<span style="color:var(--tx3)" title="该会话的落账行没有分账段（机制生效前）">未分账</span>'}</td>
           <td class="mono">${a.cost_known?fmtN(a.completion||0):'—'}</td>
           <td class="mono" style="color:var(--teal)">${a.cost_known?hitA:'—'}</td></tr>`}).join('')}</tbody></table>`;
+  // 按调用方分账（实记）：A 300K + B 400K = 轮总 700K；整理开销不在这里
+  const byRows=astats.filter(a=>a.cost_known&&(a.prompt||a.completion));
+  const byTot=byRows.reduce((s,a)=>s+(a.prompt||0),0)||1;
+  const costTable=!byRows.length?'':`
+    <h3 class="sec">按调用方分账（每次调用发生时实记：谁花的记谁 · 轮总消费 = 各调用方之和）</h3>
+    <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:6px">${byRows.map(a=>{
+      const share=Math.min(100,(a.prompt||0)/byTot*100);
+      const col=agentColor(a.agent);
+      return `<div class="viz-view"><span class="mono" style="color:${col};flex-shrink:0;min-width:110px">${esc(prettyName(a.agent))}</span>
+        <span class="viz-bar"><i style="width:${share.toFixed(1)}%;background:${col}"></i></span>
+        <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">Σprompt ${fmtN(a.prompt||0)} · 输出 ${fmtN(a.completion||0)} · 命中 ${fmtP(a.cached||0,(a.cached||0)+(a.miss||0))} · 占比 ${share.toFixed(1)}%</span></div>`;
+    }).join('')}</div>
+    <div style="font-size:11.5px;color:var(--tx3)">整理 / 压缩 / 分裂的开销**单列**（见下方维护开销账），不摊给任何 agent；老会话的落账行没有分账段，显示「未分账」。</div>`;
   c.innerHTML=
     agentTable+
+    costTable+
     `<h3 class="sec">缓存命中（口径 = llm.py 落账）</h3>
      <div class="hitbar"><div class="c" style="flex:${Math.max(hit,0.0001)}">${tot&&hit/tot>0.15?`命中 ${fmtN(hit)}`:''}</div>
      <div class="m" style="flex:${Math.max(miss,0.0001)}">${tot&&miss/tot>0.15?`未命中 ${fmtN(miss)}`:''}</div></div>

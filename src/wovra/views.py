@@ -464,6 +464,38 @@ def _tool_call_names(message: dict) -> list[str]:
     ]
 
 
+def event_owners(r: dict, lookup: Optional[dict] = None) -> list[str]:
+    """轮内**逐事件的执行方**（与 `round_step_segments` 同一套判据，一处实现）。
+
+    换手点在 `route_to` 的**工具调用事件之后**（调用者执行了那次调用，故调用
+    自身仍归上一手）；`switch_view`/`notify` 只管下一轮，不在本规则内。
+    消费方：对话页逐事件的 agent 标签（`serve.round_detail`）与步数分段。
+    """
+    lookup = lookup or {}
+    cur = str(lookup.get(str(r.get("route_explicit") or "").strip()) or MAIN_AGENT_ID)
+    out: list[str] = []
+    for event in r.get("events") or []:
+        out.append(cur)
+        if not isinstance(event, dict):
+            continue
+        message = event.get("message") or {}
+        if str(message.get("role") or "") != "assistant":
+            continue
+        if _tool_call_names(message) != ["route_to"]:
+            continue
+        for call in message.get("tool_calls") or []:
+            arguments = (call.get("function") or {}).get("arguments") or "{}"
+            try:
+                target = str((json.loads(arguments) or {}).get("agent") or "")
+            except (TypeError, ValueError):
+                target = ""
+            # 查表认名字与 ID 两种写法；查不到就**照原名认账**（模型明确说了
+            # 转给谁，不该因为名册里没有就静默算在上一手头上）
+            if target:
+                cur = str(lookup.get(target) or target)
+    return out
+
+
 def round_step_segments(r: dict, lookup: Optional[dict] = None) -> list[tuple[str, int]]:
     """一轮里「谁执行了几步」的分段（走事件流，零 LLM）。
 
@@ -477,32 +509,21 @@ def round_step_segments(r: dict, lookup: Optional[dict] = None) -> list[tuple[st
     * **起点** = 显式转交（`switch_view`/`notify` 写下的意志）的轮由目标起手，
       其余一律主 agent 起手（2026-09-12 用户口径：每轮恒由主 agent 先触发）。
 
-    这条口径落在**事件流**上，而不是落在 `active_view` 上——后者会被渐近归属
-    补判回溯改写（`core._settle_views`），那是**材料归属**；"谁答的话"是发生过
-    的事实，不该被后来的分裂改写。两问分开，各有各的算据。
+    归的是**执行步**（谁花的手）；**轮**的归属是另一件事——按落点（轮上的
+    `active_view`），见 `agent_ledger`。
     """
-    lookup = lookup or {}
-    cur = str(lookup.get(str(r.get("route_explicit") or "").strip()) or MAIN_AGENT_ID)
+    owners = event_owners(r, lookup)
     segs: list[tuple[str, int]] = []
-    for event in r.get("events") or []:
+    for owner, event in zip(owners, r.get("events") or []):
         if not isinstance(event, dict):
             continue
         message = event.get("message") or {}
         if str(message.get("role") or "") != "assistant":
             continue
-        if segs and segs[-1][0] == cur:
-            segs[-1] = (cur, segs[-1][1] + 1)
+        if segs and segs[-1][0] == owner:
+            segs[-1] = (owner, segs[-1][1] + 1)
         else:
-            segs.append((cur, 1))
-        if _tool_call_names(message) != ["route_to"]:
-            continue
-        for call in message.get("tool_calls") or []:
-            arguments = (call.get("function") or {}).get("arguments") or "{}"
-            try:
-                target = str((json.loads(arguments) or {}).get("agent") or "")
-            except (TypeError, ValueError):
-                target = ""
-            cur = str(lookup.get(target) or cur)
+            segs.append((owner, 1))
     return segs
 
 
@@ -687,6 +708,18 @@ def agent_ledger(
     by_name = {entry["name"]: by_view[entry["view"]] for entry in roster}
     unassigned: list[int] = []
 
+    def rec_for(name: str) -> dict:
+        """取名册条目；名册里没有（产物未入册/名字写错）就照原名立一格。
+
+        宁可多长一行，也不让"确实有人干过的活"因为不在名册里被静默丢掉。
+        """
+        rec = by_name.get(name)
+        if rec is None:
+            rec = blank({"id": name, "name": name, "display": name})
+            by_view[name] = rec
+            by_name[name] = rec
+        return rec
+
     for r in rounds:
         try:
             seq = int(r.get("seq") or 0)
@@ -696,15 +729,10 @@ def agent_ledger(
         # 步：按执行者（一轮里可以多家）——**不论该轮是否已被压缩**都记，
         # 因为"谁花的手"是发生过的事实，不会因为后来被压缩而改变。
         for name, count in segs:
-            rec = by_name.get(name)
-            if rec is not None:
-                rec["steps"] += count
-        if segs:
-            # 转出记给**转出方**（每一次换手算一次；一轮可转多次）
-            for name, _count in segs[:-1]:
-                rec = by_name.get(name)
-                if rec is not None:
-                    rec["handoffs"] += 1
+            rec_for(name)["steps"] += count
+        # 转出记给**转出方**（每一次换手算一次；一轮可转多次）
+        for name, _count in segs[:-1]:
+            rec_for(name)["handoffs"] += 1
         # 轮：只算**活轮**（还没被压缩掉的）。被压缩的整段记（compressed_span），
         # 没有落点的（机制生效前闭合的老轮）另记，不硬塞给主 agent 充数。
         if str(r.get("org_state") or "") == "done":
@@ -713,12 +741,7 @@ def agent_ledger(
         if not landing:
             unassigned.append(seq)
             continue
-        rec = by_name.get(str(lookup.get(landing) or landing)) or by_view.get(landing)
-        if rec is None:                      # 落点是个名册里没有的域（产物未入册）
-            rec = blank({"id": landing, "name": landing, "display": landing})
-            by_view[landing] = rec
-            by_name[landing] = rec
-        rec["seqs"].append(seq)
+        rec_for(str(lookup.get(landing) or landing))["seqs"].append(seq)
 
     for rec in by_view.values():
         rec["seqs"].sort()

@@ -45,7 +45,12 @@ _USAGE_BY_AGENT = re.compile(
 
 
 def parse_usage_row(detail: str) -> dict | None:
-    """解析轮尾 usage 落账行（steps/context/prompt/completion + 中文命中段）。"""
+    """解析轮尾 usage 落账行（steps/context/prompt/completion + 中文命中段）。
+
+    行尾可能带**按调用方分账**段（`core._by_agent_segment`）：一次调用落一次账，
+    键是那一刻的执行方。轮的总消费 = 各调用方之和（A 300K + B 400K = 700K），
+    故这里把它解析成 `by_agent`（老会话的落账行没有这段 → 空 dict，不编数）。
+    """
     out: dict = {}
     for k, v in _KV.findall(detail or ""):
         v = v.replace(",", "")
@@ -56,14 +61,22 @@ def parse_usage_row(detail: str) -> dict | None:
     mm = _USAGE_MISS.search(detail)
     out["cached"] = int(mh.group(1).replace(",", "")) if mh else 0
     out["miss"] = int(mm.group(1).replace(",", "")) if mm else 0
+    by: dict[str, dict] = {}
+    for m in _USAGE_BY_AGENT.finditer(detail or ""):
+        nums = [int(v.replace(",", "")) for v in m.groups()[1:]]
+        by[m.group(1)] = {
+            "steps": nums[0], "prompt": nums[1], "cached": nums[2],
+            "miss": nums[3], "completion": nums[4],
+        }
+    out["by_agent"] = by
     return out
 
 
 def round_usage_map(data: dict) -> dict[int, dict]:
-    """每轮的用量账（steps 签名归属，见 agent_stats）。
+    """每轮的用量账（steps 签名归属）+ **按调用方的分账**（实记）。
 
-    一轮**可能不止一个 agent 在跑**（回合内 `route_to` 转交），但分段级费用
-    账还没做，故本函数的粒度为轮：整轮费用记在该轮的答复方名下（近似）。
+    一轮可能不止一个 agent 在跑（回合内 `route_to` 转交）：分账段在消费发生时
+    就写好了执行方，故 `by_agent` 是**实记**；轮级数是各段之和。
     context = 轮内各分段上下文峰值。
     """
     rows = [parse_usage_row(h.get("detail", ""))
@@ -75,7 +88,7 @@ def round_usage_map(data: dict) -> dict[int, dict]:
         target = r.get("steps_used") or 0
         acc = 0
         agg: dict = {"steps": 0, "calls": 0, "prompt": 0, "cached": 0,
-                     "miss": 0, "completion": 0, "context": 0}
+                     "miss": 0, "completion": 0, "context": 0, "by_agent": {}}
         while acc < target:
             row = next(it, None)
             if row is None:
@@ -86,6 +99,13 @@ def round_usage_map(data: dict) -> dict[int, dict]:
             for k in _USAGE_KEYS:
                 agg[k] += row.get(k, 0)
             agg["context"] = max(agg["context"], row.get("context", 0))
+            for name, c in (row.get("by_agent") or {}).items():
+                b = agg["by_agent"].setdefault(
+                    name, {"steps": 0, "prompt": 0, "cached": 0, "miss": 0,
+                           "completion": 0}
+                )
+                for k in ("steps", "prompt", "cached", "miss", "completion"):
+                    b[k] += c.get(k, 0)
         out[r.get("seq")] = agg
     return out
 
@@ -106,23 +126,15 @@ def agent_cost_map(data: dict) -> dict[str, dict]:
     消费方据此显示"未分账"，不编数。
     """
     out: dict[str, dict] = {}
-    for h in data.get("history") or []:
-        if h.get("kind") != "usage":
-            continue
-        detail = str(h.get("detail") or "")
-        for m in _USAGE_BY_AGENT.finditer(detail):
-            name = m.group(1)
-            nums = [int(v.replace(",", "")) for v in m.groups()[1:]]
+    for agg in round_usage_map(data).values():
+        for name, c in (agg.get("by_agent") or {}).items():
             b = out.setdefault(name, {
                 "steps": 0, "calls": 0, "prompt": 0, "cached": 0, "miss": 0,
                 "completion": 0,
             })
-            b["steps"] += nums[0]
-            b["calls"] += 1
-            b["prompt"] += nums[1]
-            b["cached"] += nums[2]
-            b["miss"] += nums[3]
-            b["completion"] += nums[4]
+            b["calls"] += 1          # 一段分账 = 一行落账（一次结算）
+            for k in ("steps", "prompt", "cached", "miss", "completion"):
+                b[k] += c.get(k, 0)
     return out
 
 
@@ -717,37 +729,17 @@ def view_sizes(task_id: str) -> dict | None:
 
 
 def _event_agents(r: dict, main_id: str) -> list[str]:
-    """轮内逐事件的 agent 归属（机械派生，零推断）。
+    """轮内逐事件的 agent 归属——**复用 views.event_owners 的同一套判据**。
 
-    口径（2026-09-12 用户拍板 + route_to 实现）：每轮恒由主 agent 起手并
-    路由原话；`route_to` 在**工具批次跑完后**才换手，故换手点 = 它的工具
-    结果之后。`switch_view` 只管下一轮，不在本规则内。
+    口径（2026-09-12 用户拍板 + `route_to` 实现）：每轮恒由主 agent 起手并路由
+    原话；换手点是 `route_to` 的**工具调用事件之后**（调用者执行了那次调用）；
+    `switch_view` 只管下一轮，不在本规则内。
+
+    单点实现的理由：步数分段（`views.round_step_segments`）与对话页的事件标签
+    必须说同一件事，否则会出现"这一步算 A 的步，但气泡挂在 B 名下"。
     """
-    evs = r.get("events") or []
-    routes: dict = {}
-    for e in evs:
-        msg = e.get("message") or {}
-        for tc in (msg.get("tool_calls") or []):
-            fn = tc.get("function") or {}
-            if fn.get("name") not in ("route_to", "switch_view"):
-                continue
-            try:
-                args = json.loads(fn.get("arguments") or "{}")
-            except json.JSONDecodeError:
-                args = {}
-            tgt = str(args.get("agent") or "").strip()
-            if tgt and tc.get("id"):
-                routes[tc["id"]] = (tgt, fn.get("name"))
-    cur = main_id
-    out = []
-    for e in evs:
-        msg = e.get("message") or {}
-        out.append(cur)
-        if msg.get("role") == "tool" and msg.get("tool_call_id") in routes:
-            tgt, name = routes[msg["tool_call_id"]]
-            if name == "route_to":     # 本回合内换手；switch_view 下一轮才生效
-                cur = tgt
-    return out
+    owners = views_module.event_owners(r, {views_module.MAIN_AGENT_ID: main_id})
+    return [main_id if o == views_module.MAIN_AGENT_ID else o for o in owners]
 
 
 def _split_meta(r: dict) -> dict | None:
@@ -783,6 +775,9 @@ def _round_meta(r: dict, usage: dict | None = None) -> dict:
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",
+        # 落点（"这一轮被附加到谁的上下文"= active_view）+ 是否已被压缩
+        # （已压缩的轮退出 per-agent 活账、整段记，见 §56）
+        "compressed": str(r.get("org_state") or "") == "done",
         "route_hops": r.get("route_hops", 0),   # 轮内转交次数（>0 = 主 agent 路由过）
         "events": len(evs),
         "t0": (evs[0].get("timestamp") or "") if evs else "",

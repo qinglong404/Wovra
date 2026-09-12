@@ -10,6 +10,7 @@ import pytest
 
 from wovra import serve
 from wovra import task as task_module
+from wovra import views as views_module
 
 
 def test_parse_llm_call_full_row():
@@ -222,8 +223,13 @@ def test_round_detail_flattens_events():
     assert serve.round_detail(_fake_task(), 99) is None
 
 
-def test_event_agents_handover_after_route_result():
-    """route_to 在工具批次跑完后换手：调用与结果归路由方，其后归接手方。"""
+def test_event_agents_handover_at_route_call():
+    """换手点 = `route_to` 的**工具调用事件之后**（调用者执行了那次调用）。
+
+    与 `views.round_step_segments`（步数分段）**同一套判据、同一处实现**：
+    调用与它的结果归路由方，其后的事件归接手方。否则会出现"这一步算 A 的步、
+    气泡却挂在 B 名下"。
+    """
     r = {"seq": 1, "active_view": "A", "events": [
         {"id": "R1-E01", "type": "user",
          "message": {"role": "user", "content": "干活"}},
@@ -237,7 +243,9 @@ def test_event_agents_handover_after_route_result():
          "message": {"role": "assistant", "content": "", "tool_calls": [
              {"id": "c2", "function": {"name": "read_file", "arguments": "{}"}}]}},
     ]}
-    assert serve._event_agents(r, "Main") == ["Main", "Main", "Main", "A"]
+    assert serve._event_agents(r, "Main") == ["Main", "Main", "A", "A"]
+    # 同一轮的步数分段也照这条线切（一个来源，两处消费）
+    assert views_module.round_step_segments(r) == [("Main", 1), ("A", 1)]
 
 
 def test_round_usage_map_steps_signature():
@@ -247,8 +255,12 @@ def test_round_usage_map_steps_signature():
     assert m[1]["cached"] == 72000 and m[1]["miss"] == 3000
     assert m[1]["completion"] == 2000 and m[1]["context"] == 60000
     assert m[1]["steps"] == 7                       # 结算覆盖步数
+    # 分账实记（夹具里 t2 那行尾带了 by= 段）：轮的总消费 = 各调用方之和
+    assert m[1]["by_agent"]["Main"]["prompt"] == 45000
+    assert m[1]["by_agent"]["Main"]["steps"] == 5
     assert m[2] == {"steps": 2, "calls": 1, "prompt": 20000, "cached": 19000,
-                    "miss": 1000, "completion": 300, "context": 70000}
+                    "miss": 1000, "completion": 300, "context": 70000,
+                    "by_agent": {}}          # 没有分账段的老行 → 空，不编数
 
 
 def test_session_meta_round_list_has_usage():
