@@ -13,12 +13,13 @@ mtime 缓存（后台线程常驻增量重扫），事件原文按需单轮取�
 from __future__ import annotations
 
 import argparse
+import itertools
 import json
 import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from . import task as task_module
 
@@ -28,6 +29,47 @@ _LLM_CALL = re.compile(r"^\[(\w+)\]\s+(.*)$")
 _KV = re.compile(r"(\w+)=([\d,]+(?:\.\d+)?)")
 _FINISH = re.compile(r"finish=(\S+)")
 _ORG_STATES = ("done", "pending", "failed")
+
+# ---- C4：受控写通道的作业系统 --------------------------------------------
+# 唯一的写形态 = 新建会话 / 给会话追加一轮对话。轮执行复用 CLI 的 agent
+# 管线（懒导入避免 cli↔serve 循环依赖）。互斥三道：
+#   1. _TURN_GATE——serve 进程内同时只跑一轮（本地单用户）；
+#   2. CLI 会话锁文件——与正在运行的 chat/run 进程互斥；
+#   3. 任务级 job 去重——同一会话不叠加排队。
+_JOBS: dict[str, dict] = {}
+_JOB_SEQ = itertools.count(1)
+_TURN_GATE = threading.Lock()
+_job_lock = threading.Lock()
+
+
+def _execute_turn(job_id: str, task_id: str, content: str) -> None:
+    """轮执行线程：CLI 同款管线（会话锁 → agent → run → 补整理）。"""
+    job = _JOBS[job_id]
+    from .agent import MODE_MANAGED
+    from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
+    from .cli.session import _acquire_session_lock, _release_session_lock
+    try:
+        job["status"] = "running"
+        task = task_module.Task.load(task_id)
+        with _TURN_GATE:
+            _acquire_session_lock(task)  # 被占用时抛 SystemExit（CLI 语义）
+            try:
+                agent = _build_agent(task, mode=task.mode or MODE_MANAGED,
+                                     async_organization=False)
+                answer = agent.run(content)
+                agent.organize_backlog()
+            finally:
+                _release_session_lock(task)
+        job["status"] = "done"
+        job["answer"] = answer
+    except SystemExit:
+        job["status"] = "error"
+        job["error"] = "会话被其它进程占用（请先关闭占用它的 CLI 窗口）"
+    except Exception as error:  # noqa: BLE001——错误原样回给发起页
+        job["status"] = "error"
+        job["error"] = f"{type(error).__name__}: {error}"
+
+
 
 _USAGE_KEYS = ("prompt", "cached", "miss", "completion")
 
@@ -99,6 +141,10 @@ def session_summary(task_id: str, data: dict) -> dict:
         "todo_milestone": ms.get("goal"),
         "todo_steps_left": sum(1 for s in todo.get("steps") or []
                                if not s.get("done")),
+        "last_round": ({"seq": rounds[-1].get("seq"),
+                        "events": len(rounds[-1].get("events") or []),
+                        "end_state": rounds[-1].get("end_state")} if rounds
+                       else None),
         "usage": usage_totals(data.get("history")),
     }
 
@@ -127,14 +173,29 @@ def session_meta(task_id: str, data: dict) -> dict:
     return meta
 
 
-def round_detail(data: dict, seq: int) -> dict | None:
-    """单轮完整事件与块（expand 语义：块/事件原文按需取）。"""
+def round_detail(data: dict, seq: int,
+                 after: str | None = None) -> dict | None:
+    """单轮完整事件与块（expand 语义：块/事件原文按需取）。
+
+    after='R{n}-E{m}'：只返回该事件之后的部分（C3 实时跟随身增量）。
+    """
     for r in data.get("rounds") or []:
         if r.get("seq") != seq:
             continue
+        after_n = None
+        if after:
+            ma = re.fullmatch(r"R\d+-E(\d+)", str(after))
+            after_n = int(ma.group(1)) if ma else None
+
+        def _num(eid) -> int:
+            me = re.match(r"R\d+-E(\d+)", str(eid or ""))
+            return int(me.group(1)) if me else -1
+
         events = []
         for e in r.get("events") or []:
             msg = e.get("message") or {}
+            if after_n is not None and _num(e.get("id")) <= after_n:
+                continue
             events.append({
                 "id": e.get("id"), "type": e.get("type"),
                 "status": e.get("status", ""), "role": msg.get("role"),
@@ -216,17 +277,20 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _bytes(self, body: bytes, ctype: str) -> None:
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def _html(self) -> None:
         try:
             body = _WEBUI.read_bytes()
         except OSError:
             self._json({"error": "webui/index.html 缺失"}, 500)
             return
-        self.send_response(200)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+        self._bytes(body, "text/html; charset=utf-8")
 
     def _load_task(self, task_id: str) -> dict | None:
         if not _ID_SAFE.match(task_id):
@@ -244,6 +308,17 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path in ("/", "/index.html"):
             return self._html()
+        mv = re.fullmatch(r"/vendor/([\w.-]+)", path)
+        if mv:
+            name = mv.group(1)
+            ctype = ("application/javascript" if name.endswith(".js")
+                     else "text/css" if name.endswith(".css")
+                     else "application/octet-stream")
+            f = (_WEBUI.parent / "vendor" / name)
+            try:
+                return self._bytes(f.read_bytes(), ctype)
+            except OSError:
+                return self._json({"error": "not found"}, 404)
         if path == "/api/sessions":
             self.cache.scan()  # 增量：mtime 没变的会话直接跳过（廉价）
             items = self.cache.snapshot()
@@ -258,18 +333,65 @@ class _Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/rounds/(\d+)", path)
         if m:
             data = self._load_task(m.group(1))
-            detail = round_detail(data, int(m.group(2))) if data else None
+            if data is None:
+                return self._json({"error": "round not found"}, 404)
+            after = (parse_qs(urlparse(self.path).query).get("after")
+                     or [None])[0]
+            detail = round_detail(data, int(m.group(2)), after=after)
             if detail is None:
                 return self._json({"error": "round not found"}, 404)
             return self._json(detail)
+        mj = re.fullmatch(r"/api/jobs/([^/]+)", path)
+        if mj:
+            job = _JOBS.get(mj.group(1))
+            if job is None:
+                return self._json({"error": "job not found"}, 404)
+            return self._json({k: job.get(k)
+                               for k in ("status", "answer", "error")})
         return self._json({"error": "not found"}, 404)
 
+    # ---- C4：受控写通道（唯一的写形态 = 新建会话 / 追加一轮对话） ----
     def do_POST(self):  # noqa: N802
-        self._json({"error": "read-only（可视化不做任何写操作）"}, 405)
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except json.JSONDecodeError:
+            return self._json({"error": "bad json"}, 400)
+        path = urlparse(self.path).path
+        if path == "/api/sessions":
+            goal = str(body.get("goal") or "").strip()
+            if not goal:
+                return self._json({"error": "goal 必填"}, 400)
+            task = task_module.Task.create(goal=goal[:500])
+            return self._json({"id": task.id}, 201)
+        m = re.fullmatch(r"/api/sessions/([^/]+)/turn", path)
+        if m:
+            return self._start_turn(m.group(1), str(body.get("content") or ""))
+        return self._json({"error": "not found"}, 404)
 
     do_PUT = do_POST
     do_DELETE = do_POST
     do_PATCH = do_POST
+
+    def _start_turn(self, task_id: str, content: str) -> None:
+        """追加一轮对话：三道互斥（进程内单飞 / CLI 会话锁 / 任务级去重）。"""
+        if not content.strip():
+            return self._json({"error": "content 必填"}, 400)
+        data = self._load_task(task_id)
+        if data is None:
+            return self._json({"error": "session not found"}, 404)
+        with _job_lock:
+            busy = any(j["task_id"] == task_id
+                       and j["status"] in ("queued", "running")
+                       for j in _JOBS.values())
+            if busy or _TURN_GATE.locked():
+                return self._json({"error": "上一轮还在运行，稍后再发"}, 409)
+            jid = f"j{next(_JOB_SEQ)}"
+            _JOBS[jid] = {"job_id": jid, "task_id": task_id,
+                          "status": "queued"}
+        threading.Thread(target=_execute_turn,
+                         args=(jid, task_id, content), daemon=True).start()
+        return self._json({"job_id": jid}, 202)
 
 
 def cmd_serve(args: argparse.Namespace) -> None:

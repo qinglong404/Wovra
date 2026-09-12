@@ -16,11 +16,12 @@ JSON"的机械派生；页面零构建（单文件 HTML + 原生 JS），`wovra 
 ## 1. 目标与非目标
 
 **目标**：把"长时运行 AI 工作"的现场变成人可扫视的仪表盘——会话列表、
-轮×块时间线、状态账本、大步/小步计划、agent 注册表、逐调用成本与缓存
-命中。设计标准：**好看是验收项**（用多模态截图自检迭代，不是嘴上说）。
+对话流（C 线，默认视图）、轮×块时间线、状态账本、大步/小步计划、agent
+注册表、逐调用成本与缓存命中；以及**网页输入**（给会话追加一轮，C4）。
+设计标准：**好看是验收项**（用多模态截图自检迭代，不是嘴上说）。
 
-**非目标**：不做任何写操作（拍板/回复升级仍走 CLI 的交互通道）；不改
-agent/ 功能层；不引入构建链（webpack/vite 均不要）。
+**非目标**：不改 agent/ 功能层；不引入构建链（webpack/vite 均不要）；
+升级/拍板类写操作仍走 CLI 交互通道（网页写侧只做对话轮）。
 
 ## 2. 信息架构（页面 = 单页五视图）
 
@@ -34,23 +35,33 @@ agent/ 功能层；不引入构建链（webpack/vite 均不要）。
 
 事件级查看（M2）：点块 → 抽屉拉取该轮事件原文，块内事件 ID 高亮。
 
-## 3. 接口契约（只读，字段只增不改）
+## 3. 接口契约（字段只增不改）
 
 传输：`wovra serve [--host 127.0.0.1] [--port 8600]`，stdlib http.server，
-**GET-only**（其余 405），静态页托管于 `/`。绑定默认 loopback——数据含
-工作区路径与内容，不对外网暴露。
+默认绑定 loopback——数据含工作区路径与内容，不对外网暴露。
+
+**读侧（GET）**：
 
 | 端点 | 返回 | 说明 |
 |---|---|---|
 | `GET /api/sessions` | `{scanning, sessions:[…]}` | 摘要列表（后台按 mtime 增量解析，先到先显示） |
 | `GET /api/sessions/{id}` | 会话元数据 | 摘要 + task_state + todo + registry + **rounds 元数据（不含 events——task.json 可达 16MB，事件按需取）** |
-| `GET /api/sessions/{id}/rounds/{seq}` | `{events, blocks}` | 单轮完整事件与块（对应 expand 语义） |
+| `GET /api/sessions/{id}/rounds/{seq}` | `{events, blocks}` | 单轮完整事件与块；`?after=R{n}-E{m}` 只回之后的事件（C3 实时跟随增量） |
 
 摘要条目：`{id, goal, status, workspace, mode, created_at, updated_at,
-rounds, org:{done,pending,failed,raw}, escalations, experiments,
-todo_milestone, usage:{calls,prompt,cached,miss,completion,ttft_sum,finish:{…}}}`。
+rounds, steps, org:{done,pending,failed,raw}, escalations, experiments,
+todo_milestone, todo_steps_left, last_round:{seq,events,end_state},
+usage:{calls,prompt,cached,miss,completion,ttft_sum,finish,rows}}`。
 `usage` 由 history 的 `llm_call` 行机械解析（prompt/cached/miss/completion/
 ttft/dur/finish）——解析只在 serve 侧做一次，前端不重复实现口径。
+
+**写侧（POST，C4）——唯一的写形态 = 新建会话 / 追加一轮对话**：
+
+| 端点 | 语义 | 互斥 |
+|---|---|---|
+| `POST /api/sessions` `{goal}` | 新建会话 | — |
+| `POST /api/sessions/{id}/turn` `{content}` | 追加一轮对话（复用 CLI agent 管线，懒导入） | 三道：进程内单飞全局锁 / CLI 会话锁文件（与 chat/run 互斥，被占返回 409）/ 任务级 job 去重；返回 202 + job_id，`GET /api/jobs/{job_id}` 轮询状态 |
+| 其余一切写路径 | 404 | — |
 
 缓存纪律：serve 进程内按 task.json mtime 缓存摘要（文件没变不重解析）；
 16MB 级会话的完整解析只发生在按需取轮时。
@@ -135,7 +146,11 @@ ttft/dur/finish）——解析只在 serve 侧做一次，前端不重复实现�
 
 | 步 | 内容 | 验收 |
 |---|---|---|
-| C1 | 回放对话流：渲染规则表全落地 + 按轮惰性加载 + 轮尾统计条 | c34bc5 从 R1 读到 R79 不卡顿、无悬空、终端所见皆网页所见（除思考） |
-| C2 | 阅读体验：markdown+净化+高亮、工具卡折叠、虚拟滚动、双向联动 | 长会话阅读不疲劳；模型输出的代码/表格可读 |
-| C3 | 实时跟随：增量轮询、跟随尾部、运行中指示 | 对着正在跑的会话开一屏，增长实时可见 |
-| C4 | 网页输入 | 另拍板 |
+| C1 ✅ | 回放对话流：渲染规则表全落地 + 按轮惰性加载 + 轮分隔条 | c34bc5 尾部 5 轮即开即读、无悬空、终端所见皆网页所见（除思考） |
+| C2 ✅ | 阅读体验：vendored marked+DOMPurify+highlight（webui/vendor/）、final_answer 走 markdown、content-visibility、对话流⇄时间线双向联动（⇢ 跳转 + flash 定位） | 模型输出的代码/表格可读；两个视图互相一步可达 |
+| C3 ✅ | 实时跟随：`?after=` 增量 + 2.5s 轮询（仅 conv 视图 + in_progress + 页面可见时）+ 跟随尾部开关（上滚暂停/触底恢复）+ 运行中呼吸灯 | 对着正在跑的会话开一屏，增长实时可见 |
+| C4 ✅ | 网页输入：POST turn（作业队列 + 三道互斥）+ 新建会话 + 底部输入框（Enter 发送/Shift+Enter 换行）+ 乐观气泡与轮询回填 | 网页发一条消息 → 轮真实执行 → 对话流自动长出新轮 |
+
+C4 边界（知情记录）：轮执行跑在 serve 进程内（复用 CLI agent 管线），
+与 CLI chat 同时操作同一会话由会话锁文件互斥；升级/拍板类写操作仍走
+CLI 交互通道，不在写侧范围。

@@ -4,6 +4,10 @@
 <meta charset="utf-8">
 <title>Wovra · 现场</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="/vendor/github-dark.min.css">
+<script src="/vendor/marked.min.js"></script>
+<script src="/vendor/purify.min.js"></script>
+<script src="/vendor/highlight.min.js"></script>
 <style>
 :root{
   --bg0:#0a0d13; --bg1:#0f131c; --bg2:#151a25; --bg3:#1b2230; --bg4:#222a3b;
@@ -78,6 +82,26 @@ h3.sec{font-size:12px;color:var(--tx3);letter-spacing:1.5px;margin:20px 0 10px;f
 pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 
 /* ---------- 对话流 ---------- */
+.msg,.tcard{content-visibility:auto;contain-intrinsic-size:auto 80px}
+.md p{margin:0 0 9px;line-height:1.7}
+.md p:last-child{margin-bottom:0}
+.md ul,.md ol{margin:0 0 9px 20px}
+.md li{margin:3px 0;line-height:1.6}
+.md h1,.md h2,.md h3,.md h4{margin:12px 0 7px;font-size:14.5px}
+.md code{font-family:var(--mono);font-size:12px;background:var(--bg0);border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.md pre{background:var(--bg0);border:1px solid var(--line);border-radius:8px;padding:10px 12px;overflow-x:auto;margin:0 0 9px}
+.md pre code{background:none;border:none;padding:0;font-size:12px;line-height:1.55}
+.md table{border-collapse:collapse;margin:0 0 9px;font-size:12px}
+.md th,.md td{border:1px solid var(--line2);padding:5px 10px}
+.md blockquote{border-left:3px solid var(--acc-dim);padding-left:10px;color:var(--tx2);margin:0 0 9px}
+.md a{color:var(--acc)}
+.md hr{border:none;border-top:1px solid var(--line);margin:10px 0}
+.t-jump{color:var(--tx3);font-size:12px;padding:2px 6px;border-radius:5px;flex-shrink:0}
+.t-jump:hover{color:var(--acc);background:var(--bg4)}
+@keyframes fl{0%,55%{background:#2a3a63!important;border-color:var(--acc)!important}}
+.flash{animation:fl 1.5s}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.35}}
+.chip.pulse{color:var(--teal);border-color:#1f4a3a;animation:pulse 1.6s infinite}
 #conv .rsep{display:flex;align-items:center;gap:10px;margin:20px 0 12px;color:var(--tx3);font-family:var(--mono);font-size:11px}
 #conv .rsep::before,#conv .rsep::after{content:'';flex:1;height:1px;background:var(--line)}
 #conv .rsep .rs{color:var(--acc)}
@@ -102,6 +126,15 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .tcard:not(.open) .t-args,.tcard:not(.open) .t-result{display:none}
 .more-btn{display:block;margin:4px auto 18px;padding:7px 20px;background:var(--bg2);border:1px solid var(--line2);border-radius:20px;color:var(--tx2);font-size:12px;cursor:pointer}
 .more-btn:hover{color:var(--tx);border-color:var(--acc-dim)}
+#composer{display:none;gap:10px;padding:10px 26px;border-top:1px solid var(--line);background:var(--bg1)}
+#composer.show{display:flex}
+#compose{flex:1;resize:none;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;color:var(--tx);font-family:var(--sans);font-size:13.5px;padding:10px 13px;outline:none;min-height:44px;max-height:160px;line-height:1.5}
+#compose:focus{border-color:var(--acc-dim)}
+#send{padding:0 22px;background:linear-gradient(135deg,#33488f,#273a75);border:1px solid var(--acc-dim);border-radius:10px;color:#dfe7ff;font-size:13.5px;cursor:pointer}
+#send:hover{filter:brightness(1.15)}
+#send:disabled{opacity:.5;cursor:wait}
+.newbtn{margin-left:auto;cursor:pointer;color:var(--tx2);font-size:16px;padding:2px 9px;border-radius:6px;border:1px solid var(--line)}
+.newbtn:hover{color:var(--acc);border-color:var(--acc-dim)}
 
 /* ---------- 时间线 ---------- */
 .round{border-left:3px solid var(--bg4)}
@@ -200,10 +233,10 @@ details.hist .ev{padding:0 14px 12px;font-size:12px;color:var(--tx2);line-height
 </head>
 <body>
 <aside id="side">
-  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span></div>
+  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span><span class="newbtn" onclick="newSession()" title="新建会话">＋</span></div>
   <input id="search" placeholder="搜索会话目标…">
   <div id="list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
-  <div class="side-foot">只读投影 · task.json 单一事实源<br>GET-only · 不改任何会话数据</div>
+  <div class="side-foot">task.json 单一事实源<br>读：GET 全放开 · 写：仅对话轮（会话锁互斥）</div>
 </aside>
 <main id="main">
   <div id="topbar">
@@ -213,6 +246,10 @@ details.hist .ev{padding:0 14px 12px;font-size:12px;color:var(--tx2);line-height
     <div id="tabs"></div>
   </div>
   <div id="content"><div class="empty">等待选择会话…</div></div>
+  <div id="composer">
+    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行）"></textarea>
+    <button id="send" onclick="send()">发送</button>
+  </div>
 </main>
 <div id="mask"></div>
 <div id="drawer">
@@ -223,6 +260,17 @@ details.hist .ev{padding:0 14px 12px;font-size:12px;color:var(--tx2);line-height
 "use strict";
 const $=s=>document.querySelector(s);
 const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function md(text){
+  if(window.marked&&window.DOMPurify){
+    try{return DOMPurify.sanitize(marked.parse(String(text||'')))}catch(e){}
+  }
+  return esc(text);
+}
+function highlightIn(root){
+  if(window.hljs)root.querySelectorAll('pre code').forEach(b=>{
+    try{hljs.highlightElement(b)}catch(e){}
+  });
+}
 const fmtN=n=>{n=Number(n)||0;if(n>=1e8)return(n/1e8).toFixed(2)+'亿';if(n>=1e4)return(n/1e4).toFixed(1)+'万';if(n>=1e3)return(n/1e3).toFixed(1)+'K';return String(n)};
 const fmtP=(a,b)=>b>0?(a/b*100).toFixed(1)+'%':'—';
 const fmtT=t=>{const m=String(t||'').match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);return m?m[1]+'-'+m[2]+' '+m[3]:t||''};
@@ -273,7 +321,7 @@ function renderHeader(){
   $('#goal').classList.remove('empty');
   $('#goal').textContent=META.goal||META.id;
   const steps=(META.round_list||[]).reduce((a,r)=>a+(r.steps_used||0),0);
-  const st=META.status==='in_progress'?'<span class="chip ok">进行中</span>':'<span class="chip">完成</span>';
+  const st=META.status==='in_progress'?'<span class="chip ok pulse">● 运行中</span>':'<span class="chip">完成</span>';
   $('#chips').innerHTML=st+
     `<span class="chip acc">${esc(META.mode||'managed')}</span>`+
     `<span class="chip" title="${esc(META.workspace)}">${esc(wsBase(META.workspace))}</span>`+
@@ -289,13 +337,16 @@ function renderHeader(){
   ].map(([k,v,s])=>`<div class="kpi${k==='缓存命中'?' acc':''}"><div class="v">${v}<small>${s}</small></div><div class="k">${k}</div></div>`).join('');
   const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['registry','域注册表'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
-    `<div style="margin-left:auto;padding:6px 0"><span class="chip" style="cursor:pointer" onclick="select(CUR)">↻ 刷新</span></div>`;
+    `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
+    `<span class="chip" style="cursor:pointer;align-self:center;margin-left:6px" onclick="select(CUR)">↻ 刷新</span>`;
+  renderFollowChip();
 }
 function setTab(t){TAB=t;renderHeader();renderTab()}
 
 /* ---------- 视图 ---------- */
 function renderTab(){
   const c=$('#content');
+  $('#composer').classList.toggle('show',TAB==='conv'&&!!CUR);
   if(TAB==='conv')return renderConv(c);
   if(TAB==='timeline')return renderTimeline(c);
   if(TAB==='ledger')return renderLedger(c);
@@ -314,7 +365,8 @@ function blockChip(b){
   const kinds=[...new Set(ops)].map(o=>OP_TAG[o]||[o,'t-read']);
   const tags=kinds.map(([n,c])=>`<span class="tag ${c}">${n}</span>`).join('');
   const nOps=ops.length>1?`<span class="ops">×${ops.length}</span>`:'';
-  return `<span class="blk" onclick="openDrawer(${b.id.match(/^R(\d+)/)[1]},'${esc(b.id)}')" title="${esc(b.id)}">
+  const evs=String((b.events||[]).join(' '));
+  return `<span class="blk" data-events="${esc(evs)}" onclick="jumpToConv(this.closest('.round').dataset.seq,'${esc(b.id)}')" title="在对话流中查看 ${esc(b.id)}">
     <span class="f">${esc(b.file||b.id)}</span>${nOps}${tags}</span>`;
 }
 function renderTimeline(c){
@@ -325,7 +377,7 @@ function renderTimeline(c){
     const gen=r.org_generation>1?`<span class="badge b-gen">代${r.org_generation}</span>`:'';
     const steps=r.steps_used?`<span class="badge b-raw">步${r.steps_used}</span>`:'';
     const blocks=(r.blocks||[]).map(blockChip).join('');
-    return `<div class="card round org-${esc(r.org_state||'raw')}">
+    return `<div class="card round org-${esc(r.org_state||'raw')}" data-seq="${r.seq}">
       <div class="r-head" onclick="openDrawer(${r.seq})">
         <span class="r-seq">R${r.seq}</span><span class="r-goal" title="${esc(r.user_input)}">${esc(r.user_input)}</span>
         <span class="r-badges">${org}${gen}${steps}<span class="badge b-raw">${r.events}ev</span></span>
@@ -485,11 +537,12 @@ function drawConv(c,toBottom){
         for(const tc of tcs){
           const name=tc.function?.name||'?';
           calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
-          html+=`<div class="tcard" data-call="${esc(tc.id)}">
+          html+=`<div class="tcard" data-call="${esc(tc.id)}" data-round="${seq}" data-event="${esc(e.id)}">
             <div class="t-head" onclick="this.parentNode.classList.toggle('open')">
               <span class="t-icon">${TOOL_ICON[name]||'◆'}</span><span class="t-name">${esc(name)}</span>
               <span class="t-sum" title="${esc(argSummary(name,tc.function?.arguments))}">${esc(argSummary(name,tc.function?.arguments))}</span>
-              <span class="t-st st-run">…</span></div>
+              <span class="t-st st-run">…</span>
+              <span class="t-jump" title="在时间线中定位" onclick="event.stopPropagation();jumpToTimeline(${seq},'${esc(e.id)}')">⇢</span></div>
             <div class="t-args">${esc(prettyArgs(tc.function?.arguments))}</div>
             <div class="t-result"></div></div>`;
         }
@@ -501,7 +554,8 @@ function drawConv(c,toBottom){
         html+=`<div class="sysline">（接上轮调用结果）${esc(String(content||'').slice(0,100))}</div>`;continue;
       }
       if(role==='assistant'&&content){
-        html+=`<div class="msg assistant"><div class="bub">${esc(content)}</div></div>`;continue;
+        const inner=e.type==='final_answer'?md(content):esc(content);
+        html+=`<div class="msg assistant"><div class="bub md">${inner}</div></div>`;continue;
       }
       if(role==='user'){
         html+=`<div class="msg user"><div class="bub">${esc(content)}</div></div>`;continue;
@@ -518,8 +572,87 @@ function drawConv(c,toBottom){
       stEl.textContent=txt;stEl.className='t-st '+cls;
     }else{stEl.textContent='无结果';stEl.className='t-st st-run'}
   }
+  highlightIn(c);
   if(toBottom)c.scrollTop=c.scrollHeight;
 }
+
+/* ---- C2 双向联动：对话流工具卡 ⇄ 时间线块 ---- */
+function jumpToTimeline(seq,eventId){
+  setTab('timeline');
+  requestAnimationFrame(()=>{
+    const card=document.querySelector(`.round[data-seq="${seq}"]`);
+    if(!card)return;
+    card.scrollIntoView({block:'center'});
+    const chip=[...card.querySelectorAll('.blk')].find(
+      ch=>String(ch.dataset.events||'').split(' ').includes(eventId));
+    if(chip){chip.classList.add('flash');setTimeout(()=>chip.classList.remove('flash'),1600)}
+  });
+}
+async function ensureConvUpTo(seq){
+  const missing=convAllSeqs().filter(s=>s>=seq&&!CONV.cache[s]);
+  if(missing.length){
+    const got=await Promise.all(missing.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
+    got.forEach(([s,d])=>{CONV.cache[s]=d;if(!CONV.seqs.includes(s))CONV.seqs.push(s)});
+    CONV.seqs.sort((a,b)=>a-b);
+  }
+  drawConv($('#content'),false);
+}
+function jumpToConv(seq,blockId){
+  setTab('conv');
+  ensureConvUpTo(seq).then(()=>{
+    const round=(META.round_list||[]).find(x=>x.seq===seq);
+    const block=(round?.blocks||[]).find(b=>b.id===blockId);
+    const evIds=' '+String((block?.events||[]).join(' '))+' ';
+    const card=[...document.querySelectorAll(`.tcard[data-round="${seq}"]`)]
+      .find(el=>evIds.includes(' '+el.dataset.event+' '))
+      ||document.querySelector(`.tcard[data-round="${seq}"]`);
+    if(card){card.scrollIntoView({block:'center'});card.classList.add('open','flash');
+      setTimeout(()=>card.classList.remove('flash'),1600);return}
+    const sep=[...document.querySelectorAll('#content .rsep')]
+      .find(x=>x.textContent.includes('R'+seq));
+    if(sep)sep.scrollIntoView({block:'center'});
+  });
+}
+
+/* ---- C3 实时跟随 ---- */
+let FOLLOW=true;
+function renderFollowChip(){
+  const el=$('#follow-chip');if(!el)return;
+  el.textContent=FOLLOW?'跟随尾部 ✓':'跟随尾部 ✗';
+  el.className='chip '+(FOLLOW?'ok':'');
+}
+$('#content').addEventListener('scroll',()=>{
+  const c=$('#content');
+  const dist=c.scrollHeight-c.scrollTop-c.clientHeight;
+  if(FOLLOW&&dist>140){FOLLOW=false;renderFollowChip()}
+  else if(!FOLLOW&&dist<60){FOLLOW=true;renderFollowChip()}
+});
+setInterval(async()=>{
+  if(TAB!=='conv'||!CUR||!META||META.status!=='in_progress'||document.hidden)return;
+  try{
+    const lst=await api('/api/sessions');
+    const s=(lst.sessions||[]).find(x=>x.id===CUR);if(!s)return;
+    if(s.rounds>(META.round_list||[]).length){
+      META=await api('/api/sessions/'+CUR);renderHeader();
+      const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
+      const got=await Promise.all(fresh.map(async x=>[x,await api(`/api/sessions/${CUR}/rounds/${x}`)]));
+      got.forEach(([x,d])=>{CONV.cache[x]=d;if(!CONV.seqs.includes(x))CONV.seqs.push(x)});
+      CONV.seqs.sort((a,b)=>a-b);
+      drawConv($('#content'),FOLLOW);return;
+    }
+    const lr=s.last_round,lastSeq=CONV.seqs[CONV.seqs.length-1];
+    if(lr&&lr.seq===lastSeq){
+      const d=CONV.cache[lastSeq];
+      if(d&&lr.events>(d.events||[]).length){
+        const lastId=((d.events||[])[d.events.length-1]||{}).id;
+        const inc=await api(`/api/sessions/${CUR}/rounds/${lastSeq}?after=${lastId}`);
+        d.events.push(...inc.events);
+        if(inc.blocks&&inc.blocks.length)d.blocks=inc.blocks;
+        drawConv($('#content'),FOLLOW);
+      }
+    }
+  }catch(e){/* 轮询失败静默，下一轮再试 */}
+},2500);
 
 /* ---------- 抽屉 ---------- */
 let drawerSeq=null,drawerHl=null;
@@ -546,6 +679,61 @@ async function openDrawer(seq,hl){
 function closeDrawer(){$('#drawer').classList.remove('open');$('#mask').classList.remove('open')}
 $('#mask').addEventListener('click',closeDrawer);
 document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+
+/* ---- C4 网页输入：发送 = 给会话追加一轮（serve 侧三道互斥） ---- */
+$('#compose').addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}
+});
+async function send(){
+  const box=$('#compose');
+  const t=box.value.trim();
+  if(!t||!CUR)return;
+  box.value='';$('#send').disabled=true;
+  const c=$('#content');
+  c.insertAdjacentHTML('beforeend',
+    `<div class="msg user" id="pend-u"><div class="bub">${esc(t)}</div></div>
+     <div class="sysline" id="pend-run">⏳ 轮执行中…（完成后此屏自动更新）</div>`);
+  c.scrollTop=c.scrollHeight;
+  try{
+    const r=await fetch(`/api/sessions/${CUR}/turn`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({content:t})});
+    const j=await r.json();
+    if(r.status===409){$('#pend-run').textContent='⚠ '+j.error;return}
+    if(r.status!==202){$('#pend-run').textContent='⚠ '+(j.error||('HTTP '+r.status));return}
+    const iv=setInterval(async()=>{
+      try{
+        const jd=await api('/api/jobs/'+j.job_id);
+        if(jd.status==='running'||jd.status==='queued')return;
+        clearInterval(iv);$('#send').disabled=false;
+        if(jd.status==='error'){$('#pend-run').textContent='✗ '+jd.error;return}
+        $('#pend-u')?.remove();$('#pend-run')?.remove();
+        await refreshAfterTurn();
+      }catch(e){clearInterval(iv);$('#send').disabled=false;
+        $('#pend-run').textContent='✗ 轮询失败：'+e.message}
+    },1500);
+  }catch(e){$('#send').disabled=false;$('#pend-run').textContent='✗ '+e.message}
+}
+async function refreshAfterTurn(){
+  META=await api('/api/sessions/'+CUR);renderHeader();
+  const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
+  if(fresh.length){
+    const got=await Promise.all(fresh.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
+    got.forEach(([s,d])=>{CONV.cache[s]=d;if(!CONV.seqs.includes(s))CONV.seqs.push(s)});
+    CONV.seqs.sort((a,b)=>a-b);
+  }
+  drawConv($('#content'),true);
+  loadSessions();
+}
+async function newSession(){
+  const goal=prompt('新会话目标：');
+  if(!goal||!goal.trim())return;
+  const r=await fetch('/api/sessions',{method:'POST',
+    headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:goal.trim()})});
+  const j=await r.json();
+  if(j.id){await loadSessions();select(j.id)}
+  else alert(j.error||('HTTP '+r.status));
+}
 
 /* ---------- 启动 ---------- */
 loadSessions();

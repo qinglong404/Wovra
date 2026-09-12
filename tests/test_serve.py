@@ -73,6 +73,7 @@ def test_session_summary_derives_org_and_usage():
     assert s["org"] == {"done": 1, "pending": 0, "failed": 0, "raw": 1}
     assert s["escalations"] == 1 and s["todo_milestone"] == "大步一"
     assert s["usage"]["calls"] == 1 and s["usage"]["prompt"] == 100
+    assert s["last_round"] == {"seq": 2, "events": 0, "end_state": "open"}
 
 
 def test_session_meta_strips_events_keeps_blocks():
@@ -91,6 +92,19 @@ def test_round_detail_flattens_events():
                               "tool_calls": None, "tool_call_id": None}
     assert d["blocks"][0]["file"] == "a.py"
     assert serve.round_detail(_fake_task(), 99) is None
+
+
+def test_round_detail_after_filter():
+    """C3 实时跟随便签：after=R{n}-E{m} 只回该事件之后的部分。"""
+    data = _fake_task()
+    data["rounds"][0]["events"] = [
+        {"id": f"R1-E0{i}", "type": "tool_call", "status": "",
+         "message": {"role": "assistant", "content": f"第{i}步"}}
+        for i in range(1, 5)
+    ]
+    d = serve.round_detail(data, 1, after="R1-E02")
+    assert [e["id"] for e in d["events"]] == ["R1-E03", "R1-E04"]
+    assert serve.round_detail(data, 1, after="R1-E04")["events"] == []
 
 
 # ---- HTTP 冒烟（本机回环） ----------------------------------------------------
@@ -125,7 +139,6 @@ def _get(url, method="GET"):
 
 
 def test_http_sessions_endpoint(server):
-    _H_cache_warm = None
     code, body = _get(server + "/api/sessions")
     assert code == 200 and body["sessions"][0]["id"] == "s1"
     code, body = _get(server + "/api/sessions/s1")
@@ -134,10 +147,70 @@ def test_http_sessions_endpoint(server):
     assert code == 200 and body["events"][0]["id"] == "R1-E01"
     code, body = _get(server + "/api/sessions/nope")
     assert code == 404
+    # 写通道收窄为两个具名端点（新建会话 / turn），其余 POST 一律 404
     code, body = _get(server + "/api/sessions/s1", method="POST")
-    assert code == 405  # 只读：写操作一律 405
+    assert code == 404
     code, body = _get(server + "/api/sessions/../../etc", method="GET")
     assert code == 404  # 路径穿越不出去（id 白名单）
+
+
+def test_http_turn_job_flow(server, monkeypatch):
+    """C4 写通道：POST turn → 作业排队 → 执行线程 → done。
+
+    _execute_turn 被 monkeypatch（不真跑 agent）——测的是作业协议。
+    """
+    import time as _time
+    seen = {}
+
+    def fake_execute(job_id, task_id, content):
+        seen["job"] = (job_id, task_id, content)
+        _time.sleep(0.2)
+        serve._JOBS[job_id]["status"] = "running"
+        serve._JOBS[job_id]["status"] = "done"
+        serve._JOBS[job_id]["answer"] = "完成"
+
+    monkeypatch.setattr(serve, "_execute_turn", fake_execute)
+    body = json.dumps({"content": "继续推进"}).encode("utf-8")
+    req = urllib.request.Request(server + "/api/sessions/s1/turn",
+                                 data=body, method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=5) as r:
+        assert r.status == 202
+        job_id = json.loads(r.read())["job_id"]
+    for _ in range(40):
+        code, j = _get(server + f"/api/jobs/{job_id}")
+        if j["status"] == "done":
+            break
+        _time.sleep(0.1)
+    assert j["status"] == "done" and j["answer"] == "完成"
+    assert seen["job"][1] == "s1" and seen["job"][2] == "继续推进"
+
+
+def test_http_turn_rejects_empty_and_busy(server, monkeypatch):
+    body = json.dumps({"content": "  "}).encode("utf-8")
+    req = urllib.request.Request(server + "/api/sessions/s1/turn",
+                                 data=body, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=5) as r:
+            code = r.status
+    except urllib.error.HTTPError as e:
+        code = e.code
+    assert code == 400  # 空内容
+
+    serve._JOBS["busy1"] = {"job_id": "busy1", "task_id": "s1",
+                            "status": "running"}
+    try:
+        req = urllib.request.Request(server + "/api/sessions/s1/turn",
+                                     data=json.dumps({"content": "x"}).encode(),
+                                     method="POST")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+            assert code == 409  # 上一轮还在跑
+    finally:
+        serve._JOBS.pop("busy1", None)
 
 
 def test_http_serves_index(server):
