@@ -153,6 +153,11 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .tcard .t-when{font-size:10px;font-family:var(--mono);color:var(--tx3);flex-shrink:0;white-space:nowrap}
 #ctxbar{display:none;flex-wrap:wrap;gap:16px;align-items:center;padding:7px var(--pad-x);background:var(--bg1);border-bottom:1px solid var(--line);font-size:11px}
 #ctxbar.show{display:flex}
+#runbar{height:0;background:transparent;transition:height .15s}
+#runbar.on{height:3px;background:linear-gradient(90deg,transparent,var(--acc),transparent);background-size:200% 100%;animation:runslide 1.2s linear infinite}
+@keyframes runslide{from{background-position:200% 0}to{background-position:-200% 0}}
+#stop{animation:stoppulse 1.6s infinite}
+@keyframes stoppulse{0%,100%{border-color:#6b3440}50%{border-color:var(--red);box-shadow:0 0 8px #ff6b7a55}}
 .ctx-cell{display:flex;align-items:center;gap:6px}
 .ctx-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
 .ctx-bar{width:64px;height:5px;border-radius:3px;background:var(--bg4);overflow:hidden;flex-shrink:0}
@@ -383,6 +388,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
     <div id="tabs"></div>
   </div>
   <div id="ctxbar"></div>
+  <div id="runbar" title="轮运行中"></div>
   <div id="content"><div class="empty">等待选择会话…</div></div>
   <div id="pending-bar"></div>
   <div id="composer">
@@ -781,11 +787,20 @@ async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用�
   try{await refreshAfterTurn()}catch(e){}
   liveDetach();
 }
-function liveAttach(jobId){
+function liveAttach(jobId,resume){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
                       status:'',mode:'',done:[],seq:0,
+                      startedAt:Date.now(),
                       baseRounds:(META&&META.round_list||[]).length});
+  if(resume){
+    // /c 续跑的是**已存在的开放轮**——轮列表不会变长，必须直接锁定它，
+    // 否则直播区挂在页面底部、事件进度却长到上面的老轮里（实测错位）
+    const rl=(META&&META.round_list)||[];
+    LIVE.seq=rl.length?rl[rl.length-1].seq:0;
+  }
   const st=document.getElementById('stop');if(st)st.style.display='';
+  const rb=document.getElementById('runbar');if(rb)rb.classList.add('on');
+  document.title='● 运行中 · Wovra 现场';
   sseConnect(jobId);
 }
 function liveDetach(){
@@ -793,6 +808,8 @@ function liveDetach(){
   sseClose();clearPendingBar();
   document.getElementById('livebox')?.remove();
   const st=document.getElementById('stop');if(st)st.style.display='none';
+  const rb=document.getElementById('runbar');if(rb)rb.classList.remove('on');
+  document.title='Wovra · 现场';
 }
 async function stopTurn(){   // ⏹ 终止本轮（对齐 CLI Ctrl+C：轮保持开放）
   if(!LIVE.job)return;
@@ -860,7 +877,14 @@ async function pollLive(){
   for(const c of d.chunks||[])dirty=applyChunk(c)||dirty;
   LIVE.next=d.next||LIVE.next;
   if(CUR===LIVE.cur&&(dirty||!document.getElementById('livebox')))renderLive();
+  tickStopBtn();
   if(d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
+}
+function tickStopBtn(){
+  const st=document.getElementById('stop');
+  if(!st||!LIVE.job)return;
+  const du=fmtDur((Date.now()-(LIVE.startedAt||Date.now()))/1000);
+  st.textContent='⏹ 终止本轮'+(du?' · '+du:'');
 }
 setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
 function renderLive(){
@@ -1270,7 +1294,7 @@ async function send(){
     const j=await r.json();
     if(r.status===409){$('#pend-run').textContent='⚠ '+j.error;return}
     if(r.status!==202){$('#pend-run').textContent='⚠ '+(j.error||('HTTP '+r.status));return}
-    LIVE.viaSend=true;liveAttach(j.job_id);
+    LIVE.viaSend=true;liveAttach(j.job_id,resume);
     const iv=setInterval(async()=>{
       try{
         const jd=await api('/api/jobs/'+j.job_id);
