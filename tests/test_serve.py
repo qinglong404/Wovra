@@ -505,6 +505,23 @@ def test_http_batch_delete(server, tmp_path):
     assert code == 400
 
 
+def test_http_undo_and_local_cmd(server):
+    """/undo 只撤开放轮；/cmd 文本命令（todo/help）走任务数据。"""
+    code, body = _get(server + "/api/sessions/s1/undo", method="POST", body={})
+    assert code == 200 and body["removed_events"] == 0   # s1 最后一轮是开放轮
+    code, body = _get(server + "/api/sessions/s1/undo", method="POST", body={})
+    assert code == 409                                    # 剩下的是闭合轮
+    code, body = _get(server + "/api/sessions/s1/cmd", method="POST",
+                      body={"name": "todo"})
+    assert code == 200 and isinstance(body["text"], str)
+    code, body = _get(server + "/api/sessions/s1/cmd", method="POST",
+                      body={"name": "help"})
+    assert code == 200 and "/c" in body["text"]
+    code, body = _get(server + "/api/sessions/s1/cmd", method="POST",
+                      body={"name": "xyz"})
+    assert code == 400
+
+
 def test_http_cancel_and_resume(server, monkeypatch):
     """⏹ 终止：置 cancel 标记；/c 续跑：入队 content=None 的作业。"""
     import time as _time

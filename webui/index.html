@@ -78,7 +78,7 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 .tab{padding:9px 16px;font-size:13px;color:var(--tx2);cursor:pointer;border-bottom:2px solid transparent;user-select:none}
 .tab:hover{color:var(--tx)}
 .tab.on{color:var(--acc);border-bottom-color:var(--acc)}
-#content{flex:1;overflow-y:auto;padding:18px 26px 30px}
+#content{flex:1;overflow-y:auto;padding:18px 26px 30px;overflow-anchor:none}
 
 /* ---------- 通用 ---------- */
 .card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);margin-bottom:10px}
@@ -251,6 +251,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #composer.show{display:flex}
 #compose{flex:1;resize:none;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;color:var(--tx);font-family:var(--sans);font-size:13.5px;padding:10px 13px;outline:none;min-height:44px;max-height:160px;line-height:1.5}
 #compose:focus{border-color:var(--acc-dim)}
+#stop{padding:0 16px;background:transparent;border:1px solid #6b3440;border-radius:10px;color:#ff98a6;font-size:13px;cursor:pointer;transition:background .15s}
+#stop:hover{background:#3a2027;border-color:var(--red)}
 #send{padding:0 22px;background:linear-gradient(135deg,#33488f,#273a75);border:1px solid var(--acc-dim);border-radius:10px;color:#dfe7ff;font-size:13.5px;cursor:pointer}
 #send:hover{filter:brightness(1.15)}
 #send:disabled{opacity:.5;cursor:wait}
@@ -275,6 +277,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #drawer .d-close{cursor:pointer;color:var(--tx3);font-size:18px;padding:2px 8px;border-radius:6px}
 #drawer .d-close:hover{color:var(--tx);background:var(--bg3)}
 #drawer .d-body{flex:1;overflow-y:auto;padding:10px 12px}
+.cmd-out{margin:0;white-space:pre-wrap;word-break:break-word;font-family:var(--mono);font-size:12px;line-height:1.7;color:var(--tx2)}
 .ev{border:1px solid var(--line);border-radius:8px;margin-bottom:7px;overflow:hidden}
 .ev.hl{border-color:var(--acc-dim)}
 .ev .e-head{display:flex;gap:8px;padding:6px 10px;background:var(--bg2);font-family:var(--mono);font-size:10.5px;color:var(--tx3);align-items:center}
@@ -634,6 +637,36 @@ async function stopTurn(){   // ⏹ 终止本轮（对齐 CLI Ctrl+C：轮保持
   try{await fetch(`/api/jobs/${LIVE.job}/cancel`,{method:'POST'})}catch(e){}
   LIVE.status='终止中…';renderLive();
 }
+async function undoTurn(){   // /undo 撤销最近一条开放轮
+  if(!CUR)return;
+  if(!confirm('撤销最近一条开放轮？\n其全部事件将从历史移除（成本记录保留），不可恢复。'))return;
+  try{
+    const r=await fetch(`/api/sessions/${CUR}/undo`,{method:'POST'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('HTTP '+r.status));return}
+    CONV={session:CUR,seqs:[],cache:{}};
+    await refreshAfterTurn();
+  }catch(e){alert('撤销失败：'+e.message)}
+}
+async function runCmd(name,arg){   // 文本类命令 → 右侧抽屉
+  try{
+    const r=await fetch(`/api/sessions/${CUR}/cmd`,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({name,arg})});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('HTTP '+r.status));return}
+    showCmdOutput('/'+name+(arg?' '+arg:''),j.text||'（无输出）');
+  }catch(e){alert('命令失败：'+e.message)}
+}
+function showCmdOutput(title,text){
+  $('#mask').classList.add('open');$('#drawer').classList.add('open');
+  $('#d-title').textContent=title;
+  $('#d-sub').textContent='';
+  const pre=document.createElement('pre');
+  pre.className='cmd-out';
+  pre.textContent=String(text).replace(/\x1b\[\[\d;]*m/g,'');   // 剥 ANSI
+  const b=$('#d-body');b.innerHTML='';b.appendChild(pre);
+}
 async function pollLive(){
   if(!LIVE.job||document.hidden)return;
   let d;
@@ -667,7 +700,7 @@ async function pollLive(){
     }
   }
 }
-setInterval(pollLive,800);
+setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
 function renderLive(){
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
   // 直播中的轮一旦落进 round_list，记住它的 seq；该轮已落账的思考段
@@ -889,9 +922,14 @@ function drawConv(c,toBottom){
     }else{stEl.textContent='无结果';stEl.className='t-st st-run'}
   }
   highlightIn(c);
-  if(toBottom)c.scrollTop=c.scrollHeight;
-  else c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
-  requestAnimationFrame(()=>{REBUILDING=false});   // 钳位滚动事件放行完再恢复监听
+  if(toBottom){
+    c.scrollTop=c.scrollHeight;
+    requestAnimationFrame(()=>{c.scrollTop=c.scrollHeight;
+      requestAnimationFrame(()=>{REBUILDING=false})});
+  }else{
+    c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
+    requestAnimationFrame(()=>{REBUILDING=false});
+  }
   if(LIVE.job&&CUR===LIVE.cur)renderLive();   // 重绘后把直播区接回来
 }
 function ci_status(ci){
@@ -996,12 +1034,20 @@ async function send(){
   box.value='';
   let url=`/api/sessions/${CUR}/turn`,body={content:t},resume=false;
   if(t.startsWith('/')){
-    const cmd=t.split(/\s+/)[0].toLowerCase();
-    if(cmd==='/c'||cmd==='/继续'){url=`/api/sessions/${CUR}/resume`;body={};resume=true}
+    const parts=t.slice(1).trim().split(/\s+/);
+    const cmd=(parts[0]||'').toLowerCase();
+    const arg=parts.slice(1).join(' ');
+    box.value='';
+    if(cmd==='c'||cmd==='继续'){url=`/api/sessions/${CUR}/resume`;body={};resume=true}
+    else if(cmd==='undo'||cmd==='撤销'){await undoTurn();return}
+    else if(['todo','阶段','计划'].includes(cmd)){setTab('todo');return}
+    else if(['report','报告'].includes(cmd)){setTab('timeline');return}
+    else if(['maint','维护','进度','bg','后台','help','h','?','帮助'].includes(cmd)){
+      await runCmd(cmd,arg);return}
     else{
       const c=$('#content');
       c.insertAdjacentHTML('beforeend',
-        `<div class="sysline">未知命令 ${esc(cmd)} · 目前可用：/c（续跑开放轮）</div>`);
+        `<div class="sysline">未知命令 /${esc(cmd)} · 输入 /help 查看全部命令</div>`);
       c.scrollTop=c.scrollHeight;return;
     }
   }

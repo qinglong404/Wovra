@@ -276,6 +276,17 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
 _ORG_STATES = ("done", "pending", "failed")
 
 
+_WEB_HELP = """网页斜杠命令（零模型成本，除 /c 续跑外均为本地操作）：
+  /c /继续          续跑开放轮（步数超限或 ⏹ 终止后的标准恢复方式）
+  /undo /撤销       撤销最近一条开放轮（含其全部事件；已闭合轮不可撤）
+  /todo /阶段 /计划 跳到计划页
+  /report /报告     跳到时间线页
+  /maint /维护 /进度整理与分裂进度（右侧抽屉）
+  /bg [编号]        后台任务：查看状态与增量输出
+  /bg stop 编号     停止某个后台任务
+  /help             显示本帮助"""
+
+
 
 _USAGE_KEYS = ("prompt", "cached", "miss", "completion")
 
@@ -684,6 +695,14 @@ class _Handler(BaseHTTPRequestHandler):
         mr = re.fullmatch(r"/api/sessions/([^/]+)/resume", path)
         if mr:
             return self._start_resume(mr.group(1))
+        mu = re.fullmatch(r"/api/sessions/([^/]+)/undo", path)
+        if mu:
+            return self._undo_round(mu.group(1))
+        mcmd = re.fullmatch(r"/api/sessions/([^/]+)/cmd", path)
+        if mcmd:
+            return self._local_command(mcmd.group(1),
+                                       str(body.get("name") or ""),
+                                       str(body.get("arg") or ""))
         mc = re.fullmatch(r"/api/jobs/([^/]+)/cancel", path)
         if mc:
             job = _JOBS.get(mc.group(1))
@@ -805,6 +824,68 @@ class _Handler(BaseHTTPRequestHandler):
     def _start_resume(self, task_id: str) -> None:
         """/c 续跑开放轮：不注入新消息（对齐 CLI \\继续）。"""
         return self._start_job(task_id, None)
+
+    def _undo_round(self, task_id: str) -> None:
+        """/undo：撤销最近一条开放轮（对齐 CLI；已闭合轮不可撤）。"""
+        with _job_lock:
+            busy = any(j["task_id"] == task_id
+                       and j["status"] in ("queued", "running")
+                       for j in _JOBS.values())
+        if busy or _TURN_GATE.locked():
+            return self._json({"error": "轮正在运行，先终止再撤销"}, 409)
+        from .agent import MODE_MANAGED
+        from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
+        try:
+            task = task_module.Task.load(task_id)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._json({"error": "session not found"}, 404)
+        rounds = task.rounds or []
+        if not rounds or rounds[-1].get("end_state") not in ("", "open"):
+            return self._json(
+                {"error": "最后一轮已闭合（有最终回答）——只撤销开放中的轮次"}, 409)
+        n = len(rounds[-1].get("events") or [])
+        task.rounds.pop()
+        agent = _build_agent(task, mode=task.mode or MODE_MANAGED)
+        agent.rounds = task.rounds
+        agent._persist_rounds()
+        with self.cache._lock:
+            self.cache._cache.pop(task_id, None)
+        return self._json({"ok": True, "removed_events": n})
+
+    def _local_command(self, task_id: str, name: str, arg: str) -> None:
+        """/ 命令的文本类输出（maint/report/bg/todo）：纯本地零模型成本。"""
+        from . import ui
+        if name in ("help", "h", "?", "帮助"):
+            return self._json({"text": _WEB_HELP})
+        try:
+            task = task_module.Task.load(task_id)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._json({"error": "session not found"}, 404)
+        if name in ("maint", "维护", "进度"):
+            text = ui.maint_view(task)
+        elif name in ("report", "报告"):
+            from .cli.session import _child_summaries
+            text = ui.report_view(task, _child_summaries(task_id))
+        elif name in ("bg", "后台"):
+            from .tools.background import (check_background, list_background,
+                                           stop_background)
+            parts = arg.split()
+            if parts and parts[0].isdigit():
+                parts[0] = f"bg-{parts[0]}"        # bg 1 == bg bg-1
+            if len(parts) >= 2 and parts[0].lower() == "stop":
+                target = parts[1]
+                if target.isdigit():
+                    target = f"bg-{target}"
+                text = stop_background(target)
+            elif len(parts) == 1:
+                text = check_background(parts[0])
+            else:
+                text = list_background()
+        elif name in ("todo", "阶段", "计划"):
+            text = "\n".join(task.todo_lines())
+        else:
+            return self._json({"error": f"未知命令 {name}"}, 400)
+        return self._json({"text": text})
 
     def _start_job(self, task_id: str, content: str | None) -> None:
         data = self._load_task(task_id)
