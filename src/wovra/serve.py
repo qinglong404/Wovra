@@ -520,6 +520,12 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     agent._persist_rounds = lambda: None       # 预览：绝不落盘
+    # 重组前全文必须在 settle **之前**取：settle 会应用本次产物并触发分档折叠，
+    # 之后再装配拿到的是"已重组口径"（实测 5 条 vs 重组前 27 条）
+    try:
+        _pre_settle = agent._assemble_messages()
+    except Exception:  # noqa: BLE001
+        _pre_settle = None
     try:
         # 完整开场状态（promote + 渐近归属 _settle_views）——只 promote 不够：
         # 视图装配依赖各轮/块的域归属判定（505a101 起归属在 settle 里做）
@@ -566,9 +572,8 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                     "messages": msgs, "count": len(msgs),
                     "total_chars": total, "tokens": tok, "truncated": trunc})
     if out:
-        # 主 agent 的"整理后、未按域重组"全文：同一套装配路径（_assemble_messages），
-        # 与重组后视图并排供核对；截断规则同上
-        full = agent._assemble_messages()
+        # 主 agent 的"整理后、未按域重组"全文 = settle 之前的装配（见上）；
+        full = _pre_settle if _pre_settle is not None else agent._assemble_messages()
         alt_chars = sum(len(str(m.get("content") or "")) for m in full)
         alt_msgs, alt_trunc = [], 0
         for m in full:
@@ -588,6 +593,25 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
         out[0]["alt_tokens"] = alt_tok
         out[0]["alt_messages"] = alt_msgs
         out[0]["alt_truncated"] = alt_trunc
+    if not out and _pre_settle is not None:
+        # 无分裂产物（或视图降级）：至少给出"当前装配"一档，别让抽屉空着
+        msgs, total, trunc = [], 0, 0
+        for m in _pre_settle:
+            raw = str(m.get("content") or "")
+            total += len(raw)
+            body = raw
+            if len(raw) > _DUMP_CAP:
+                body = raw[:_DUMP_CAP] + chr(10) + f"…（本条截断，原 {len(raw):,} 字符）"
+                trunc += 1
+            msgs.append({"role": m.get("role"), "content": body,
+                         "len": len(raw), "tool_calls": len(m.get("tool_calls") or [])})
+        try:
+            tok = int(agent._estimate_messages(_pre_settle))
+        except Exception:  # noqa: BLE001
+            tok = total // 3
+        out.append({"id": "Main", "name": "主agent", "is_main": True, "count": len(msgs),
+                    "total_chars": total, "tokens": tok, "truncated": trunc,
+                    "messages": msgs, "description": "", "file_domains": []})
     return {"agents": out, "pending": True,
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 

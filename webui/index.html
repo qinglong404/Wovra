@@ -1794,7 +1794,8 @@ function ctxViz(){
                   :`<span class="fbadge t-read">不可分裂</span>`;
     const pend='';   // 时序已改为轮闭合即生效：不再标"待生效/已落实"
     splitHtml=`<div class="split-head">${badge}${pend}
-      <span class="chip acc" style="cursor:pointer;margin-left:auto" onclick="openPendingView('Main')">主 agent 重组后上下文</span>
+      <span class="chip" style="cursor:pointer;margin-left:auto" title="分裂重组生效前的完整上下文（整理后全量装配）" onclick="openPendingView('__alt__')">重组前上下文</span>
+      <span class="chip acc" style="cursor:pointer" title="重组后各 agent 各看到什么（主 agent / A / B）" onclick="openPendingView('Main')">重组后上下文</span>
       <span class="mono" style="color:var(--tx3);font-size:10px">产出 ${lastSplit.domains.length} 域 · 未归属块 ${lastSplit.unassigned}</span></div>`+
       `<div style="font-size:10.5px;color:var(--tx3);margin-top:5px;line-height:1.6">子 agent 与各自重组后上下文由本次分裂产物派生（点击域卡片可查看该域视图）。</div>`+
       (a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">为什么这样判定</summary>
@@ -1939,7 +1940,7 @@ async function openPendingView(name){
   // 重组后上下文预览（主 agent + 各子 agent）：后端在内存里模拟产物生效
   // 后物化各视图，不改会话；抽屉内可切换 agent 对照
   $('#drawer').classList.add('open');$('#mask').classList.add('open');
-  $('#d-title').textContent='重组后上下文';
+  $('#d-title').textContent='上下文对照（重组前 / 重组后）';
   $('#d-sub').textContent='装配中…';
   $('#d-body').innerHTML='<div class="empty">在内存中模拟产物生效…</div>';
   try{
