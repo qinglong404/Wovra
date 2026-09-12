@@ -23,18 +23,103 @@
 字段还很少，标准库足够；schema 复杂起来后再引入校验库也不迟。
 """
 
+import contextlib
+import itertools
 import json
+import os
+import threading
+import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from dataclasses import fields as dataclass_fields
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from . import tools as tools_module
 from .tools import FAILURE_MARKERS
 
 # 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
 TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
+
+# ---- 原子落盘（Windows 稳健性，2026-09-12）--------------------------------
+#
+# 为什么需要这一层：原实现是"固定 tmp 名 + os.replace"，在 Windows 上会撞车
+# ——**同一个任务的保存不止一个线程在做**：主线程（账本工具、转交、轮闭合）
+# 与后台整理线程会同时 save()，两边写同一个 `task.json.tmp`，或目标文件被
+# 另一方短暂持有，os.replace 直接抛 PermissionError [WinError 5]，异常一路
+# 穿透到 CLI，**把整个会话进程带走**（2026-09-12 实测崩掉正在进行的会话）。
+# 另一类触发源是外部句柄：杀毒/搜索索引器/用户拿编辑器打开了 task.json 或
+# report.md——这类占用是**短暂**的，退避重试即可过去。
+#
+# 故三层保护：①每次保存用**唯一** tmp 名（pid/线程/序号，跨进程也不会撞）；
+# ②同一 task id 的保存按 id 串行（锁在模块级，跨 Agent 实例有效——调用方
+# 散落在 ledger/cli/maintenance，逐个加锁改不动也容易漏）；③replace 遇
+# PermissionError 退避重试，重试耗尽才上抛。
+_SAVE_LOCKS: dict[str, threading.RLock] = {}
+_SAVE_LOCKS_GUARD = threading.Lock()
+_SAVE_TMP_SEQ = itertools.count(1)
+_SAVE_ATTEMPTS = int(os.environ.get("WOVRA_SAVE_ATTEMPTS", "6"))
+_SAVE_BACKOFF = float(os.environ.get("WOVRA_SAVE_BACKOFF", "0.05"))
+
+
+def _save_lock(task_id: str) -> threading.RLock:
+    """同一任务的落盘锁（模块级按 id 复用；RLock 以防 save 被重入）。"""
+    with _SAVE_LOCKS_GUARD:
+        lock = _SAVE_LOCKS.get(task_id)
+        if lock is None:
+            lock = threading.RLock()
+            _SAVE_LOCKS[task_id] = lock
+        return lock
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """os.replace + 退避重试（只重试 PermissionError：外部句柄是短暂的）。"""
+    delay = _SAVE_BACKOFF
+    last: Optional[Exception] = None
+    for attempt in range(1, max(_SAVE_ATTEMPTS, 1) + 1):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError as error:  # WinError 5：目标/源被别的句柄持有
+            last = error
+            if attempt < _SAVE_ATTEMPTS:
+                time.sleep(delay)
+                delay *= 2
+    raise last if last is not None else PermissionError("replace 失败")
+
+
+def _write_atomic(path: Path, text: str) -> None:
+    """原子写入：唯一 tmp → fsync → replace（失败清理半截文件）。"""
+    tmp = path.with_name(
+        f"{path.name}.tmp.{os.getpid()}.{threading.get_ident()}.{next(_SAVE_TMP_SEQ)}"
+    )
+    try:
+        with open(tmp, "w", encoding="utf-8", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        _replace_with_retry(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            tmp.unlink()
+        raise
+
+
+def _cleanup_stale_tmp(directory: Path, keep_younger_than: float = 600.0) -> None:
+    """清掉历史崩溃留下的半截 tmp（best-effort，只动**够旧**的）。
+
+    年龄下限是必须的：另一个线程/进程可能正在写它自己的唯一 tmp，删了就把
+    对方的保存打坏——只清超过 10 分钟没人动的。
+    """
+    now = time.time()
+    for path in directory.glob("*.tmp.*"):
+        try:
+            if now - path.stat().st_mtime > keep_younger_than:
+                path.unlink()
+        except OSError:
+            pass
+
 
 # TaskState 每类列表的容量上限：超出淘汰最旧。
 # 被淘汰的内容仍在 History（Round/Event）里，可通过 expand_history 找回——
@@ -678,8 +763,20 @@ class Task:
     def save(self) -> None:
         """把当前状态写到磁盘：task.json + report.md。
 
-        task.json 用临时文件 + 原子替换落盘：write_text 先清空再写，
-        写一半崩掉会把整个会话历史截断成空文件（实测 2026-09-05）。
+        原子性（2026-09-05 教训）：write_text 先清空再写，写一半崩掉会把
+        整个会话历史截断成空文件——故走 tmp + replace。
+
+        并发与 Windows 稳健性（2026-09-12 修复）：主线程与后台整理线程会
+        同时保存，原实现（固定 tmp 名）在 Windows 上直接 PermissionError
+        [WinError 5] 崩掉整个会话。现在：唯一 tmp 名 + 按 task id 串行 +
+        退避重试，详见模块顶部 `_SAVE_LOCKS` 一段的注释。
+
+        失败策略**不对称**，这是刻意的：
+        * `task.json` 是数据本身——写不进去必须上抛（宁可让调用方看见失败，
+          也不能假装保存成功）；
+        * `report.md` 是**派生的人视图**（每次保存都整体重写）——它被外部
+          查看器/编辑器占着时不该拖垮正在进行的会话，故失败只记一笔账，
+          下一次保存会把它重写回来（信息没有丢，只是这一版晚了点）。
         """
         directory = TASKS_ROOT / self.id
         directory.mkdir(parents=True, exist_ok=True)
@@ -687,11 +784,18 @@ class Task:
         data = sanitize_surrogates(
             json.dumps(asdict(self), ensure_ascii=False, indent=2)
         )
-        tmp = directory / "task.json.tmp"
-        tmp.write_text(data, encoding="utf-8")
-        tmp.replace(directory / "task.json")
         report = sanitize_surrogates(self._render_report())
-        (directory / "report.md").write_text(report, encoding="utf-8")
+        with _save_lock(self.id):
+            _write_atomic(directory / "task.json", data)
+            try:
+                _write_atomic(directory / "report.md", report)
+            except OSError as error:
+                self.record(
+                    "maintenance",
+                    f"report.md 写入失败（{error}）——人视图是派生物，"
+                    "下一次保存会重写；task.json 已正常落盘",
+                )
+            _cleanup_stale_tmp(directory)
 
     # ---- 给模型和报告用的视图 --------------------------------------------
 

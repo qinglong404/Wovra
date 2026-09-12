@@ -147,8 +147,8 @@ def test_settle_and_route_orders_settle_before_current_round(monkeypatch):
 
 
 def test_settle_is_noop_when_switch_off(monkeypatch):
-    """开关关闭时补判不做任何事（保持"装配与今天逐字节相同"的前提）。"""
-    monkeypatch.delenv(routing_module.ACTIVE_VIEW_ENV, raising=False)
+    """开关**显式关掉**时补判不做任何事（退路可用：装配退回单体全量）。"""
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "0")
     task = Task.create(goal="g")
     task.rounds = [_chat_round(1, "index.html 改一下")]
     task.rounds[0]["domains"] = _domains()

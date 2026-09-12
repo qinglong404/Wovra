@@ -40,6 +40,12 @@ _SPLIT_CHAT_MERGE_RATIO = float(os.environ.get("WOVRA_SPLIT_CHAT_RATIO", "0.15")
 
 _ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 
+# 一个用户回合内的最大转交跳数（route_to，2026-09-12）：主 agent 路由给
+# 某个域、该域发现不是自己的活再转出……这条链必须收口，否则两个域可以
+# 互相踢皮球到步数上限。到顶后拒绝继续转交，要求就地处理或交回用户
+# （宁可让用户看到"没人认领"，也不要烧一整个回合的空转）。
+_MAX_ROUTE_HOPS = int(os.environ.get("WOVRA_ROUTE_HOPS", "3"))
+
 # 任务状态渲染的字符预算（2026-09-11 机制评审）：TaskState 的 7 个列表
 # 各有 200 条上限（STATE_LIST_CAP），理论最坏 1400 条；它是**每轮都进
 # 上下文**的（信封尾部），不设预算就是一条无界常驻负担。实测当前 36 条

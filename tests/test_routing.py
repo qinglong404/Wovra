@@ -2,9 +2,10 @@
 
 钉住五件事：
 1. **判定顺序**——显式转交 > 文件命中（单域）> 粘滞 > 主 agent；
-2. **多域命中不猜**——一句话跨两摊活时交主 agent（可转交兜底）；
-3. **开关默认关**——不设 WOVRA_ACTIVE_VIEW 时恒判主 agent（装配与今天
-   逐字节相同，这是"步 1 行为零变化"的前提）；
+2. **多域命中交主 agent 转出**——一句话跨两摊活，由主 agent 挑关联最大的
+   那个域（它有 route_to，比规则更懂"主要在谁那儿"；接手方还能再转）；
+3. **开关默认开**——不设 WOVRA_ACTIVE_VIEW 时视图分化参与装配（显式给
+   0/false/no/off 才退回单体全量装配，那是退路）；
 4. **职责表是唯一公共信息面**——list_agents 渲染的职责表含 id/职责/文件域；
 5. **误路由可纠正**——switch_view 写 pending_view，下一轮路由直接采信。
 
@@ -55,7 +56,7 @@ def test_route_does_not_overmatch_extensionless_dir_names():
 
 
 def test_route_multi_hit_goes_to_main_agent():
-    """一句话跨两摊活：第一版交主 agent（不猜），并在证据里记下命中面。
+    """一句话跨两摊活：交主 agent，由它挑**关联最大**的域用 route_to 转出。
 
     `file_hints` 是材料侧机械统计的"该域真实出现过的文件"——只提文件名
     的说法（safety.py）靠它命中，否则职责表里的目录写法定不了归属。
@@ -68,6 +69,7 @@ def test_route_multi_hit_goes_to_main_agent():
     assert out["view"] == "A"
     assert set(out["matched"]) == {"工具层", "前端"}
     assert "多域命中" in out["reason"]
+    assert "转出" in out["reason"]      # 交主 agent 是"让它转"，不是"让它做"
 
 
 def test_route_by_bare_filename_with_hints():
@@ -94,10 +96,16 @@ def test_route_sticky_to_main_agent_is_not_reported_as_sticky():
     assert "粘滞" not in out["reason"]
 
 
-def test_active_view_switch_defaults_off(monkeypatch):
-    """开关默认关：不设环境变量时视图分化不参与装配。"""
+def test_active_view_switch_defaults_on(monkeypatch):
+    """开关默认开（2026-09-12 用户拍板「先追求效果」）。
+
+    只有显式给 0/false/no/off 才退回单体全量装配——那是退路，不是缺省。
+    """
     monkeypatch.delenv(routing_module.ACTIVE_VIEW_ENV, raising=False)
-    assert routing_module.active_view_enabled() is False
+    assert routing_module.active_view_enabled() is True
+    for value in ("0", "false", "no", "off", "OFF", " false "):
+        monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, value)
+        assert routing_module.active_view_enabled() is False, value
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     assert routing_module.active_view_enabled() is True
 
@@ -121,13 +129,21 @@ def test_identity_card_states_isolation_and_handoff():
     card = "\n".join(routing_module.identity_card("工具层", _registry()))
     assert "所有权文件域：src/wovra/tools/" in card
     assert "隔离纪律" in card
-    assert "notify" in card and "consult" in card
+    assert "route_to" in card and "consult" in card
+    assert "接活先验 ownership" in card
 
 
-def test_identity_card_for_main_agent_is_coordinator():
+def test_identity_card_for_main_agent_is_router():
+    """主 agent 的身份卡必须写清本职是路由（不是干活），且给出兜底判据。
+
+    注册表里恒有 A 条目——身份卡必须先判主 agent，否则它会拿到与子域同款
+    的通用卡片，路由纪律永远下发不到它手上（机制在、纪律缺席）。
+    """
     card = "\n".join(routing_module.identity_card("A", _registry()))
     assert "主agent" in card
-    assert "全局协调" in card
+    assert "路由器" in card and "route_to" in card
+    assert "完全不需要读任何域的代码" in card
+    assert "停手" in card
 
 
 @pytest.mark.parametrize(

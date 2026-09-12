@@ -49,12 +49,13 @@ def _agent(task: Task) -> Agent:
 
 
 def test_active_view_off_uses_legacy_assembly(monkeypatch):
-    """等价性：开关 off（默认）时不进视图分支——无职责表、无身份段。
+    """等价性：开关显式关掉（`WOVRA_ACTIVE_VIEW=0`）时不进视图分支——无职责表、
+    无身份段，字节与视图分化上线前一致（退路可用）。
 
-    且开关 on、但本轮 active_view 为主 agent 时，产物也与 off 时**逐字节
-    相同**（"active_view 缺省 = 主 agent = 今天的装配"）。
+    默认（不设环境变量）是**开**（2026-09-12 用户拍板「先追求效果」），
+    故主 agent 轮也走视图装配——它的桶是补集，不再是全量。
     """
-    monkeypatch.delenv(routing_module.ACTIVE_VIEW_ENV, raising=False)
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "0")
     task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
     agent = _agent(task)
     _make_open_round(agent, 2, "继续")
@@ -64,9 +65,13 @@ def test_active_view_off_uses_legacy_assembly(monkeypatch):
     assert "[当前身份]" not in body
     assert agent._active_view() == views_module.MAIN_AGENT_ID
 
-    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    # 默认（开）且本轮归主 agent：拿的是**自己那份料**，不是全量
+    monkeypatch.delenv(routing_module.ACTIVE_VIEW_ENV, raising=False)
     agent.current_round["active_view"] = views_module.MAIN_AGENT_ID
-    assert agent._assemble_messages() == off
+    on_msgs = agent._assemble_messages()
+    on_body = "\n".join(str(m.get("content") or "") for m in on_msgs)
+    assert "[当前身份]" in on_body
+    assert on_msgs != off
 
 
 def test_view_assembly_isolates_other_domain_rounds(monkeypatch):

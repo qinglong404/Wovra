@@ -1,7 +1,11 @@
 """Agent 账本类工具：todo（大步/小步）、notify/consult（跨 agent 通信）、
-submit_organization / submit_domains（维护管线的提交守卫）。
+route_to/switch_view（路由与转交）、submit_organization / submit_domains
+（维护管线的提交守卫）。
 """
 from typing import Optional
+
+from ..registry import MAIN_AGENT_ID
+from .support import _MAX_ROUTE_HOPS
 
 
 class _LedgerMixin:
@@ -275,6 +279,67 @@ class _LedgerMixin:
         if not lines:
             return "注册表为空（尚未分裂）。当前只有主 agent 承担全部工作。"
         return "[agent 职责表]\n" + "\n".join(lines)
+
+    def route_to(self, agent: str, reason: str) -> str:
+        """回合内转交（主 agent 的本职动作，2026-09-12 用户拍板）。
+
+        与 `switch_view` 的区别是**生效时刻**：switch_view 只管下一轮，
+        route_to 让目标**在同一个用户回合内**接手把活干完——用户不必等
+        两个回合才看到结果，主 agent 也不必替目标复述一遍。
+
+        工具方法体只登记意图（`_pending_route`），实际换视图由 `_work_loop`
+        在**工具批次跑完后**执行：批次执行期间改装配会让同批里后面的工具
+        看到错乱的上下文（读 A 域文件却按 B 域视图理解）。
+
+        跳数上限（`_MAX_ROUTE_HOPS`）记在轮上：两个域互相踢皮球的链必须
+        收口，否则烧光一整轮步数还是没人干活。到顶后拒绝转交，要求就地
+        处理或交回用户——宁可让用户看见"没人认领"，也不空转。
+        """
+        if self.task is None:
+            return "route_to：当前无任务绑定。"
+        entry = self._registry_entry(agent)
+        if entry is None:
+            known = "、".join(
+                f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
+            )
+            return f"未找到 agent：{agent}。现存：{known}"
+        target = str(entry.get("name") or entry.get("id"))
+        if str(entry.get("id")) == "A" or target == MAIN_AGENT_ID:
+            return (
+                "route_to：目标就是主 agent（你自己）——没有可转的对象，"
+                "这一轮直接自己处理。"
+            )
+        current = self.current_round or {}
+        if target == str(current.get("active_view") or ""):
+            return f"route_to：本轮已经由 {target} 接手，不要再转给自己。"
+        hops = int(current.get("route_hops") or 0)
+        if hops >= _MAX_ROUTE_HOPS:
+            return (
+                f"route_to：本回合已转交 {hops} 次（上限 {_MAX_ROUTE_HOPS}），"
+                "不再转交——就地处理，或把情况说明给用户请人指定归属。"
+            )
+        note = str(reason or "").strip()
+        self._pending_route = target
+        if self.current_round is not None:
+            # 本轮转交说明：接手方装配时用它替代被剥掉的路由步骤（见
+            # assembly._strip_router_steps）——谁是上一手、为什么转来。
+            self.current_round["route_handoff"] = {
+                "from": str(current.get("active_view") or "").strip() or "主 agent",
+                "to": target,
+                "reason": note,
+            }
+        entry.setdefault("inbox", []).append({
+            "from": "A（主agent·路由）",
+            "message": f"[转交] {note or '（未给理由）'}",
+        })
+        self.task.save()
+        if self.on_progress:
+            self.on_progress(f"🔀 本回合转交 → {entry.get('name')}：{note[:60]}")
+        return (
+            f"已转交 {entry.get('id')}（{target}）：它在本回合内直接接手"
+            "并把结果给用户。**就此停手**——不要再自己动手、不要复述用户的话、"
+            "不要写方案或解释；下一步就是它干活。"
+        )
 
     def switch_view(self, agent: str, reason: str) -> str:
         """显式转交：让**下一轮**由目标 agent 接手（本轮上下文不改写）。

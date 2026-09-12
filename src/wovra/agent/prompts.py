@@ -581,6 +581,41 @@ _SWITCH_VIEW_SCHEMA: dict = {
     },
 }
 
+_ROUTE_TO_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "route_to",
+        "description": (
+            "把**这一条用户消息**转给职责表里对应的 agent，并让它在本回合内"
+            "直接接着干活——不用等你下一轮，也不经过你转述。用户原话原封"
+            "转过去（这活本来就是它的，你不需要替它解释）。\n"
+            "用法：看懂用户要做什么后，对着职责表挑最相关的一个，调用本工具，"
+            "然后**就此停手**（不要先自己动手、不要复述用户的话、不要写方案）；"
+            "目标 agent 会在这同一个回合里把活干完并把结果直接给用户。\n"
+            "挑不出来（没有哪个域的职责对得上、或完全不需要读任何域的代码）"
+            "才自己处理。一句话跨两摊活时，挑**关联最大**的那个域转过去，"
+            "由它自己去和别的域对齐（它比你有上下文）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent": {
+                    "type": "string",
+                    "description": "目标 agent 的 id 或名称（职责表里有）",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "一句话路由理由（账本留痕用；不发给用户）。"
+                        "例：改了 tools 层文件 → 工具层"
+                    ),
+                },
+            },
+            "required": ["agent", "reason"],
+        },
+    },
+}
+
 _NOTIFY_SCHEMA: dict = {
     "type": "function",
     "function": {

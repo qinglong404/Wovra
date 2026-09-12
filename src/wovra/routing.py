@@ -12,7 +12,9 @@
 1. **显式转交**（`switch_view` 工具 / 上一轮接活视图用 notify 交出去的活）
    ——人工与机制的直接意志，最高优先；
 2. **文件命中**：用户消息里出现某域 `file_domains` 的路径或文件名 → 交给它；
-   命中多个域（一句话跨两摊活）→ 第一版交回主 agent（多域命中不猜）；
+   命中多个域（一句话跨两摊活）→ 交主 agent，由它挑**关联最大**的转出
+   （2026-09-12 用户口径：主 agent 有 route_to，它比规则更懂"这活主要在谁那儿"；
+   接手方还能再转，转错只付一跳）；
 3. **粘滞**：都没命中时留在上一轮的视图里——同一摊活连着干是常态，
    每轮重判只会让前缀反复断裂（粘滞是钱的问题，也是连贯性的问题）；
 4. **兜底主 agent**：环境准备、纯讨论、跨域闲聊天然归它。
@@ -28,15 +30,21 @@ from typing import Iterable, Optional
 
 from .registry import MAIN_AGENT_ID
 
-# 视图分化的总开关（2026-09-12）：默认关——装配行为与今天逐字节相同。
-# 打开（重启后手动设 WOVRA_ACTIVE_VIEW=1）才让 active_view 参与装配。
+# 视图分化的总开关（2026-09-12 用户拍板：**默认开**——「先追求效果，再考虑
+# 成本」）。主 agent 与子域走同一套装配分叉；显式给 0/false/no/off 才退回
+# 单体全量装配（对照实验与出问题时的退路）。
 ACTIVE_VIEW_ENV = "WOVRA_ACTIVE_VIEW"
 
 
 def active_view_enabled() -> bool:
-    """视图分化开关（env，默认关；关闭时路由结果不影响装配）。"""
+    """视图分化开关（**默认开**，2026-09-12 用户拍板「先追求效果」）。
+
+    只有显式给 `0/false/no/off` 才关回旧路径（单体全量装配）——关掉时
+    路由结果不影响装配，字节与视图分化上线前逐字节相同，供对照实验与
+    出问题时的退路用。
+    """
     value = (os.environ.get(ACTIVE_VIEW_ENV) or "").strip().lower()
-    return value in ("1", "true", "yes", "on")
+    return value not in ("0", "false", "no", "off")
 
 
 def _entries(registry: Optional[Iterable[dict]]) -> list[dict]:
@@ -156,9 +164,15 @@ def route(
             "matched": hits,
         }
     if len(hits) > 1:
+        # 多域命中不猜 → 交主 agent，但**主 agent 现在有 route_to**：
+        # 它照着职责表挑关联最大的那个转过去，由它再去和别的域对齐
+        # （2026-09-12 用户口径：一句话跨两摊活时，挑关联最大的子 agent，
+        # 它比主 agent 有上下文）。
         return {
             "view": MAIN_AGENT_ID,
-            "reason": f"多域命中（{'、'.join(hits)}）→ 交主 agent（不猜）",
+            "reason": (
+                f"多域命中（{'、'.join(hits)}）→ 交主 agent，由它挑关联最大的域转出"
+            ),
             "matched": hits,
         }
 
@@ -194,15 +208,27 @@ def responsibility_lines(registry: Optional[Iterable[dict]]) -> list[str]:
 
 
 def identity_card(name: str, registry: Optional[Iterable[dict]]) -> list[str]:
-    """本视图的身份与约束段（第 3 段；只含自己的职责，不含别人的内容）。"""
+    """本视图的身份与约束段（第 3 段；只含自己的职责，不含别人的内容）。
+
+    **主 agent 先判**（2026-09-12 修正）：注册表里恒有 `A` 条目，若先查
+    注册表，主 agent 会拿到与子域同款的通用卡片——它的路由纪律（本职是
+    转发不是干活）就永远下发不出去，等于机制在、纪律缺席。
+    """
+    if str(name) == MAIN_AGENT_ID:
+        return [
+            "[当前身份] A（主agent）：**路由器 + 兜底执行者**。"
+            "收到用户消息先对职责表问一句「这活落在谁的域里」：\n"
+            "1. 落得到 → 用 route_to 把**用户原话**转给它，"
+            "然后就此停手（不要自己动手、不要复述、不要写方案或解释）——"
+            "它在本回合内直接接手，结果直接给用户；\n"
+            "2. 落不到（完全不需要读任何域的代码就能产出新内容——环境准备、"
+            "独立想法、跟哪摊活都没关系的闲聊）→ 才自己做。\n"
+            "一句话跨两摊活：挑关联最大的那个域转过去，由它去和别的域对齐"
+            "（它比你有上下文）。你没把握就转——转错了对方会自己转出去，"
+            "代价只是一跳；自己硬做才是贵的。"
+        ]
     entry = _find(registry, name)
     if entry is None:
-        if str(name) == MAIN_AGENT_ID:
-            return [
-                "[当前身份] A（主agent）：全局协调与未归属事务"
-                "（环境准备、独立思想、零散块）。路由不了的活、跨域的活、"
-                "以及用户没说清落在哪一摊的活都由你接。"
-            ]
         return [f"[当前身份] {name}（注册表无此条目——请核对分裂产物）"]
     fds = "、".join(str(f) for f in (entry.get("file_domains") or [])) or "未划定"
     lines = [
@@ -214,8 +240,10 @@ def identity_card(name: str, registry: Optional[Iterable[dict]]) -> list[str]:
     lines.append(f"所有权文件域：{fds}")
     lines.append(
         "隔离纪律：你只看到属于自己这摊活的历史与账目——其他职责域的内容"
-        "不在你的上下文里（这是设计，不是缺失）。如果这一轮不是你的活，"
-        "用 notify 把它转给更相关的 agent（下一轮生效）；需要别人的事实，"
-        "用 consult 问属主域。"
+        "不在你的上下文里（这是设计，不是缺失）。**接活先验 ownership**："
+        "这一轮若不是你的活（要读别人的代码/文件才做得成），一上手就用 "
+        "route_to 转给更相关的 agent（本回合内生效，它直接接手）；不要"
+        "先干一半再退回——半途退货是最贵的纠错。需要别人的事实，用 "
+        "consult 问属主域；只是知会一声用 notify。"
     )
     return lines

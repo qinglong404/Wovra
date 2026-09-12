@@ -1,6 +1,11 @@
 """Task 的持久化与视图测试。不联网、不依赖 .env。"""
 
 import json
+import os
+import threading
+import time
+
+import pytest
 
 from wovra import task as task_module
 from wovra.task import Task
@@ -436,6 +441,121 @@ def test_save_sanitizes_lone_surrogates(monkeypatch, tmp_path):
     loaded = Task.load(task.id)
     assert "\ud83d" not in loaded.history[-1]["detail"]
     assert "\ufffd" in loaded.history[-1]["detail"]
+
+
+def test_save_survives_concurrent_writers(monkeypatch, tmp_path):
+    """并发保存不得撞车（2026-09-12 实测：固定 tmp 名 → WinError 5 崩会话）。
+
+    真实触发场景：主线程的账本/转交保存与后台整理线程的保存同时发生——
+    原实现的固定 `task.json.tmp` 被两边交叉写、或目标文件被另一方持句柄，
+    os.replace 直接 PermissionError，异常穿透 CLI 把整个会话带走。
+    """
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="并发落盘")
+    errors: list[BaseException] = []
+
+    def worker(n: int) -> None:
+        try:
+            for i in range(20):
+                task.record("maintenance", f"线程{n} 第{i}笔")
+                task.save()
+        except BaseException as error:  # noqa: BLE001——写进列表，别吞
+            errors.append(error)
+
+    threads = [threading.Thread(target=worker, args=(n,)) for n in range(6)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert errors == []
+    raw = json.loads((tmp_path / task.id / "task.json").read_text(encoding="utf-8"))
+    assert raw["id"] == task.id
+    # 唯一 tmp 名 + 失败清理：目录里不留任何半截文件
+    assert list((tmp_path / task.id).glob("*.tmp.*")) == []
+
+
+def test_save_retries_transient_permission_error(monkeypatch, tmp_path):
+    """os.replace 被外部句柄短暂占用（杀毒/索引器/查看器）→ 退避重试后成功。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="重试")
+    real = os.replace
+    seen: list[str] = []
+
+    def flaky(src, dst):
+        seen.append(str(dst))
+        if len([p for p in seen if p.endswith("task.json")]) <= 2:
+            raise PermissionError(13, "拒绝访问")
+        return real(src, dst)
+
+    monkeypatch.setattr(task_module.os, "replace", flaky)
+    monkeypatch.setattr(task_module, "_SAVE_BACKOFF", 0.001)
+
+    task.save()  # 修复前：第一次失败就崩
+
+    # task.json 两次失败 + 一次成功；report.md 一次成功
+    assert len([p for p in seen if p.endswith("task.json")]) == 3
+    assert len([p for p in seen if p.endswith("report.md")]) == 1
+    assert (tmp_path / task.id / "task.json").exists()
+
+
+def test_save_gives_up_and_cleans_tmp(monkeypatch, tmp_path):
+    """重试耗尽必须上抛（不假装保存成功），且不留半截 tmp。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="放弃")
+    monkeypatch.setattr(task_module, "_SAVE_ATTEMPTS", 3)
+    monkeypatch.setattr(task_module, "_SAVE_BACKOFF", 0.001)
+
+    def always_denied(src, dst):
+        raise PermissionError(13, "拒绝访问")
+
+    monkeypatch.setattr(task_module.os, "replace", always_denied)
+
+    with pytest.raises(PermissionError):
+        task.save()
+
+    assert list((tmp_path / task.id).glob("*.tmp.*")) == []
+
+
+def test_report_md_failure_is_not_fatal(monkeypatch, tmp_path):
+    """report.md 是派生物：被外部占用时不致命，task.json 照常落盘。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="人视图被占用")
+    real = os.replace
+
+    def only_report_denied(src, dst):
+        if str(dst).endswith("report.md"):
+            raise PermissionError(13, "拒绝访问")
+        return real(src, dst)
+
+    monkeypatch.setattr(task_module.os, "replace", only_report_denied)
+    monkeypatch.setattr(task_module, "_SAVE_ATTEMPTS", 2)
+    monkeypatch.setattr(task_module, "_SAVE_BACKOFF", 0.001)
+
+    task.save()  # 不抛——派生物失败不该拖垮正在进行的会话
+
+    raw = json.loads((tmp_path / task.id / "task.json").read_text(encoding="utf-8"))
+    assert raw["goal"] == "人视图被占用"
+    assert any("report.md 写入失败" in h["detail"] for h in task.history)
+
+
+def test_stale_tmp_is_cleaned_but_fresh_one_kept(monkeypatch, tmp_path):
+    """只清**够旧**的半截 tmp：新鲜的很可能是别人正在写的，动了就打坏它。"""
+    _use_tmp_root(monkeypatch, tmp_path)
+    task = Task.create(goal="清理")
+    directory = tmp_path / task.id
+    directory.mkdir(parents=True, exist_ok=True)
+    old = directory / "task.json.tmp.999.1.1"
+    fresh = directory / "task.json.tmp.999.1.2"
+    old.write_text("半截", encoding="utf-8")
+    fresh.write_text("正在写", encoding="utf-8")
+    stale_time = time.time() - 3600
+    os.utime(old, (stale_time, stale_time))
+
+    task.save()
+
+    assert not old.exists()
+    assert fresh.exists()
 
 
 def test_load_self_heals_legacy_v1_blocks(monkeypatch, tmp_path):
