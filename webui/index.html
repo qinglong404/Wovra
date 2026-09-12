@@ -64,6 +64,10 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 @keyframes sh{to{background-position:-200% 0}}
 
 /* ---------- 主区 ---------- */
+#dragbar{width:5px;cursor:col-resize;background:transparent;flex-shrink:0;transition:background .15s}
+#dragbar:hover,#dragbar.on{background:var(--acc-dim)}
+body.dragging{cursor:col-resize;user-select:none}
+body.dragging *{user-select:none!important}
 #main{flex:1;display:flex;flex-direction:column;min-width:0}
 #topbar{padding:18px var(--pad-x) 0;border-bottom:1px solid var(--line);background:linear-gradient(180deg,#0d1119,var(--bg0))}
 #goal{font-size:var(--goal-fs);font-weight:600;line-height:1.4;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
@@ -163,8 +167,8 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .think-box{background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin:3px 0;overflow:hidden}
 .think-head{padding:5px 11px;font-size:11px;color:var(--tx3);cursor:pointer;font-family:var(--mono);user-select:none}
 .think-head:hover{color:var(--tx2)}
-.think-body{display:none;padding:8px 12px 10px;font-size:11.5px;color:var(--tx3);white-space:pre-wrap;word-break:break-word;line-height:1.6;max-height:240px;overflow-y:auto;border-top:1px solid var(--line)}
-.think-box.open .think-body{display:block}
+.think-body{max-height:0;padding:0 12px;font-size:11.5px;color:var(--tx3);white-space:pre-wrap;word-break:break-word;line-height:1.6;overflow:hidden;border-top:1px solid transparent;transition:max-height .28s ease,padding .28s ease,border-color .28s}
+.think-box.open .think-body{max-height:240px;padding:8px 12px 10px;overflow-y:auto;border-top-color:var(--line)}
 .gbox .sysline{margin:2px 0 4px}
 .sys-bad{color:var(--red)}
 .more-btn{display:block;margin:4px auto 18px;padding:7px 20px;background:var(--bg2);border:1px solid var(--line2);border-radius:20px;color:var(--tx2);font-size:12px;cursor:pointer}
@@ -326,6 +330,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
     <span id="foot-ver">后端启动 — · 页面 —</span>
     <span id="shutdown-btn" style="float:right;cursor:pointer;color:var(--tx3)" title="终止服务进程（有轮在跑会被拒绝）" onclick="shutdownServer(this)">⏻</span></div>
 </aside>
+<div id="dragbar" title="拖动调整会话列表宽度（双击复位）"></div>
 <main id="main">
   <div id="topbar">
     <div id="goal" class="empty">从左侧选择一个会话</div>
@@ -513,16 +518,53 @@ function renderList(){
 }
 $('#search').addEventListener('input',renderList);
 
+let SESS_SIG='';
+function sessSig(items){
+  // 只认会改变列表外观的字段（含用量），顺带把"重排依据"updated_at 计入
+  return items.map(s=>[s.id,s.rounds,s.steps,s.updated_at,s.status,
+    s.usage?.prompt,s.escalations,s.todo_milestone].join(':')).join('|');
+}
 async function loadSessions(){
   try{
     const d=await api('/api/sessions');
     SESSIONS=d.sessions;
     const fv=document.getElementById('foot-ver');
     if(fv)fv.textContent=`后端启动 ${d.server_started||'—'} · 页面 ${document.lastModified}`;
-    renderList();
+    const sig=sessSig(SESSIONS);   // 数据没变就不重建：列表不再每 5 秒闪一次/跳一次
+    if(sig!==SESS_SIG){SESS_SIG=sig;renderList()}
     if(!CUR&&SESSIONS.length)select(SESSIONS[0].id);
   }catch(e){$('#list').innerHTML='<div class="empty">API 不可达：'+esc(e.message)+'</div>'}
 }
+
+/* ---------- 侧栏拖拽调宽（记忆到本地，双击复位回响应式默认） ---------- */
+(function(){
+  const KEY='wovra.side-w';
+  const saved=parseInt(localStorage.getItem(KEY)||'0',10);
+  if(saved>=160)document.documentElement.style.setProperty('--side-w',saved+'px');
+  const bar=document.getElementById('dragbar');
+  const side=document.getElementById('side');
+  let drag=false;
+  const clamp=w=>Math.max(170,Math.min(620,Math.min(w,innerWidth-420)));
+  bar.addEventListener('mousedown',e=>{
+    drag=true;bar.classList.add('on');document.body.classList.add('dragging');
+    e.preventDefault();
+  });
+  window.addEventListener('mousemove',e=>{
+    if(!drag)return;
+    const w=clamp(e.clientX);
+    document.documentElement.style.setProperty('--side-w',w+'px');
+  });
+  window.addEventListener('mouseup',()=>{
+    if(!drag)return;
+    drag=false;bar.classList.remove('on');document.body.classList.remove('dragging');
+    const w=parseInt(getComputedStyle(document.documentElement).getPropertyValue('--side-w'),10);
+    if(w>=160)localStorage.setItem(KEY,String(w));
+  });
+  bar.addEventListener('dblclick',()=>{   // 复位：交还响应式断点
+    localStorage.removeItem(KEY);
+    document.documentElement.style.removeProperty('--side-w');
+  });
+})();
 
 /* ---------- 会话选择 ---------- */
 async function select(id){
@@ -814,6 +856,28 @@ async function renderConv(c,fresh){
   }
   drawConv(c,true);
 }
+function toggleThink(el){el.dataset.user='1';el.classList.toggle('open')}
+function autoOpenLastThink(){
+  // 直播期间：最新落账的思考块保持展开——占住流式区刚让出的高度，
+  // 下面内容不瞬间上跳；被更新的思考块顶替时带动画折叠
+  const boxes=[...document.querySelectorAll('#content .think-box')];
+  boxes.forEach((b,i)=>b.classList.toggle('open', i===boxes.length-1 && b.dataset.user!=='1'));
+}
+function tickRunning(){
+  // 只改最后一个卡片的"开始·持续"文本：零重建、零跳动
+  if(TAB!=='conv')return;
+  const seqs=CONV.seqs;if(!seqs.length)return;
+  const d=CONV.cache[seqs[seqs.length-1]];
+  if(!d||!(d.events||[]).length)return;
+  const ev=d.events[d.events.length-1];
+  if(ev.type!=='tool_call')return;
+  const t=Date.parse(ev.time||'');if(isNaN(t))return;
+  const cards=document.querySelectorAll('#content .tcard');
+  const card=cards[cards.length-1];if(!card)return;
+  const el=card.querySelector('.t-when');if(!el)return;
+  const du=fmtDur((Date.now()-t)/1000);
+  el.textContent=fmtClock(ev.time)+(du?' · '+du:'');
+}
 async function loadEarlier(){
   const before=convAllSeqs().filter(s=>s<CONV.seqs[0]).slice(-5);
   if(!before.length)return;
@@ -945,7 +1009,7 @@ function drawConv(c,toBottom){
             (it.tm?`<span class="stime">${esc(it.tm)}</span>`:'')+`</div>`;
         }
         if(it.t==='think'){
-          return `<div class="think-box" onclick="this.classList.toggle('open')">
+          return `<div class="think-box" onclick="toggleThink(this)">
             <div class="think-head">💭 思考过程 · ${fmtN(it.text.length)} 字（点击展开）</div>
             <div class="think-body">${esc(it.text)}</div></div>`;
         }
@@ -990,7 +1054,7 @@ function drawConv(c,toBottom){
     c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
     requestAnimationFrame(()=>{REBUILDING=false});
   }
-  if(LIVE.job&&CUR===LIVE.cur)renderLive();   // 重绘后把直播区接回来
+  if(LIVE.job&&CUR===LIVE.cur){autoOpenLastThink();renderLive()}   // 重绘后接回直播区并保持最新思考展开
 }
 function ci_status(ci){
   if(!ci||ci.result==null)return['无结果','st-run'];
@@ -1081,9 +1145,9 @@ setInterval(async()=>{
         if(inc.blocks&&inc.blocks.length)d.blocks=inc.blocks;
         drawConv($('#content'),FOLLOW);
       }else if(LIVE.job){
-        // 轮在跑但没有新事件：也要重绘——运行中卡片的时长按"至今"实时算，
-        // 不重绘就冻在上一次的数字上（用户得手动刷新才看到结果/计时）
-        drawConv($('#content'),FOLLOW);
+        // 轮在跑但没有新事件：不重建 DOM（重建=整块消失再出现，视觉跳动），
+        // 只原地更新运行中卡片的计时文本
+        tickRunning();
       }
     }
   }catch(e){/* 轮询失败静默，下一轮再试 */}
