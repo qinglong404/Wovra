@@ -314,6 +314,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #drawer.open{right:0}
 #drawer .d-head{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;align-items:center;gap:10px}
 #drawer .d-head b{font-size:13px;flex:1}
+#drawer .d-head{align-items:flex-start}
+#d-sub{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
 #drawer .d-close{cursor:pointer;color:var(--tx3);font-size:18px;padding:2px 8px;border-radius:6px}
 #drawer .d-close:hover{color:var(--tx);background:var(--bg3)}
 #drawer .d-body{flex:1;overflow-y:auto;padding:10px 12px}
@@ -1948,11 +1950,14 @@ async function openPendingView(name){
     const altOn=name==='__alt__';
     const mainEntry=list.find(x=>x.is_main)||list[0];
     const pick=altOn?mainEntry:(list.find(x=>(x.name||'')===name||(x.id||'')===name)||mainEntry);
+    const shortLab=x=>x.is_main?'主 agent':(esc(x.id||''));   // chip 只放短标签，全名走 title
     const chips=list.map(x=>`<span class="chip ${(!altOn&&x===pick)?'acc':''}" style="cursor:pointer"
-      onclick="openPendingView('${esc(x.name||x.id||'')}')">${x.is_main?'主 agent（重组后）':esc(x.id||'')+' · '+esc(x.name||'')}</span>`).join(' ');
+      title="${esc(x.name||'')}"
+      onclick="openPendingView('${esc(x.name||x.id||'')}')">重组后 · ${shortLab(x)}</span>`).join('');
     const altChip=mainEntry&&mainEntry.alt_messages?`<span class="chip ${altOn?'acc':''}" style="cursor:pointer"
-      onclick="openPendingView('__alt__')">整理后（未重组）</span>`:'';
-    $('#d-sub').innerHTML=altChip+' '+chips;
+      title="分裂重组生效前的完整上下文（整理后全量装配）"
+      onclick="openPendingView('__alt__')">重组前（整理后全量）</span>`:'';
+    $('#d-sub').innerHTML=altChip+chips;
     const cmp=(pick.is_main&&pick.alt_chars)?`　对照：全量装配 ${fmtN(pick.alt_count||0)} 条 / ${fmtN(pick.alt_chars)} 字符（分裂前口径）`:'';
     if(altOn){
       const fds2=((pick.file_domains||[]).length)
@@ -2013,16 +2018,38 @@ function renderUsage(c){
   }).join('');
   const astats=META.agent_stats||[];
   const prettyName=k=>REG[k]?.name||REG[k]?.id||k;
-  const agentTable=!astats.length?'':`
+  const vs=(VIEWSIZES&&VIEWSIZES.agents)||[];
+  const vsOf=a=>vs.find(x=>(x.id||'')===(a.agent||'')||(x.name||'')===prettyName(a.agent));
+  const seenVs=new Set();
+  const rowsAll=astats.map(a=>({kind:'stat',a,vs:vsOf(a)}));
+  // 分裂产出、尚未有运行时账的子 agent：也列出（视图体量已知，用量为空）
+  for(const x of vs){
+    if(x.is_main)continue;
+    const dup=astats.some(a=>(a.agent||'')===(x.id||'')||prettyName(a.agent)===(x.name||''));
+    if(dup)continue;
+    seenVs.add(x.id||x.name);
+    rowsAll.push({kind:'pending',x});
+  }
+  const agentTable=!rowsAll.length?'':`
     <h3 class="sec">按 agent 聚合（轮次/步数精确；用量按 steps 签名归属，近似口径）</h3>
     <table class="tbl"><thead><tr>
       <th>agent</th><th>轮次</th><th>步数</th><th>上下文峰值 tok</th>
-      <th>单轮消费 tok</th><th>Σprompt tok</th><th>Σ输出 tok</th><th>命中率</th></tr></thead>
-      <tbody>${astats.map(a=>{
+      <th>单轮消费 tok</th><th>重组后视图 tok</th><th>Σprompt tok</th><th>Σ输出 tok</th><th>命中率</th></tr></thead>
+      <tbody>${rowsAll.map(r=>{
+        if(r.kind==='pending'){
+          const x=r.x;
+          return `<tr><td><span class="mono" style="color:${agentColor(x.id||x.name)}">${esc(x.id||'')}</span> <span class="mono" style="color:var(--tx3)">${esc(x.name||'')}</span></td>
+            <td class="mono" colspan="4" style="color:var(--tx3)">尚未接活（分裂产出，待路由到它才有轮次与用量）</td>
+            <td class="mono" style="color:var(--acc)">${fmtN(x.tokens||0)}</td>
+            <td class="mono">—</td><td class="mono">—</td><td class="mono">—</td></tr>`;
+        }
+        const a=r.a;
         const hitA=fmtP(a.cached||0,(a.cached||0)+(a.miss||0));
+        const vTok=r.vs?(r.vs.tokens||0):(a.agent==='Main'?0:0);
         return `<tr><td><span class="mono" style="color:${agentColor(a.agent)}">${esc(prettyName(a.agent))}</span> <span class="mono" style="color:var(--tx3)">${esc(a.agent)}</span></td>
           <td class="mono">${a.rounds}</td><td class="mono">${fmtN(a.steps||0)}</td>
           <td class="mono">${fmtN(a.ctx_peak||0)}</td><td class="mono">${fmtN(a.avg_prompt||0)}</td>
+          <td class="mono" style="color:var(--acc)">${vTok?fmtN(vTok):'—'}</td>
           <td class="mono">${fmtN(a.prompt||0)}</td><td class="mono">${fmtN(a.completion||0)}</td>
           <td class="mono" style="color:var(--teal)">${hitA}</td></tr>`}).join('')}</tbody></table>`;
   c.innerHTML=
