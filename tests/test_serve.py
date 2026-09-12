@@ -55,7 +55,17 @@ def _fake_task() -> dict:
         "registry": [{"id": "A", "name": "主agent", "status": "active", "inbox": []}],
         "history": [{"kind": "llm_call", "time": "t1",
                      "detail": "[working] prompt=100 cached=90 miss=10 completion=5 "
-                               "ttft=1.0s finish=stop"}],
+                               "ttft=1.0s finish=stop"},
+                    {"kind": "usage", "time": "t2",
+                     "detail": "[managed] steps=5 context=50,000 prompt=45,000 "
+                               "completion=1,200 缓存命中 43,000 tok（95.6%） "
+                               "未命中 2,000 tok（4.4%）"},
+                    {"kind": "usage", "time": "t3",
+                     "detail": "[managed] steps=2 context=60,000 prompt=30,000 "
+                               "completion=800 缓存命中 29,000 tok 未命中 1,000 tok"},
+                    {"kind": "usage", "time": "t4",
+                     "detail": "[managed] steps=2 context=70,000 prompt=20,000 "
+                               "completion=300 缓存命中 19,000 tok 未命中 1,000 tok"}],
         "rounds": [
             {"seq": 1, "user_input": {"original": "干活"}, "end_state": "completed",
              "org_state": "done", "org_generation": 2, "steps_used": 7,
@@ -65,7 +75,7 @@ def _fake_task() -> dict:
              "blocks": [{"id": "R1-B1", "file": "a.py", "kind": "file",
                          "events": ["R1-E01"]}]},
             {"seq": 2, "user_input": {"original": "继续"}, "end_state": "open",
-             "org_state": "", "events": []},
+             "org_state": "", "steps_used": 2, "events": []},
         ],
     }
 
@@ -99,6 +109,26 @@ def test_round_detail_flattens_events():
                               "tool_calls": None, "tool_call_id": None}
     assert d["blocks"][0]["file"] == "a.py"
     assert serve.round_detail(_fake_task(), 99) is None
+
+
+def test_round_usage_map_steps_signature():
+    """轮级用量：usage 行按 steps 签名归属（轮1=7步吃两行，轮2=2步吃一行）。"""
+    m = serve.round_usage_map(_fake_task())
+    assert m[1]["calls"] == 2 and m[1]["prompt"] == 75000
+    assert m[1]["cached"] == 72000 and m[1]["miss"] == 3000
+    assert m[1]["completion"] == 2000 and m[1]["context"] == 60000
+    assert m[1]["steps"] == 7                       # 结算覆盖步数
+    assert m[2] == {"steps": 2, "calls": 1, "prompt": 20000, "cached": 19000,
+                    "miss": 1000, "completion": 300, "context": 70000}
+
+
+def test_session_meta_round_list_has_usage():
+    meta = serve.session_meta("s1", _fake_task())
+    assert meta["round_list"][0]["usage"]["prompt"] == 75000
+    assert meta["round_list"][1]["usage"]["calls"] == 1
+    # agent_stats 与轮级账同源：无 active_view 的轮归主 agent（哨兵 ID）
+    a = meta["agent_stats"][0]
+    assert a["agent"] == "Main" and a["prompt"] == 95000 and a["billed_rounds"] == 2
 
 
 def test_round_detail_after_filter():

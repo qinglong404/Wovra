@@ -45,7 +45,7 @@ JSON"的机械派生；页面零构建（单文件 HTML + 原生 JS），`wovra 
 | 端点 | 返回 | 说明 |
 |---|---|---|
 | `GET /api/sessions` | `{scanning, sessions:[…]}` | 摘要列表（后台按 mtime 增量解析，先到先显示） |
-| `GET /api/sessions/{id}` | 会话元数据 | 摘要 + task_state + todo + registry + **rounds 元数据（不含 events——task.json 可达 16MB，事件按需取；含 t0/t1 首末事件时间，供时间线轮历时）** |
+| `GET /api/sessions/{id}` | 会话元数据 | 摘要 + task_state + todo + registry + **rounds 元数据（不含 events——task.json 可达 16MB，事件按需取；含 t0/t1 首末事件时间与 usage 轮级账（steps 签名归属，同 agent_stats 口径），供对话页轮头与时间线）** |
 | `GET /api/sessions/{id}/rounds/{seq}` | `{events, blocks}` | 单轮完整事件与块；`?after=R{n}-E{m}` 只回之后的事件（C3 实时跟随增量）；事件含 `time`（落账 timestamp），前端派生开始时间与持续（=距下一事件） |
 
 摘要条目：`{id, goal, status, workspace, mode, created_at, updated_at,

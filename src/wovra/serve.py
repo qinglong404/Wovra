@@ -51,6 +51,36 @@ def parse_usage_row(detail: str) -> dict | None:
     return out
 
 
+def round_usage_map(data: dict) -> dict[int, dict]:
+    """每轮的用量账（steps 签名归属，与 agent_stats 同一口径）。
+
+    一轮只在一个 active_view 上跑——轮级账天然就是该轮 agent 的账。
+    context = 轮内各分段上下文峰值。
+    """
+    rows = [parse_usage_row(h.get("detail", ""))
+            for h in data.get("history") or [] if h.get("kind") == "usage"]
+    rows = [x for x in rows if x]
+    it = iter(rows)
+    out: dict[int, dict] = {}
+    for r in data.get("rounds") or []:
+        target = r.get("steps_used") or 0
+        acc = 0
+        agg: dict = {"steps": 0, "calls": 0, "prompt": 0, "cached": 0,
+                     "miss": 0, "completion": 0, "context": 0}
+        while acc < target:
+            row = next(it, None)
+            if row is None:
+                break
+            acc += row.get("steps", 0)
+            agg["steps"] += row.get("steps", 0)
+            agg["calls"] += 1
+            for k in _USAGE_KEYS:
+                agg[k] += row.get(k, 0)
+            agg["context"] = max(agg["context"], row.get("context", 0))
+        out[r.get("seq")] = agg
+    return out
+
+
 def agent_stats(
     data: dict, main_id: str = "", registry: list | None = None
 ) -> list[dict]:
@@ -78,32 +108,18 @@ def agent_stats(
             order.append(aid)
         return per[aid]
 
+    usage = round_usage_map(data)
     for r in rounds:
         aid = r.get("active_view") or main_id
         b = bucket(aid)
         b["rounds"] += 1
         b["steps"] += r.get("steps_used") or 0
-
-    rows = [parse_usage_row(h.get("detail", ""))
-            for h in data.get("history") or [] if h.get("kind") == "usage"]
-    rows = [x for x in rows if x]
-    it = iter(rows)
-    for r in rounds:
-        aid = r.get("active_view") or main_id
-        b = bucket(aid)
-        target = r.get("steps_used") or 0
-        acc = 0
-        while acc < target:
-            row = next(it, None)
-            if row is None:
-                break
-            acc += row.get("steps", 0)
-            b["prompt"] += row.get("prompt", 0)
-            b["cached"] += row.get("cached", 0)
-            b["miss"] += row.get("miss", 0)
-            b["completion"] += row.get("completion", 0)
-            b["ctx_peak"] = max(b["ctx_peak"], row.get("context", 0))
+        agg = usage.get(r.get("seq")) or {}
+        if agg.get("calls"):
             b["billed_rounds"] += 1
+        for k in _USAGE_KEYS:
+            b[k] += agg.get(k, 0)
+        b["ctx_peak"] = max(b["ctx_peak"], agg.get("context", 0))
 
     out = []
     runtime = registry_module.runtime_stats(
@@ -341,7 +357,7 @@ def session_summary(task_id: str, data: dict) -> dict:
     }
 
 
-def _round_meta(r: dict) -> dict:
+def _round_meta(r: dict, usage: dict | None = None) -> dict:
     """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。"""
     evs = r.get("events") or []
     return {
@@ -355,6 +371,7 @@ def _round_meta(r: dict) -> dict:
         "events": len(evs),
         "t0": (evs[0].get("timestamp") or "") if evs else "",
         "t1": (evs[-1].get("timestamp") or "") if evs else "",
+        "usage": usage or {},
         "blocks": r.get("blocks") or [],
     }
 
@@ -365,7 +382,9 @@ def session_meta(task_id: str, data: dict) -> dict:
     meta["task_state"] = data.get("task_state") or {}
     meta["todo"] = data.get("todo") or {}
     meta["registry"] = data.get("registry") or []
-    meta["round_list"] = [_round_meta(r) for r in data.get("rounds") or []]
+    usage = round_usage_map(data)
+    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")))
+                          for r in data.get("rounds") or []]
     meta["agent_stats"] = agent_stats(data)
     return meta
 
