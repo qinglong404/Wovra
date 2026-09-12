@@ -60,12 +60,21 @@ load_dotenv(dotenv_path=_PROJECT_ROOT / ".env")
 def reasoning_of(part) -> str:
     """兼容地取出思考内容（reasoning content）。
 
-    思考内容不是 OpenAI 协议的标准字段，各服务以扩展字段
-    `reasoning_content` 下发；SDK 没有为它生成属性时，会落进
-    pydantic 的 model_extra。message 和流式 delta 都适用。
+    思考内容不是 OpenAI 协议的标准字段，各家字段名不一：DeepSeek 官方
+    走 `reasoning_content`（SDK 没有该属性时落进 pydantic 的 model_extra）；
+    OpenRouter 系网关走 `reasoning`（实测 commandcode 网关，2026-09-12）。
+    message 和流式 delta 都适用。
     """
-    return getattr(part, "reasoning_content", None) or (
-        (getattr(part, "model_extra", None) or {}).get("reasoning_content") or ""
+
+    def _str(value) -> str:
+        return value if isinstance(value, str) else ""
+
+    return (
+        _str(getattr(part, "reasoning_content", None))
+        or _str((getattr(part, "model_extra", None) or {}).get("reasoning_content"))
+        or _str(getattr(part, "reasoning", None))
+        or _str((getattr(part, "model_extra", None) or {}).get("reasoning"))
+        or ""
     )
 
 
