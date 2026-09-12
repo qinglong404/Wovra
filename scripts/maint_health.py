@@ -243,6 +243,25 @@ def report(task_id: str) -> None:
                 task.rounds, task.get_state(), registry=task.registry,
                 watermark=watermark,
             )
+            # 分档前/后对照（同一份材料的 A/B：临时关掉折叠再派生一次）——
+            # 跨会话比数没有意义（域树与轮数都会变），必须同一材料两次派生。
+            real_is_folded = views_module.is_folded
+            try:
+                views_module.is_folded = lambda r, k: False
+                raw = views_module.view_watermarks(
+                    task.rounds, task.get_state(), registry=task.registry,
+                )
+            finally:
+                views_module.is_folded = real_is_folded
+            raw_sizes = [int(m.get("tokens") or 0) for m in raw.values()]
+            raw_span = (f"{min(raw_sizes):,}–{max(raw_sizes):,}"
+                        if raw_sizes else "—")
+            total_now = sum(int(m.get("tokens") or 0) for m in marks.values())
+            total_raw = sum(raw_sizes)
+            saved = total_raw - total_now
+            pct = (saved / total_raw) if total_raw else 0.0
+            print(f"视图体量（分档前 {raw_span} tok → 分档后 {span} tok）："
+                  f"合计 {total_raw:,} → {total_now:,}（省 {saved:,}，{pct:.1%}）")
             over = [n for n, m in marks.items()
                     if m.get("over") and n != views_module.MAIN_AGENT_ID]
             print(f"视图水位（阈值 {watermark:,}）："

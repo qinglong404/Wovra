@@ -68,6 +68,46 @@ from .registry import MAIN_AGENT_ID, latest_domains
 GLOBAL_STATE_FIELDS = ("goal", "current_status", "escalations", "experiments")
 SHARDED_STATE_FIELDS = ("decisions", "known_issues", "open_questions")
 
+# 分档口径（2026-09-12，与装配同源）：本视图只保留最近 N 批整理的块细节，
+# 更早代折叠为「文件名清单 + N 块已折叠」。基准是**本视图自己的**代次水位，
+# 不是全局最新代次——否则别的域一整理，本视图字节就跟着漂、冻结性失效
+# （plan §2/§5.1）。未整理的轮永不折叠（分辨率损失只允许来自整理）。
+FOLD_KEEP_GENERATIONS = 3
+
+
+def round_generation(r: dict) -> int:
+    """轮的整理代次（`done` 才有；未整理返回 0）。
+
+    与装配端同口径：已整理但无 `org_generation` 的旧轮视为第 1 代
+    （最老、优先折叠）——两处判据必须一致，否则同一轮的档位会打架。
+    """
+    r = r or {}
+    if str(r.get("org_state") or "") != "done":
+        return 0
+    try:
+        return int(r.get("org_generation") or 1)
+    except (TypeError, ValueError):
+        return 1
+
+
+def view_keep_min(rounds: Iterable[dict]) -> Optional[int]:
+    """本视图自己的分档基准：低于它的已整理轮折叠；无已整理轮时 None。
+
+    只喂**本视图命中的轮**——这就是"按视图各自计量"的落点。
+    """
+    gens = [g for g in (round_generation(r) for r in rounds) if g > 0]
+    if not gens:
+        return None
+    return max(gens) - (FOLD_KEEP_GENERATIONS - 1)
+
+
+def is_folded(r: dict, keep_min: Optional[int]) -> bool:
+    """该轮在本视图里是否走折叠档（未整理 / 无基准 → 永不折叠）。"""
+    gen = round_generation(r)
+    if gen <= 0 or keep_min is None:
+        return False
+    return gen < keep_min
+
 
 def _file_domain_entries(domains: Iterable[dict]) -> list[tuple[str, str]]:
     """(路径前缀, 域名) 列表，按前缀长度降序（最长前缀优先匹配）。"""
@@ -231,6 +271,65 @@ def _round_lines(r: dict) -> list[str]:
     return lines
 
 
+def _file_lines_and_count(pairs: Iterable[tuple[str, dict]], ledger) -> list[str]:
+    """折叠档的块行：文件名清单 + 块 ID + 「N 块已折叠」（与装配二级折叠同口径）。
+
+    折叠只去块**描述**——膨胀来源就是描述（实测折叠档 80% 体量是块摘要）；
+    **块 ID 保留**（R68 用户口径：「留，不然如何取回原文，展开工具就没有用了」）：
+    它是 `expand_history` 定位块原文的锚，且体量极小。已删文件标「已删」但
+    仍列出——清单是"这轮碰过什么"的索引，比整块消失好。
+    """
+    files: list[str] = []
+    ids: list[str] = []
+    for bid, item in pairs or []:
+        if item is None:
+            continue
+        ids.append(str(bid))
+        b = (item or {}).get("block") or {}
+        f = str(b.get("file") or "")
+        if not f:
+            wrote = b.get("wrote_files") or []
+            f = str(wrote[0]) if wrote else ""
+        if f and f not in files:
+            files.append(f)
+    lines: list[str] = []
+    if files:
+        parts = [
+            f"{f}（已删）" if ledger is not None and ledger.state_of(f) == "dead" else f
+            for f in files
+        ]
+        lines.append("涉及文件：" + "、".join(parts))
+    if ids:
+        shown = "、".join(sorted(ids, key=_bnum)[:12])
+        more = "…" if len(ids) > 12 else ""
+        lines.append(
+            f"（{len(ids)} 块细节已折叠：{shown}{more}——"
+            "块 ID 保留，按轮号或块 ID expand_history 可展开本轮）"
+        )
+    return lines
+
+
+def folded_block_lines(
+    r: dict,
+    rec: dict,
+    index: Optional[dict[str, dict]] = None,
+    ledger=None,
+) -> list[str]:
+    """装配侧：本视图里某一折叠轮的块行（装配的 rec 用 own_ids/user_ids 形态）。
+
+    用户块**不折叠**——它与轮头用户原文同规则（用户输入是输入，不是细节）；
+    折叠只针对本域块**描述**（那才是会单调膨胀的部分），块 ID 一律保留
+    （R68 口径：没有块 ID，`expand_history` 就取不回原文）。
+    """
+    idx = index or {}
+    pairs = [
+        (str(bid), idx.get(str(bid)))
+        for bid in (rec.get("own_ids") or [])
+        if idx.get(str(bid)) is not None
+    ]
+    return _file_lines_and_count(pairs, ledger)
+
+
 def _bnum(bid: str) -> int:
     """块号（排序键；解析不出来当 0）。"""
     try:
@@ -339,9 +438,12 @@ def view_watermarks(
     `rounds`（该域活跃轮数＝命中轮数，同时是经济判据里 `N_future` 的保守下界）、
     `over`（是否已达自身水位）。
 
-    口径提醒：`tokens` 是该视图**全部块的一行式重建**（尚未按自身整理代次分档），
-    属**上界**——用它做"要不要再裂"的判据是偏保守的（宁可晚裂，不早裂）；
-    分档落地后这个数会降下来，判据随之更准。
+    口径提醒（2026-09-12 更新）：`tokens` 是该视图**全部块的一行式重建**，
+    已按**本视图自己的代次水位**分档（最近 3 批全分辨率、更早代折叠为文件名
+    清单）——故它不再是"未分档的上界"，而是当前真实口径；但它仍不含装配
+    侧的口袋（信封、职责表、身份段），比真实装配体量略小。
+    仪器（`scripts/maint_health.py`）会临时关掉折叠再派生一次做 A/B——同一份
+    材料两次派生，跨会话比数没有意义（域树与轮数都会变）。
     """
     built = build_views(rounds, state, domains=domains, registry=registry)
     out: dict[str, dict] = {}
@@ -422,18 +524,32 @@ def view_for_domain(
     history: list[str] = []
     own_ids: list[str] = []
     hit_rounds = 0
+    folded_rounds = 0
+    # 分档基准取自**本视图命中轮**（不是全局最新代次）——见 view_keep_min。
+    keep_min = view_keep_min(rec["round"] for rec in per_seq.values() if rec.get("hit"))
     for seq in sorted(per_seq):
         rec = per_seq[seq]
         if not rec["hit"]:
             continue  # 非本视图的轮：整轮不出现
         hit_rounds += 1
         lines = _round_lines(rec["round"])
+        # 用户块**不折叠**（与轮头用户原文同规则）；只折本域块描述。
         for bid, item in sorted(rec["users"], key=lambda x: _bnum(x[0])):
             lines.append(_terse_block("▸ ", bid, item, ledger))
-            own_ids.append(bid)
-        for bid, item in sorted(rec["hit"], key=lambda x: _bnum(x[0])):
-            lines.append(_terse_block("▸ ", bid, item, ledger))
-            own_ids.append(bid)
+        if is_folded(rec["round"], keep_min):
+            folded_rounds += 1
+            lines += _file_lines_and_count(rec["hit"], ledger)
+        else:
+            for bid, item in sorted(rec["hit"], key=lambda x: _bnum(x[0])):
+                lines.append(_terse_block("▸ ", bid, item, ledger))
+        # 块 ID 恒进 own_ids（完整性对账用）：折叠只改**渲染文本**，
+        # 不改归属——块仍有归宿，仍可按轮号 expand_history 取回原文。
+        own_ids.extend(
+            bid for bid, _item in sorted(rec["users"], key=lambda x: _bnum(x[0]))
+        )
+        own_ids.extend(
+            bid for bid, _item in sorted(rec["hit"], key=lambda x: _bnum(x[0]))
+        )
         history.extend(lines)
 
     # 账本：子域按自己的 file_domains 切片；主 agent 拿**不属于任何域**的那
@@ -446,9 +562,11 @@ def view_for_domain(
     else:
         sharded = slice_state(state, node.get("file_domains") or [])
 
-    text_lines = card + ["", "[本视图历史]（命中轮的用户原文 + 本域块）"] + (
-        history or ["（无——本域尚无命中轮）"]
-    )
+    text_lines = card + [
+        "",
+        "[本视图历史]（命中轮的用户原文 + 本域块；"
+        f"最近 {FOLD_KEEP_GENERATIONS} 批整理全分辨率，更早代折叠）",
+    ] + (history or ["（无——本域尚无命中轮）"])
     if sharded:
         text_lines += ["", "[本域账本]"]
         for field, items in sharded.items():

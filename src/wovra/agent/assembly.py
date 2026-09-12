@@ -191,6 +191,11 @@ class _AssemblyMixin:
             msgs.append({"role": "system", "content": head})
 
         # [2] 本视图历史：命中轮才成段（轮头 + 用户块 → user；本域块 → assistant）
+        # 分档基准取自**本视图命中轮**（不是全局最新代次）：别的域整理不会
+        # 移动这条线，故本视图字节不因他人整理而漂（plan §2/§5.1 不变量）。
+        keep_min = views_module.view_keep_min(
+            rec["round"] for rec in hits.values()
+        )
         for seq in sorted(hits):
             rec = hits[seq]
             r = rec["round"]
@@ -200,7 +205,9 @@ class _AssemblyMixin:
             })
             msgs.append({
                 "role": "assistant",
-                "content": "\n".join(self._view_round_detail(r, rec, index)),
+                "content": "\n".join(
+                    self._view_round_detail(r, rec, index, keep_min)
+                ),
             })
         if not hits:
             msgs.append({
@@ -261,13 +268,22 @@ class _AssemblyMixin:
             lines.append(f"▸ {bid}（用户补充输入）: {text}" if text else f"▸ {bid}（用户补充输入）")
         return lines
 
-    def _view_round_detail(self, r: dict, rec: dict, index: dict) -> list[str]:
+    def _view_round_detail(
+        self, r: dict, rec: dict, index: dict, keep_min: Optional[int] = None
+    ) -> list[str]:
         """本域块：已整理的给一行全分辨率描述，未整理的给原文（可 expand 取回）。
 
         分辨率损失只允许来自整理，不来自装配——未整理的块在这里直接摊开
         原文，与今天的装配口径一致。
+
+        **分档（2026-09-12）**：早于 `keep_min`（本视图自己最近 3 批整理）
+        的轮只给「文件名清单 + N 块已折叠」，与装配二级折叠同口径。折叠只改
+        渲染文本、不改归属——块 ID 仍在 `own_ids` 里，按轮号 `expand_history`
+        可展开本轮取回原文。
         """
         summaries = r.get("block_summaries") or {}
+        if views_module.is_folded(r, keep_min):
+            return views_module.folded_block_lines(r, rec, index)
         lines: list[str] = []
         for bid in rec.get("own_ids") or []:
             item = index.get(bid)

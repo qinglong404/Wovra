@@ -391,3 +391,71 @@ def test_subdomain_gets_its_own_view_and_watermark():
     child_text = built["views"]["检测加固"]["text"]
     assert "canary.py" in child_text
     assert "safety.py" not in child_text
+
+
+def _gen_round(seq: int, files: list[str], gen: int, summaries: dict | None = None) -> dict:
+    """造一个「已整理、第 gen 代」的轮（分档判据的输入）。"""
+    r = _block_round(seq, files, summaries)
+    r["org_state"] = "done"
+    r["org_generation"] = gen
+    return r
+
+
+def test_view_tiering_folds_older_generations_by_own_watermark():
+    """分档（plan §2）：最近 3 批整理全分辨率，更早代折叠为文件名清单。
+
+    基准是本视图**自己的**代次水位（本域命中轮的最大代次 − 2）：本域连续 5 代，
+    则第 1–2 代折叠、第 3–5 代全分辨率。
+    """
+    rounds = [
+        _gen_round(i, ["src/wovra/tools/f%d.py" % i], i) for i in range(1, 6)
+    ]
+    domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+    built = views_module.build_views(rounds, TaskState(), domains=domains)
+    text = built["views"]["工具层"]["text"]
+
+    # 更早代：只留文件名清单 + 折叠计数（不留块描述）
+    assert "涉及文件：src/wovra/tools/f1.py" in text
+    assert "块细节已折叠" in text
+    # 最近代：块 ID 与全分辨率描述在场（R5 是最近一批）
+    assert "R5-B1" in text
+    # 轮头（用户原文）在两种档位下**都保留**——用户输入是输入，不是细节
+    assert "👤 用户:" in text
+
+    # 归属不因折叠而丢：折叠轮的块 ID 仍在 own_ids（完整性对账的前提）
+    own = set(built["views"]["工具层"]["own_ids"])
+    assert any(b.startswith("R1-B") for b in own)
+    assert built["completeness"]["ok"] is True
+
+
+def test_view_tiering_never_folds_organized_or_unorganized_gaps():
+    """未整理的轮永不折叠；本域无已整理轮时分档基准为 None（一律全分辨率）。"""
+    rounds = [_block_round(1, ["src/wovra/tools/a.py"])]      # 未整理
+    domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+    assert views_module.view_keep_min(rounds) is None
+    built = views_module.build_views(rounds, TaskState(), domains=domains)
+    text = built["views"]["工具层"]["text"]
+    assert "块细节已折叠" not in text
+    assert "R1-B" in text
+
+
+def test_view_keep_min_is_per_view_not_global():
+    """分档基准按视图各自计量：别的域代次高，不拉高本视图的折叠线。
+
+    本域只有第 1 代 → 基准 = 1 − 2 = −1（低于任何代次，故一律不折叠）；
+    若错用全局最新代次（9），基准会是 7，本域那一轮就会被错误折叠。
+    """
+    rounds = [
+        _gen_round(1, ["src/wovra/tools/a.py"], 1),
+        _gen_round(2, ["index.html"], 9),          # 别的域整理了很多批
+    ]
+    domains = [
+        {"name": "工具层", "file_domains": ["src/wovra/tools/"]},
+        {"name": "前端", "file_domains": ["index.html"]},
+    ]
+    assert views_module.view_keep_min([rounds[0]]) == -1   # 本域单代：基准 −1
+    assert views_module.view_keep_min(rounds) == 7         # 全局口径会算出 7（不许用）
+    built = views_module.build_views(rounds, TaskState(), domains=domains)
+    tools_text = built["views"]["工具层"]["text"]
+    assert "R1-B" in tools_text
+    assert "块细节已折叠" not in tools_text

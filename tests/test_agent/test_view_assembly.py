@@ -114,10 +114,11 @@ def test_view_assembly_history_is_frozen_when_other_domain_organized(monkeypatch
     before = agent._assemble_messages()
 
     # 前端那批活被整理（别人的水位推进）：块描述与代次都变了。
-    # agent.rounds 是 task.rounds 的浅拷贝，内层 dict 共享——改材料即改视图输入。
-    task.rounds[1]["org_state"] = "done"
-    task.rounds[1]["org_generation"] = 9
-    task.rounds[1]["block_summaries"] = {"R2-B1": "index.html 的描述（不该进工具层视图）"}
+    # 注意：Agent 构造时对 rounds 做**外层**浅拷贝——必须改 agent.rounds
+    # 这一份，否则改的是 task 那份、视图读不到，冻结性会假通过。
+    agent.rounds[1]["org_state"] = "done"
+    agent.rounds[1]["org_generation"] = 9
+    agent.rounds[1]["block_summaries"] = {"R2-B1": "index.html 的描述（不该进工具层视图）"}
     after = agent._assemble_messages()
 
     assert before == after
@@ -210,3 +211,58 @@ def test_tool_batch_helpers_are_json_serializable():
     for schema in (_LIST_AGENTS_SCHEMA, _SWITCH_VIEW_SCHEMA):
         assert json.dumps(schema, ensure_ascii=False)
         assert schema["function"]["name"] in ("list_agents", "switch_view")
+
+
+def test_view_tiering_rewrites_only_on_own_watermark_advance(monkeypatch):
+    """分档的冻结性（plan §5.1）：只有**本视图自己**水位推进才重写字节。
+
+    ① 别的域整理（全局代次前进、别人材料变化）→ 本视图历史段逐字节不变；
+    ② 本域自己再整理一代 → 折叠线前进，字节随之变化（这是该变的）。
+
+    注意口径：分档基准是"本域命中轮的最大代次 − 2"，故**单轮域永不折叠**
+    （它自己就是最高代次）——要观察折叠必须给本域两个不同代次的轮。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    rounds = [
+        _mk_file_round(1, "写工具层", ["src/wovra/tools/safety.py"]),
+        _mk_file_round(2, "再写工具层", ["src/wovra/tools/shell.py"]),
+        _mk_file_round(3, "写演示页", ["index.html"]),
+    ]
+    task = _task_with_domains(rounds)
+    # 工具层：R1 第 3 代、R2 第 5 代（基准 5 − 2 = 3 → R1 尚在全分辨率）；
+    # 前端：R3 第 1 代（它的代次高低与工具层无关）
+    task.rounds[0]["org_state"], task.rounds[0]["org_generation"] = "done", 3
+    task.rounds[0]["block_summaries"] = {"R1-B1": "第 3 代描述"}
+    task.rounds[1]["org_state"], task.rounds[1]["org_generation"] = "done", 5
+    task.rounds[1]["block_summaries"] = {"R2-B1": "第 5 代描述"}
+    task.rounds[2]["org_state"], task.rounds[2]["org_generation"] = "done", 1
+    task.rounds[2]["block_summaries"] = {"R3-B1": "演示页第 1 代描述"}
+
+    agent = _agent(task)
+    _make_open_round(agent, 90, "继续")
+    agent.current_round["active_view"] = "工具层"
+    before = agent._assemble_messages()
+    body_before = "\n".join(str(m.get("content") or "") for m in before)
+    assert "第 3 代描述" in body_before            # 基准 3 → 未折叠
+
+    # ① 别的域整理推进（全局代次前进、前端材料变化）——本域材料一字未动
+    agent.rounds[2]["org_generation"] = 9
+    agent.rounds[2]["block_summaries"] = {"R3-B1": "演示页第 9 代描述（不该进工具层）"}
+    after_other = agent._assemble_messages()
+    assert after_other == before
+    assert "演示页第 9 代描述" not in "\n".join(
+        str(m.get("content") or "") for m in after_other
+    )
+
+    # ② 本域自己再整理一代（R2 → 第 6 代）→ 基准前进（3 → 4），R1 落入折叠档
+    # 注意：Agent 构造时对 rounds 做**外层**浅拷贝（内层 dict/列表共享），
+    # 故改材料必须改 agent.rounds 这一份，改 task.rounds 视图看不到。
+    agent.rounds[1]["org_generation"] = 6
+    after_own = agent._assemble_messages()
+    body_after = "\n".join(str(m.get("content") or "") for m in after_own)
+    assert after_own != before
+    assert "第 3 代描述" not in body_after         # 第 3 代已折叠
+    assert "块细节已折叠" in body_after
+    assert "第 5 代描述" in body_after             # 第 6 代那轮仍在全分辨率
+    # 折叠不改归属：折叠轮的块 ID 依然保留（expand_history 的锚）
+    assert "R1-B" in body_after
