@@ -11,6 +11,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 from .. import blocks as blocks_module
+from .. import registry as registry_module
 from .. import tools as tools_module
 from .. import tokens as tokens
 from .. import truncate as truncate
@@ -226,6 +227,10 @@ class _CoreMixin:
         tools_module.set_audit_recorder(
             lambda detail: self.task.record("file_change", detail) if self.task else None
         )
+        # 文件权限守卫（工具层强制，2026-09-12 用户口径：干不干看有没有
+        # 改写删权）：不在构造时粘性绑定，而是每次工具调用用 `guard_scope`
+        # 临时绑定"此刻是谁在干活"——见 `_invoke_tool`。这里只做自检性的
+        # 清空，避免上一个会话的守卫残留到本会话的第一次调用前。
         # 后台任务按会话归属：启动/查看/停止都限定在本会话内
         tools_module.set_current_session(self.task.id if self.task else None)
 
@@ -492,6 +497,95 @@ class _CoreMixin:
             )
             self._persist_rounds()
         return len(changed)
+
+    def _file_guard_object(self):
+        """工具层调用的权限守卫对象（`__call__` 查权限，`claim` 记新文件归属）。"""
+        agent = self
+
+        class _Guard:
+            def __call__(self, op: str, path: str):
+                return agent._file_permission(op, path)
+
+            def claim(self, op: str, path: str) -> None:
+                agent._claim_new_file(path)
+
+        return _Guard()
+
+    @staticmethod
+    def _rel_path(path: str) -> str:
+        """把模型给的路径归一到**工作区相对 POSIX 串**（清单里存的就是这个形态）。"""
+        raw = str(path or "").strip()
+        if not raw:
+            return ""
+        try:
+            target = tools_module.safety._safe_path_lexical(raw)
+            return target.relative_to(tools_module.PROJECT_ROOT).as_posix()
+        except Exception:  # noqa: BLE001——越界/畸形路径交给工具层原有检查
+            return raw.replace("\\", "/").strip("/")
+
+    def _file_permission(self, op: str, path: str) -> Optional[str]:
+        """**工具层硬权限**（用户口径：干不干看有没有改写删权，不看"该不该"）。
+
+        ```text
+        P1 自己的文件（清单内）：读/写/改/删
+        P2 别人的文件：只读
+        P4 分裂之前（注册表里只有主 agent）：主 agent 全权
+        P5 分裂之后：主 agent 权限与子 agent 相同
+        F5 新文件：谁创建谁拥有（放行，创建成功后由 claim 落册）
+        ```
+        没有任何域认领**已存在**的文件 = 分裂/整理的缺陷（用户口径：不存在
+        "未认领文件"）→ 拒绝并叫人，不静默吸进谁的桶。
+        """
+        if self.task is None or op == "read":
+            return None
+        registry = [e for e in (self.task.registry or []) if isinstance(e, dict)]
+        subs = [e for e in registry
+                if str(e.get("id") or "") != registry_module.MAIN_AGENT_ID]
+        if not subs:
+            return None                       # P4
+        rel = self._rel_path(path)
+        view = self._active_view()
+        mine = self._registry_entry_for(view)
+        if mine is not None and registry_module.file_owned_by(mine, rel):
+            return None                       # P1
+        owner = registry_module.owner_of_file(registry, rel)
+        if owner is not None:
+            who = str((mine or {}).get("name") or view or "你")
+            return (
+                f"权限拒绝：{path} 不属于 {who}（属 {owner}）——**改写删只能动"
+                f"自己维护的文件，别人的文件只能读**。这活该它干：用 route_to "
+                f"把用户原话转给它（本回合内生效），或 consult 问它要判断。"
+            )
+        try:
+            exists = tools_module.safety._safe_path_lexical(path).exists()
+        except Exception:  # noqa: BLE001
+            exists = False
+        if not exists:
+            return None                       # F5：新文件，谁创建谁拥有
+        return (
+            f"权限拒绝：{path} 已存在但**没有任何域认领**它——按口径这不该发生"
+            f"（分裂/整理的缺陷）。停下来把这件事报告给用户，不要自己改写它。"
+        )
+
+    def _claim_new_file(self, path: str) -> None:
+        """F5：新文件归属创建者——立即写进它自己条目的文件清单并落盘。"""
+        if self.task is None:
+            return
+        entry = self._registry_entry_for(self._active_view())
+        rel = self._rel_path(path)
+        if entry is None or not rel:
+            return
+        files = entry.setdefault("files", [])
+        if rel in files:
+            return
+        files.append(rel)
+        # 记账用独立的 kind：`file_change` 那条流水被 lifecycle/blocks 当状态信号读，
+        # 归属变更不该混进去（它不改变文件状态，只改变"谁维护它"）。
+        self.task.record(
+            "ownership",
+            f"[归属] {rel} 由 {entry.get('name')} 新建 → 计入它的文件清单",
+        )
+        self.task.save()
 
     def _registry_entry_for(self, view: str) -> Optional[dict]:
         """按视图名或 ID 取注册表条目（`active_view` 两种形态都可能出现）。"""
@@ -963,7 +1057,12 @@ class _CoreMixin:
         if blocked:
             return blocked
         try:
-            result = fn(**parsed)
+            # 文件权限守卫**按调用作用域**生效（不是构造时一绑到底）：粘性绑定
+            # 会在 Agent 收工后继续拦别人（脚本/CLI 直接调文件工具、同进程里
+            # 换会话），也会让测试互相污染。作用域内绑定 = "谁在干活就按谁的
+            # 权限"，出栈即还原。
+            with tools_module.permissions.guard_scope(self._file_guard_object()):
+                result = fn(**parsed)
         except Exception as error:  # noqa: BLE001——错误回传给模型而不是中断循环
             return f"工具执行出错: {error!r}"
         if not isinstance(result, str):

@@ -16,7 +16,7 @@ import re
 import time
 from pathlib import Path
 
-from . import limits, safety
+from . import limits, permissions, safety
 
 
 # 搜索时跳过的噪声目录（依赖、缓存、运行时数据——搜索它们只有噪音）
@@ -491,6 +491,10 @@ def delete_file(path: str) -> str:
     "路径越界"，用户只能绕 shell 的 unlink）。
     """
     target = safety._safe_path_lexical(path)
+    denied = permissions.check("delete", path)
+    if denied:
+        safety._audit(f"[delete_file][权限拒绝] {path}")
+        return denied
     if target.is_symlink():
         link_to = os.readlink(target)
         dangling = not target.exists()
@@ -527,6 +531,14 @@ def move_file(path: str, new_path: str) -> str:
     """
     src = safety._safe_path_lexical(path)
     dst = safety._safe_path_lexical(new_path)
+    denied = permissions.check("move", path)
+    if denied:
+        safety._audit(f"[move_file][权限拒绝] {path}")
+        return denied
+    denied_dst = permissions.check("write", new_path)
+    if denied_dst and dst.exists():
+        safety._audit(f"[move_file][权限拒绝·目标] {new_path}")
+        return denied_dst
     if dst.is_symlink() or dst.exists():
         # 目标已存在且是目录：用户本意多半是"移进该目录"——给路，别只让删/换名。
         # （2026-09-13 摩擦修复：实测 move_file('f.txt', 'bdir') 只回"目标已存在"）
@@ -570,6 +582,10 @@ def write_file(path: str, content: str, force: bool = False) -> str:
     与有意重写一模一样，只有大小差异可查（实测教训）。
     """
     target = safety._safe_write_path(path)
+    denied = permissions.check("write", path)
+    if denied:
+        safety._audit(f"[write_file][权限拒绝] {path}")
+        return denied
     # 参数误用预检（2026-09-13 摩擦修复）：目标是目录 → 明确提示而不是裸 IsADirectoryError
     if target.is_dir():
         return (
@@ -603,6 +619,9 @@ def write_file(path: str, content: str, force: bool = False) -> str:
     target.write_text(content, encoding="utf-8")
     _observe_file(target)
     action = "覆盖" if existed else "创建"
+    if not existed:
+        # F5：新文件谁创建谁拥有——创建成功即归属当前视图（运行时守卫负责落册）
+        permissions.claim("write", path)
     if old is not None:
         # 旧内容完整留底（审计原则：能还原）；超大文件截断到 20000 字符
         backup = old if len(old) <= 20_000 else old[:20_000] + "\n...(已截断)"
@@ -664,6 +683,10 @@ def edit_file(path: str, old_text: str, new_text: str,
     若文件在你上次读取后被外部修改过，会拒绝执行并要求重新确认。
     """
     target = safety._safe_write_path(path)
+    denied = permissions.check("edit", path)
+    if denied:
+        safety._audit(f"[edit_file][权限拒绝] {path}")
+        return denied
     stale = _stale_error(target)
     if stale:
         return stale
@@ -748,6 +771,10 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     写操作后请重新读取，否则行号已经漂移。文件被外部修改过会拒绝。
     """
     target = safety._safe_write_path(path)
+    denied = permissions.check("edit", path)
+    if denied:
+        safety._audit(f"[replace_lines][权限拒绝] {path}")
+        return denied
     stale = _stale_error(target)
     if stale:
         return stale

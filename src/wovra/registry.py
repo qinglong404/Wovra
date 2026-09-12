@@ -29,7 +29,7 @@ Main                     主 agent（不再占字母）
 幂等：同一批分裂产物重复 promote（崩溃补做、重启重放）只更新既有
 条目，不重复追加——注册表是"现状的投影"，不是事件流水。
 """
-from typing import Iterable
+from typing import Iterable, Optional
 
 MAIN_AGENT_ID = "Main"
 
@@ -95,6 +95,63 @@ def _children_of(name: str, domains: list[dict]) -> list[dict]:
     return out
 
 
+def entry_files(entry: dict) -> list[str]:
+    """条目维护的**具体文件清单**（2026-09-12 新口径：归属按文件，不看路径）。"""
+    out: list[str] = []
+    for f in entry.get("files") or []:
+        rel = str(f).strip().strip("/")
+        if rel:
+            out.append(rel)
+    return out
+
+
+def entry_prefixes(entry: dict) -> list[str]:
+    """条目上的**历史路径前缀**（老分裂产物只有 file_domains，按前缀匹配）。"""
+    out: list[str] = []
+    for f in entry.get("file_domains") or []:
+        rel = str(f).strip().strip("/")
+        if rel:
+            out.append(rel)
+    return out
+
+
+def file_owned_by(entry: dict, rel: str) -> bool:
+    """这个文件是不是该条目维护的（精确清单优先，历史前缀兜底）。"""
+    want = str(rel or "").strip().strip("/")
+    if not want:
+        return False
+    if want in entry_files(entry):
+        return True
+    return any(want == p or want.startswith(p + "/") for p in entry_prefixes(entry))
+
+
+def owner_of_file(
+    registry: Iterable[dict] | None, rel: str
+) -> Optional[str]:
+    """文件归谁：**精确清单优先**，其次最长前缀（历史产物）。
+
+    返回拥有者的展示串（`id（name）`）；没有任何域认领时返回 None——那是
+    分裂/整理的缺陷（用户口径：不存在"未认领文件"），不是正常态。
+    """
+    want = str(rel or "").strip().strip("/")
+    if not want:
+        return None
+    best: tuple[int, dict] | None = None
+    for entry in registry or []:
+        if not isinstance(entry, dict) or not entry.get("name"):
+            continue
+        if want in entry_files(entry):
+            return f"{entry.get('id')}（{entry.get('name')}）"
+        for prefix in entry_prefixes(entry):
+            if want == prefix or want.startswith(prefix + "/"):
+                if best is None or len(prefix) > best[0]:
+                    best = (len(prefix), entry)
+    if best is None:
+        return None
+    entry = best[1]
+    return f"{entry.get('id')}（{entry.get('name')}）"
+
+
 def build_entries(domains: Iterable[dict] | None) -> list[dict]:
     """把分裂产物的域树翻译成注册表条目（纯函数，零 LLM）。
 
@@ -143,6 +200,10 @@ def build_entries(domains: Iterable[dict] | None) -> list[dict]:
             "name": name,
             "description": str(node.get("description") or ""),
             "goal": str(node.get("goal") or ""),
+            # 归属**按文件**（2026-09-12 用户口径：划分只看内容相关度，不看路径）：
+            # `files` = 该域维护的具体文件清单（精确匹配）；`file_domains` 是
+            # 老产物的路径前缀，留作历史兼容读取。
+            "files": [str(f) for f in (node.get("files") or [])],
             "file_domains": [str(f) for f in (node.get("file_domains") or [])],
             # 休眠是默认态（不对话即零成本），分裂产生的节点初始即休眠；
             # 路由/装配分化接入后才会有节点进入 active（后续步骤）

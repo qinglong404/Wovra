@@ -36,6 +36,7 @@
 
 # 子模块（可直接访问）
 from . import limits
+from . import permissions  # noqa: E402——文件权限守卫（工具层强制）
 from . import safety, files, shell, background, web, interaction  # noqa: F401,E402
 
 # ---- 公开 API 再导出 ---------------------------------------------------------
@@ -47,6 +48,7 @@ from .safety import (  # noqa: E402
     set_audit_recorder,
     user_input_pending,
 )
+from .permissions import set_file_guard  # noqa: E402
 from .files import (  # noqa: E402
     delete_file,
     edit_file,
