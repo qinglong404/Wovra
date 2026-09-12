@@ -211,12 +211,31 @@ def test_round_detail_flattens_events():
     d = serve.round_detail(_fake_task(), 1)
     assert d["user_input"] == "干活"
     assert d["events"][0] == {"id": "R1-E01", "type": "user",
+                              "agent": "Main",     # 轮内逐事件归属（route_to 后换手）
                               "time": "2026-09-12T10:59:14",
                               "thinking": "推理全文", "status": "",
                               "role": "user", "content": "干活",
                               "tool_calls": None, "tool_call_id": None}
     assert d["blocks"][0]["file"] == "a.py"
     assert serve.round_detail(_fake_task(), 99) is None
+
+
+def test_event_agents_handover_after_route_result():
+    """route_to 在工具批次跑完后换手：调用与结果归路由方，其后归接手方。"""
+    r = {"seq": 1, "active_view": "A", "events": [
+        {"id": "R1-E01", "type": "user",
+         "message": {"role": "user", "content": "干活"}},
+        {"id": "R1-E02", "type": "tool_call",
+         "message": {"role": "assistant", "content": "", "tool_calls": [
+             {"id": "c1", "function": {"name": "route_to",
+                                       "arguments": '{"agent": "A"}'}}]}},
+        {"id": "R1-E03", "type": "tool_result",
+         "message": {"role": "tool", "tool_call_id": "c1", "content": "已转交"}},
+        {"id": "R1-E04", "type": "tool_call",
+         "message": {"role": "assistant", "content": "", "tool_calls": [
+             {"id": "c2", "function": {"name": "read_file", "arguments": "{}"}}]}},
+    ]}
+    assert serve._event_agents(r, "Main") == ["Main", "Main", "Main", "A"]
 
 
 def test_round_usage_map_steps_signature():

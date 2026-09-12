@@ -633,6 +633,40 @@ def view_sizes(task_id: str) -> dict | None:
             "pending": True, "note": got.get("note")}
 
 
+def _event_agents(r: dict, main_id: str) -> list[str]:
+    """轮内逐事件的 agent 归属（机械派生，零推断）。
+
+    口径（2026-09-12 用户拍板 + route_to 实现）：每轮恒由主 agent 起手并
+    路由原话；`route_to` 在**工具批次跑完后**才换手，故换手点 = 它的工具
+    结果之后。`switch_view` 只管下一轮，不在本规则内。
+    """
+    evs = r.get("events") or []
+    routes: dict = {}
+    for e in evs:
+        msg = e.get("message") or {}
+        for tc in (msg.get("tool_calls") or []):
+            fn = tc.get("function") or {}
+            if fn.get("name") not in ("route_to", "switch_view"):
+                continue
+            try:
+                args = json.loads(fn.get("arguments") or "{}")
+            except json.JSONDecodeError:
+                args = {}
+            tgt = str(args.get("agent") or "").strip()
+            if tgt and tc.get("id"):
+                routes[tc["id"]] = (tgt, fn.get("name"))
+    cur = main_id
+    out = []
+    for e in evs:
+        msg = e.get("message") or {}
+        out.append(cur)
+        if msg.get("role") == "tool" and msg.get("tool_call_id") in routes:
+            tgt, name = routes[msg["tool_call_id"]]
+            if name == "route_to":     # 本回合内换手；switch_view 下一轮才生效
+                cur = tgt
+    return out
+
+
 def _split_meta(r: dict) -> dict | None:
     """分裂结果（已落实的轮字段 + 尚未落实的 pending_org）——机械透出。
 
@@ -666,6 +700,7 @@ def _round_meta(r: dict, usage: dict | None = None) -> dict:
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",
+        "route_hops": r.get("route_hops", 0),   # 轮内转交次数（>0 = 主 agent 路由过）
         "events": len(evs),
         "t0": (evs[0].get("timestamp") or "") if evs else "",
         "t1": (evs[-1].get("timestamp") or "") if evs else "",
@@ -713,13 +748,16 @@ def round_detail(data: dict, seq: int,
             me = re.match(r"R\d+-E(\d+)", str(eid or ""))
             return int(me.group(1)) if me else -1
 
+        evs_all = r.get("events") or []
+        agents = _event_agents(r, "Main")
         events = []
-        for e in r.get("events") or []:
+        for ei, e in enumerate(evs_all):
             msg = e.get("message") or {}
             if after_n is not None and _num(e.get("id")) <= after_n:
                 continue
             events.append({
                 "id": e.get("id"), "type": e.get("type"),
+                "agent": agents[ei] if ei < len(agents) else "",
                 "time": e.get("timestamp", ""),
                 "thinking": e.get("thinking", ""),
                 "status": e.get("status", ""), "role": msg.get("role"),

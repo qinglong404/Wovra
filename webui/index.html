@@ -522,6 +522,12 @@ function senderOf(roundMeta){
   const id=a?.id||key;
   return{key,id,name,color:agentColor(a?.id||key)};
 }
+function senderForAgent(agent,roundMeta){
+  const v=String(agent||'').trim();
+  if(!v)return senderOf(roundMeta);
+  const a=REG[v]||null;
+  return{key:v, id:a?.id||v, name:a?.name|| (v==='Main'?'主agent':v), color:agentColor(a?.id||v)};
+}
 function agentStatChip(key){
   const st=(AGENT_STATS||[]).find(x=>x.agent===key);
   if(!st||(!st.prompt&&!st.completion))return'';
@@ -1033,7 +1039,8 @@ function drawConv(c,toBottom){
     // 轮头贴在本轮用户消息下方（用户消息在右、轮头在其下，归属一目了然）；
     // 无用户消息的轮（检查点续轮等）保持旧位（组前）。
     const sepRow={kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,
-                  t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},aid:(senderOf(m)||{}).id};
+                  t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
+                  aid:(senderOf(m)||{}).id,hops:m.route_hops||0};
     let sepDone=false;
     const dropSep=()=>{if(!sepDone){flush();push(sepRow);sepDone=true}};
     if(!evs.some(e=>e.role==='user'))dropSep();
@@ -1041,22 +1048,24 @@ function drawConv(c,toBottom){
     for(let ei=0;ei<evs.length;ei++){
       const e=evs[ei];
       const role=e.role,content=e.content,tcs=e.tool_calls||[];
+      // 轮内可多名 agent：主 agent 路由 → 子 agent 接手（route_to 工具结果后换手）
+      const es=e.agent?senderForAgent(e.agent,m):sender;
       if(e.type==='runtime_note'||(role==='user'&&String(content||'').startsWith('<runtime-reminder>'))){
         // 不 flush：提示行留在组框内，同一个块顺着往下走，不再拆成两块
         const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,160);
         const bad=/异常终止|未产出任何正文|整理失败|错误/.test(inner);
-        feed(sender,{t:'sys',text:(bad?'⚠ ':'⚙ ')+inner,title:String(content||''),tm:when(ei),bad});
+        feed(es,{t:'sys',text:(bad?'⚠ ':'⚙ ')+inner,title:String(content||''),tm:when(ei),bad});
         continue;
       }
       if(e.type==='tool_call'){
-        if(e.thinking)feed(sender,{t:'think',text:e.thinking});
+        if(e.thinking)feed(es,{t:'think',text:e.thinking});
         // 带工具调用的这步的正文是"过程发言"（边做边说），不是最终回答——
         // 视觉上弱化，最终回答才醒目地收在最后
-        if(String(content||'').trim())feed(sender,{t:'text',text:content,tm:when(ei),interim:true});
+        if(String(content||'').trim())feed(es,{t:'text',text:content,tm:when(ei),interim:true});
         for(const tc of tcs){
           const name=tc.function?.name||'?';
           calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
-          feed(sender,{t:'tool',id:tc.id,name,args:tc.function?.arguments||'',seq,tm:when(ei)});
+          feed(es,{t:'tool',id:tc.id,name,args:tc.function?.arguments||'',seq,tm:when(ei)});
         }
         continue;
       }
@@ -1070,8 +1079,8 @@ function drawConv(c,toBottom){
         push({kind:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`,tm:when(ei)});continue;
       }
       if(role==='assistant'&&content){
-        if(e.thinking)feed(sender,{t:'think',text:e.thinking});
-        feed(sender,{t:'text',text:content,md:e.type==='final_answer',tm:when(ei)});continue;
+        if(e.thinking)feed(es,{t:'think',text:e.thinking});
+        feed(es,{t:'text',text:content,md:e.type==='final_answer',tm:when(ei)});continue;
       }
       if(role==='user'){
         flush();feed(YOU,{t:'text',text:content,user:true,tm:when(ei)});dropSep();continue;
@@ -1100,7 +1109,7 @@ function drawConv(c,toBottom){
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
       html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+
-        (row.aid?`<span class="ra" style="color:${agentColor(row.aid)}">⬤ ${esc(row.aid)}</span>`:'')+
+        (row.aid?`<span class="ra" style="color:${agentColor(row.aid)}" title="${row.hops?'主 agent 路由 → 子 agent 接手':'单 agent 完成'}">${row.hops?'Main → ':''}⬤ ${esc(row.aid)}</span>`:'')+
         `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`;continue}
     if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}`+
       (row.tm?`<span class="stime">${esc(row.tm)}</span>`:'')+`</div>`;continue}
@@ -1112,7 +1121,7 @@ function drawConv(c,toBottom){
     }
     html+=`<div class="crow agent" data-seq="${row.seq||''}"><div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>
       <div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}<span style="color:var(--tx3);font-weight:400"> · ${esc(s.id)}</span>${agentStatChip(s.key)}</div>
-      <div class="gbox" style="border-color:${s.color}55">`+
+      <div class="gbox" data-agent="${esc(s.id||'')}" style="border-color:${s.color}55">`+
       row.items.map(it=>{
         if(it.t==='sys'){
           return `<div class="sysline${it.bad?' sys-bad':''}" title="${esc(it.title||'')}">${esc(it.text)}`+
@@ -2046,7 +2055,7 @@ function renderUsage(c){
         }
         const a=r.a;
         const hitA=fmtP(a.cached||0,(a.cached||0)+(a.miss||0));
-        const vTok=r.vs?(r.vs.tokens||0):(a.agent==='Main'?0:0);
+        const vTok=r.vs?(r.vs.tokens||0):(a.ctx_cur||0);
         return `<tr><td><span class="mono" style="color:${agentColor(a.agent)}">${esc(prettyName(a.agent))}</span> <span class="mono" style="color:var(--tx3)">${esc(a.agent)}</span></td>
           <td class="mono">${a.rounds}</td><td class="mono">${fmtN(a.steps||0)}</td>
           <td class="mono">${fmtN(a.ctx_peak||0)}</td><td class="mono">${fmtN(a.avg_prompt||0)}</td>
