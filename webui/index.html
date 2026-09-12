@@ -255,6 +255,12 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #pending-bar{display:none;padding:10px 26px;background:linear-gradient(180deg,#1a2030,#141a28);border-top:1px solid var(--acc-dim);font-size:12.5px;color:var(--tx)}
 #pending-bar.show{display:block}
 #pending-bar .pb-head{display:flex;align-items:center;gap:7px}
+#pending-bar .pb-actions{display:flex;gap:10px;margin-top:9px;align-items:center}
+#pending-bar .pbtn{font-size:13px;padding:7px 20px;border-radius:8px;cursor:pointer;border:1px solid;font-family:var(--mono);flex-shrink:0}
+#pending-bar .pbtn.ok{color:var(--teal);border-color:#2a6b52;background:#12291f}
+#pending-bar .pbtn.ok:hover{background:#1a3b2c}
+#pending-bar .pbtn.bad{color:var(--red);border-color:#6b2a34;background:#2a1620}
+#pending-bar .pbtn.bad:hover{background:#3a1c26}
 #composer{display:none;gap:10px;padding:10px 26px;border-top:1px solid var(--line);background:var(--bg1)}
 #composer.show{display:flex}
 #compose{flex:1;resize:none;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;color:var(--tx);font-family:var(--sans);font-size:13.5px;padding:10px 13px;outline:none;min-height:44px;max-height:160px;line-height:1.5}
@@ -1138,16 +1144,24 @@ function renderPendingBar(jobId,p){
   bar.classList.add('show');
   if(sig===PEND_SIG)return;   // 同一问题不重绘（保住输入框里的半截文字）
   PEND_SIG=sig;
-  const kind=p.type==='confirm'?'请求确认':'模型提问';
+  const isConfirm=p.type==='confirm';
+  const kind=isConfirm?'请求确认':'模型提问';
   let html=`<div class="pb-head"><span style="color:var(--gold)">⏸</span><b>${esc(kind)}</b>：<span>${esc(p.question)}</span></div>`;
-  if(p.choices&&p.choices.length){
-    html+='<div class="blocks" style="margin-top:7px">'+p.choices.map((c,i)=>
-      `<span class="chip acc" style="cursor:pointer" data-ans="${esc(c)}">${String.fromCharCode(65+i)}. ${esc(c)}</span>`).join('')+'</div>';
+  if(isConfirm){
+    // 确认类只有两态：后端只认 y/yes 为通过（自由文本会被当拒绝），
+    // 因此不给输入框，只给两个大按钮
+    html+=`<div class="pb-actions">
+      <span class="pbtn ok" data-ans="y">✓ 允许执行</span>
+      <span class="pbtn bad" data-ans="n">✗ 拒绝</span></div>`;
+  }else{
+    if(p.choices&&p.choices.length){
+      html+='<div class="blocks" style="margin-top:7px">'+p.choices.map((c,i)=>
+        `<span class="chip acc" style="cursor:pointer" data-ans="${esc(c)}">${String.fromCharCode(65+i)}. ${esc(c)}</span>`).join('')+'</div>';
+    }
+    html+=`<div class="pb-actions">
+      <input id="pend-free" placeholder="或自由回答…" style="flex:1;min-width:0;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:8px 12px;font-size:13px;outline:none">
+      <span class="pbtn ok" data-ans="__free__">回答</span></div>`;
   }
-  html+=`<div style="display:flex;gap:7px;margin-top:7px;align-items:center">
-    <input id="pend-free" placeholder="或自由回答…" style="flex:1;min-width:0;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:6px 10px;font-size:12.5px;outline:none">
-    <span class="chip acc" style="cursor:pointer" data-ans="__free__">回答</span>
-    ${p.type==='confirm'?'<span class="chip bad" style="cursor:pointer" data-ans="n">拒绝</span>':''}</div>`;
   bar.innerHTML=html;
   bar.querySelectorAll('[data-ans]').forEach(el=>el.addEventListener('click',async()=>{
     const v=el.dataset.ans==='__free__'?(document.getElementById('pend-free')?.value||''):el.dataset.ans;
