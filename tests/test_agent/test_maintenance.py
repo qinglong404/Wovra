@@ -1399,6 +1399,7 @@ def test_maint_snapshot_defers_when_protocol_incomplete(monkeypatch, tmp_path):
     })
     agent.last_context_estimate = 5000
     # 闭合那一刻的装配：尾部正是这条未回复的 tool_call → 闸门拦下
+    agent._tools_running = True   # 真实路径=工具批次执行中（悬空尾兜底只修重载遗留）
     assert agent._maint_snapshot() is None
     assert _dangling(agent._assemble_messages()) == ["call_1"]
 

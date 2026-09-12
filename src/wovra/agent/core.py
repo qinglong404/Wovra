@@ -182,6 +182,8 @@ class _CoreMixin:
         # ⏹ 协作式取消（网页终止按钮）：返回 True 即抛 KeyboardInterrupt，
         # 语义与 CLI Ctrl+C 一致（轮保持开放）。每步边界 + 流中分片间检查
         self.cancel_check: Optional[Callable[[], bool]] = None
+        # 工具批次执行中（维护闸门据此区分"在跑"与"重载遗留悬空尾"）
+        self._tools_running = False
         # 最近一步的思考全文（随 tool_call / final_answer 事件落盘，只进
         # event 不进 message——装配读 message，上下文不受影响）
         self._last_thinking = ""
@@ -833,6 +835,10 @@ class _CoreMixin:
                     # 思考过程随事件落盘（零截断口径）；只进 event 不进
                     # message——装配读 message，上下文内容不受影响
                     ev["thinking"] = self._last_thinking
+                if self.task is not None:
+                    # 工具卡即时上屏：调用已发出即落盘，结果回来再补——
+                    # 网页端不必等工具跑完（几分钟的命令）才看到卡片
+                    self._persist_rounds()
                 self.last_stats["tool_calls"] += len(ordered)
                 self._run_tool_batch(ordered)
                 # 回合内转交（route_to）：工具批次跑完才换视图——批次执行
@@ -1012,6 +1018,14 @@ class _CoreMixin:
         纯只读批次（互不依赖）并发执行、按序记录——独立读取串行只是
         白等；含变更类调用时保持顺序执行（写与写之间存在顺序依赖，
         并行写同一文件是竞态）。"""
+        self._tools_running = True
+        try:
+            self._run_tool_batch_inner(ordered)
+        finally:
+            self._tools_running = False
+
+    def _run_tool_batch_inner(self, ordered: list[dict]) -> None:
+        """（_run_tool_batch 的实体，见其 docstring。）"""
         if len(ordered) > 1 and all(tc["name"] in _READ_ONLY_TOOLS for tc in ordered):
             if self.on_tool_call:
                 for tc in ordered:

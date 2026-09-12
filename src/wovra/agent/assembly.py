@@ -545,6 +545,22 @@ class _AssemblyMixin:
         events = self.current_round["events"]
         if len(events) != len(msgs):
             return msgs  # 结构对不上时不动手（宁超限，不坏数据）
+        # 悬空尾兜底（工具卡即时落盘的伴生保护）：末尾若挂着没等到结果的
+        # tool_calls，补合成 tool 结果——严格端点见到无配对的 tool_call 必
+        # 400。仅限"重载遗留"的悬空尾：本进程工具批次执行中不修——维护
+        # 闸门正是靠"尾部未回复"识别在跑状态并推迟维护，修了会把维护调用
+        # 插进正在执行的工具批次中间
+        if not getattr(self, "_tools_running", False):
+            answered: set = set()
+            j = len(msgs) - 1
+            while j >= 0 and msgs[j].get("role") == "tool":
+                answered.add(msgs[j].get("tool_call_id"))
+                j -= 1
+            if j >= 0 and msgs[j].get("tool_calls"):
+                for tc in msgs[j]["tool_calls"]:
+                    if tc.get("id") not in answered:
+                        msgs.append({"role": "tool", "tool_call_id": tc["id"],
+                                     "content": "（会话在工具执行中被中断，无结果返回）"})
         budget = int(self.context_limit * 0.9)  # 给最终回答留余量
         # 廉价预检：最坏 1 字 ≈ 1 tok（CJK），字符数不超预算必在窗内
         total_chars = sum(len(str(m.get("content") or "")) for m in msgs)
