@@ -92,6 +92,7 @@ def session_summary(task_id: str, data: dict) -> dict:
         "created_at": data.get("created_at", ""),
         "updated_at": data.get("updated_at", ""),
         "rounds": len(rounds),
+        "steps": sum(r.get("steps_used") or 0 for r in rounds),
         "org": org,
         "escalations": len(ts.get("escalations") or []),
         "experiments": len(ts.get("experiments") or []),

@@ -52,7 +52,7 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 .chip.warn{color:var(--gold);border-color:#4a3a1f}
 .chip.bad{color:var(--red);border-color:#4a1f26}
 .chip.acc{color:var(--acc);border-color:#26345c}
-#kpis{display:grid;grid-template-columns:repeat(5,1fr);gap:10px;margin:14px 0 12px}
+#kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:10px;margin:14px 0 12px}
 .kpi{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);padding:10px 14px}
 .kpi .v{font-family:var(--mono);font-size:20px;font-weight:600;letter-spacing:-.5px}
 .kpi .v small{font-size:12px;color:var(--tx3);font-weight:400;margin-left:2px}
@@ -219,7 +219,7 @@ function renderList(){
     const hit=fmtP(s.usage?.cached||0,(s.usage?.cached||0)+(s.usage?.miss||0));
     return `<div class="s-item${on}" onclick="select('${s.id}')">
       <div class="s-goal">${esc(title)}</div>
-      <div class="s-meta"><span>R${s.rounds}</span><span title="Σ prompt">Σ${fmtN(s.usage?.prompt||0)}</span>
+      <div class="s-meta"><span>R${s.rounds}·${fmtN(s.steps||0)}步</span><span title="Σ prompt">Σ${fmtN(s.usage?.prompt||0)}</span>
         <span title="缓存命中率">命中${hit}</span>${escN}${ms}
         <span style="margin-left:auto">${fmtT(s.updated_at)}</span></div>
     </div>`}).join('')||'<div class="empty">无匹配会话</div>';
@@ -245,6 +245,7 @@ function renderHeader(){
   const u=META.usage||{};
   $('#goal').classList.remove('empty');
   $('#goal').textContent=META.goal||META.id;
+  const steps=(META.round_list||[]).reduce((a,r)=>a+(r.steps_used||0),0);
   const st=META.status==='in_progress'?'<span class="chip ok">进行中</span>':'<span class="chip">完成</span>';
   $('#chips').innerHTML=st+
     `<span class="chip acc">${esc(META.mode||'managed')}</span>`+
@@ -256,7 +257,8 @@ function renderHeader(){
   $('#kpis').innerHTML=[
     ['Σ prompt',fmtN(u.prompt||0),'tok'],
     ['缓存命中',hit,''], ['LLM 调用',fmtN(u.calls||0),'次'],
-    ['轮次',META.rounds,'轮'], ['TTFT 均值',(u.calls?((u.ttft_sum||0)/u.calls).toFixed(1):'—'),'s'],
+    ['轮次',META.rounds,'轮'], ['总步数',fmtN(steps),'步'],
+    ['TTFT 均值',(u.calls?((u.ttft_sum||0)/u.calls).toFixed(1):'—'),'s'],
   ].map(([k,v,s])=>`<div class="kpi${k==='缓存命中'?' acc':''}"><div class="v">${v}<small>${s}</small></div><div class="k">${k}</div></div>`).join('');
   const tabs=[['timeline','时间线'],['ledger','账本'],['todo','计划'],['registry','域注册表'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
