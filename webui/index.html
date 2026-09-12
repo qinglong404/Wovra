@@ -1721,18 +1721,18 @@ function ctxViz(){
     const ok=a.splittable===true;
     const badge=ok?`<span class="fbadge t-create">可分裂</span>`
                   :`<span class="fbadge t-read">不可分裂</span>`;
-    const PEND_TIP='轮内装配必须保持原样（连贯性 + 缓存前缀稳定），产物已就绪、暂存在 pending_org，下一轮开启时自动并入注册表（与整理同一时序）';
-    const pend=lastSplit.pending?`<span class="fbadge t-modify" title="${esc(PEND_TIP)}">待下一轮落实</span>`:
-                                `<span class="fbadge t-create">已落实</span>`;
+    const PEND_TIP='产物在轮闭合那一刻生效（2026-09-12 时序调整）：无开放轮时立即并入注册表；仅当异步维护跑完时你已进入下一轮，才暂存到下次轮闭合。轮内字节永不改写（前缀纪律）';
+    const pend=lastSplit.pending?`<span class="fbadge t-modify" title="${esc(PEND_TIP)}">待生效（下次轮闭合）</span>`:
+                                `<span class="fbadge t-create">已生效</span>`;
     splitHtml=`<div class="split-head">${badge}${pend}
       <span class="mono" style="color:var(--tx3);font-size:10px">产出 ${lastSplit.domains.length} 域 · 未归属块 ${lastSplit.unassigned}</span></div>`+
-      (lastSplit.pending?`<div style="font-size:10.5px;color:var(--tx3);margin-top:5px;line-height:1.6">产物已就绪并暂存；因“轮内装配不可变 + 前缀缓存稳定”，下一轮开启时自动并入注册表（与整理同一时序，无需额外操作）。</div>`:'')+
+      (lastSplit.pending?`<div style="font-size:10.5px;color:var(--tx3);margin-top:5px;line-height:1.6">产物已就绪；无开放轮时会在轮闭合那一刻立即并入注册表，异步维护赶在轮内则暂存到下次轮闭合（轮内字节永不改写）。</div>`:'')+
       (a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">为什么这样判定</summary>
         <div class="ev"><pre>${esc(a.reason)}</pre></div></details>`:'')+
       lastSplit.domains.map(d=>{
         const merged=regNames.has(d.name);
         return `<div class="split-dom" style="border-left-color:${merged?'var(--teal)':'var(--gold)'}">
-          <b>${esc(d.name||'?')}</b>${merged?'<span class="fbadge t-create">已入注册表</span>':'<span class="fbadge t-modify">待落实</span>'}
+          <b>${esc(d.name||'?')}</b>${merged?'<span class="fbadge t-create">已入注册表</span>':'<span class="fbadge t-modify">待生效</span>'}
           <div style="color:var(--tx3);font-size:11px;margin-top:3px">${esc((d.description||'').slice(0,140))}</div>
           ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`;
       }).join('');
@@ -1743,10 +1743,10 @@ function ctxViz(){
       <div class="org-strip">${strip||'<span style="color:var(--tx3);font-size:11px">暂无轮</span>'}</div>
       <div class="viz-legend">${Object.entries(ORG_COLOR).filter(([k])=>k).map(([k,c])=>
         `<span class="lg"><i style="background:${c}"></i>${ORG_NAME[k]}</span>`).join('')}</div>
-      <div class="viz-lab" style="margin-top:14px">视图体量 <span style="color:var(--tx3);font-weight:400">（当前 / 模型窗口；分裂后每域一条）</span></div>
-      <div>${bars||'<div class="empty" style="padding:8px 0">无注册表</div>'}</div>
-      <div class="viz-lab" style="margin-top:14px">分裂结果 <span style="color:var(--tx3);font-weight:400">（评估结论 / 产出的域 / 是否已落实进注册表）</span></div>
+      <div class="viz-lab" style="margin-top:14px">分裂结果 <span style="color:var(--tx3);font-weight:400">（评估结论 / 产出的域 / 是否已并入注册表）</span></div>
       <div>${splitHtml}</div>
+      <div class="viz-lab" style="margin-top:14px">重组上下文 · 子 agent 视图 <span style="color:var(--tx3);font-weight:400">（各 agent 装配视图体量 / 模型窗口；分裂后每个域一条）</span></div>
+      <div>${bars||'<div class="empty" style="padding:8px 0">无注册表</div>'}</div>
       <div class="viz-lab" style="margin-top:14px">调用开销构成 <span style="color:var(--tx3);font-weight:400">（整轮对话 vs 维护开销：整理/压缩/分裂）</span></div>
       <div>${usage}</div>
     </div>`;
