@@ -591,7 +591,7 @@ function renderList(){
     const on=s.id===CUR?' on':'';
     const picked=BATCH.sel.has(s.id)?' sel':'';
     const escN=s.escalations?`<span class="esc">◉${s.escalations}</span>`:'';
-    const ms=s.todo_milestone?`<span class="ms" title="${esc(s.todo_milestone)}">◉大步</span>`:'';
+    const ms=s.todo_milestone?`<span class="ms" title="${esc(s.todo_milestone)}">◉阶段</span>`:'';
     const title=s.goal||s.id;
     const hit=fmtP(s.usage?.cached||0,(s.usage?.cached||0)+(s.usage?.miss||0));
     const act=BATCH.on?`batchSel('${s.id}',this.classList.toggle('sel'))`:`select('${s.id}')`;
@@ -679,7 +679,7 @@ function renderHeader(){
     `<span class="chip" title="工作目录 ${esc(META.workspace)}">📁 ${esc(wsMid(META.workspace))}</span>`+
     `<span class="chip">更新 ${fmtT(META.updated_at)}</span>`+
     (META.escalations?`<span class="chip bad">◉ ${META.escalations} 项待拍板</span>`:'')+
-    (META.todo_milestone?`<span class="chip warn">大步进行中</span>`:'')+
+    (META.todo_milestone?`<span class="chip warn">阶段进行中</span>`:'')+
     `<span class="chip bad" style="cursor:pointer;margin-left:auto" onclick="deleteSession('${META.id}')">删除会话</span>`;
   const hit=fmtP(u.cached||0,(u.cached||0)+(u.miss||0));
   $('#kpis').innerHTML=[
@@ -1594,7 +1594,7 @@ function renderLedger(c){
           当前上下文峰值 <b class="mono">${fmtN(peak)} tok</b>（达水位 ${pct.toFixed(1)}%）——
           ${pct>=100?'已到线，下一轮收口时会整理':'还没到线，继续对话即可；也可用 /maint 看维护进度'}。<br>
           轮整理状态：已整理 ${done} · 未整理 ${raw}。<br>
-          <span style="color:var(--tx3)">（计划页的大步/小步是另一本账，由 todo 工具即时维护，不受水位影响。）</span>
+          <span style="color:var(--tx3)">（计划页的阶段/工作项是另一本账，由 todo 工具即时维护，不受水位影响。）</span>
         </div>
       </div>`;
     return;
@@ -1623,25 +1623,30 @@ function renderLedger(c){
 /* ---------- 计划 ---------- */
 function renderTodo(c){
   const t=META.todo||{},m=t.milestone;
-  let html='<h3 class="sec">大步 / 小步（深度恒 1）</h3>';
+  let html='<h3 class="sec">阶段 / 工作项（深度恒 1）</h3>';
   if(m){
-    html+=`<div class="ms-card"><div class="g">🎯 ${esc(m.goal)}</div>
+    html+=`<div class="ms-card"><div class="g">🎯 ${m.id?esc(m.id)+' · ':''}${esc(m.goal)}</div>
       <div class="lab">验收标准</div><ul class="acc-list">${(m.acceptance||[]).map(a=>`<li><span class="box"></span>${esc(a)}</li>`).join('')}</ul>
-      ${(t.steps||[]).length?`<div class="lab">小步 · ${(t.steps||[]).filter(s=>s.done).length}/${t.steps.length}</div>
+      ${(t.steps||[]).length?`<div class="lab">工作项 · ${(t.steps||[]).filter(s=>s.done).length}/${t.steps.length}</div>
       <ul class="step-list">${t.steps.map(s=>`<li class="${s.done?'done':''}"><span class="box"></span>${esc(s.text)}</li>`).join('')}</ul>`:''}
     </div>`;
-  }else html+='<div class="empty" style="padding:26px 0">当前无开启中的大步</div>';
+  }else html+='<div class="empty" style="padding:26px 0">当前无进行中的阶段</div>';
   const hist=[...(t.history||[])].reverse();
-  html+='<h3 class="sec">已验收大步 · '+hist.length+'</h3>'+hist.map(h=>
-    `<details class="hist"><summary>🏁 ${esc(h.goal)}</summary>
-     <div class="ev"><b>验收证据</b><pre>${esc(h.evidence)}</pre></div></details>`).join('')
-    ||'<div class="empty">暂无已验收大步</div>';
-  // todo 工具调用流水：模型对计划做了什么（check_step/push/verify_milestone…）
+  html+='<h3 class="sec">已验收阶段 · '+hist.length+'</h3>'+hist.map(h=>
+    `<details class="hist"><summary>🏁 ${h.id?esc(h.id)+' · ':''}${esc(h.goal)}</summary>
+     <div class="ev"><b>验收证据</b><pre>${esc(h.evidence)}</pre></div>${
+       h.anchor?.block?`<div class="ev"><b>检查点</b><pre>R${h.anchor.round} · ${esc(h.anchor.event||'')} · ${esc(h.anchor.block)}</pre></div>`:''}</details>`).join('')
+    ||'<div class="empty">暂无已验收阶段</div>';
+  // todo 工具调用流水：模型对计划做了什么（check_item/verify_stage…）
   const log=[...(META.todo_log||[])].reverse();
-  const ACT={start_milestone:['🎯 开大步','t-create'],add_step:['＋ 加小步','t-create'],
-    check_step:['✓ 完成小步','t-modify'],drop_step:['↩ 撤小步','t-delete'],
+  const ACT={start_stage:['🎯 开阶段','t-create'],add_item:['＋ 加工作项','t-create'],
+    check_item:['✓ 完成工作项','t-modify'],drop_item:['↩ 撤工作项','t-delete'],
     defer_check:['⏸ 挂起验收','t-read'],
-    verify_milestone:['🏁 验收大步','t-create'],drop_milestone:['✗ 弃大步','t-delete'],
+    verify_stage:['🏁 验收阶段','t-create'],drop_stage:['✗ 弃阶段','t-delete'],
+    // 旧动作名别名（§53 改名前的会话流水仍能对上）
+    start_milestone:['🎯 开阶段','t-create'],add_step:['＋ 加工作项','t-create'],
+    check_step:['✓ 完成工作项','t-modify'],drop_step:['↩ 撤工作项','t-delete'],
+    verify_milestone:['🏁 验收阶段','t-create'],drop_milestone:['✗ 弃阶段','t-delete'],
     show:['▤ 查看','t-read']};
   html+='<h3 class="sec">todo 调用流水 · '+log.length+' <span style="font-weight:400;color:var(--tx3)">（模型对计划做过的每一步动作）</span></h3>';
   html+=log.length?`<div class="tree-body tree-pad">`+log.map(x=>{

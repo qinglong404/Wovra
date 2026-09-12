@@ -470,8 +470,9 @@ def confirm_tag(question: str) -> str:
 def todo_log(data: dict, limit: int = 60) -> list[dict]:
     """todo 工具调用流水（从轮事件机械派生，零新口径）。
 
-    计划页要能看到"模型对计划做了什么"——check_step/push/verify_milestone
-    这些动作此前只落在事件里，页面上无处可看。
+    计划页要能看到"模型对计划做了什么"——check_item / verify_stage 这些动作
+    此前只落在事件里，页面上无处可看。动作名 v2（§53：阶段/工作项）与旧名
+    别名都会出现在流水里，页面的 ACT 映射表两种都认。
     """
     out: list[dict] = []
     for r in data.get("rounds") or []:
