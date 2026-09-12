@@ -44,6 +44,18 @@ CASES = [
     "cd .. && pwd",
     # 对照：盘根绝对路径（开关判据不放过 `C:\x` 形态）
     "type C:\\Windows\\win.ini",
+    # 真洞（2026-09-12，worklog §49 ①）：纯点斜 token 曾整类漏拦，`dir ..`
+    # 实测列出了界外目录——属于"真读到了"，与上面几条误伤不同，必须拦
+    "ls ..",
+    "dir ..",
+    "ls ../..",
+    "cat -n ..",
+    # 对照：文本里的点号（不是路径访问）——不该拦
+    "echo ..",
+    "printf 1..2",
+    "ls a/../b.txt",
+    # §49 ②：开关的值是盘根形态 → 仍受检
+    "robocopy src dst /XD:C:\\Windows",
     # 引号内的绝对路径（数据文本）——不该拦
     'echo "see /etc/passwd for users"',
     # 正常提交消息

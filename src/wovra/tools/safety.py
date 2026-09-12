@@ -203,6 +203,22 @@ _CMD_OPTION_WORDS = frozenset({
 })
 
 
+def _value_is_abs_path(value: str) -> bool:
+    """开关"值"部分是否是**绝对路径形态**（盘根 `C:\\x`、`C:/x`、UNC `\\\\…`）。
+
+    2026-09-12 补：`<名>:<值>` 判据只看冒号后第一个字符时，
+    `robocopy src dst /XD:C:\\Windows` 的值以盘符字母开头 → 被判成开关放行，
+    与 §48.6「不放行盘根形态」的口径差一格。危害有限（`/XD`、`/EXCLUDE`
+    是排除参数、不是读通道），但口径必须一致，故按**值形态**补判。
+    """
+    text = str(value or "").lstrip("\"'")
+    if not text:
+        return False
+    if text[:1] in ("\\", "/"):
+        return True
+    return bool(re.match(r"[A-Za-z]:[\\/]", text))
+
+
 def _is_cmd_option(token: str) -> bool:
     """`/x` 形态的 token 是否是**命令开关**而不是路径。
 
@@ -237,11 +253,14 @@ def _is_cmd_option(token: str) -> bool:
     # 才是开关。取值必须看 `rest` 而不是 `body`——`body` 在冒号后的斜杠处就被
     # 截断了，会把 `/C:/x`（一种盘根绝对路径形态）误读成"开关 /C:"放行。
     # 自我测试抓到过这一点（`/C:/x` 被判 True），故此处按原值判。
+    # 值形态还要过 `_value_is_abs_path`：`/XD:C:\Windows` 的值以盘符开头，
+    # 也是盘根绝对路径形态，不得当开关（§49，口径与 §48 一致）。
     name, sep, value = rest.partition(":")
-    if sep and 1 <= len(name) <= 4 and name.isalpha() and value[:1] not in ("\\", "/"):
-        return True
-    if sep and name.lower() in _CMD_OPTION_WORDS and value[:1] not in ("\\", "/"):
-        return True
+    if sep and not _value_is_abs_path(value):
+        if 1 <= len(name) <= 4 and name.isalpha():
+            return True
+        if name.lower() in _CMD_OPTION_WORDS:
+            return True
     return False
 
 
@@ -312,6 +331,40 @@ def _linked_outside(command: str) -> str | None:
 # 既不以 / 开头（绝对路径规则看不见），也不是链接（链接规则看不见），
 # 必须单独判。判定用**归一化后是否落在界外**，而不是"出现 .. 就拦"——
 # `cat a/../b.txt` 归一回界内属正常写法，不该误伤。
+def _follows_path_command(command: str, token: str) -> bool:
+    """纯点/斜 token 是否处在**路径参数位置**（前一个 token 是命令词或选项）。
+
+    同一杆秤见 `_has_root_slash_target`（孤立 `/` 的判定）：只有紧跟命令词/
+    选项的 `/` 才算根目录访问，普通词之间的 `/` 是文本分隔符。
+    这里用来给"纯 `.`/`/` 构成的上溯 token"（`..`、`../..`）定同一档：
+
+        ls ..          → True（路径参数）
+        dir ../..      → True
+        cat -n ..      → True（前一个是选项）
+        echo ..        → False（echo 不在路径命令表里，是文本）
+        a .. b         → False
+
+    任一出现位置处在路径参数位置即返回 True（保守）。
+    """
+    if not token:
+        return False
+    for m in re.finditer(re.escape(token), command):
+        left = command[m.start() - 1] if m.start() > 0 else " "
+        right = command[m.end()] if m.end() < len(command) else " "
+        if not (left.isspace() or left in ";&|("):
+            continue  # 只是更长 token 的一部分（如 a../b），不是独立 token
+        if not (right.isspace() or right in ";|&)"):
+            continue
+        head = command[:m.start()]
+        prev = re.search(r"([^\s'\"|;&<>=()$`]+)\s*$", head)
+        if not prev:
+            return True  # 段首：`.. x`（少见）保守当路径
+        tok = prev.group(1).rstrip(",;")
+        if tok.startswith("-") or tok.startswith("/") or tok in _ROOT_TARGET_COMMANDS:
+            return True
+    return False
+
+
 def _traverses_outside(command: str) -> str | None:
     """命令里的相对路径 token 经归一化后落在界外 → 返回该 token。"""
     command = _mask_quoted_text(command)
@@ -323,8 +376,18 @@ def _traverses_outside(command: str) -> str | None:
         if token.startswith("/") or re.match(r"^[A-Za-z]:", token):
             continue  # 绝对路径：由 _outside_absolute_paths 负责
         if token in (".", "..") or set(token) <= {".", "/"}:
-            continue  # 光秃秃的 `..`：cd 判定的辖区；且它常出现在引号文本里
-        if ".." not in Path(token).parts:
+            # 纯 `.`/`/` 构成的上溯 token（`..`、`../..`）——2026-09-12 修复：
+            # 旧实现把这一整类 `continue` 掉，注释写的是"光秃秃的 .. 是 cd
+            # 判定的辖区"，但 cd 判定只认**命令位置**的 `cd ..`，`ls ..` /
+            # `dir ..` 根本不在它的辖区（实测 `dir ..` 真的列出了界外目录 →
+            # 目录/文件名列举泄漏；含字母的 `type ..\AGENTS.md` 反而拦得住）。
+            # 引号文本早已由 `_mask_quoted_text` 掩码，故这里不再有"它常出现
+            # 在引号文本里"的理由。改判：只有处在**路径参数位置**才算访问，
+            # 文本里的 `..`（`echo ..`）照旧放行——同一杆秤见
+            # `_follows_path_command` / `_has_root_slash_target`。
+            if not _follows_path_command(command, token):
+                continue
+        elif ".." not in Path(token).parts:
             continue  # 不含上溯：链接规则/常规路径，不在此判
         normalized = Path(os.path.normpath(root / token))
         if not normalized.is_relative_to(root):

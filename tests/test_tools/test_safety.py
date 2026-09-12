@@ -784,10 +784,47 @@ def test_cmd_option_with_value_is_not_a_path():
     assert safety._is_cmd_option("/C:") is True
     assert safety._is_cmd_option('/C:"TEXT"') is True
     assert safety._is_cmd_option("/R:src") is True
+    # 开关"值"本身是盘根绝对路径形态 → 不得当开关（§49 ②：`/XD:C:\Windows`
+    # 曾因判据只看冒号后第一个字符而被放行，与"不放行盘根形态"的口径差一格）
+    for token in ("/XD:C:\\Windows", "/XD:C:/Windows", "/EXCLUDE:\\\\srv\\share"):
+        assert safety._is_cmd_option(token) is False, token
+    assert abs_paths("robocopy src dst /XD:C:\\Windows") != []
     # 真实路径与盘根形态：照旧按路径处理（不在这里放行）
     for token in ("/etc", "/tmp", "/usr/bin", "/C:\\x", "/C:/x", "/"):
         assert safety._is_cmd_option(token) is False, token
     assert abs_paths("cat /etc/passwd") == ["/etc/passwd"]
+
+
+def test_bare_dotdot_traversal_is_blocked(workspace):
+    """纯 `..` / `../..` token 也是越界（worklog §49 ① 真洞）。
+
+    旧实现把"纯 `.`/`/` 构成"的 token **整类跳过**，注释写的是"光秃秃的 ..
+    是 cd 判定的辖区"——但 cd 判定只认**命令位置**的 `cd ..`，`ls ..` /
+    `dir ..` 不在它的辖区。实测（用户）：`dir ..` 真的列出了界外目录的 17 个
+    条目；而含字母的 `type ..\\AGENTS.md` 反而拦得住，故漏的只是"纯点斜"
+    这一类，泄漏面是目录/文件名列举。
+
+    改判后靠"是否处在路径参数位置"（与孤立 `/` 同一杆秤）区分访问与文本：
+    `ls ..`、`dir ../..`、`cat -n ..` 拦；`echo ..`、`1..2`、`a/../b.txt` 放行。
+    """
+    from wovra import tools as tools_module
+
+    safety = tools_module.safety
+    traverses = safety._traverses_outside
+    escape = safety._command_escape
+
+    assert traverses("ls ..") == ".."
+    assert traverses("dir ..") == ".."
+    assert traverses("ls ../..") == "../.."
+    assert "上溯" in (escape("dir ..") or "")
+    assert "上溯" in (escape("cat -n ..") or "")
+    # cd 判定辖区不变（它先判、归因仍是 cd）
+    assert escape("cd .. && ls") == "cd 到工作区之外"
+    # 文本里的点号照旧放行（误伤代价远大于漏拦，但这里漏拦=真读到了界外）
+    assert traverses("echo ..") is None
+    assert traverses("printf 1..2") is None
+    assert traverses("ls .") is None
+    assert traverses("cat a/../b.txt") is None
 
 
 def test_fs_root_can_never_be_authorized(monkeypatch, tmp_path):
