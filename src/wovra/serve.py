@@ -18,6 +18,7 @@ import json
 import os
 import re
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -26,6 +27,7 @@ from . import registry as registry_module
 from . import task as task_module
 
 _WEBUI = Path(__file__).resolve().parents[2] / "webui" / "index.html"
+_STARTED = time.strftime("%Y-%m-%d %H:%M:%S")
 _ID_SAFE = re.compile(r"^[0-9A-Za-z_-]+$")
 _LLM_CALL = re.compile(r"^\[(\w+)\]\s+(.*)$")
 _KV = re.compile(r"(\w+)=([\d,]+(?:\.\d+)?)")
@@ -465,9 +467,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _bytes(self, body: bytes, ctype: str) -> None:
+        # no-store 一律带：前端热更新靠浏览器每次拿到最新 index.html
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
@@ -510,6 +514,7 @@ class _Handler(BaseHTTPRequestHandler):
             self.cache.scan()  # 增量：mtime 没变的会话直接跳过（廉价）
             items = self.cache.snapshot()
             return self._json({"scanning": self.cache.scanning,
+                               "server_started": _STARTED,
                                "sessions": items})
         m = re.fullmatch(r"/api/sessions/([^/]+)", path)
         if m:

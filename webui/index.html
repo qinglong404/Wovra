@@ -255,7 +255,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span><span class="newbtn" onclick="newSession()" title="新建会话">＋</span></div>
   <input id="search" placeholder="搜索会话目标…">
   <div id="list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
-  <div class="side-foot">task.json 单一事实源<br>读：GET 全放开 · 写：仅对话轮（会话锁互斥）</div>
+  <div class="side-foot">task.json 单一事实源 · 读 GET / 写仅对话轮<br>
+    <span id="foot-ver">后端启动 — · 页面 —</span></div>
 </aside>
 <main id="main">
   <div id="topbar">
@@ -369,6 +370,8 @@ async function loadSessions(){
   try{
     const d=await api('/api/sessions');
     SESSIONS=d.sessions;
+    const fv=document.getElementById('foot-ver');
+    if(fv)fv.textContent=`后端启动 ${d.server_started||'—'} · 页面 ${document.lastModified}`;
     renderList();
     if(!CUR&&SESSIONS.length)select(SESSIONS[0].id);
   }catch(e){$('#list').innerHTML='<div class="empty">API 不可达：'+esc(e.message)+'</div>'}
