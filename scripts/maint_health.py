@@ -262,6 +262,58 @@ def report(task_id: str) -> None:
             pct = (saved / total_raw) if total_raw else 0.0
             print(f"视图体量（分档前 {raw_span} tok → 分档后 {span} tok）："
                   f"合计 {total_raw:,} → {total_now:,}（省 {saved:,}，{pct:.1%}）")
+            # 逐视图明细 + 主 agent 份额（2026-09-12 加）：此前只打区间，主 agent
+            # 落在区间哪里看不见，读者会把「区间」读成「份额」——用户追问
+            # 「刚分裂完主 agent 一定最小，现在是咋回事」正是这么来的。
+            # 口径提醒：这是**材料层**份额；装配层主 agent 仍走全量（§38.4-2）。
+            detail = "｜".join(
+                f"{n} {int(m.get('tokens') or 0):,}"
+                for n, m in sorted(
+                    marks.items(), key=lambda x: -int(x[1].get("tokens") or 0)
+                )
+            )
+            main_tok = int(
+                (marks.get(views_module.MAIN_AGENT_ID) or {}).get("tokens") or 0
+            )
+            main_share = (main_tok / total_now) if total_now else 0.0
+            print(f"逐视图：{detail}")
+            print(f"主 agent 份额：{main_tok:,} / {total_now:,} = {main_share:.1%}")
+            # 主 agent 桶构成（2026-09-12 加，用户追问「刚分裂完主 agent 一定最小，
+            # 现在是咋回事」）：桶里装的到底是什么？口径上它应只收「环境准备 +
+            # 独立思想（保底块）+ 用户块 + 不属于任何域的文件块」。若"未覆盖
+            # 文件"占大头，说明涨的不是主 agent 的定位，而是**分裂的覆盖不全**。
+            main_view = views.get(views_module.MAIN_AGENT_ID) or {}
+            _idx = built.get("index") or {}
+            _ent = views_module._file_domain_entries(built.get("domains") or [])
+            buckets = {"环境": 0, "用户": 0, "保底": 0, "未覆盖文件": 0, "其他": 0}
+            uncovered: list[str] = []
+            for bid in main_view.get("own_ids") or []:
+                item = _idx.get(str(bid))
+                if item is None:
+                    buckets["其他"] += 1
+                    continue
+                b = item["block"]
+                kind = str(b.get("kind") or "")
+                path = str(b.get("file") or "")
+                if kind == "environment":
+                    buckets["环境"] += 1
+                elif kind == "user":
+                    buckets["用户"] += 1
+                elif kind == "fallback":
+                    buckets["保底"] += 1
+                elif kind == "file" and not views_module._match_domain(path, _ent):
+                    buckets["未覆盖文件"] += 1
+                    if path and path not in uncovered:
+                        uncovered.append(path)
+                else:
+                    buckets["其他"] += 1
+            print("主 agent 桶构成：" + "｜".join(
+                f"{k} {v} 块" for k, v in buckets.items() if v
+            ))
+            if uncovered:
+                print(f"未覆盖文件 {len(uncovered)} 个（未落在任何域 file_domains 下）："
+                      + "、".join(uncovered[:12])
+                      + ("…" if len(uncovered) > 12 else ""))
             over = [n for n, m in marks.items()
                     if m.get("over") and n != views_module.MAIN_AGENT_ID]
             print(f"视图水位（阈值 {watermark:,}）："
