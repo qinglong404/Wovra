@@ -152,6 +152,8 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .think-head:hover{color:var(--tx2)}
 .think-body{display:none;padding:8px 12px 10px;font-size:11.5px;color:var(--tx3);white-space:pre-wrap;word-break:break-word;line-height:1.6;max-height:240px;overflow-y:auto;border-top:1px solid var(--line)}
 .think-box.open .think-body{display:block}
+.gbox .sysline{margin:2px 0 4px}
+.sys-bad{color:var(--red)}
 .more-btn{display:block;margin:4px auto 18px;padding:7px 20px;background:var(--bg2);border:1px solid var(--line2);border-radius:20px;color:var(--tx2);font-size:12px;cursor:pointer}
 .more-btn:hover{color:var(--tx);border-color:var(--acc-dim)}
 .tcard{background:var(--bg1);border:1px solid var(--line);border-radius:9px;margin:3px 0;overflow:hidden}
@@ -588,11 +590,14 @@ function argSummary(name,raw){
   const v=Object.values(a).find(x=>typeof x==='string'&&x);
   return v?String(v).slice(0,90):'';
 }
-function resultStatus(content){
-  const s=String(content||'');
-  if(/已拒绝执行/.test(s))return['🚫 已拒绝','st-deny'];
-  if(/exit_code=0/.test(s)||/^ok\b/.test(s))return['✓ 成功','st-ok'];
-  if(/(错误|失败|Error|Traceback|路径越界|文件不存在)/.test(s))return['✗ 出错','st-bad'];
+function resultStatus(name,content){
+  // 只看结果开头 + 退出码——结果全文可能就是源码（read_file 读到
+  // "已拒绝执行"这几个字的实现代码），全文扫描必然误判
+  const s=String(content||'').trim();
+  if(/^已拒绝执行/.test(s))return['🚫 已拒绝','st-deny'];
+  const m=s.match(/exit_code=(-?\d+)/);
+  if(m)return m[1]==='0'?['✓ 成功','st-ok']:['✗ 出错','st-bad'];
+  if(/^(错误|失败|路径越界|文件不存在|Error|Traceback)/.test(s))return['✗ 出错','st-bad'];
   return['✓ 成功','st-ok'];
 }
 /* consult 回复归因：内容形如 "{agent-id} 的回复：…" 且 id 在注册表中 */
@@ -745,9 +750,11 @@ function drawConv(c,toBottom){
       const e=evs[ei];
       const role=e.role,content=e.content,tcs=e.tool_calls||[];
       if(e.type==='runtime_note'||(role==='user'&&String(content||'').startsWith('<runtime-reminder>'))){
-        flush();
-        const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,140);
-        push({kind:'sys',text:`⚙ ${inner}`,title:String(content||''),tm:when(ei)});continue;
+        // 不 flush：提示行留在组框内，同一个块顺着往下走，不再拆成两块
+        const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,160);
+        const bad=/异常终止|未产出任何正文|整理失败|错误/.test(inner);
+        feed(sender,{t:'sys',text:(bad?'⚠ ':'⚙ ')+inner,title:String(content||''),tm:when(ei),bad});
+        continue;
       }
       if(e.type==='tool_call'){
         if(e.thinking)feed(sender,{t:'think',text:e.thinking});
@@ -813,6 +820,10 @@ function drawConv(c,toBottom){
       <div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}<span style="color:var(--tx3);font-weight:400"> · ${esc(s.id)}</span>${agentStatChip(s.key)}</div>
       <div class="gbox" style="border-color:${s.color}55">`+
       row.items.map(it=>{
+        if(it.t==='sys'){
+          return `<div class="sysline${it.bad?' sys-bad':''}" title="${esc(it.title||'')}">${esc(it.text)}`+
+            (it.tm?`<span class="stime">${esc(it.tm)}</span>`:'')+`</div>`;
+        }
         if(it.t==='think'){
           return `<div class="think-box" onclick="this.classList.toggle('open')">
             <div class="think-head">💭 思考过程 · ${fmtN(it.text.length)} 字（点击展开）</div>
@@ -852,7 +863,7 @@ function drawConv(c,toBottom){
 }
 function ci_status(ci){
   if(!ci||ci.result==null)return['无结果','st-run'];
-  const [t,c]=resultStatus(ci.result);return[t,c];
+  const [t,c]=resultStatus(ci.name,ci.result);return[t,c];
 }
 
 /* ---- 对话页顶部的 agent 上下文条（注册表运行时账）----
