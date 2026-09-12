@@ -129,7 +129,9 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .cgroup{margin-bottom:14px}
 .crow.user{margin-top:18px}   /* 轮首用户消息与上一轮拉开（轮头线已移到其下方） */
 .gbox{border:1px solid var(--line2);border-radius:10px;padding:9px 11px;display:flex;flex-direction:column;gap:7px}
-.crow,.tcard{content-visibility:auto;contain-intrinsic-size:auto 80px}
+/* content-visibility 已移除：整树 innerHTML 重建后新元素全按估高（80px）,
+   总高塌缩不足一屏 → scrollTop 钳 0 → 真实布局展开后视角停在顶部（跳顶根因）。
+   高度即时真实，锚点/跟随的滚动数学才可靠。*/
 .sysline{text-align:center;color:var(--tx3);font-size:11px;margin:9px 0;font-family:var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .sysline .stime{margin-left:8px;font-size:10px;opacity:.65}
 .mtime{font-size:10.5px;color:var(--tx3);text-align:right;margin:3px 2px 0 0;font-family:var(--mono);line-height:1.3}
