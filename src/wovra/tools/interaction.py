@@ -20,9 +20,10 @@ _CHOICE_LABEL_RE = re.compile(r"^[A-Ha-h][.、:：)]\s*")
 def _split_choices(choices) -> list[str]:
     """把模型给的 choices 拆成候选项（零 LLM）。
 
-    兼容三种形态：| 分隔（约定格式）、换行分隔（deepseek 实测会传
-    换行而非 |）、list/tuple（绕过 schema 类型时）。选项自带编号时
-    去掉前缀，避免渲染成 "A. A. xxx"。
+    兼容四种形态：| 分隔（约定格式）、换行分隔（deepseek 实测会传
+    换行而非 |）、全角分号分隔（实测模型把选项写成一整句
+    "选甲；选乙；选丙"——不拆就渲染成一整条）、list/tuple（绕过
+    schema 类型时）。选项自带编号时去掉前缀，避免渲染成 "A. A. xxx"。
     """
     if isinstance(choices, (list, tuple)):
         raw = "\n".join(str(c) for c in choices)
@@ -30,7 +31,7 @@ def _split_choices(choices) -> list[str]:
         raw = str(choices or "")
     out: list[str] = []
     for seg in raw.replace("\r", "\n").split("\n"):
-        for part in seg.split("|"):
+        for part in re.split(r"[|｜；;]", seg):
             part = part.strip()
             if not part:
                 continue

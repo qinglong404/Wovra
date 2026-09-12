@@ -522,6 +522,17 @@ def test_http_undo_and_local_cmd(server):
     assert code == 400
 
 
+def test_split_choices_fullwidth_separators():
+    """选项分割：全角分号/竖线也要拆（实测模型写成一整句的情况）。"""
+    from wovra.tools.interaction import _split_choices
+    got = _split_choices("只追加 worklog，先不提交；追加 worklog 并提交推送；暂不落账，继续留在工作区")
+    assert len(got) == 3
+    assert got[0].startswith("只追加 worklog")
+    assert "暂不落账" in got[2]
+    assert _split_choices("甲｜乙") == ["甲", "乙"]
+    assert _split_choices(["A. 一", "B、二"]) == ["一", "二"]
+
+
 def test_http_sse_stream(server):
     """SSE 端点：分片 data 行 + 终态 done 事件，写完即断。"""
     serve._JOBS["js"] = {"job_id": "js", "task_id": "s1", "status": "done",
