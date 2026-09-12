@@ -29,6 +29,11 @@ CASES = [
     'git commit -m "run_command 拦截 .venv/bin/python 时提示"',
     # 误伤 3：cd 到工作区本身的绝对路径——不该拦
     f"cd {WORKSPACE} && pwd",
+    # 误伤 4（2026-09-12，worklog §48）：带值开关 `/C:"…"` 被当成盘根 C:
+    # → 授权门判"过于宽泛"直接驳回，合法命令彻底挡死
+    'python -m pip install --dry-run --no-deps pytest 2>&1 | findstr /C:"Would install"',
+    'findstr /S /N /C:"from wovra.blocks" /C:"import blocks" src\\wovra\\tools\\*.py',
+    "xcopy /E: src dst",
     # 对照：真实要拦的根目录访问
     "find / -name x",
     "ls -la /",
@@ -37,6 +42,8 @@ CASES = [
     "rm -rf /tmp/x",
     "cd /tmp && ls",
     "cd .. && pwd",
+    # 对照：盘根绝对路径（开关判据不放过 `C:\x` 形态）
+    "type C:\\Windows\\win.ini",
     # 引号内的绝对路径（数据文本）——不该拦
     'echo "see /etc/passwd for users"',
     # 正常提交消息

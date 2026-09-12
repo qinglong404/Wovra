@@ -760,6 +760,36 @@ def test_cmd_option_flags_are_not_paths():
     assert abs_paths("head -1 /usr/bin/python3.13") or True  # 解释器白名单另行放行
 
 
+def test_cmd_option_with_value_is_not_a_path():
+    """带值的开关形态 `<名>:<值>` 也不是路径（worklog §48，§9 同类误伤）。
+
+    现场：`python -m pip install --dry-run --no-deps pytest 2>&1 | findstr
+    /C:"Would install"` 被拦成"访问工作区之外的绝对路径（/C:）"——`/C:` 再
+    经授权规范化落到盘根，被判"过于宽泛"**直接驳回且不问**，合法命令彻底
+    挡死。findstr 的 `/C:"…"`、`/R:"…"`、xcopy 的 `/E:`、robocopy 的
+    `/XD:` 都是这个形态，而 `/etc`、`/tmp` 这类真实路径必须照旧受检。
+    """
+    from wovra import tools as tools_module
+
+    safety = tools_module.safety
+    abs_paths = safety._outside_absolute_paths
+    # 带值开关：不报
+    for command in (
+        'findstr /C:"Would install" notes.txt',
+        'findstr /S /N /C:"from wovra.blocks" /C:"import blocks" src\\wovra\\tools\\*.py',
+        "xcopy /E: src dst",
+        "robocopy src dst /XD:tmp",
+    ):
+        assert abs_paths(command) == [], f"{command} 不该报越界"
+    assert safety._is_cmd_option("/C:") is True
+    assert safety._is_cmd_option('/C:"TEXT"') is True
+    assert safety._is_cmd_option("/R:src") is True
+    # 真实路径与盘根形态：照旧按路径处理（不在这里放行）
+    for token in ("/etc", "/tmp", "/usr/bin", "/C:\\x", "/C:/x", "/"):
+        assert safety._is_cmd_option(token) is False, token
+    assert abs_paths("cat /etc/passwd") == ["/etc/passwd"]
+
+
 def test_fs_root_can_never_be_authorized(monkeypatch, tmp_path):
     """盘根/根目录永不可授权——清单里一条 `D:\\` 曾让整块盘放行（§9）。"""
     from wovra import tools as tools_module

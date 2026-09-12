@@ -9,7 +9,9 @@ interaction 各模块依赖；它自身不 import 包内其它模块。
 这里——`wovra.tools.PROJECT_ROOT` 只是 import 时的值快照，改写包属性不会
 生效（cli.py 需要快照语义，探针另有 cli_module 补丁，属既有行为）。
 
-路径安全层两个入口，各工具按语义选用：
+路径安全层**两道判定**：① 词法层拒绝 `..` 且不跟随末段链接；
+② 解析层在 ① 之上再拦"解析后指向界外的链接"（需授权一次）。
+各工具按语义选用对应入口：
 
     * `_safe_path_lexical`  —— 词法拒绝 `..`，不跟随末段链接
                               （需要操作链接本身的工具用：delete/move）
@@ -20,6 +22,10 @@ interaction 各模块依赖；它自身不 import 包内其它模块。
 `.wovra/authorized-paths.json`（持久化，重启仍在），之后访问放行。
 授权粒度：单文件或目录（目录授权 = 其下全部内容）。未授权仍拦。
 """
+
+# 模块级速览：路径守卫两道判定——① 词法层 `_safe_path_lexical` 拒绝 `..`
+# 上溯且不跟随末段链接；② 解析层 `_safe_write_path` / `_safe_directory`
+# 在其上再拦"解析后指向界外的链接"（需授权一次）。
 
 import json
 import os
@@ -207,13 +213,36 @@ def _is_cmd_option(token: str) -> bool:
     这些碎片进了授权清单（其中 `D:\\` 一条即让整块 D 盘放行）。
 
     判据（保守）：单字母 `/X`（几乎所有单字母开关都在用，而单字母根
-    目录极罕见）或已知多字母开关名。其余（`/etc`、`/tmp`、`/usr/bin`）
+    目录极罕见）、已知多字母开关名，或**带值的开关形态** `<名>:<值>`
+    （2026-09-12 补，同 §9 同类误伤）。其余（`/etc`、`/tmp`、`/usr/bin`）
     照旧按路径处理。
+
+    带值形态的实测现场（会话 20260912-151325-22671f）：
+    `python -m pip install --dry-run --no-deps pytest 2>&1 | findstr /C:"Would install"`
+    被拦下，理由"访问工作区之外的绝对路径（/C:）"，随后 `/C:` 经授权规范化
+    落到盘根、被判"过于宽泛"**直接驳回且不询问**（连问的机会都没有）——
+    合法命令被彻底挡死。findstr 的 `/C:"…"`、`/R:"…"`、xcopy 的 `/E:`、
+    robocopy 的 `/XD:` 都是这个形态。
+
+    代价知情：根目录下恰好叫 `X:`（单字母+冒号）的路径会被当开关放行——
+    实测不存在这种用法，而误拦合法命令是每天都在发生的。
     """
     if not token.startswith("/") or token == "/":
         return False
-    body = token[1:].split("/")[0]
-    return len(body) == 1 or body.lower() in _CMD_OPTION_WORDS
+    rest = token[1:]
+    body = rest.split("/")[0]
+    if len(body) == 1 or body.lower() in _CMD_OPTION_WORDS:
+        return True
+    # `<名>:<值>`：名字是**短纯字母**、且**冒号后的原值**不以 `\`/`/` 开头，
+    # 才是开关。取值必须看 `rest` 而不是 `body`——`body` 在冒号后的斜杠处就被
+    # 截断了，会把 `/C:/x`（一种盘根绝对路径形态）误读成"开关 /C:"放行。
+    # 自我测试抓到过这一点（`/C:/x` 被判 True），故此处按原值判。
+    name, sep, value = rest.partition(":")
+    if sep and 1 <= len(name) <= 4 and name.isalpha() and value[:1] not in ("\\", "/"):
+        return True
+    if sep and name.lower() in _CMD_OPTION_WORDS and value[:1] not in ("\\", "/"):
+        return True
+    return False
 
 
 def _has_root_slash_target(masked: str) -> bool:
@@ -451,6 +480,34 @@ def set_audit_recorder(fn) -> None:
 def _audit(text: str) -> None:
     if _audit_recorder is not None:
         _audit_recorder(text)
+
+# ---- 路径守卫：两道判定（各工具按语义取用） ---------------------------------
+# ① 词法层 `_safe_path_lexical`——只看**路径字符串本身**，完全不问文件系统
+#    "这个路径最终指向哪里"（唯一例外是中间段解析，见第 3 步）。做四件事：
+#      1) 归一化写法：`\\` 一律当分隔符（Windows 命令里常见），剥掉空段与
+#         `.` 段——故 `./a`、`a//b`、`a\.\b` 都是合法写法，放行；
+#      2) 拒绝绝对路径：前导 `/` 或盘符前缀（`C:`）——工作区内的相对路径
+#         才是本层的语言，绝对路径该走解析层/授权门；
+#      3) 拒绝任何 `..`：**逐段查 PurePosixPath.parts，不先归一化再判**。
+#         所以 `sub/../t1.txt`（归一化后其实落在界内）照样拒；
+#      4) 中间段解析 + 复核：把除末段外的父目录 resolve() 一次（会展开
+#         `PROJECT_ROOT` 之下已存在的链接前缀），要求解析后仍在界内——
+#         堵的是"中间某段是指向界外的链接"这条穿越路；末段刻意**不解析**。
+#    末段不解析是本层的语义所在：返回 `parent / cleaned[-1]`，调用者拿到的
+#    是**链接本身**而不是它指向的目标——delete_file/move_file 靠这条才能
+#    操作链接（删链接、移动链接），而不是顺手改到目标文件上去。目标落在
+#    界外与否属于下一层（解析层）的事，本层不管。
+#    边界情形：`""` / `.` / `./` 这类"没有实际段"的输入 → 直接返回
+#    PROJECT_ROOT（空路径指工作区本身，合法）。
+#    失败一律 ValueError（文本带 PROJECT_ROOT 与"不接受 `..` 上溯"提示），
+#    由各工具转成给模型看的失败文本；本层不做任何自动纠正。
+#    ② 解析层 `_safe_write_path` / `_safe_directory`——在 ① 之上再拦
+#    **解析后指向界外**的链接（读写/目录遍历走这条；界外目标需用户授权一次，
+#    授权清单 .wovra/authorized-paths.json，重启仍在）。
+# ② 解析层 `_safe_write_path` / `_safe_directory`——在 ① 之上再拒绝
+#    **解析后指向界外**的链接（读写/目录遍历走这条；界外目标需用户授权一次，
+#    授权清单 .wovra/authorized-paths.json，重启仍在）。
+# 两层都是**拒绝而非归一化**：'随便绕、落地在界内就行' 守不住，简单规则才可审计。
 
 def _within_root(path: Path) -> bool:
     """path 解析后是否落在工作区内（不抛错，供遍历循环逐项过滤用）。
