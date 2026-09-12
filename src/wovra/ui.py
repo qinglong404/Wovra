@@ -460,7 +460,10 @@ def _agent_stat_line(stat: dict) -> str:
 
 
 def _round_account_line(task) -> str:
-    """会话级轮账一行：总轮 = 已压缩段 + 各 agent 名下轮（恒等式）。"""
+    """会话级轮账一行：**按阶段分**——总轮数 = Σ各阶段轮数（恒等式）。
+
+    分裂前那一段整段记、不归任何 agent；分裂后按落点归（§58 用户口径）。
+    """
     try:
         from .views import round_account
     except Exception:  # noqa: BLE001
@@ -473,13 +476,22 @@ def _round_account_line(task) -> str:
         return ""
     if not acc.get("total"):
         return ""
-    span = acc.get("compressed_span") or {}
-    line = f"轮账：总 {acc['total']} 轮 = 已压缩 {acc['compressed']} 轮"
-    if span.get("rounds"):
-        line += f"（R{span['first']}–R{span['last']}）"
-    line += f" + 名下 {acc['attributed']} 轮"
+    parts: list[str] = []
+    for st in acc["stages"][:6]:
+        seg = f"{st['label']} R{st['first']}–R{st['last']}（{st['rounds']} 轮）"
+        if st["stage"] == 0:
+            seg += "·不归 agent"
+        else:
+            counts = st.get("by_agent_counts") or {}
+            if counts:
+                seg += "·" + "、".join(f"{k} {v}" for k, v in counts.items())
+            if st["unassigned"]:
+                seg += f"·无落点 {len(st['unassigned'])}"
+        parts.append(seg)
+    tail = "" if len(acc["stages"]) <= 6 else f"；…共 {len(acc['stages'])} 个阶段"
+    line = f"轮账（按阶段）：总 {acc['total']} 轮 = " + "；".join(parts) + tail
     if not acc.get("balanced"):
-        line += "　⚠ 不配平（有名下账缺失）"
+        line += "　⚠ 不配平"
     return line
 
 

@@ -362,27 +362,30 @@ def test_agent_ledger_rounds_by_landing_steps_by_executor():
     轮数统一：`R{n}` 是会话级唯一序列，一轮恰好归一个落点（"它被附加到谁的
     上下文"）；步则归真的走那一步的 agent——同一轮里可以两家都有步
     （主 agent 走路由那一步算它的，接手方走的算接手方的）。
+
+    阶段：域树落在产出它的批次首轮上（R1，代次 1）→ R1 是**分裂前**（整段记、
+    不归 agent），R2/R3 是分裂后产生的新轮（没有代次 = 当前阶段）→ 按落点归。
     """
     rounds = [
-        _block_round(1, ["src/wovra/tools/a.py"]),            # 归工具层
-        _route_round(2, "工具层", ["src/wovra/tools/b.py"]),   # 主 agent 转出 → 归工具层
-        _block_round(3, ["notes.md"]),                        # 没有落点（老轮）
+        _block_round(1, ["src/wovra/tools/a.py"]),            # 分裂前
+        _route_round(2, "工具层", ["src/wovra/tools/b.py"]),   # 分裂后：主 agent 转出
+        _block_round(3, ["notes.md"]),                        # 分裂后：没有落点
     ]
-    rounds[2].pop("active_view", None)
-    rounds[0]["active_view"] = "工具层"
+    rounds[0]["org_generation"] = 1
+    rounds[0]["domains"] = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
     rounds[1]["active_view"] = "工具层"
     domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
     ledger = views_module.agent_ledger(rounds, domains)
 
     tools = ledger["工具层"]
-    # 轮：按落点——R1、R2 都落在工具层的上下文里
-    assert tools["rounds"] == 2 and tools["seqs"] == [1, 2]
-    assert tools["first"] == 1 and tools["last"] == 2
-    # 无落点的轮既不归工具层、也不硬塞给主 agent 充数
+    # 轮：按落点——只有 R2（分裂后）落在工具层的上下文里；R1 是分裂前的
+    assert tools["rounds"] == 1 and tools["seqs"] == [2]
+    assert tools["first"] == 2 and tools["last"] == 2
+    # 分裂前的轮不归任何 agent；分裂后没落点的轮另记（不塞给主 agent 充数）
     assert ledger["Main"]["rounds"] == 0
     assert ledger["__unassigned__"]["seqs"] == [3]
     # 步：按执行者——R1/R3 各两步全归主 agent；R2 里主 agent 走写文件与转交两步、
-    # 工具层走答复一步
+    # 工具层走答复一步（**步不受阶段影响**：谁花的手是事实）
     assert ledger["Main"]["steps"] == 6 and tools["steps"] == 1
     assert ledger["Main"]["handoffs"] == 1 and tools["handoffs"] == 0
     # 观测字段照旧透出；没给注册表就全是 0，不编数
@@ -391,54 +394,55 @@ def test_agent_ledger_rounds_by_landing_steps_by_executor():
     assert ledger["A"] is tools
 
 
-def test_round_account_is_balanced_and_compaction_moves_rounds():
-    """恒等式：Σ名下活轮 + 已压缩段 + 无落点 == 总轮数（= 最大 R 号）。
+def test_stage_spans_presplit_then_by_landing():
+    """按**阶段**分组：分裂前整段记（不归 agent），分裂后按落点归（§58）。
 
-    口径：**只记新轮**——被整理/压缩覆盖掉的轮（`org_state=done`）从各 agent
-    的活账里退出去、整段记一个数（用户口径「旧轮，整理压缩后，就重新记了」）；
-    但**步数不因被压缩而改**（谁花的手是发生过的事实）。
+    恒等式：Σ各阶段轮数 = 总轮数；分裂前那一段**不属于任何 agent**
+    （"主 agent 名下 13 轮"是错的说法——那是分裂前的 13 轮）。
     """
     rounds = [
         _block_round(1, ["src/wovra/tools/a.py"]),
         _route_round(2, "工具层", ["src/wovra/tools/b.py"]),
         _block_round(3, ["src/wovra/tools/c.py"]),
     ]
-    for r in rounds:
-        r["active_view"] = "工具层"
-    rounds[0]["org_state"] = "done"          # R1 已被压缩
+    for r in (rounds[0], rounds[1]):
+        r["org_generation"] = 1
+    rounds[0]["domains"] = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+    rounds[2]["active_view"] = "工具层"
     domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
 
-    ledger = views_module.agent_ledger(rounds, domains)
-    span = views_module.compressed_span(rounds)
+    stages = views_module.stage_spans(rounds, domains)
     acc = views_module.round_account(rounds, domains)
 
-    assert span["rounds"] == 1 and span["seqs"] == [1]
-    assert span["by_agent"] == {"工具层": [1]}      # 冻结快照：当时归谁
-    assert ledger["工具层"]["seqs"] == [2, 3]      # 活账里只剩没被压缩的
-    assert ledger["工具层"]["steps"] == 1
-    # 步**不因被压缩而改**（谁花的手是发生过的事实）：主 agent 那 6 步照记，
-    # 其中 R1 的两步虽然在已压缩段里
-    assert ledger["Main"]["steps"] == 6 and ledger["Main"]["seqs"] == []
-    assert acc["total"] == 3 and acc["compressed"] == 1
-    assert acc["attributed"] == 2 and acc["unassigned"] == 0
+    assert [s["label"] for s in stages] == ["分裂前", "第 1 次分裂后"]
+    pre, after = stages
+    assert pre["seqs"] == [1, 2] and pre["unattributed"] == [1, 2]
+    assert pre["by_agent"] == {}                     # 分裂前不归 agent
+    assert after["seqs"] == [3] and after["by_agent_counts"] == {"工具层": 1}
+    assert acc["total"] == 3 and acc["presplit"] == 2 and acc["attributed"] == 1
     assert acc["balanced"] is True
-    assert acc["compressed"] + acc["attributed"] + acc["unassigned"] == acc["total"]
+    assert sum(s["rounds"] for s in acc["stages"]) == acc["total"]
+    # 观测：步照旧按执行者记（阶段不挪步）
+    assert views_module.agent_ledger(rounds, domains)["Main"]["steps"] == 6
 
 
 def test_agent_ledger_landing_follows_settle():
     """落点就是轮上的 `active_view`——渐近归属补判改了它，账就跟着改。
 
-    这正是用户口径（"这一轮被附加到哪个上下文"）：重组前由主 agent 答的轮，
-    重组后材料归了域，那这轮就记在域名下。旧写入式账的问题不是"改了归属"，
-    而是**改了轮上的标记却不搬已经写下的账**——派生之后不存在这个裂缝。
+    这正是用户口径（"这一轮被附加到哪个上下文"）：重组后材料归了域，那这轮
+    就记在域名下。旧写入式账的问题不是"改了归属"，而是**改了轮上的标记却不搬
+    已经写下的账**——派生之后不存在这个裂缝。
     """
-    r = _block_round(1, ["src/wovra/tools/a.py"])
+    pre = _block_round(1, ["src/wovra/tools/a.py"])
+    pre["org_generation"] = 1
+    pre["domains"] = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
+    r = _block_round(2, ["src/wovra/tools/b.py"])
     domains = [{"name": "工具层", "file_domains": ["src/wovra/tools/"]}]
     r["active_view"] = "Main"
-    assert views_module.agent_ledger([r], domains)["Main"]["seqs"] == [1]
+    assert views_module.agent_ledger([pre, r], domains)["Main"]["seqs"] == [2]
     r["active_view"] = "工具层"              # 模拟补判（材料归位）
-    after = views_module.agent_ledger([r], domains)
-    assert after["工具层"]["seqs"] == [1] and after["Main"]["seqs"] == []
+    after = views_module.agent_ledger([pre, r], domains)
+    assert after["工具层"]["seqs"] == [2] and after["Main"]["seqs"] == []
 
 
 def test_human_report_reports_completeness():

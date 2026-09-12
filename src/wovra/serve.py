@@ -764,8 +764,13 @@ def _split_meta(r: dict) -> dict | None:
     }
 
 
-def _round_meta(r: dict, usage: dict | None = None) -> dict:
-    """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。"""
+def _round_meta(r: dict, usage: dict | None = None,
+                plan: dict | None = None) -> dict:
+    """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。
+
+    `stage` = 该轮属于哪个阶段（0 = **分裂前**，i≥1 = 第 i 次分裂生效之后）——
+    显示按阶段分，且分裂前的轮**不归任何 agent**（§58）。
+    """
     evs = r.get("events") or []
     return {
         "seq": r.get("seq"),
@@ -775,8 +780,8 @@ def _round_meta(r: dict, usage: dict | None = None) -> dict:
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",
-        # 落点（"这一轮被附加到谁的上下文"= active_view）+ 是否已被压缩
-        # （已压缩的轮退出 per-agent 活账、整段记，见 §56）
+        "stage": views_module.stage_index(r, plan or {}),
+        # 该轮是否已被整理压缩覆盖（只作整理状态的展示，不再决定轮账归属）
         "compressed": str(r.get("org_state") or "") == "done",
         "route_hops": r.get("route_hops", 0),   # 轮内转交次数（>0 = 主 agent 路由过）
         "events": len(evs),
@@ -836,8 +841,9 @@ def session_meta(task_id: str, data: dict) -> dict:
             e["ctx_peak"] = rec["ctx_peak"]
         e["share"] = rec["share"] if rec["window"] else 0.0
     usage = round_usage_map(data)
-    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")))
-                          for r in data.get("rounds") or []]
+    plan = views_module.stage_plan(rounds)
+    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")), plan)
+                          for r in rounds]
     meta["agent_stats"] = agent_stats(data)
     return meta
 

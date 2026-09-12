@@ -64,7 +64,7 @@ def audit(path: Path) -> dict | None:
         "id": data.get("id") or path.parent.name,
         "ledger": unique(ledger),
         "account": account,
-        "span": account["compressed_span"],
+        "stages": account["stages"],
         "derived_steps": derived_steps,
         "used_steps": sum(int(r.get("steps_used") or 0) for r in rounds),
         "domains": len(domains),
@@ -77,32 +77,32 @@ def main() -> None:
     if not rows:
         print("没有会话——无账可对。")
         return
-    print(f"会话 {len(rows)} 个（口径：views.agent_ledger——轮按落点、步按执行者，一律总轮 R 号）")
+    print(f"会话 {len(rows)} 个（口径：轮按**阶段**分——分裂前整段记、分裂后按落点；步按执行者）")
     unbalanced = 0
     for row in rows[:SHOW]:
-        acc, span = row["account"], row["span"]
+        acc = row["account"]
         print(
-            f"\n[{row['id']}] 总 {acc['total']} 轮 = 已压缩 {acc['compressed']} 轮"
-            f"（R{span['first']}–R{span['last']}）+ 名下活轮 {acc['attributed']}"
-            f" + 无落点 {acc['unassigned']}　域 {row['domains']} 个"
-            f"　{'✓ 配平' if acc['balanced'] else '✗ 不配平'}"
+            f"\n[{row['id']}] 总 {acc['total']} 轮　域 {row['domains']} 个　"
+            f"{'✓ 配平' if acc['balanced'] else '✗ 不配平'}"
         )
-        if span.get("by_agent"):
-            snap = "、".join(
-                f"{k} {len(v)}" for k, v in sorted(span["by_agent"].items())
-            )
-            print(f"    已压缩段当时的归属快照（只作追溯）：{snap}")
+        for st in row["stages"][:6]:
+            counts = st.get("by_agent_counts") or {}
+            own = ("不归 agent（整段记）" if st["stage"] == 0
+                   else "、".join(f"{k} {v}" for k, v in counts.items()) or "—")
+            extra = f"　无落点 {len(st['unassigned'])}" if st["unassigned"] else ""
+            print(f"    {st['label']:<12} R{st['first']}–R{st['last']}　"
+                  f"{st['rounds']:>3} 轮　归：{own}{extra}")
+        if len(row["stages"]) > 6:
+            print(f"    … 共 {len(row['stages'])} 个阶段")
         if not acc["balanced"]:
             unbalanced += 1
-        for rec in sorted(row["ledger"], key=lambda x: -x["rounds"]):
-            if not (rec["rounds"] or rec["steps"]):
+        for rec in sorted(row["ledger"], key=lambda x: -x["rounds"])[:4]:
+            if not rec["rounds"]:
                 continue
-            seqs = rec["seqs"]
-            head = "、".join(f"R{s}" for s in seqs[:6]) + ("…" if len(seqs) > 6 else "")
             print(
-                f"    {rec['name']:<28} {rec['rounds']:>3} 轮"
-                f"（R{rec['first']}–R{rec['last']}）　步 {rec['steps']:<5}"
-                f"　转出 {rec['handoffs']}　{head}"
+                f"    ▸ {rec['name']:<26} 名下 {rec['rounds']:>3} 轮"
+                f"（R{rec['first']}–R{rec['last']}）　步 {rec['steps']}"
+                f"　转出 {rec['handoffs']}"
             )
         delta = row["used_steps"] - row["derived_steps"]
         note = ("在飞/未结算（轮上累计还没落账）" if delta < 0
@@ -111,8 +111,9 @@ def main() -> None:
               f"{row['used_steps']}　差 {delta}（{note}）")
     if len(rows) > SHOW:
         print(f"\n（仅展示最近 {SHOW} 个会话，共 {len(rows)} 个）")
-    print(f"\n不变量①：Σ名下轮 + 已压缩 == 总轮数 —— "
+    print(f"\n不变量：Σ各阶段轮数 == 总轮数（= 最大 R 号） —— "
           f"{'全部配平' if not unbalanced else f'{unbalanced} 个会话不配平'}")
+    print("注：分裂前的轮不属于任何 agent；分裂后一轮恰好归一个落点。")
 
 
 if __name__ == "__main__":

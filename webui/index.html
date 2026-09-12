@@ -1049,7 +1049,7 @@ function drawConv(c,toBottom){
     const sepRow={kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,
                   t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
                   aid:(senderOf(m)||{}).id,landing:String(m.active_view||''),
-                  unassigned:!(senderOf(m)||{}).id,compressed:!!m.compressed,
+                  unassigned:!(senderOf(m)||{}).id,stage:(m.stage==null?-1:m.stage),
                   hops:m.route_hops||0};
     let sepDone=false;
     const dropSep=()=>{if(!sepDone){flush();push(sepRow);sepDone=true}};
@@ -1119,8 +1119,8 @@ function drawConv(c,toBottom){
         :'（本轮落账未分账：机制生效前的账）';
       const tip=tot?`本轮输入 ${fmtN(tot)} tok（缓存命中 ${fmtN(u.cached||0)} · 未命中 ${fmtN(u.miss||0)}）· 输出 ${fmtN(u.completion||0)} tok · LLM 调用 ${u.calls||0} 次 · 上下文峰值 ${fmtN(u.context||0)} tok${settle}\n${byLine}`:'';
       const landingTip=row.unassigned
-        ?'这一轮没有落点可归：它在机制生效前就闭合了，按口径不塞给主 agent 充数'
-        :`落点：这一轮被附加到 ${esc(row.landing)} 的上下文${row.hops?'（主 agent 路由转交）':''}${row.compressed?'；已被整理压缩，退出 per-agent 活账、整段记':''}`;
+        ?'这一轮没有落点可归：它产生于机制生效之前，按口径不塞给主 agent 充数'
+        :`落点：这一轮被附加到 ${esc(row.landing)} 的上下文${row.hops?'（主 agent 路由转交）':''}`;
       const chip=row.unassigned
         ?`<span class="ra" style="color:var(--tx3)" title="${esc(landingTip)}">○ 无落点</span>`
         :(row.aid?`<span class="ra" style="color:${agentColor(row.aid)}" title="${esc(landingTip)}">${row.hops?'Main → ':''}⬤ ${esc(row.aid)}</span>`:'');
@@ -1128,7 +1128,7 @@ function drawConv(c,toBottom){
         row.ob,
         (row.steps!=null&&row.steps!=='')?`<span class="seg">${row.steps} 步</span>`:'',
         `<span class="seg">${row.n} 事件</span>`,
-        row.compressed?`<span class="seg" title="已被整理/压缩覆盖的轮：退出 per-agent 活账，整段记「已压缩」">已压缩</span>`:'',
+        row.stage===0?`<span class="seg" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'',
         tot?`<span class="seg acc" title="${esc(tip)}">Σ ${fmtN(tot)} tok · 命中 ${hit}${byKeys.length>1?' · 分账 '+byKeys.length+' 方':''}</span>`:'',
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
@@ -2080,8 +2080,23 @@ function renderUsage(c){
     rowsAll.push({kind:'pending',x});
   }
   const acc=(META&&META.round_account)||null;
-  const accSpan=(acc&&acc.compressed_span)||{};
-  const accTip=acc?`总 ${acc.total} 轮 = 已压缩 ${acc.compressed} 轮${accSpan.first?`（R${accSpan.first}–R${accSpan.last}）`:''} + 名下 ${acc.attributed} 轮${acc.unassigned?` + 无落点 ${acc.unassigned} 轮`:''}`:'';
+  const accTip=acc?`总 ${acc.total} 轮 = ${(acc.stages||[]).map(s=>s.label+' '+s.rounds).join(' + ')}`:'';
+  // 按**阶段**分：分裂前那一段整段记、不归任何 agent；分裂后按落点归
+  const stageRows=(acc&&acc.stages)||[];
+  const stageBlock=!stageRows.length?'':`
+    <h3 class="sec">轮账按阶段（总 ${acc.total} 轮 = 各阶段之和；**分裂前的轮不归任何 agent**——那时还没有子 agent 可分）</h3>
+    <table class="tbl"><thead><tr><th>阶段</th><th>轮号区间</th><th>轮数</th><th>归属</th></tr></thead>
+    <tbody>${stageRows.slice(0,8).map(s=>{
+      const counts=s.by_agent_counts||{};
+      const by=Object.keys(counts).map(k=>`<span class="mono" style="color:${agentColor(k)}">${esc(REG[k]?.name||k)}</span> ${counts[k]}`).join('　');
+      const unm=(s.unassigned||[]).length?`<span style="color:var(--tx3)">无落点 ${s.unassigned.length}</span>`:'';
+      const own=s.stage===0?`<span style="color:var(--tx3)">不归 agent（整段记）</span>`:(by||'<span style="color:var(--tx3)">—</span>');
+      return `<tr><td class="mono">${esc(s.label)}</td>
+        <td class="mono">R${s.first}–R${s.last}</td>
+        <td class="mono">${s.rounds}</td>
+        <td>${own}${unm?'　'+unm:''}</td></tr>`;
+    }).join('')}</tbody></table>
+    ${stageRows.length>8?`<div style="font-size:11.5px;color:var(--tx3)">…共 ${stageRows.length} 个阶段（长会话每代一次分裂，只列前 8 个）</div>`:''}`;
   const agentTable=!rowsAll.length?'':`
     <h3 class="sec">按 agent 聚合${accTip?` · ${esc(accTip)}`:''}（轮数统一按**总轮 R 号**；消费按**调用方实记**——整理开销单列，不摊给任何 agent）</h3>
     <table class="tbl"><thead><tr>
@@ -2122,6 +2137,7 @@ function renderUsage(c){
     }).join('')}</div>
     <div style="font-size:11.5px;color:var(--tx3)">整理 / 压缩 / 分裂的开销**单列**（见下方维护开销账），不摊给任何 agent；老会话的落账行没有分账段，显示「未分账」。</div>`;
   c.innerHTML=
+    stageBlock+
     agentTable+
     costTable+
     `<h3 class="sec">缓存命中（口径 = llm.py 落账）</h3>

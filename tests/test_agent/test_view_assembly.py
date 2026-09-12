@@ -107,23 +107,28 @@ def test_settle_views_moves_round_landing(monkeypatch):
     "这一轮被附加到哪个 agent 的上下文"就是轮上的 `active_view`；补判把材料
     归到域之后，那几轮就记在域名下。旧写入式账的毛病不是"归属会变"，而是
     **变了标记却不搬已经写下的账**——派生之后不存在这个裂缝。
+
+    阶段：R1 是产出域树的那一批的首轮（**分裂前**，不归任何 agent），
+    R2 是分裂之后产生的轮（落点可被补判）。
     """
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     task = _task_with_domains([
         _mk_file_round(1, "改 safety.py", ["src/wovra/tools/safety.py"]),
         _mk_file_round(2, "safety.py 再改一处", ["src/wovra/tools/safety.py"]),
     ])
+    task.rounds[0]["org_generation"] = 1        # R1 = 产出域树的那一批
     agent = _agent(task)
     before = views_module.agent_ledger(task.rounds, None, task.registry)
     assert before["工具层"]["seqs"] == []            # 补判前还没有落点
+    stages = views_module.stage_spans(task.rounds)
+    assert stages[0]["seqs"] == [1]                  # R1 是分裂前那一段
 
-    changed = agent._settle_views()                  # 材料归位（补判）
-    assert changed == 2
-    assert task.rounds[1]["active_view"] == "工具层"
+    agent._settle_views()                            # 材料归位（补判）
 
     after = views_module.agent_ledger(task.rounds, None, task.registry)
-    assert after["工具层"]["seqs"] == [1, 2]          # 落点搬到域名下
-    # 但**步**不搬：那两轮的文件是谁写的就是谁写的（R1/R2 各两步，都归主 agent）
+    assert after["工具层"]["seqs"] == [2]             # 落点搬到域名下
+    assert after["Main"]["seqs"] == []                # 分裂前的 R1 不归它
+    # 但**步**不搬也不按阶段分：那两轮的文件是谁写的就是谁写的（各两步归主 agent）
     assert after["Main"]["steps"] == 4
 
 

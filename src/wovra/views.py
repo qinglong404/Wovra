@@ -587,41 +587,120 @@ def agent_lookup(
     return _ledger_roster(domains, registry)[1]
 
 
-def compressed_span(rounds: Iterable[dict] | None) -> dict:
-    """**已压缩段**：已经被整理/压缩覆盖掉的轮（用户口径：整段记，不拆给 agent）。
+def _round_generation_of(r: dict) -> int:
+    try:
+        return int(r.get("org_generation") or 0)
+    except (TypeError, ValueError):
+        return 0
 
-    判据是轮上自带的 `org_state`（整理产物生效过的轮就是 `done`）——"旧轮，
-    整理压缩后，就重新记了"：它们从各 agent 的**活账**里退出去，整段记一个数
-    （仍留下 R 区间与当时的归属快照，供追溯与展开）。
 
-    为什么不用"第一次分裂之前"当界线：分裂产物落在哪一轮不等于它何时生效
-    （实测 `20260912-181611-886f42` 的域树挂在 R1 上，而实际是会话中途才分出来的），
-    拿它当界线既不准也不稳。
+def stage_plan(rounds: Iterable[dict] | None) -> dict:
+    """阶段划分的两个机械信号（供 `stage_index` 用）。
+
+    * `boundaries`：**产出域树的代次**（有代次的载体轮）——某代 g 的轮是产出
+      那棵树**之前**产生的，故其阶段 = `#{b : b < g}`；
+    * `carriers`：**域树载体轮的 seq**（域树落盘在产出它的批次首轮上）。载体轮
+      自己就是那棵树的来源，必然处于它生效**之前**；它的代次可能缺失（未整理
+      就落盘的批次），故单独认。
     """
     rounds = [r for r in (rounds or []) if isinstance(r, dict)]
-    seqs: list[int] = []
-    by_agent: dict[str, list[int]] = {}
+    gens: set[int] = set()
+    carriers: list[int] = []
     for r in rounds:
-        if str(r.get("org_state") or "") != "done":
+        if not (r.get("domains") or []):
             continue
         try:
             seq = int(r.get("seq") or 0)
         except (TypeError, ValueError):
             continue
-        seqs.append(seq)
-        landing = str(r.get("active_view") or "").strip() or MAIN_AGENT_ID
-        by_agent.setdefault(landing, []).append(seq)
-    seqs.sort()
-    for v in by_agent.values():
-        v.sort()
-    return {
-        "rounds": len(seqs),
-        "seqs": seqs,
-        "first": seqs[0] if seqs else 0,
-        "last": seqs[-1] if seqs else 0,
-        # 冻结快照：这一段当时归过谁（"你也可以记"——只作追溯，不进活账）
-        "by_agent": by_agent,
-    }
+        carriers.append(seq)
+        g = _round_generation_of(r)
+        if g > 0:
+            gens.add(g)
+    return {"boundaries": sorted(gens), "carriers": sorted(carriers)}
+
+
+def stage_boundaries(rounds: Iterable[dict] | None) -> list[int]:
+    """**分裂生效点**的整理代次（升序）——`stage_plan` 的薄封装（旧调用点）。"""
+    return stage_plan(rounds)["boundaries"]
+
+
+def stage_index(
+    r: dict, plan: Iterable[int] | dict | None
+) -> int:
+    """该轮属于哪个阶段：0 = **分裂前**，i≥1 = 第 i 次分裂生效之后。
+
+    * 域树载体轮（产出某棵树的那一批的首轮）处于那棵树生效之前——它在阶段
+      `该树序号`（第一棵树的载体轮 = 阶段 0 = 分裂前）；
+    * 有代次的轮：阶段 = `#{生效点 b : b < 代次}`；
+    * 未整理的轮（没有代次）属于**当前阶段**（最后一次分裂之后）。
+    """
+    if isinstance(plan, dict):
+        carriers = list(plan.get("carriers") or [])
+        boundaries = list(plan.get("boundaries") or [])
+    else:                                  # 兼容旧签名（只给 boundaries）
+        carriers, boundaries = [], list(plan or [])
+    try:
+        seq = int(r.get("seq") or 0)
+    except (TypeError, ValueError):
+        seq = 0
+    if seq and seq in carriers:
+        return carriers.index(seq)
+    g = _round_generation_of(r)
+    if g > 0:
+        return sum(1 for b in boundaries if b < g)
+    return len(boundaries) if boundaries else (1 if carriers else 0)
+
+
+def stage_spans(
+    rounds: Iterable[dict] | None, domains: Iterable[dict] | None = None
+) -> list[dict]:
+    """按**阶段**给轮分组（用户口径：显示按阶段分，不是笼统一坨）。
+
+    * 阶段 0「**分裂前**」：第一次分裂生效之前产生的轮——那时还没有子 agent
+      可分，故整段记一个数、**不归任何 agent**（也就不用谈"主 agent 名下 13 轮"）。
+    * 阶段 i≥1「第 i 次分裂后」：该阶段内的轮按**落点**归 agent。
+
+    恒等式仍然成立：Σ各阶段轮数 = 总轮数（= 最大 R 号）。
+    """
+    rounds = [r for r in (rounds or []) if isinstance(r, dict)]
+    plan = stage_plan(rounds)
+    stages: dict[int, dict] = {}
+    for r in rounds:
+        try:
+            seq = int(r.get("seq") or 0)
+        except (TypeError, ValueError):
+            continue
+        idx = stage_index(r, plan)
+        st = stages.setdefault(idx, {
+            "stage": idx,
+            "label": "分裂前" if idx == 0 else f"第 {idx} 次分裂后",
+            "seqs": [], "by_agent": {}, "unassigned": [], "unattributed": [],
+        })
+        st["seqs"].append(seq)
+        landing = str(r.get("active_view") or "").strip()
+        if idx == 0:
+            # 分裂前的轮**不归任何 agent**（那时还没有子 agent 可分）
+            st["unattributed"].append(seq)
+        elif not landing:
+            # 分裂之后产生、但没有落点的轮（机制生效前闭合的老轮）
+            st["unassigned"].append(seq)
+        else:
+            st["by_agent"].setdefault(landing, []).append(seq)
+    out: list[dict] = []
+    for idx in sorted(stages):
+        st = stages[idx]
+        st["seqs"].sort()
+        for v in st["by_agent"].values():
+            v.sort()
+        st["unassigned"].sort()
+        st["unattributed"].sort()
+        st["rounds"] = len(st["seqs"])
+        st["first"] = st["seqs"][0] if st["seqs"] else 0
+        st["last"] = st["seqs"][-1] if st["seqs"] else 0
+        st["by_agent_counts"] = {k: len(v) for k, v in st["by_agent"].items()}
+        out.append(st)
+    return out
 
 
 def round_account(
@@ -629,33 +708,33 @@ def round_account(
     domains: Iterable[dict] | None = None,
     registry: Iterable[dict] | None = None,
 ) -> dict:
-    """会话级轮账：总轮数 = 最大 R 号 = 已压缩段 + 各 agent 名下活轮（恒等式）。
+    """会话级轮账：总轮数 = 最大 R 号 = 各阶段轮数之和（按阶段分组）。
 
-    活账口径：**只记新轮**——还没被压缩掉的轮按落点归 agent；被压缩掉的整段记。
-    没有落点的轮（`active_view` 为空：机制生效前闭合的老轮）另记"无落点"，
-    不硬塞给主 agent 充数。
+    分组口径见 `stage_spans`：分裂前的轮整段记（不归 agent），分裂后的轮按
+    落点归 agent。**只记新轮**——被压缩掉的旧轮不进 per-agent 活账。
     """
     rounds = [r for r in (rounds or []) if isinstance(r, dict)]
-    span = compressed_span(rounds)
+    stages = stage_spans(rounds, domains)
     ledger = agent_ledger(rounds, domains, registry)
     live = 0
     seen: set[int] = set()
     for key, rec in ledger.items():
-        if key == "__unassigned__":
-            continue
-        if id(rec) in seen:
+        if key == "__unassigned__" or id(rec) in seen:
             continue
         seen.add(id(rec))
         live += int(rec.get("rounds") or 0)
+    presplit = next((s for s in stages if s["stage"] == 0), None)
     total = max((int(r.get("seq") or 0) for r in rounds), default=0)
+    counted = sum(int(s["rounds"]) for s in stages)
     return {
         "total": total,
-        "compressed": span["rounds"],
-        "compressed_span": span,
+        "stages": stages,
+        "presplit": int((presplit or {}).get("rounds") or 0),
+        "presplit_span": presplit or {},
+        "compressed": int((presplit or {}).get("rounds") or 0),   # 兼容旧名
         "attributed": live,
         "unassigned": int((ledger.get("__unassigned__") or {}).get("rounds") or 0),
-        "balanced": span["rounds"] + live
-        + int((ledger.get("__unassigned__") or {}).get("rounds") or 0) == total,
+        "balanced": counted == total,
     }
 
 
@@ -664,15 +743,15 @@ def agent_ledger(
     domains: Iterable[dict] | None = None,
     registry: Iterable[dict] | None = None,
 ) -> dict[str, dict]:
-    """每个 agent 名下的**新轮**（按落点）+ 步（按执行者）——派生，不落盘。
+    """每个 agent 名下的**分裂后活轮**（按落点）+ 步（按执行者）——派生，不落盘。
 
-    口径（2026-09-12 用户拍板，worklog §56）——**轮数统一，不按 agent 重算**：
+    口径（2026-09-12 用户拍板，worklog §56/§58）——**轮数统一，按阶段分**：
 
-    * **轮**：`R{n}` 是会话级唯一序列，只增、不重编；一轮**恰好归一个**落点，
-      即"它被附加到哪个 agent 的上下文"（轮上的 `active_view`）。实时落定，
-      **只记新轮**——分裂/重组之后不回算旧轮；被压缩掉的轮整段记
-      （`compressed_span`），不拆给任何 agent。故
-      **Σ该 agent 名下活轮 + 已压缩段 + 无落点轮 = 会话总轮数 = 最大 R 号**。
+    * **轮**：`R{n}` 是会话级唯一序列，只增、不重编。**分裂前**那一段整段记、
+      不归任何 agent（那时还没有子 agent 可分——"主 agent 名下 13 轮"是错的说法，
+      那是分裂前的 13 轮）；**分裂之后**产生的轮，一轮恰好归一个**落点**
+      （"它被附加到哪个 agent 的上下文"= 轮上的 `active_view`），实时落定、
+      **只记新轮**、不回算旧轮。阶段划分见 `stage_spans`。
     * **步**：一次模型调用 = 一步，归**执行它的那个 agent**（同一轮里可有
       多家：主 agent 走路由那一步算它的，接手方走的算接手方的）。轮的总步
       = 各执行方之和。步数按事件流里的 `route_to` 转交点分段，历史轮同样能算；
@@ -690,6 +769,7 @@ def agent_ledger(
     rounds = [r for r in (rounds or []) if isinstance(r, dict)]
     domains = list(domains) if domains is not None else latest_domains(rounds)
     roster, lookup = _ledger_roster(domains, registry)
+    plan = stage_plan(rounds)
 
     def blank(entry: dict) -> dict:
         return {
@@ -733,9 +813,10 @@ def agent_ledger(
         # 转出记给**转出方**（每一次换手算一次；一轮可转多次）
         for name, _count in segs[:-1]:
             rec_for(name)["handoffs"] += 1
-        # 轮：只算**活轮**（还没被压缩掉的）。被压缩的整段记（compressed_span），
+        # 轮：只算**分裂之后**的活轮。分裂前那一段整段记（那时还没有子 agent
+        # 可分，谈不上"主 agent 名下 13 轮"，见 `stage_spans`）；分裂之后但
         # 没有落点的（机制生效前闭合的老轮）另记，不硬塞给主 agent 充数。
-        if str(r.get("org_state") or "") == "done":
+        if stage_index(r, plan) == 0:
             continue
         landing = str(r.get("active_view") or "").strip()
         if not landing:
@@ -774,8 +855,7 @@ def agent_ledger(
             out[str(entry["id"])] = rec
     out["__unassigned__"] = {
         "id": "", "name": "", "display": "无落点（机制生效前）",
-        "rounds": len(unassigned), "seqs": sorted(unassigned),
-        "first": min(unassigned) if unassigned else 0,
+        "rounds": len(unassigned), "seqs": sorted(unassigned),        "first": min(unassigned) if unassigned else 0,
         "last": max(unassigned) if unassigned else 0,
         "steps": 0, "handoffs": 0,
         "ctx_cur": 0, "ctx_peak": 0, "window": 0, "share": 0.0,

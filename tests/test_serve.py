@@ -71,7 +71,8 @@ def _fake_task() -> dict:
                                "completion=300 缓存命中 19,000 tok 未命中 1,000 tok"}],
         "rounds": [
             {"seq": 1, "user_input": {"original": "干活"}, "end_state": "completed",
-             "org_state": "done", "org_generation": 2, "steps_used": 7,
+             "org_state": "done", "org_generation": 1, "steps_used": 7,
+             "domains": [{"name": "工具层", "file_domains": ["src/"]}],
              "events": [{"id": "R1-E01", "type": "user", "status": "",
                          "timestamp": "2026-09-12T10:59:14",
                          "thinking": "推理全文",
@@ -271,11 +272,12 @@ def test_session_meta_round_list_has_usage():
     a = meta["agent_stats"][0]
     assert a["agent"] == "Main" and a["prompt"] == 45000 and a["cost_known"] is True
     assert a["steps"] == 5 and a["billed_rounds"] == 2
-    # 轮账恒等式：总轮 = 已压缩段 + 名下活轮 + 无落点（夹具里 R1 已整理、
-    # R2 还没有落点）
+    # 轮账恒等式（按阶段分）：夹具里 R1 是产出域树的批次（分裂前），R2 是
+    # 分裂之后产生、还没有落点的轮 → 分裂前 1 + 无落点 1 = 总 2 轮
     acc = meta["round_account"]
-    assert acc["total"] == 2 and acc["compressed"] == 1 and acc["unassigned"] == 1
+    assert acc["total"] == 2 and acc["presplit"] == 1 and acc["unassigned"] == 1
     assert acc["balanced"] is True
+    assert [s["label"] for s in acc["stages"]] == ["分裂前", "第 1 次分裂后"]
 
 
 def test_round_detail_after_filter():
