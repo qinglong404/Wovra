@@ -743,7 +743,7 @@ function consultSender(content){
    时间线顺序 = 你要的：思考流式 → 完成原地折叠 → 工具卡落位 → 下一段思考 → 正文。
    已落账的段（事件带 thinking）由正式渲染负责，直播区只补还没落账的段。 */
 const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
-            done:[],seq:0,baseRounds:0,sse:false};
+            seq:0,baseRounds:0,sse:false};
 let SSE=null;
 function sseClose(){if(SSE){SSE.close();SSE=null}LIVE.sse=false}
 function sseConnect(jobId){   // SSE：分片到达即推（替代高频轮询的正确形态）
@@ -768,14 +768,10 @@ function applyChunk(c){
   }
   else if(c.k==='status'){
     LIVE.mode='status';LIVE.status=c.s;dirty=true;
-    // 折叠时机=该段已完结：新一步开始（等待模型响应）或本步已产出动作
-    // （工具名到达——思考必然已流完）。否则工具执行期间，已落账卡片上方
-    // 的折叠块之外，直播区还会把同一段思考重复挂在卡片下方
-    if(/等待模型/.test(c.s)||/^正在/.test(c.s)){
-      if(LIVE.think)LIVE.done.push({t:'think',text:LIVE.think});
-      if(LIVE.ans)LIVE.done.push({t:'ans',text:LIVE.ans});
-      LIVE.think='';LIVE.ans='';
-    }
+    // 该段已完结（新一步开始 / 本步已产出动作）：清空流式缓冲。
+    // 直播区不做"留档折叠"——完成的内容一律由事件区正式渲染，
+    // 否则去重计数一旦滞后，同一段思考就会在底部重复挂出（实测错位）
+    if(/等待模型/.test(c.s)||/^正在/.test(c.s)){LIVE.think='';LIVE.ans=''}
   }
   return dirty;
 }
@@ -789,7 +785,7 @@ async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用�
 }
 function liveAttach(jobId,resume){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
-                      status:'',mode:'',done:[],seq:0,
+                      status:'',mode:'',seq:0,
                       startedAt:Date.now(),
                       baseRounds:(META&&META.round_list||[]).length});
   if(resume){
@@ -889,27 +885,15 @@ function tickStopBtn(){
 setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
 function renderLive(){
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
-  // 直播中的轮一旦落进 round_list，记住它的 seq；该轮已落账的思考段
-  // （事件带 thinking）已由正式渲染画折叠块，直播区不再重复
-  const rl=(META.round_list||[]);
-  if(!LIVE.seq&&rl.length>LIVE.baseRounds)LIVE.seq=rl[rl.length-1].seq;
-  let landed=0;
-  if(LIVE.seq){const d=CONV.cache[LIVE.seq];
-    landed=((d&&d.events)||[]).filter(e=>e.thinking).length}
-  const pend=LIVE.done.slice(landed);
   let el=document.getElementById('livebox');
   const g=LIVE.seq?document.querySelector(`.crow.agent[data-seq="${LIVE.seq}"] .gbox`):null;
   if(g){if(el&&el.parentNode!==g)g.appendChild(el)}
   if(!el){el=document.createElement('div');el.id='livebox';(g||$('#content')).appendChild(el)}
-  // 结构（状态行/已折叠段数）变化才重建骨架；流式文本走 textContent
-  // 增量赋值——每 800ms 重建 innerHTML 正是"不丝滑"的来源
-  const sig=(LIVE.status||'')+'|'+pend.length;
+  // 结构（状态行文案）变化才重建骨架；流式文本走 textContent 增量赋值
+  const sig=(LIVE.status||'');
   if(el._sig!==sig){
     el._sig=sig;
     el.innerHTML=`<div class="live-line"><span class="live-dot"></span><span class="live-st">${esc(LIVE.status||'思考中…')}</span></div>`+
-      pend.map(s=>s.t==='think'
-        ?`<div class="think-box"><div class="think-head">💭 思考过程 · ${fmtN(s.text.length)} 字</div></div>`
-        :`<div class="bub ans-live">${esc(s.text)}</div>`).join('')+
       `<div class="think-live" id="live-think" style="display:none"></div>`+
       `<div class="bub ans-live" id="live-ans" style="display:none"></div>`;
   }else{
@@ -950,19 +934,22 @@ async function renderConv(c,fresh){
 }
 function toggleThink(el){el.dataset.user='1';el.classList.toggle('open')}
 function tickRunning(){
-  // 只改最后一个卡片的"开始·持续"文本：零重建、零跳动
+  // 原地更新所有"运行中"卡片的时间（并行工具批：每张各自走字）
   if(TAB!=='conv')return;
   const seqs=CONV.seqs;if(!seqs.length)return;
   const d=CONV.cache[seqs[seqs.length-1]];
-  if(!d||!(d.events||[]).length)return;
-  const ev=d.events[d.events.length-1];
-  if(ev.type!=='tool_call')return;
-  const t=Date.parse(ev.time||'');if(isNaN(t))return;
-  const cards=document.querySelectorAll('#content .tcard');
-  const card=cards[cards.length-1];if(!card)return;
-  const el=card.querySelector('.t-when');if(!el)return;
-  const du=fmtDur((Date.now()-t)/1000);
-  el.textContent=fmtClock(ev.time)+(du?' · '+du:'');
+  if(!d)return;
+  for(const ev of (d.events||[])){
+    if(ev.type!=='tool_call'||!ev.time)continue;
+    const t=Date.parse(ev.time);if(isNaN(t))continue;
+    const du=fmtDur((Date.now()-t)/1000);
+    for(const tc of (ev.tool_calls||[])){
+      const card=document.querySelector(`.tcard[data-call="${CSS.escape(tc.id)}"]`);
+      if(!card||!card.querySelector('.st-running'))continue;   // 只动在跑的
+      const el=card.querySelector('.t-when');
+      if(el)el.textContent=fmtClock(ev.time)+(du?' · '+du:'');
+    }
+  }
 }
 async function loadEarlier(){
   const before=convAllSeqs().filter(s=>s<CONV.seqs[0]).slice(-5);
