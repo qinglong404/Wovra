@@ -514,10 +514,10 @@ function drawConv(c,toBottom){
         if(it.t==='text'){
           const inner=it.md?md(it.text):esc(it.text);
           return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
-            `<div class="bub md">${inner}</div>`;
+            `<div class="bub md" style="background:${s.color}10;border-color:${s.color}2b">${inner}</div>`;
         }
         const st=ci_status(calls[it.id]);
-        return `<div class="tcard" data-call="${esc(it.id)}" data-round="${it.seq}" data-event="">
+        return `<div class="tcard" style="border-left:2px solid ${s.color}59" data-call="${esc(it.id)}" data-round="${it.seq}" data-event="">
           <div class="t-head" onclick="this.parentNode.classList.toggle('open')">
             <span class="t-icon">${TOOL_ICON[it.name]||'◆'}</span><span class="t-name">${esc(it.name)}</span>
             <span class="t-sum" title="${esc(argSummary(it.name,it.args))}">${esc(argSummary(it.name,it.args))}</span>
