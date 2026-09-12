@@ -1500,14 +1500,43 @@ function renderTimeline(c){
 /* ---------- 账本 ---------- */
 function renderLedger(c){
   const t=META.task_state||{};
+  // 账本由"上下文整理"产出（state_patch 写 TaskState）：未触发时不是坏了，
+  // 而是还没到水位——把机制与进度直接写在页面上，别让用户对着空白猜
+  const empty=!((t.decisions||[]).length||(t.completed||[]).length||
+    (t.escalations||[]).length||(t.experiments||[]).length||
+    (t.known_issues||[]).length||(t.open_questions||[]).length||t.current_status);
+  if(empty){
+    const peak=Math.max(0,...((META.registry||[]).map(e=>e.ctx_peak||0)));
+    const wm=META.org_watermark||100000;
+    const pct=wm?Math.min(100,peak/wm*100):0;
+    const orgs=(META.round_list||[]).map(r=>r.org_state).filter(Boolean);
+    const done=orgs.filter(s=>s==='done').length,raw=(META.round_list||[]).length-done;
+    c.innerHTML=`<h3 class="sec">状态账本（TaskState）</h3>
+      <div class="lcard" style="max-width:720px">
+        <h4>账本暂空 · 等上下文到水位后自动生成</h4>
+        <div style="padding:10px 16px;font-size:12.5px;line-height:1.9;color:var(--tx2)">
+          决策 / 已完成 / 已知问题 / 待拍板这些条目由
+          <b>上下文整理</b>在轮边界产出（state_patch 增量写账），
+          触发条件是当前上下文体量到达<b>整理水位 ${fmtN(wm)} tok</b>。<br>
+          当前上下文峰值 <b class="mono">${fmtN(peak)} tok</b>（达水位 ${pct.toFixed(1)}%）——
+          ${pct>=100?'已到线，下一轮收口时会整理':'还没到线，继续对话即可；也可用 /maint 看维护进度'}。<br>
+          轮整理状态：已整理 ${done} · 未整理 ${raw}。<br>
+          <span style="color:var(--tx3)">（计划页的大步/小步是另一本账，由 todo 工具即时维护，不受水位影响。）</span>
+        </div>
+      </div>`;
+    return;
+  }
   const list=(items,cls,title,empty)=>{
     const arr=items||[];
     return `<div class="lcard ${cls}"><h4>${title} · ${arr.length}</h4>`+
       (arr.length?`<ul>${arr.map((x,i)=>`<li><span class="n">${String(i+1).padStart(2,'0')}</span><pre>${esc(x)}</pre></li>`).join('')}</ul>`
       :`<div class="empty" style="padding:18px 0">${empty}</div>`)+`</div>`;
   };
+  const peak=Math.max(0,...((META.registry||[]).map(e=>e.ctx_peak||0)));
+  const wm=META.org_watermark||100000;
   c.innerHTML=
     (t.current_status?`<h3 class="sec">现状</h3><div class="status-quote">${esc(t.current_status)}</div>`:'')+
+    `<div class="mono" style="font-size:10.5px;color:var(--tx3);margin:-4px 0 10px">账本由上下文整理在轮边界产出 · 当前上下文峰值 ${fmtN(peak)} / 水位 ${fmtN(wm)}（${wm?Math.min(100,peak/wm*100).toFixed(1):'0'}%）</div>`+
     '<h3 class="sec">状态账本（TaskState）</h3><div class="ledger-grid">'+
     list(t.escalations,'lcard esc atten full','决策升级 · 等你拍板','暂无待拍板事项')+
     list(t.experiments,'lc-exp','待办实验','暂无')+

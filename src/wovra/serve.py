@@ -704,6 +704,8 @@ class _Handler(BaseHTTPRequestHandler):
             meta["live_job"] = live[0] if live else None
             meta["safety_mode"] = str(data.get("safety_mode") or "approve")
             meta["approved_tags"] = list(data.get("approved_tags") or [])
+            from .agent.support import _ORG_WATERMARK_DEFAULT
+            meta["org_watermark"] = _ORG_WATERMARK_DEFAULT   # 整理水位（账本产出条件）
             return self._json(meta)
         m = re.fullmatch(r"/api/sessions/([^/]+)/views/(.+)", path)
         if m:
