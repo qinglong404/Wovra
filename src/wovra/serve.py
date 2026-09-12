@@ -527,9 +527,12 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
     except Exception:  # noqa: BLE001——预览失败不该影响任何东西
         pass
     out = []
-    for e in task.registry or []:
-        if str(e.get("id")) == "Main":
-            continue
+    # 主 agent 也有"重组后视图"（不含分出去的域块），与全量装配不是一回事——
+    # 同样列出来，用户才能对照"主 agent 现在看到什么"
+    entries = list(task.registry or [])
+    if not any(str(e.get("id")) == "Main" for e in entries):
+        entries.insert(0, {"id": "Main", "name": "主agent"})
+    for e in entries:
         if domain and domain not in (str(e.get("name")), str(e.get("id"))):
             continue
         got = None
@@ -551,11 +554,17 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                 trunc += 1
             msgs.append({"role": m.get("role"), "content": body, "len": len(raw),
                          "tool_calls": len(m.get("tool_calls") or [])})
+        is_main = str(e.get("id")) == "Main"
         out.append({"id": e.get("id"), "name": e.get("name"),
+                    "is_main": is_main,
                     "description": str(e.get("description") or "")[:160],
                     "file_domains": list(e.get("file_domains") or []),
                     "messages": msgs, "count": len(msgs),
                     "total_chars": total, "truncated": trunc})
+    if out:
+        full = agent._assemble_messages()
+        out[0]["alt_chars"] = sum(len(m.get("content") or "") for m in full)
+        out[0]["alt_count"] = len(full)
     return {"agents": out, "pending": True,
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 
