@@ -619,15 +619,56 @@ function consultSender(content){
    时间线顺序 = 你要的：思考流式 → 完成原地折叠 → 工具卡落位 → 下一段思考 → 正文。
    已落账的段（事件带 thinking）由正式渲染负责，直播区只补还没落账的段。 */
 const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
-            done:[],seq:0,baseRounds:0};
+            done:[],seq:0,baseRounds:0,sse:false};
+let SSE=null;
+function sseClose(){if(SSE){SSE.close();SSE=null}LIVE.sse=false}
+function sseConnect(jobId){   // SSE：分片到达即推（替代高频轮询的正确形态）
+  sseClose();
+  try{
+    SSE=new EventSource(`/api/jobs/${jobId}/stream`);
+    SSE.onopen=()=>{LIVE.sse=true};
+    SSE.onmessage=e=>{try{if(applyChunk(JSON.parse(e.data)))renderLive()}catch(err){}};
+    SSE.addEventListener('done',()=>{sseFinish()});
+    SSE.onerror=()=>{sseClose()};   // 断开不自动重连（重连会从头重放）——pollLive 兜底
+  }catch(e){}
+}
+function applyChunk(c){
+  let dirty=false;
+  if(c.k==='think'){
+    if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
+    LIVE.think+=c.s;dirty=true;
+  }
+  else if(c.k==='ans'){
+    if(LIVE.mode!=='ans'){LIVE.mode='ans';LIVE.status='回答中…';dirty=true}
+    LIVE.ans+=c.s;dirty=true;
+  }
+  else if(c.k==='status'){
+    LIVE.mode='status';LIVE.status=c.s;dirty=true;
+    if(/等待模型/.test(c.s)){   // 新一步开始：上一段思考/正文原地折叠留档
+      if(LIVE.think)LIVE.done.push({t:'think',text:LIVE.think});
+      if(LIVE.ans)LIVE.done.push({t:'ans',text:LIVE.ans});
+      LIVE.think='';LIVE.ans='';
+    }
+  }
+  return dirty;
+}
+function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用）
+  const wasCur=CUR===LIVE.cur,viaSend=LIVE.viaSend;
+  liveDetach();
+  if(wasCur&&!viaSend){   // send 自带的轮询负责它发起的轮；这里兜刷新页面中途挂上的
+    FOLLOW=true;$('#send').disabled=false;refreshAfterTurn();
+  }
+}
 function liveAttach(jobId){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
                       status:'',mode:'',done:[],seq:0,
                       baseRounds:(META&&META.round_list||[]).length});
   const st=document.getElementById('stop');if(st)st.style.display='';
+  sseConnect(jobId);
 }
 function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
+  sseClose();
   document.getElementById('livebox')?.remove();
   const st=document.getElementById('stop');if(st)st.style.display='none';
 }
@@ -669,36 +710,18 @@ function showCmdOutput(title,text){
 }
 async function pollLive(){
   if(!LIVE.job||document.hidden)return;
+  if(LIVE.sse){   // SSE 健康时零轮询；断开则 300ms 兜底
+    const d=await api(`/api/jobs/${LIVE.job}`).catch(()=>null);
+    if(d&&d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
+    return;
+  }
   let d;
   try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}catch(e){return}
   let dirty=false;
-  for(const c of d.chunks||[]){
-    if(c.k==='think'){
-      if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
-      LIVE.think+=c.s;dirty=true;
-    }
-    else if(c.k==='ans'){
-      if(LIVE.mode!=='ans'){LIVE.mode='ans';LIVE.status='回答中…';dirty=true}
-      LIVE.ans+=c.s;dirty=true;
-    }
-    else if(c.k==='status'){
-      LIVE.mode='status';LIVE.status=c.s;dirty=true;
-      if(/等待模型/.test(c.s)){   // 新一步开始：上一段思考/正文原地折叠留档
-        if(LIVE.think)LIVE.done.push({t:'think',text:LIVE.think});
-        if(LIVE.ans)LIVE.done.push({t:'ans',text:LIVE.ans});
-        LIVE.think='';LIVE.ans='';
-      }
-    }
-  }
+  for(const c of d.chunks||[])dirty=applyChunk(c)||dirty;
   LIVE.next=d.next||LIVE.next;
   if(CUR===LIVE.cur&&(dirty||!document.getElementById('livebox')))renderLive();
-  if(d.status&&d.status!=='running'&&d.status!=='queued'){
-    const wasCur=CUR===LIVE.cur,viaSend=LIVE.viaSend;
-    liveDetach();
-    if(wasCur&&!viaSend){   // send 自带的轮询负责它发起的轮；这里兜刷新页面中途挂上的
-      FOLLOW=true;$('#send').disabled=false;await refreshAfterTurn();
-    }
-  }
+  if(d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
 }
 setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
 function renderLive(){

@@ -522,6 +522,22 @@ def test_http_undo_and_local_cmd(server):
     assert code == 400
 
 
+def test_http_sse_stream(server):
+    """SSE 端点：分片 data 行 + 终态 done 事件，写完即断。"""
+    serve._JOBS["js"] = {"job_id": "js", "task_id": "s1", "status": "done",
+                         "live": [{"k": "think", "s": "想"}]}
+    try:
+        req = urllib.request.Request(server + "/api/jobs/js/stream")
+        with urllib.request.urlopen(req, timeout=5) as r:
+            body = r.read().decode("utf-8")
+            assert r.headers.get("Content-Type", "").startswith(
+                "text/event-stream")
+        assert '"k": "think"' in body and "data: " in body
+        assert "event: done" in body and '"status": "done"' in body
+    finally:
+        serve._JOBS.pop("js", None)
+
+
 def test_http_cancel_and_resume(server, monkeypatch):
     """⏹ 终止：置 cancel 标记；/c 续跑：入队 content=None 的作业。"""
     import time as _time

@@ -666,6 +666,39 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"status": job["status"],
                                "chunks": chunks[after:],
                                "next": len(chunks)})
+        mss = re.fullmatch(r"/api/jobs/([^/]+)/stream", path)
+        if mss:
+            # SSE 推送：一条长连接，分片到达即推——比任何轮询率都快且无
+            # 连接/线程churn。50ms 批次粒度 = 人眼无感的合成延迟。
+            job = _JOBS.get(mss.group(1))
+            if job is None:
+                return self._json({"error": "job not found"}, 404)
+            self.send_response(200)
+            self.send_header("Content-Type",
+                             "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            last = 0
+            try:
+                while True:
+                    chunks = job.get("live") or []
+                    if len(chunks) > last:
+                        payload = b"".join(
+                            b"data: "
+                            + json.dumps(c, ensure_ascii=False).encode("utf-8")
+                            + b"\n\n" for c in chunks[last:])
+                        self.wfile.write(payload)
+                        last = len(chunks)
+                    if job["status"] not in ("queued", "running"):
+                        self.wfile.write(
+                            b"event: done\ndata: "
+                            + json.dumps({"status": job["status"]}).encode()
+                            + b"\n\n")
+                        return
+                    time.sleep(0.05)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                return   # 客户端断开（刷新/关页/服务关停）
         return self._json({"error": "not found"}, 404)
 
     # ---- C4：受控写通道（唯一的写形态 = 新建会话 / 追加一轮对话） ----
