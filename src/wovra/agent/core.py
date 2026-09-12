@@ -512,8 +512,10 @@ class _CoreMixin:
         return None
 
     def _agent_window(self) -> int:
-        """该 agent 的上下文窗口（3a）：目前取整理水位，后续可按域单独调。"""
-        return int(self._org_watermark or 0)
+        """该 agent 的上下文窗口（3a）：模型上下文上限（WOVRA_CONTEXT_LIMIT，
+        默认 1M）。此前误取整理水位——水位 100K 只是整理阈值，不是窗口
+        （2026-09-12 用户纠正：展示口径应为 16.8K/1M，而不是 /100K）。"""
+        return int(self.context_limit)
 
     def _touch_view_context(self, view: str, size: int) -> None:
         """记下某视图这次装配的体量（3a：每个 agent 自己的上下文与占比）。
@@ -528,8 +530,9 @@ class _CoreMixin:
         entry["ctx_cur"] = size
         if size > int(entry.get("ctx_peak") or 0):
             entry["ctx_peak"] = size
-        if not int(entry.get("window") or 0):
-            entry["window"] = self._agent_window()
+        # 窗口每次都校正（无条件写）：老会话的 registry 里存过水位 100K，
+        # 语义纠正后要随活动自然迁移到真实窗口，不能被旧值占住
+        entry["window"] = self._agent_window()
 
     def _account_agent_activity(self) -> None:
         """轮闭合时的 per-agent 记账（3a）：轮次 + 步数落到**最终接手方**。
@@ -547,9 +550,8 @@ class _CoreMixin:
             return
         entry["rounds"] = int(entry.get("rounds") or 0) + 1
         entry["steps"] = int(entry.get("steps") or 0) + int(r.get("steps_used") or 0)
-        if not int(entry.get("window") or 0):
-            # 窗口随首次活动落定：没装配过（ctx 还是 0）也要能算"占比"分母
-            entry["window"] = self._agent_window()
+        # 窗口无条件校正（同 _touch_view_context：老值可能是误存的水位）
+        entry["window"] = self._agent_window()
 
     def _route_hint_lines(self) -> list[str]:
         """主 agent 起手时的**路由建议**（规则层给的起点，不是命令）。"""

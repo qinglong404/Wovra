@@ -394,6 +394,13 @@ def session_meta(task_id: str, data: dict) -> dict:
     meta["task_state"] = data.get("task_state") or {}
     meta["todo"] = data.get("todo") or {}
     meta["registry"] = data.get("registry") or []
+    # 窗口语义纠正（2026-09-12）：旧数据把整理水位 100K 存进了 registry
+    # window——投影层按真实窗口展示；落盘值随下一轮活动由 core 自愈
+    from .agent.support import _DEFAULT_CONTEXT_LIMIT
+    for e in meta["registry"] or []:
+        if isinstance(e, dict) and (not int(e.get("window") or 0)
+                                    or int(e["window"]) == 100_000):
+            e["window"] = _DEFAULT_CONTEXT_LIMIT
     usage = round_usage_map(data)
     meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")))
                           for r in data.get("rounds") or []]
@@ -645,6 +652,17 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/sessions":
             return self._create_session(body)
+        if path == "/api/shutdown":
+            with _job_lock:
+                busy = any(j["status"] in ("queued", "running")
+                           for j in _JOBS.values())
+            if busy:
+                return self._json({"error": "有正在运行的轮，先等它结束"}, 409)
+            # 先应答、后关停：响应送达前端再停主循环并关闭监听 socket；
+            # 作业线程皆 daemon，主线程（serve_forever）返回后进程自然退出
+            threading.Timer(0.3, lambda: (self.server.shutdown(),
+                                          self.server.server_close())).start()
+            return self._json({"ok": True})
         m = re.fullmatch(r"/api/sessions/([^/]+)/turn", path)
         if m:
             return self._start_turn(m.group(1), str(body.get("content") or ""))

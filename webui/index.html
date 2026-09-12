@@ -290,7 +290,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <input id="search" placeholder="搜索会话目标…">
   <div id="list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
   <div class="side-foot">task.json 单一事实源 · 读 GET / 写仅对话轮<br>
-    <span id="foot-ver">后端启动 — · 页面 —</span></div>
+    <span id="foot-ver">后端启动 — · 页面 —</span>
+    <span id="shutdown-btn" style="float:right;cursor:pointer;color:var(--tx3)" title="终止服务进程（有轮在跑会被拒绝）" onclick="shutdownServer(this)">⏻</span></div>
 </aside>
 <main id="main">
   <div id="topbar">
@@ -349,10 +350,11 @@ function highlightIn(root){
   });
 }
 const fmtN=n=>{n=Number(n)||0;const s=n<0?'-':'';n=Math.abs(n);
-  if(n>=1e12)return s+(n/1e12).toFixed(2)+'T';
-  if(n>=1e9)return s+(n/1e9).toFixed(2)+'B';
-  if(n>=1e6)return s+(n/1e6).toFixed(1)+'M';
-  if(n>=1e3)return s+(n/1e3).toFixed(1)+'K';
+  const t=(v,u)=>s+(v.toFixed(1).replace(/\.0$/,'')+u);
+  if(n>=1e12)return t(n/1e12,'T');
+  if(n>=1e9)return t(n/1e9,'B');
+  if(n>=1e6)return t(n/1e6,'M');
+  if(n>=1e3)return t(n/1e3,'K');
   return s+String(n)};
 const fmtP=(a,b)=>b>0?(a/b*100).toFixed(1)+'%':'—';
 const fmtT=t=>{const m=String(t||'').match(/^\d{4}-(\d{2})-(\d{2})T(\d{2}:\d{2})/);return m?m[1]+'-'+m[2]+' '+m[3]:t||''};
@@ -405,7 +407,7 @@ function agentStatChip(key){
   const hit=fmtP(st.cached||0,(st.cached||0)+(st.miss||0));
   const tip=`缓存输入 ${fmtN(st.cached||0)} tok · 输入(miss) ${fmtN(st.miss||0)} tok · 输出 ${fmtN(st.completion||0)} tok · 命中率 ${hit}`
     +`\n轮 ${st.rounds} · 步 ${fmtN(st.steps||0)} · 上下文窗口峰值 ${fmtN(st.ctx_peak||0)} tok · 单轮消费 ${fmtN(st.avg_prompt||0)} tok`
-    +(st.window?`\n当前上下文 ${fmtN(st.ctx_cur||0)} tok · 整理水位 ${fmtN(st.window)}（达 ${((st.share||0)*100).toFixed(1)}%）`:'');
+    +(st.window?`\n当前上下文 ${fmtN(st.ctx_cur||0)} tok / 窗口 ${fmtN(st.window)}（${((st.share||0)*100).toFixed(1)}%）`:'');
   return `<span class="stat-chip" title="${esc(tip)}">Σ ${fmtN(total)}</span>`;
 }
 
@@ -534,6 +536,16 @@ function copySid(el){
   };
   (navigator.clipboard&&navigator.clipboard.writeText)
     ?navigator.clipboard.writeText(META.id).then(done,fb):fb();
+}
+async function shutdownServer(el){   // 偏僻角落的 ⏻：终止服务进程
+  if(!confirm('终止 Wovra 服务进程？\n运行中的轮会被拒绝；之后需自行重新启动 `wovra serve`。'))return;
+  try{
+    const r=await fetch('/api/shutdown',{method:'POST'});
+    const j=await r.json().catch(()=>({}));
+    if(!r.ok){alert(j.error||('HTTP '+r.status));return}
+  }catch(e){/* 进程应答后退出的瞬间连接会断——视为成功 */}
+  el.textContent='已关闭';
+  $('#foot-ver').textContent='服务已停止——重启 wovra serve 后刷新此页';
 }
 
 /* ---------- 视图 ---------- */
@@ -815,16 +827,17 @@ function ci_status(ci){
 }
 
 /* ---- 对话页顶部的 agent 上下文条（注册表运行时账）----
-   分母 window = 整理水位（_agent_window 目前取 org watermark），不是模型窗口 */
+   分母 window = 模型上下文窗口（WOVRA_CONTEXT_LIMIT，默认 1M），不是整理水位 */
 function ctxStrip(){
   const entries=(META.registry||[]).filter(e=>e&&e.name);
   if(!entries.length)return'';
   return `<div class="ctx-strip">`+entries.map(e=>{
     const col=agentColor(e.id||e.name);
     const cur=e.ctx_cur||0,win=e.window||0,share=win?cur/win*100:0;
+    const pct=share>=10?share.toFixed(1):share.toFixed(2);
     const bar=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`+
-      `<span class="mono">${fmtN(cur)}/水位${fmtN(win)}</span>`:'';
-    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok · 整理水位 ${fmtN(win)} tok（达 ${share.toFixed(1)}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · R${e.rounds||0} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
+      `<span class="mono">${fmtN(cur)}/${fmtN(win)}（${pct}%）</span>`:'';
+    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · R${e.rounds||0} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
       <span class="ctx-dot" style="background:${col}"></span>
       <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${bar}</div>`;
   }).join('')+`</div>`;

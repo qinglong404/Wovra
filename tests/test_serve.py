@@ -101,6 +101,14 @@ def test_session_meta_strips_events_keeps_blocks():
     assert "escalations" in meta["task_state"]
 
 
+def test_session_meta_corrects_legacy_window():
+    """旧数据把水位 100K 存成 registry window——投影层即时校正为真实窗口。"""
+    data = _fake_task()
+    data["registry"][0]["window"] = 100_000
+    meta = serve.session_meta("s1", data)
+    assert meta["registry"][0]["window"] == 1_000_000
+
+
 def test_round_detail_flattens_events():
     d = serve.round_detail(_fake_task(), 1)
     assert d["user_input"] == "干活"
@@ -495,6 +503,19 @@ def test_http_batch_delete(server, tmp_path):
     assert (tmp_path / "tasks" / "s3").exists()   # 未列入的不动
     code, body = _get(server + "/api/sessions", method="DELETE", body={"ids": []})
     assert code == 400
+
+
+def test_http_shutdown(server):
+    """⏻ 关停端点：空闲时先应答后退路；监听关闭后连接被拒。"""
+    import time as _time
+    code, body = _get(server + "/api/shutdown", method="POST")
+    assert code == 200 and body["ok"] is True
+    _time.sleep(0.8)   # 等 0.3s 延迟的关停计时器生效
+    try:
+        urllib.request.urlopen(server + "/api/sessions", timeout=2)
+        raise AssertionError("服务应已停止")
+    except (urllib.error.URLError, TimeoutError, OSError):
+        pass   # 连接拒绝/超时 = 监听已关闭（进程在真实部署随主线程退出）
 
 
 def test_http_live_stream_and_live_job(server):

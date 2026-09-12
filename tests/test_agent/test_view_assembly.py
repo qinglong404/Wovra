@@ -77,7 +77,8 @@ def test_per_agent_runtime_accounting(monkeypatch):
     agent.current_round["steps_used"] = 4
     agent._assemble_messages()                       # 记一次主 agent 的上下文
     main_entry = agent._registry_entry_for(routing_module.MAIN_AGENT_ID)
-    assert main_entry["ctx_cur"] > 0 and main_entry["window"] == agent._org_watermark
+    # window = 模型上下文窗口（context_limit），不是整理水位（2026-09-12 纠正）
+    assert main_entry["ctx_cur"] > 0 and main_entry["window"] == agent.context_limit
 
     # 主 agent 照建议转出 → 转出记账给主 agent，轮次/步数记给接手方
     agent._pending_route = "工具层"
