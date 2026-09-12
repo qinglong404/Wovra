@@ -272,6 +272,10 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .stat-chip{font-size:10px;color:var(--tx2);border:1px solid var(--line2);border-radius:5px;padding:1px 7px;margin-left:7px;font-family:var(--mono);cursor:help;background:var(--bg1)}
 
 /* ---------- 输入条 ---------- */
+#runline{display:none;align-items:center;gap:9px;padding:7px 26px;padding-left:max(26px,calc((100% - var(--read-max))/2));padding-right:max(26px,calc((100% - var(--read-max))/2));background:var(--bg1);border-top:1px solid var(--line);font-size:12px;font-family:var(--mono);color:var(--acc)}
+#runline.on{display:flex}
+#runline .rl-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:pulse 1.2s infinite;flex-shrink:0}
+#runline .rl-time{color:var(--tx3);margin-left:auto}
 #pending-bar{display:none;padding:10px max(var(--pad-x),calc((100% - var(--read-max))/2));background:linear-gradient(180deg,#1a2030,#141a28);border-top:1px solid var(--acc-dim);font-size:12.5px;color:var(--tx)}
 #pending-bar.show{display:block}
 #pending-bar .pb-head{display:flex;align-items:center;gap:7px}
@@ -369,6 +373,22 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .frow .fname{color:var(--tx2);flex-shrink:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .frow .fpath2{flex:1;min-width:0;color:var(--tx3);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85}
 .frow:hover .fname{color:var(--tx)}
+
+.ctx-stat{font-family:var(--mono);font-size:11px;color:var(--tx2);padding:6px 12px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
+.ctx-note{font-size:11.5px;color:var(--tx3);padding:0 4px 10px;line-height:1.7}
+
+/* 上下文可视化面板 */
+.viz-card{border:1px solid var(--line);border-radius:10px;background:var(--bg1);padding:12px 14px}
+.viz-lab{font-size:11.5px;color:var(--tx2);margin-bottom:8px}
+.org-strip{display:flex;flex-wrap:wrap;gap:3px}
+.orgsq{width:13px;height:13px;border-radius:3px;display:inline-block;opacity:.9}
+.orgsq:hover{outline:1px solid var(--tx2)}
+.viz-legend{display:flex;gap:12px;margin-top:7px;font-size:10px;color:var(--tx3)}
+.viz-legend .lg{display:flex;align-items:center;gap:5px}
+.viz-legend i{width:9px;height:9px;border-radius:2px;display:inline-block}
+.viz-view{display:flex;align-items:center;gap:8px;margin-bottom:5px;font-size:11px}
+.viz-bar{flex:1;min-width:40px;height:7px;border-radius:4px;background:var(--bg4);overflow:hidden}
+.viz-bar i{display:block;height:100%}
 </style>
 </head>
 <body>
@@ -391,6 +411,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div id="ctxbar"></div>
   <div id="runbar" title="轮运行中"></div>
   <div id="content"><div class="empty">等待选择会话…</div></div>
+  <div id="runline"></div>
   <div id="pending-bar"></div>
   <div id="composer">
     <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 或 \c 续跑开放轮）"></textarea>
@@ -797,6 +818,7 @@ function liveAttach(jobId,resume){
   }
   const st=document.getElementById('stop');if(st)st.style.display='';
   const rb=document.getElementById('runbar');if(rb)rb.classList.add('on');
+  const rl=document.getElementById('runline');if(rl)rl.classList.add('on');
   document.title='● 运行中 · Wovra 现场';
   sseConnect(jobId);
 }
@@ -806,6 +828,7 @@ function liveDetach(){
   document.getElementById('livebox')?.remove();
   const st=document.getElementById('stop');if(st)st.style.display='none';
   const rb=document.getElementById('runbar');if(rb)rb.classList.remove('on');
+  const rl=document.getElementById('runline');if(rl){rl.classList.remove('on');rl.innerHTML=''}
   document.title='Wovra · 现场';
 }
 async function stopTurn(){   // ⏹ 终止本轮（对齐 CLI Ctrl+C：轮保持开放）
@@ -891,15 +914,16 @@ function renderLive(){
   if(g){if(el&&el.parentNode!==g)g.appendChild(el)}
   if(!el){el=document.createElement('div');el.id='livebox';(g||$('#content')).appendChild(el)}
   // 结构（状态行文案）变化才重建骨架；流式文本走 textContent 增量赋值
-  const sig=(LIVE.status||'');
-  if(el._sig!==sig){
-    el._sig=sig;
-    el.innerHTML=`<div class="live-line"><span class="live-dot"></span><span class="live-st">${esc(LIVE.status||'思考中…')}</span></div>`+
-      `<div class="think-live" id="live-think" style="display:none"></div>`+
+  if(!el._built){
+    el._built=true;
+    el.innerHTML=`<div class="think-live" id="live-think" style="display:none"></div>`+
       `<div class="bub ans-live" id="live-ans" style="display:none"></div>`;
-  }else{
-    const st=el.querySelector('.live-st');
-    if(st&&st.textContent!==(LIVE.status||'思考中…'))st.textContent=LIVE.status||'思考中…';
+  }
+  const rl=document.getElementById('runline');
+  if(rl){
+    rl.classList.add('on');
+    rl.innerHTML=`<span class="rl-dot"></span><span class="rl-st">${esc(LIVE.status||'思考中…')}</span>`+
+      `<span class="rl-time">${esc(fmtDur((Date.now()-(LIVE.startedAt||Date.now()))/1000)||'<1s')}</span>`;
   }
   const tb=el.querySelector('#live-think');
   if(tb){
@@ -1644,6 +1668,57 @@ function treeHtml(node,status,filtering,depth){
   html+=files.map(f=>fileRowHtml(f,status)).join('');
   return html;
 }
+const ORG_COLOR={done:'#3ddc97',pending:'#ffb454',failed:'#ff6b7a',raw:'#3a4356','':'#3a4356'};
+const ORG_NAME={done:'已整理',pending:'整理中',failed:'整理失败',raw:'未整理','':'未整理'};
+const PURPOSE_COLOR={working:'#5b8def',organization:'#ffb454',compaction:'#3ddc97',
+  split:'#b07cff',consult:'#7c9cff',empty_stream:'#ff6b7a'};
+function ctxViz(){
+  const rl=META.round_list||[];
+  const reg=META.registry||[];
+  const rows=(META.usage||{}).rows||[];
+  // ① 轮整理状态条
+  const strip=rl.map(r=>{
+    const st=r.org_state||'raw';
+    return `<span class="orgsq" style="background:${ORG_COLOR[st]||'#3a4356'}"
+      title="R${r.seq} · ${ORG_NAME[st]||st}${r.org_generation>1?' · 第'+r.org_generation+'代':''} · 步${r.steps_used||0} · ${r.events}事件"></span>`;
+  }).join('');
+  const counts={};rl.forEach(r=>{const k=r.org_state||'raw';counts[k]=(counts[k]||0)+1});
+  // ② 各视图体量
+  const bars=reg.map(e=>{
+    const cur=e.ctx_cur||0,win=e.window||0,share=win?Math.min(100,cur/win*100):0;
+    const col=agentColor(e.id||e.name);
+    const gen=(e.generation||'');
+    return `<div class="viz-view"><span class="mono" style="color:${col};flex-shrink:0">${esc(e.id||e.name)}</span>
+      <span class="viz-bar"><i style="width:${share.toFixed(1)}%;background:${col}"></i></span>
+      <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">${fmtN(cur)}/${fmtN(win)} · 峰${fmtN(e.ctx_peak||0)} · 转出${e.handoffs||0}</span></div>`;
+  }).join('');
+  // ③ 维护开销账（按用途聚合）
+  const by={};
+  for(const r of rows){const k=r.purpose||'?';const e=by[k]||(by[k]={calls:0,prompt:0,completion:0,cached:0});
+    e.calls++;e.prompt+=r.prompt||0;e.completion+=r.completion||0;e.cached+=r.cached||0;}
+  const order=['working','organization','compaction','split','consult','empty_stream'];
+  const keys=[...new Set([...order.filter(k=>by[k]),...Object.keys(by)])];
+  const total=keys.reduce((a,k)=>a+(by[k].prompt||0),0)||1;
+  const usage=keys.map(k=>{
+    const e=by[k],col=PURPOSE_COLOR[k]||'#7f8ea8',pct=(e.prompt/total*100);
+    const lab={working:'对话',organization:'整理',compaction:'压缩',split:'分裂',
+      consult:'咨询',empty_stream:'空响应重试'}[k]||k;
+    return `<div class="viz-view"><span class="mono" style="color:${col};flex-shrink:0;width:76px">${esc(lab)}</span>
+      <span class="viz-bar"><i style="width:${pct.toFixed(1)}%;background:${col}"></i></span>
+      <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">${e.calls} 次 · ${fmtN(e.prompt)} tok · ${pct.toFixed(1)}%</span></div>`;
+  }).join('')||'<div class="empty" style="padding:8px 0">无调用账</div>';
+  return `<h3 class="sec">上下文与整理可视化</h3>
+    <div class="viz-card">
+      <div class="viz-lab">轮整理状态 <span style="color:var(--tx3);font-weight:400">（${rl.length} 轮：${Object.entries(counts).map(([k,v])=>`${ORG_NAME[k]||k} ${v}`).join(' · ')}）</span></div>
+      <div class="org-strip">${strip||'<span style="color:var(--tx3);font-size:11px">暂无轮</span>'}</div>
+      <div class="viz-legend">${Object.entries(ORG_COLOR).filter(([k])=>k).map(([k,c])=>
+        `<span class="lg"><i style="background:${c}"></i>${ORG_NAME[k]}</span>`).join('')}</div>
+      <div class="viz-lab" style="margin-top:14px">视图体量 <span style="color:var(--tx3);font-weight:400">（当前 / 模型窗口；分裂后每域一条）</span></div>
+      <div>${bars||'<div class="empty" style="padding:8px 0">无注册表</div>'}</div>
+      <div class="viz-lab" style="margin-top:14px">调用开销构成 <span style="color:var(--tx3);font-weight:400">（整轮对话 vs 维护开销：整理/压缩/分裂）</span></div>
+      <div>${usage}</div>
+    </div>`;
+}
 function renderProject(c){
   const reg=META.registry||[];
   const status=fileStatusIndex();
@@ -1681,6 +1756,7 @@ function renderProject(c){
       <div class="proj-right">
         <h3 class="sec">多 agent 职责划分 · ${reg.length}</h3>
         <div class="reg-grid">${agents}</div>
+        ${ctxViz()}
       </div>
     </div>`;
 }
@@ -1740,25 +1816,35 @@ function renderRegistry(c){
       <div style="margin-top:9px"><span class="chip acc" style="cursor:pointer" onclick="openViewDrawer('${esc(a.name||a.id)}','${esc(a.id)}')">查看上下文</span></div></div>`).join('')+'</div>';
 }
 async function openViewDrawer(view,id){
+  // 上下文对照抽屉：可切"当前装配视图"（整理/压缩后）与"全量原文"（未压缩），
+  // 用于人工核对压缩/整理/分裂机制是否按预期生效
   $('#mask').classList.add('open');$('#drawer').classList.add('open');
-  $('#d-title').textContent='上下文视图 · '+(id||view);
-  $('#d-sub').textContent='加载中…';
-  $('#d-body').innerHTML='<div class="empty">物化视图…</div>';
+  $('#d-title').textContent='上下文对照 · '+(id||view||'主 agent');
+  const mode=window._ctxMode||(view?'view':'view');
+  $('#d-sub').innerHTML=`<span class="chip ${mode==='view'?'acc':''}" style="cursor:pointer" onclick="window._ctxMode='view';openViewDrawer('${esc(view||'')}','${esc(id||'')}')">整理/装配后</span>
+    <span class="chip ${mode==='raw'?'acc':''}" style="cursor:pointer" onclick="window._ctxMode='raw';openViewDrawer('${esc(view||'')}','${esc(id||'')}')">全量原文</span>`;
+  $('#d-body').innerHTML='<div class="empty">装配中…</div>';
   try{
-    const d=await api(`/api/sessions/${CUR}/views/${encodeURIComponent(view)}`);
+    const url=`/api/sessions/${CUR}/context?mode=${mode}`+
+      (mode==='view'&&view?`&view=${encodeURIComponent(view)}`:'');
+    const d=await api(url);
     if(!d.available){
-      $('#d-sub').textContent='';
-      $('#d-body').innerHTML='<div class="empty">'+esc(d.note)+'</div>';return;
+      $('#d-body').innerHTML=`<div class="empty">${esc(d.note||'不可用')}<br><br>
+        <span class="chip acc" style="cursor:pointer" onclick="window._ctxMode='raw';openViewDrawer('','')">看全量原文</span></div>`;
+      return;
     }
-    $('#d-sub').textContent=d.messages.length+' 条消息 · '+fmtN(d.total_chars)+' 字符（≈'+fmtN(Math.round(d.total_chars/3))+' tok）';
-    $('#d-body').innerHTML=d.messages.map((m,i)=>{
+    const tot=d.total_chars||0;
+    const head=`<div class="ctx-stat">${d.count||d.messages.length} 条消息 · ${fmtN(tot)} 字符（≈${fmtN(Math.round(tot/3))} tok）${d.truncated?` · ${d.truncated} 条展示截断`:''}</div>`+
+      (d.note?`<div class="ctx-note">${esc(d.note)}</div>`:'');
+    $('#d-body').innerHTML=head+d.messages.map((m,i)=>{
       const body=String(m.content||'');
-      const long=body.length>1500;
+      const long=body.length>4000;
       return `<div class="ev"><div class="e-head"><b>#${i+1}</b>
         <span class="e-role role-${esc(m.role||'user')}">${esc(m.role||'?')}</span>
-        <span style="margin-left:auto">${fmtN(body.length)} 字符</span></div>
-        <div class="e-body">${esc(body.slice(0,1500))}${long?'<i style="color:var(--tx3)">…（截断展示，原文 '+fmtN(body.length)+' 字符）</i>':''}</div></div>`;
-    }).join('')||'<div class="empty">空视图</div>';
+        ${m.tool_calls?`<span class="mono" style="color:var(--tx3)">⛭ ${m.tool_calls}</span>`:''}
+        <span style="margin-left:auto">${fmtN(m.len||body.length)} 字符</span></div>
+        <div class="e-body">${esc(body.slice(0,4000))}${long?'<i style="color:var(--tx3)">…（截断展示）</i>':''}</div></div>`;
+    }).join('')||'<div class="empty">空</div>';
   }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
 }
 

@@ -318,6 +318,8 @@ _IGNORE_DIRS = frozenset({
 
 _TREE_MAX = 4000
 
+_DUMP_CAP = 6000   # 上下文导出的单条消息上限（页面展示用，机械截断并标注）
+
 
 def project_tree(workspace: str) -> dict:
     """会话工作区的文件树（扁平相对路径列表，前端建树）。
@@ -603,6 +605,57 @@ def view_messages(task_id: str, view: str) -> dict | None:
             "total_chars": sum(len(m.get("content", "")) for m in msgs)}
 
 
+def context_dump(task_id: str, mode: str = "view",
+                 view: str = "") -> dict | None:
+    """导出上下文供人工核对（全量原文 / 当前装配视图）。
+
+    * mode="raw"  —— 所有轮事件原文，未经整理压缩（"我看到过什么"）
+    * mode="view" —— 当前装配后的上下文（整理/压缩生效后的样子）；
+                    带 view 参数时物化该 agent 的独立视图
+    每条消息按 _DUMP_CAP 截断（16MB 级会话不能整包塞给页面），
+    截断为机械行为并在响应里标注。
+    """
+    from .agent import MODE_MANAGED
+    from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
+    try:
+        task = task_module.Task.load(task_id)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    agent = _build_agent(task, mode=task.mode or MODE_MANAGED)
+    agent.current_round = None
+    note = ""
+    if mode == "raw":
+        msgs = []
+        for r in task.rounds or []:
+            msgs.extend(e.get("message") or {} for e in (r.get("events") or []))
+        note = ("全量原文：所有轮事件未经整理/压缩（未整理轮原样、已整理轮也按原文）"
+                "——与模型当前实际所见不同，仅供对照")
+    elif view:
+        got = agent._assemble_view_messages(view, task.rounds or [])
+        if got is None:
+            return {"mode": "view", "view": view, "available": False,
+                    "messages": [], "total_chars": 0,
+                    "note": "该 agent 无独立视图（走全量路径）"}
+        msgs = got
+    else:
+        msgs = agent._assemble_messages()
+        note = "当前装配视图：整理/压缩/分档生效后，模型下一轮实际会看到的上下文"
+    out, total, truncated = [], 0, 0
+    for m in msgs:
+        body = str(m.get("content") or "")
+        total += len(body)
+        if len(body) > _DUMP_CAP:
+            body = (body[:_DUMP_CAP]
+                    + chr(10) + f"…（本条截断，原 {len(body):,} 字符）")
+            truncated += 1
+        out.append({"role": m.get("role"), "content": body,
+                    "len": len(str(m.get("content") or "")),
+                    "tool_calls": len(m.get("tool_calls") or [])})
+    return {"mode": mode, "view": view, "available": True, "messages": out,
+            "count": len(out), "total_chars": total, "truncated": truncated,
+            "note": note}
+
+
 class SummaryCache:
     """mtime 缓存：文件没变不重解析；摘要常驻，原文按需重读。"""
 
@@ -745,6 +798,15 @@ class _Handler(BaseHTTPRequestHandler):
         if m:
             view = unquote(m.group(2))
             result = view_messages(m.group(1), view)
+            if result is None:
+                return self._json({"error": "session not found"}, 404)
+            return self._json(result)
+        mctx = re.fullmatch(r"/api/sessions/([^/]+)/context", path)
+        if mctx:
+            qs = parse_qs(urlparse(self.path).query)
+            mode = (qs.get("mode") or ["view"])[0]
+            view = (qs.get("view") or [""])[0]
+            result = context_dump(mctx.group(1), mode, view)
             if result is None:
                 return self._json({"error": "session not found"}, 404)
             return self._json(result)

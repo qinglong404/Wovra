@@ -101,6 +101,37 @@ def test_session_meta_strips_events_keeps_blocks():
     assert "escalations" in meta["task_state"]
 
 
+def test_http_context_dump(tmp_path, monkeypatch):
+    """上下文对照：raw = 全量原文；view = 当前装配视图。"""
+    import json as _json
+    from dataclasses import asdict as _asdict
+    from wovra.task import Task
+    tasks = tmp_path / "tasks3"
+    (tasks / "c1").mkdir(parents=True)
+    task = Task(id="c1", goal="读文档", workspace=str(tmp_path))
+    task.rounds = [{
+        "seq": 1, "user_input": {"original": "读一下"},
+        "events": [
+            {"id": "R1-E01", "type": "user", "truncated": "读一下",
+             "message": {"role": "user", "content": "读一下"}},
+            {"id": "R1-E02", "type": "final_answer", "truncated": "读完了",
+             "message": {"role": "assistant", "content": "读完了，结论是 X"}},
+        ],
+        "end_state": "completed", "org_state": "done",
+    }]
+    (tasks / "c1" / "task.json").write_text(
+        _json.dumps(_asdict(task), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    raw = serve.context_dump("c1", "raw")
+    assert raw["available"] and raw["mode"] == "raw"
+    assert raw["messages"][0]["content"] == "读一下"
+    assert "未经整理" in raw["note"]
+    view = serve.context_dump("c1", "view")
+    assert view["available"] and view["mode"] == "view"
+    assert view["count"] >= 1 and view["total_chars"] > 0
+    assert serve.context_dump("ghost", "raw") is None
+
+
 def test_todo_log_derives_calls():
     """计划页流水：从轮事件抽 todo 调用（动作/文本/结果配对）。"""
     data = _fake_task()
