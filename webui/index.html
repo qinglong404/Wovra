@@ -467,7 +467,7 @@ function renderList(){
   const bar=BATCH.on?`<div class="batchbar">
     <span class="chip" style="cursor:pointer" onclick="batchAll()">全选/反选</span>
     <span class="chip" style="cursor:pointer" onclick="batchSingle()" title="rounds≤1 的测试会话">只选单轮</span>
-    <span class="chip bad" style="cursor:pointer" onclick="batchDelete()">删除所选（${BATCH.sel.size}）</span>
+    <span class="chip bad" style="cursor:pointer" id="batch-count" onclick="batchDelete()">删除所选（${BATCH.sel.size}）</span>
     <span class="chip" style="cursor:pointer;margin-left:auto" onclick="toggleBatch(false)">退出</span></div>`:'';
   $('#list').innerHTML=bar+items.map(s=>{
     const on=s.id===CUR?' on':'';
@@ -1232,7 +1232,11 @@ document.getElementById('ws-dirs').addEventListener('click', e => {
   const el = e.target.closest('[data-p]');
   if (el) browseTo(el.dataset.p);
 });
-function batchSel(id,on){on?BATCH.sel.add(id):BATCH.sel.delete(id)}
+function batchSel(id,on){
+  on?BATCH.sel.add(id):BATCH.sel.delete(id);
+  const el=document.getElementById('batch-count');   // 计数即时刷新，不等列表重渲染
+  if(el)el.textContent=`删除所选（${BATCH.sel.size}）`;
+}
 function forgetCurrent(){
   CUR=null;META=null;AGENT_STATS=[];
   $('#goal').classList.add('empty');$('#goal').textContent='从左侧选择一个会话';
