@@ -45,6 +45,7 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 .s-meta{display:flex;gap:8px;align-items:center;margin-top:5px;font-size:11px;color:var(--tx3);font-family:var(--mono)}
 .s-meta .esc{color:var(--red);font-weight:600}
 .s-meta .ms{color:var(--gold)}
+.s-ws{font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .batchbar{display:flex;gap:6px;flex-wrap:wrap;padding:6px 4px;position:sticky;top:0;background:var(--bg1);z-index:3;border-bottom:1px solid var(--line);margin-bottom:4px}
 .s-item{position:relative}
 .s-item.sel{border-color:var(--acc-dim);background:rgba(124,156,255,.09)}
@@ -338,7 +339,12 @@ const fmtDur=sec=>{                     // 秒 → 人话时长；null/负数 �
   if(m<60)return m+'m'+String(s).padStart(2,'0')+'s';
   return Math.floor(m/60)+'h'+String(m%60).padStart(2,'0')+'m';
 };
-const wsBase=w=>String(w||'').replace(/[\\/]+$/,'').split(/[\\/]/).pop()||'—';
+const wsMid=w=>{   // 路径倒数两段（如 BC/Wovra）——比单叶子名更有区分度；全路径走 title
+  const parts=String(w||'').replace(/[\\/]+$/,'').split(/[\\/]/).filter(Boolean);
+  if(!parts.length)return'—';
+  if(parts.length===1)return parts[0];
+  return parts[parts.length-2]+'/'+parts[parts.length-1];
+};
 
 let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true;
 let CONV={session:null,seqs:[],cache:{}};
@@ -434,6 +440,7 @@ function renderList(){
     return `<div class="s-item${on}${picked}${BATCH.on?' bm':''}" onclick="${act}">
       ${BATCH.on?`<span class="cb">${BATCH.sel.has(s.id)?'✓':''}</span>`:''}
       <div class="s-goal">${esc(title)}</div>
+      <div class="s-ws" title="工作目录 ${esc(s.workspace||'')}">📁 ${esc(wsMid(s.workspace))}</div>
       <div class="s-meta"><span>R${s.rounds}·${fmtN(s.steps||0)}步</span><span title="Σ prompt">Σ${fmtN(s.usage?.prompt||0)}</span>
         <span title="缓存命中率">命中${hit}</span>${escN}${ms}
         <span style="margin-left:auto">${fmtT(s.updated_at)}</span></div>
@@ -468,7 +475,7 @@ function renderHeader(){
   const st=META.status==='in_progress'?'<span class="chip ok pulse">● 运行中</span>':'<span class="chip">完成</span>';
   $('#chips').innerHTML=st+
     `<span class="chip acc">${esc(META.mode||'managed')}</span>`+
-    `<span class="chip" title="${esc(META.workspace)}">${esc(wsBase(META.workspace))}</span>`+
+    `<span class="chip" title="工作目录 ${esc(META.workspace)}">📁 ${esc(wsMid(META.workspace))}</span>`+
     `<span class="chip">更新 ${fmtT(META.updated_at)}</span>`+
     (META.escalations?`<span class="chip bad">◉ ${META.escalations} 项待拍板</span>`:'')+
     (META.todo_milestone?`<span class="chip warn">大步进行中</span>`:'')+
