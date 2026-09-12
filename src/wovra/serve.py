@@ -504,6 +504,62 @@ def session_summary(task_id: str, data: dict) -> dict:
     }
 
 
+def pending_views(task_id: str, domain: str = "") -> dict | None:
+    """物化"待生效"分裂产物的域视图（内存模拟生效，绝不落盘）。
+
+    暂存中的域还没并入注册表，正常路径取不到视图。这里：Task.load（走真实
+    加载器，含块结构迁移）→ 把 agent._persist_rounds 换成空操作 → 在内存里
+    跑一遍产物生效流程 → 物化各域装配视图。用户因此能在产物生效前就核对
+    "每个子 agent 重组后会看到什么"，且会话一个字节都不变。
+    """
+    from .agent import MODE_MANAGED
+    from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
+    try:
+        task = task_module.Task.load(task_id)
+        agent = _build_agent(task, mode=task.mode or MODE_MANAGED)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    agent._persist_rounds = lambda: None       # 预览：绝不落盘
+    try:
+        # 完整开场状态（promote + 渐近归属 _settle_views）——只 promote 不够：
+        # 视图装配依赖各轮/块的域归属判定（505a101 起归属在 settle 里做）
+        agent._settle_after_maintenance()
+    except Exception:  # noqa: BLE001——预览失败不该影响任何东西
+        pass
+    out = []
+    for e in task.registry or []:
+        if str(e.get("id")) == "Main":
+            continue
+        if domain and domain not in (str(e.get("name")), str(e.get("id"))):
+            continue
+        got = None
+        # 必须用 agent.rounds：settle 的产物写进 agent 自己的那份列表，
+        # task.rounds 是加载时的另一份副本（否则域信息看不见 → 装配降级 None）
+        for key in (e.get("name"), e.get("id")):
+            got = agent._assemble_view_messages(str(key or ""), agent.rounds or [])
+            if got is not None:
+                break
+        if got is None:
+            continue
+        msgs, total, trunc = [], 0, 0
+        for m in got:
+            raw = str(m.get("content") or "")
+            total += len(raw)
+            body = raw
+            if len(raw) > _DUMP_CAP:
+                body = raw[:_DUMP_CAP] + chr(10) + f"…（本条截断，原 {len(raw):,} 字符）"
+                trunc += 1
+            msgs.append({"role": m.get("role"), "content": body, "len": len(raw),
+                         "tool_calls": len(m.get("tool_calls") or [])})
+        out.append({"id": e.get("id"), "name": e.get("name"),
+                    "description": str(e.get("description") or "")[:160],
+                    "file_domains": list(e.get("file_domains") or []),
+                    "messages": msgs, "count": len(msgs),
+                    "total_chars": total, "truncated": trunc})
+    return {"agents": out, "pending": True,
+            "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
+
+
 def _split_meta(r: dict) -> dict | None:
     """分裂结果（已落实的轮字段 + 尚未落实的 pending_org）——机械透出。
 
@@ -824,6 +880,14 @@ class _Handler(BaseHTTPRequestHandler):
         if m:
             view = unquote(m.group(2))
             result = view_messages(m.group(1), view)
+            if result is None:
+                return self._json({"error": "session not found"}, 404)
+            return self._json(result)
+        mpv = re.fullmatch(r"/api/sessions/([^/]+)/pending-views", path)
+        if mpv:
+            qs = parse_qs(urlparse(self.path).query)
+            dom = (qs.get("domain") or [""])[0]
+            result = pending_views(mpv.group(1), dom)
             if result is None:
                 return self._json({"error": "session not found"}, 404)
             return self._json(result)

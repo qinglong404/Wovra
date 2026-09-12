@@ -1734,7 +1734,9 @@ function ctxViz(){
         return `<div class="split-dom" style="border-left-color:${merged?'var(--teal)':'var(--gold)'}">
           <b>${esc(d.name||'?')}</b>${merged?'<span class="fbadge t-create">已入注册表</span>':'<span class="fbadge t-modify">待生效</span>'}
           <div style="color:var(--tx3);font-size:11px;margin-top:3px">${esc((d.description||'').slice(0,140))}</div>
-          ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`;
+          ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}
+          <div style="margin-top:6px"><span class="chip acc" style="cursor:pointer"
+            onclick="openPendingView('${esc(d.name||'')}')">查看上下文（待生效预览）</span></div></div>`;
       }).join('');
   }
   return `<h3 class="sec">上下文与整理可视化</h3>
@@ -1850,6 +1852,31 @@ function renderRegistry(c){
       ${(a.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}
       <div style="margin-top:9px"><span class="chip acc" style="cursor:pointer" onclick="openViewDrawer('${esc(a.name||a.id)}','${esc(a.id)}')">查看上下文</span></div></div>`).join('')+'</div>';
 }
+function ctxMsgHtml(messages){
+  return (messages||[]).map((m,i)=>{
+    const body=String(m.content||'');
+    const long=body.length>4000;
+    return `<div class="ev"><div class="e-head"><b>#${i+1}</b>
+      <span class="e-role role-${esc(m.role||'user')}">${esc(m.role||'?')}</span>
+      ${m.tool_calls?`<span class="mono" style="color:var(--tx3)">⛭ ${m.tool_calls}</span>`:''}
+      <span style="margin-left:auto">${fmtN(m.len||body.length)} 字符</span></div>
+      <div class="e-body">${esc(body.slice(0,4000))}${long?'<i style="color:var(--tx3)">…（截断展示）</i>':''}</div></div>`;
+  }).join('')||'<div class="empty">空</div>';
+}
+async function openPendingView(name){
+  // 待生效子 agent 上下文：后端在内存里模拟产物生效后物化视图，不改会话
+  $('#drawer').classList.add('open');$('#mask').classList.add('open');
+  $('#d-title').textContent='子 agent 上下文（待生效预览）· '+name;
+  $('#d-sub').textContent='装配中…';
+  $('#d-body').innerHTML='<div class="empty">在内存中模拟产物生效…</div>';
+  try{
+    const d=await api(`/api/sessions/${CUR}/pending-views`);
+    const a=(d.agents||[]).find(x=>(x.name||'')===name||(x.id||'')===name);
+    if(!a){$('#d-body').innerHTML='<div class="empty">未找到该域视图（可能产物已生效，请刷新）</div>';return}
+    $('#d-sub').innerHTML=a.count+' 条 · '+fmtN(a.total_chars)+' 字符（≈'+fmtN(Math.round(a.total_chars/3))+' tok）';
+    $('#d-body').innerHTML=`<div class="ctx-stat">${esc(d.note||'')}</div>`+ctxMsgHtml(a.messages);
+  }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
+}
 async function openViewDrawer(view,id){
   // 上下文对照抽屉：可切"当前装配视图"（整理/压缩后）与"全量原文"（未压缩），
   // 用于人工核对压缩/整理/分裂机制是否按预期生效
@@ -1871,15 +1898,7 @@ async function openViewDrawer(view,id){
     const tot=d.total_chars||0;
     const head=`<div class="ctx-stat">${d.count||d.messages.length} 条消息 · ${fmtN(tot)} 字符（≈${fmtN(Math.round(tot/3))} tok）${d.truncated?` · ${d.truncated} 条展示截断`:''}</div>`+
       (d.note?`<div class="ctx-note">${esc(d.note)}</div>`:'');
-    $('#d-body').innerHTML=head+d.messages.map((m,i)=>{
-      const body=String(m.content||'');
-      const long=body.length>4000;
-      return `<div class="ev"><div class="e-head"><b>#${i+1}</b>
-        <span class="e-role role-${esc(m.role||'user')}">${esc(m.role||'?')}</span>
-        ${m.tool_calls?`<span class="mono" style="color:var(--tx3)">⛭ ${m.tool_calls}</span>`:''}
-        <span style="margin-left:auto">${fmtN(m.len||body.length)} 字符</span></div>
-        <div class="e-body">${esc(body.slice(0,4000))}${long?'<i style="color:var(--tx3)">…（截断展示）</i>':''}</div></div>`;
-    }).join('')||'<div class="empty">空</div>';
+    $('#d-body').innerHTML=head+ctxMsgHtml(d.messages);
   }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
 }
 

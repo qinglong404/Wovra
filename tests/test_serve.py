@@ -149,6 +149,39 @@ def test_round_meta_exposes_split_result():
     assert meta["round_list"][1]["split"] is None      # 无分裂数据的轮不编造
 
 
+def test_pending_views_preview_is_readonly(tmp_path, monkeypatch):
+    """待生效预览：内存模拟生效能物化域视图，且**不改动会话文件**。"""
+    import json as _json
+    from dataclasses import asdict as _asdict
+    from wovra.task import Task
+    tasks = tmp_path / "tasks4"
+    (tasks / "p1").mkdir(parents=True)
+    task = Task(id="p1", goal="g", workspace=str(tmp_path))
+    task.rounds = [{
+        "seq": 1, "user_input": {"original": "干活"},
+        "events": [{"id": "R1-E01", "type": "user", "truncated": "干活",
+                    "message": {"role": "user", "content": "干活"}}],
+        "end_state": "completed", "org_state": "done",
+        "pending_org": {
+            "domains": [{"name": "域甲", "description": "d",
+                         "file_domains": ["a.py"]}],
+            "split_assessment": {"splittable": True, "reason": "r"},
+        },
+    }]
+    tf = tasks / "p1" / "task.json"
+    tf.write_text(_json.dumps(_asdict(task), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    out = serve.pending_views("p1")
+    assert out is not None and "agents" in out
+    # 预览绝不"生效"：产物仍留在暂存区、域未写进轮、注册表未长条目
+    # （Task.load 自身的块迁移可能重排文件格式，那是幂等的既有行为）
+    after = _json.loads(tf.read_text(encoding="utf-8"))
+    assert after["rounds"][0].get("pending_org")
+    assert not after["rounds"][0].get("domains")
+    assert after["registry"] == []          # 注册表未被写入新域（夹具本就是空的）
+    assert serve.pending_views("ghost") is None
+
+
 def test_todo_log_derives_calls():
     """计划页流水：从轮事件抽 todo 调用（动作/文本/结果配对）。"""
     data = _fake_task()
