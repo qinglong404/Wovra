@@ -386,7 +386,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div id="content"><div class="empty">等待选择会话…</div></div>
   <div id="pending-bar"></div>
   <div id="composer">
-    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 续跑开放轮）"></textarea>
+    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 或 \c 续跑开放轮）"></textarea>
     <button id="stop" onclick="stopTurn()" style="display:none;background:#5a2a33">⏹ 终止</button>
     <button id="send" onclick="send()">发送</button>
   </div>
@@ -1233,7 +1233,8 @@ async function send(){
   if(!t||!CUR)return;
   box.value='';
   let url=`/api/sessions/${CUR}/turn`,body={content:t},resume=false;
-  if(t.startsWith('/')){
+  const prefix=String.fromCharCode(92);   // 反斜杠（源码零字面反斜杠）
+  if(t.startsWith('/')||t.startsWith(prefix)){
     const parts=t.slice(1).trim().split(/\s+/);
     const cmd=(parts[0]||'').toLowerCase();
     const arg=parts.slice(1).join(' ');
@@ -1247,7 +1248,7 @@ async function send(){
     else{
       const c=$('#content');
       c.insertAdjacentHTML('beforeend',
-        `<div class="sysline">未知命令 /${esc(cmd)} · 输入 /help 查看全部命令</div>`);
+        `<div class="sysline">未知命令 ${esc(t[0])}${esc(cmd)} · 输入 /help 查看全部命令</div>`);
       c.scrollTop=c.scrollHeight;return;
     }
   }
