@@ -179,6 +179,9 @@ class _CoreMixin:
         # 最近一次流式调用的 finish_reason（stop/length/tool_calls/未返回）：
         # 流被掐断时 usage 也缺失，这是唯一诊断线索（空响应防护用）
         self._last_finish_reason: Optional[str] = None
+        # ⏹ 协作式取消（网页终止按钮）：返回 True 即抛 KeyboardInterrupt，
+        # 语义与 CLI Ctrl+C 一致（轮保持开放）。每步边界 + 流中分片间检查
+        self.cancel_check: Optional[Callable[[], bool]] = None
         # 最近一步的思考全文（随 tool_call / final_answer 事件落盘，只进
         # event 不进 message——装配读 message，上下文不受影响）
         self._last_thinking = ""
@@ -784,6 +787,8 @@ class _CoreMixin:
             steps_used += 1
             if self.current_round is not None:
                 self.current_round["steps_used"] = steps_used
+            if self.cancel_check is not None and self.cancel_check():
+                raise KeyboardInterrupt   # ⏹ 与 Ctrl+C 同语义：轮保持开放
             if self.on_progress:
                 self.on_progress("等待模型响应…")
             messages = self._assemble_messages()
@@ -1085,6 +1090,8 @@ class _CoreMixin:
             delta = choice.delta
             if delta is None:
                 continue
+            if self.cancel_check is not None and self.cancel_check():
+                raise KeyboardInterrupt   # 流中也可终止（长思考不必等完）
 
             thinking = reasoning_of(delta)
             if thinking:

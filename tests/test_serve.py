@@ -505,6 +505,34 @@ def test_http_batch_delete(server, tmp_path):
     assert code == 400
 
 
+def test_http_cancel_and_resume(server, monkeypatch):
+    """⏹ 终止：置 cancel 标记；/c 续跑：入队 content=None 的作业。"""
+    import time as _time
+    seen = {}
+
+    def fake_execute(job_id, task_id, content):
+        seen[task_id] = content
+        serve._JOBS[job_id]["status"] = "running"
+        serve._JOBS[job_id]["status"] = "done"
+
+    monkeypatch.setattr(serve, "_execute_turn", fake_execute)
+    code, body = _get(server + "/api/sessions/s1/resume", method="POST", body={})
+    assert code == 202 and body["job_id"]
+    _time.sleep(0.3)
+    assert seen.get("s1") is None            # 续跑不注入消息
+    # cancel：作业在跑才可终止
+    serve._JOBS["jc"] = {"job_id": "jc", "task_id": "s1", "status": "running"}
+    try:
+        code, body = _get(server + "/api/jobs/jc/cancel", method="POST", body={})
+        assert code == 200 and body["ok"] is True
+        assert serve._JOBS["jc"]["cancel"] is True
+        serve._JOBS["jc"]["status"] = "done"
+        code, body = _get(server + "/api/jobs/jc/cancel", method="POST", body={})
+        assert code == 409
+    finally:
+        serve._JOBS.pop("jc", None)
+
+
 def test_http_shutdown(server):
     """⏻ 关停端点：空闲时先应答后退路；监听关闭后连接被拒。"""
     import time as _time

@@ -305,7 +305,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   </div>
   <div id="content"><div class="empty">等待选择会话…</div></div>
   <div id="composer">
-    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行）"></textarea>
+    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 续跑开放轮）"></textarea>
+    <button id="stop" onclick="stopTurn()" style="display:none;background:#5a2a33">⏹ 终止</button>
     <button id="send" onclick="send()">发送</button>
   </div>
 </main>
@@ -377,7 +378,7 @@ const wsMid=w=>{   // 路径倒数两段（如 BC/Wovra）——比单叶子名�
   return parts[parts.length-2]+'/'+parts[parts.length-1];
 };
 
-let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true;
+let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true,REBUILDING=false;
 let CONV={session:null,seqs:[],cache:{}};
 let REG={};   // agent 身份表：id/name → registry 条目
 let AGENT_STATS=[];   // 按 agent 聚合（serve 端计算）
@@ -618,12 +619,20 @@ const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             done:[],seq:0,baseRounds:0};
 function liveAttach(jobId){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
-                      status:'',done:[],seq:0,
+                      status:'',mode:'',done:[],seq:0,
                       baseRounds:(META&&META.round_list||[]).length});
+  const st=document.getElementById('stop');if(st)st.style.display='';
 }
 function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
   document.getElementById('livebox')?.remove();
+  const st=document.getElementById('stop');if(st)st.style.display='none';
+}
+async function stopTurn(){   // ⏹ 终止本轮（对齐 CLI Ctrl+C：轮保持开放）
+  if(!LIVE.job)return;
+  if(!confirm('终止当前轮？\n已完成的步骤保留，轮保持开放（/c 可续跑）。'))return;
+  try{await fetch(`/api/jobs/${LIVE.job}/cancel`,{method:'POST'})}catch(e){}
+  LIVE.status='终止中…';renderLive();
 }
 async function pollLive(){
   if(!LIVE.job||document.hidden)return;
@@ -631,10 +640,16 @@ async function pollLive(){
   try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}catch(e){return}
   let dirty=false;
   for(const c of d.chunks||[]){
-    if(c.k==='think'){LIVE.think+=c.s;dirty=true}
-    else if(c.k==='ans'){LIVE.ans+=c.s;dirty=true}
+    if(c.k==='think'){
+      if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
+      LIVE.think+=c.s;dirty=true;
+    }
+    else if(c.k==='ans'){
+      if(LIVE.mode!=='ans'){LIVE.mode='ans';LIVE.status='回答中…';dirty=true}
+      LIVE.ans+=c.s;dirty=true;
+    }
     else if(c.k==='status'){
-      LIVE.status=c.s;dirty=true;
+      LIVE.mode='status';LIVE.status=c.s;dirty=true;
       if(/等待模型/.test(c.s)){   // 新一步开始：上一段思考/正文原地折叠留档
         if(LIVE.think)LIVE.done.push({t:'think',text:LIVE.think});
         if(LIVE.ans)LIVE.done.push({t:'ans',text:LIVE.ans});
@@ -663,22 +678,34 @@ function renderLive(){
   if(LIVE.seq){const d=CONV.cache[LIVE.seq];
     landed=((d&&d.events)||[]).filter(e=>e.thinking).length}
   const pend=LIVE.done.slice(landed);
-  const html=`<div class="live-line"><span class="live-dot"></span>${esc(LIVE.status||'思考中…')}</div>`+
-    pend.map(s=>s.t==='think'
-      ?`<div class="think-box"><div class="think-head">💭 思考过程 · ${fmtN(s.text.length)} 字</div></div>`
-      :`<div class="bub ans-live">${esc(s.text)}</div>`).join('')+
-    (LIVE.think?`<div class="think-live" id="live-think">${esc(LIVE.think.slice(-4000))}</div>`:'')+
-    (LIVE.ans?`<div class="bub ans-live">${esc(LIVE.ans)}</div>`:'');
-  // 挂进直播中那一轮的组框内：流式段与落账后的折叠块/工具卡同位衔接，
-  // 不再有"外面飘着、落账后跳进块里"的割裂感；轮未落账前暂挂对话流底部
   let el=document.getElementById('livebox');
   const g=LIVE.seq?document.querySelector(`.crow.agent[data-seq="${LIVE.seq}"] .gbox`):null;
   if(g){if(el&&el.parentNode!==g)g.appendChild(el)}
   if(!el){el=document.createElement('div');el.id='livebox';(g||$('#content')).appendChild(el)}
-  el.innerHTML=html;
+  // 结构（状态行/已折叠段数）变化才重建骨架；流式文本走 textContent
+  // 增量赋值——每 800ms 重建 innerHTML 正是"不丝滑"的来源
+  const sig=(LIVE.status||'')+'|'+pend.length;
+  if(el._sig!==sig){
+    el._sig=sig;
+    el.innerHTML=`<div class="live-line"><span class="live-dot"></span><span class="live-st">${esc(LIVE.status||'思考中…')}</span></div>`+
+      pend.map(s=>s.t==='think'
+        ?`<div class="think-box"><div class="think-head">💭 思考过程 · ${fmtN(s.text.length)} 字</div></div>`
+        :`<div class="bub ans-live">${esc(s.text)}</div>`).join('')+
+      `<div class="think-live" id="live-think" style="display:none"></div>`+
+      `<div class="bub ans-live" id="live-ans" style="display:none"></div>`;
+  }else{
+    const st=el.querySelector('.live-st');
+    if(st&&st.textContent!==(LIVE.status||'思考中…'))st.textContent=LIVE.status||'思考中…';
+  }
+  const tb=el.querySelector('#live-think');
+  if(tb){const show=LIVE.think?LIVE.think.slice(-4000):'';
+    tb.style.display=LIVE.think?'':'none';
+    if(tb.textContent!==show)tb.textContent=show;}
+  const ab=el.querySelector('#live-ans');
+  if(ab){ab.style.display=LIVE.ans?'':'none';
+    if(ab.textContent!==LIVE.ans)ab.textContent=LIVE.ans;}
   if(FOLLOW){
     const c=$('#content');c.scrollTop=c.scrollHeight;
-    const tb=document.getElementById('live-think');
     if(tb)tb.scrollTop=tb.scrollHeight;
   }
 }
@@ -846,6 +873,10 @@ function drawConv(c,toBottom){
           <div class="t-result"></div></div>`;
       }).join('')+`</div></div></div>`;
   }
+  // 重建会瞬间把滚动高度掐到很小，浏览器把 scrollTop 钳到顶部——这是
+  // "一生成新内容就跳到最开头"的根源：先记锚点，重建后按增量恢复
+  const anchorTop=c.scrollTop,anchorH=c.scrollHeight;
+  REBUILDING=true;
   c.innerHTML=html;
   // 回填结果与状态
   for(const [id,ci] of Object.entries(calls)){
@@ -853,12 +884,14 @@ function drawConv(c,toBottom){
     const stEl=el.querySelector('.t-st'),resEl=el.querySelector('.t-result');
     if(ci.result!=null){
       resEl.textContent=ci.result;
-      const [txt,cls]=resultStatus(ci.result);
+      const [txt,cls]=resultStatus(ci.name,ci.result);
       stEl.textContent=txt;stEl.className='t-st '+cls;
     }else{stEl.textContent='无结果';stEl.className='t-st st-run'}
   }
   highlightIn(c);
   if(toBottom)c.scrollTop=c.scrollHeight;
+  else c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
+  requestAnimationFrame(()=>{REBUILDING=false});   // 钳位滚动事件放行完再恢复监听
   if(LIVE.job&&CUR===LIVE.cur)renderLive();   // 重绘后把直播区接回来
 }
 function ci_status(ci){
@@ -919,6 +952,7 @@ function renderFollowChip(){
   el.className='chip '+(FOLLOW?'ok':'');
 }
 $('#content').addEventListener('scroll',()=>{
+  if(REBUILDING)return;   // 重建引发的钳位滚动不算用户操作，不关跟随
   const c=$('#content');
   const dist=c.scrollHeight-c.scrollTop-c.clientHeight;
   if(FOLLOW&&dist>140){FOLLOW=false;renderFollowChip()}
@@ -959,17 +993,33 @@ async function send(){
   const box=$('#compose');
   const t=box.value.trim();
   if(!t||!CUR)return;
-  box.value='';$('#send').disabled=true;
+  box.value='';
+  let url=`/api/sessions/${CUR}/turn`,body={content:t},resume=false;
+  if(t.startsWith('/')){
+    const cmd=t.split(/\s+/)[0].toLowerCase();
+    if(cmd==='/c'||cmd==='/继续'){url=`/api/sessions/${CUR}/resume`;body={};resume=true}
+    else{
+      const c=$('#content');
+      c.insertAdjacentHTML('beforeend',
+        `<div class="sysline">未知命令 ${esc(cmd)} · 目前可用：/c（续跑开放轮）</div>`);
+      c.scrollTop=c.scrollHeight;return;
+    }
+  }
+  $('#send').disabled=true;
   const c=$('#content');
-  c.insertAdjacentHTML('beforeend',
-    `<div class="crow user" id="pend-u"><div class="avatar" style="background:linear-gradient(135deg,#5a6fd6,#3d4f8f)">你</div>
-     <div class="ccol"><div class="cname">你</div><div class="bub">${esc(t)}</div></div></div>
-     <div class="sysline" id="pend-run">⏳ 轮执行中…（完成后此屏自动更新）</div>`);
+  if(resume){
+    c.insertAdjacentHTML('beforeend','<div class="sysline" id="pend-run">⏳ 续跑开放轮…（完成后此屏自动更新）</div>');
+  }else{
+    c.insertAdjacentHTML('beforeend',
+      `<div class="crow user" id="pend-u"><div class="avatar" style="background:linear-gradient(135deg,#5a6fd6,#3d4f8f)">你</div>
+       <div class="ccol"><div class="cname">你</div><div class="bub">${esc(t)}</div></div></div>
+       <div class="sysline" id="pend-run">⏳ 轮执行中…（完成后此屏自动更新）</div>`);
+  }
   c.scrollTop=c.scrollHeight;
   try{
-    const r=await fetch(`/api/sessions/${CUR}/turn`,{
+    const r=await fetch(url,{
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({content:t})});
+      body:JSON.stringify(body)});
     const j=await r.json();
     if(r.status===409){$('#pend-run').textContent='⚠ '+j.error;return}
     if(r.status!==202){$('#pend-run').textContent='⚠ '+(j.error||('HTTP '+r.status));return}

@@ -237,11 +237,26 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
 
                 job["live"] = []
                 agent.on_progress = lambda s: _live({"k": "status", "s": s})
-                answer = agent.run(
-                    content,
-                    on_thinking=lambda d: _live({"k": "think", "s": d}),
-                    on_answer_delta=lambda d: _live({"k": "ans", "s": d}),
-                )
+                # ⏹ 终止（对齐 CLI Ctrl+C）：每步与流中分片间检查，触发处
+                # 抛 KeyboardInterrupt，由下方 except 收尾成开放轮
+                agent.cancel_check = lambda: bool(job.get("cancel"))
+                try:
+                    if content is None:   # /c 续跑：不注入新消息
+                        answer = agent.resume(
+                            on_thinking=lambda d: _live({"k": "think", "s": d}),
+                            on_answer_delta=lambda d: _live({"k": "ans", "s": d}),
+                        )
+                    else:
+                        answer = agent.run(
+                            content,
+                            on_thinking=lambda d: _live({"k": "think", "s": d}),
+                            on_answer_delta=lambda d: _live({"k": "ans", "s": d}),
+                        )
+                except KeyboardInterrupt:
+                    agent.finalize_round("open")   # 中断不闭合轮次（CLI 同款）
+                    job["status"] = "cancelled"
+                    job["answer"] = "已终止——轮保持开放，发 /c 可续跑"
+                    return
                 agent.organize_backlog()
             finally:
                 _release_session_lock(task)
@@ -666,6 +681,18 @@ class _Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/api/sessions/([^/]+)/turn", path)
         if m:
             return self._start_turn(m.group(1), str(body.get("content") or ""))
+        mr = re.fullmatch(r"/api/sessions/([^/]+)/resume", path)
+        if mr:
+            return self._start_resume(mr.group(1))
+        mc = re.fullmatch(r"/api/jobs/([^/]+)/cancel", path)
+        if mc:
+            job = _JOBS.get(mc.group(1))
+            if job is None:
+                return self._json({"error": "job not found"}, 404)
+            if job["status"] not in ("queued", "running"):
+                return self._json({"error": "该作业已结束"}, 409)
+            job["cancel"] = True
+            return self._json({"ok": True})
         ma = re.fullmatch(r"/api/jobs/([^/]+)/answer", path)
         if ma:
             job = _JOBS.get(ma.group(1))
@@ -773,6 +800,13 @@ class _Handler(BaseHTTPRequestHandler):
         """追加一轮对话：三道互斥（进程内单飞 / CLI 会话锁 / 任务级去重）。"""
         if not content.strip():
             return self._json({"error": "content 必填"}, 400)
+        return self._start_job(task_id, content)
+
+    def _start_resume(self, task_id: str) -> None:
+        """/c 续跑开放轮：不注入新消息（对齐 CLI \\继续）。"""
+        return self._start_job(task_id, None)
+
+    def _start_job(self, task_id: str, content: str | None) -> None:
         data = self._load_task(task_id)
         if data is None:
             return self._json({"error": "session not found"}, 404)
