@@ -72,42 +72,115 @@ def parse_usage_row(detail: str) -> dict | None:
     return out
 
 
-def round_usage_map(data: dict) -> dict[int, dict]:
-    """每轮的用量账（steps 签名归属）+ **按调用方的分账**（实记）。
+def _blank_usage() -> dict:
+    return {"steps": 0, "calls": 0, "prompt": 0, "cached": 0, "miss": 0,
+            "completion": 0, "context": 0, "by_agent": {}}
 
-    一轮可能不止一个 agent 在跑（回合内 `route_to` 转交）：分账段在消费发生时
-    就写好了执行方，故 `by_agent` 是**实记**；轮级数是各段之和。
-    context = 轮内各分段上下文峰值。
-    """
-    rows = [parse_usage_row(h.get("detail", ""))
-            for h in data.get("history") or [] if h.get("kind") == "usage"]
-    rows = [x for x in rows if x]
-    it = iter(rows)
-    out: dict[int, dict] = {}
-    for r in data.get("rounds") or []:
-        target = r.get("steps_used") or 0
-        acc = 0
-        agg: dict = {"steps": 0, "calls": 0, "prompt": 0, "cached": 0,
-                     "miss": 0, "completion": 0, "context": 0, "by_agent": {}}
-        while acc < target:
-            row = next(it, None)
-            if row is None:
+
+def _merge_usage(agg: dict, row: dict) -> None:
+    agg["steps"] += row.get("steps", 0)
+    agg["calls"] += 1
+    for k in _USAGE_KEYS:
+        agg[k] += row.get(k, 0)
+    agg["context"] = max(agg["context"], row.get("context", 0))
+    for name, c in (row.get("by_agent") or {}).items():
+        b = agg["by_agent"].setdefault(
+            name, {"steps": 0, "prompt": 0, "cached": 0, "miss": 0, "completion": 0}
+        )
+        for k in ("steps", "prompt", "cached", "miss", "completion"):
+            b[k] += c.get(k, 0)
+
+
+def round_open_times(rounds: Iterable[dict]) -> list[tuple[int, str]]:
+    """每轮的**开轮时刻**（首事件时间；没有事件的轮沿用上一轮的，便于分桶）。"""
+    out: list[tuple[int, str]] = []
+    last = ""
+    for r in rounds:
+        if not isinstance(r, dict):
+            continue
+        evs = r.get("events") or []
+        t0 = ""
+        for e in evs:
+            if isinstance(e, dict) and e.get("timestamp"):
+                t0 = str(e["timestamp"])
                 break
-            acc += row.get("steps", 0)
-            agg["steps"] += row.get("steps", 0)
-            agg["calls"] += 1
-            for k in _USAGE_KEYS:
-                agg[k] += row.get(k, 0)
-            agg["context"] = max(agg["context"], row.get("context", 0))
-            for name, c in (row.get("by_agent") or {}).items():
-                b = agg["by_agent"].setdefault(
-                    name, {"steps": 0, "prompt": 0, "cached": 0, "miss": 0,
-                           "completion": 0}
-                )
-                for k in ("steps", "prompt", "cached", "miss", "completion"):
-                    b[k] += c.get(k, 0)
-        out[r.get("seq")] = agg
+        last = t0 or last
+        out.append((int(r.get("seq") or 0), last))
     return out
+
+
+# 只有**真的 ISO 时刻**才拿去做时间分桶：老数据/手改文件里出现过 "t3" 这类
+# 占位值，字符串比较会把它们全判给最后一轮（实测把整会话的账并进一轮）。
+_ISO_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}")
+
+
+def round_usage_map(data: dict) -> dict[int, dict]:
+    """每轮的用量账（**按轮号精确归属**，三种口径按优先级）：
+
+    1. **行里的轮号**（`round=n`，`core._usage_record_and_drain` 新写入）——精确；
+    2. **开轮时刻分桶**（老账没有轮号时）：一条落账行属于"最后一个已开轮的轮"。
+       轮按时间顺序且不重叠，故这条机械规则不会歧义，且天然支持一轮多行
+       （中断写一行、续跑闭合再写一行）；
+    3. **步数签名逐轮吞行**（没有时间戳可用的老数据，即历史实现）——
+       保留为最后退路：它依赖 `steps_used` 与实际步数一致，一旦不符整条链错位。
+
+    为什么换掉纯签名口径：实测 `20260912-181611-886f42` 的 R12（旧检查点轮）
+    `steps_used=13` 而实际 1 个事件，签名法在 R10 多吞一行后整条链错位一格
+    ——末轮 R13 一行都没分到，页面上就没有成本格。
+
+    一轮的总消费 = 各调用方之和（`by_agent`，实记）；`context` = 轮内峰值。
+    """
+    rounds = [r for r in (data.get("rounds") or []) if isinstance(r, dict)]
+    rows: list[dict] = []
+    for h in data.get("history") or []:
+        if h.get("kind") != "usage":
+            continue
+        row = parse_usage_row(h.get("detail", ""))
+        if row:
+            row["time"] = str(h.get("time") or "")   # 分桶要用（行里的时间在 history 上）
+            rows.append(row)
+    out: dict[int, dict] = {}
+    legacy: list[dict] = []
+    # ① 行里带轮号 → 精确归属
+    for row in rows:
+        seq = row.get("round")
+        if isinstance(seq, (int, float)) and int(seq) > 0:
+            _merge_usage(out.setdefault(int(seq), _blank_usage()), row)
+        else:
+            legacy.append(row)
+    if legacy:
+        starts = round_open_times(rounds)
+        timed = [r for r in legacy if _ISO_TIME.match(str(r.get("time") or ""))]
+        untimed = [r for r in legacy if not _ISO_TIME.match(str(r.get("time") or ""))]
+        # ② 开轮时刻分桶（有时间戳就一行都不会错位）
+        if timed and any(t for _seq, t in starts):
+            for row in timed:
+                t = str(row.get("time") or "")
+                owner = 0
+                for seq, t0 in starts:
+                    if t0 and t0 <= t:
+                        owner = seq
+                if owner:
+                    _merge_usage(out.setdefault(owner, _blank_usage()), row)
+        else:
+            untimed = timed + untimed        # 没有可用时间戳 → 全走签名
+        # ③ 最后退路：步数签名逐轮吞行（老实现，保留）
+        if untimed:
+            it = iter(untimed)
+            for r in rounds:
+                seq = int(r.get("seq") or 0)
+                if seq in out:
+                    continue
+                target = r.get("steps_used") or 0
+                agg = out.setdefault(seq, _blank_usage())
+                acc = 0
+                while acc < target:
+                    row = next(it, None)
+                    if row is None:
+                        break
+                    acc += row.get("steps", 0)
+                    _merge_usage(agg, row)
+    return {k: v for k, v in out.items() if v["calls"]}
 
 
 # （原 `attributed_seqs()`：用正则从 history 的 route 行里解析"渐近归属补判过的

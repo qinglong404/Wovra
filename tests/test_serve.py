@@ -250,8 +250,16 @@ def test_event_agents_handover_at_route_call():
 
 
 def test_round_usage_map_steps_signature():
-    """轮级用量：usage 行按 steps 签名归属（轮1=7步吃两行，轮2=2步吃一行）。"""
-    m = serve.round_usage_map(_fake_task())
+    """老数据（**没有时间戳、行里也没有轮号**）→ 保留步数签名归一路径。
+
+    这是最后退路：它依赖 `steps_used` 与实际步数一致，一旦不符整条链错位
+    （§59 的 R13 就是这样丢的），故只用于"救老账"。
+    """
+    data = _fake_task()
+    for h in data["history"]:
+        if h.get("kind") == "usage":
+            h["time"] = ""                      # 无时间戳 → 走签名归一路径
+    m = serve.round_usage_map(data)
     assert m[1]["calls"] == 2 and m[1]["prompt"] == 75000
     assert m[1]["cached"] == 72000 and m[1]["miss"] == 3000
     assert m[1]["completion"] == 2000 and m[1]["context"] == 60000
@@ -264,8 +272,49 @@ def test_round_usage_map_steps_signature():
                     "by_agent": {}}          # 没有分账段的老行 → 空，不编数
 
 
+def test_round_usage_map_prefers_explicit_round_number():
+    """新数据：落账行里带 `round=n`（`core._usage_record_and_drain` 写的）→ 精确归属。
+
+    为什么必须写进行里：老的"按 steps_used 逐轮吞行"一旦某轮步数与实际不符，
+    整条链错位（实测 R13 因此一行都没分到，页面上没有成本格，见 §59）。
+    """
+    data = _fake_task()
+    h = next(x for x in data["history"] if x.get("kind") == "usage")
+    h["detail"] = h["detail"].replace("[managed]", "[managed] round=2", 1)
+    for x in data["history"]:
+        if x.get("kind") == "usage":
+            x["time"] = ""                      # 其余行无时间戳 → 走签名归一
+    m = serve.round_usage_map(data)
+    assert m[2]["steps"] == 5 and m[2]["prompt"] == 45000
+    assert 1 in m and m[1]["steps"] == 4        # 另两行仍按签名归给 R1（target 7）
+
+
+def test_round_usage_map_assigns_by_open_time():
+    """有时间戳 → 按**开轮时刻**分桶：落在"最后一个已开轮的轮"。
+
+    轮按时间顺序不重叠，故这条机械规则不会歧义，且天然支持一轮多行
+    （中断写一行、续跑闭合再写一行）。
+    """
+    data = _fake_task()
+    data["rounds"][1]["events"] = [
+        {"id": "R2-E01", "type": "user", "timestamp": "2026-09-12T11:30:00",
+         "message": {"role": "user", "content": "继续"}},
+    ]
+    rows = [x for x in data["history"] if x.get("kind") == "usage"]
+    rows[0]["time"] = "2026-09-12T10:59:14"     # R1 窗内
+    rows[1]["time"] = "2026-09-12T11:00:00"     # R1 窗内（R1 两段）
+    rows[2]["time"] = "2026-09-12T11:30:05"     # R2 窗内
+    m = serve.round_usage_map(data)
+    assert m[1]["calls"] == 2 and m[1]["prompt"] == 75000
+    assert m[2]["calls"] == 1 and m[2]["prompt"] == 20000
+
+
 def test_session_meta_round_list_has_usage():
-    meta = serve.session_meta("s1", _fake_task())
+    data = _fake_task()
+    for h in data["history"]:
+        if h.get("kind") == "usage":
+            h["time"] = ""                      # 老账：无时间戳 → 签名归一
+    meta = serve.session_meta("s1", data)
     assert meta["round_list"][0]["usage"]["prompt"] == 75000
     assert meta["round_list"][1]["usage"]["calls"] == 1
     # 消费**按调用方实记**（落账行尾的 by= 段），不做事后按轮推断

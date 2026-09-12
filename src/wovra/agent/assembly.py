@@ -289,7 +289,11 @@ class _AssemblyMixin:
             block.extend(self._route_hint_lines())
         lines = self._todo_tail_lines()
         if lines:
-            block = list(lines)
+            # 前置而不是**覆盖**（2026-09-12 修）：视图路径这里原写作
+            # `block = list(lines)`，于是只要有待办尾巴就把上面那条
+            # `[路由建议]` 丢掉——主 agent 明明有建议却看不到它，与全量
+            # 装配路径（`todo_lines + block`）不一致。
+            block = list(lines) + block
         state = self.task.get_state()
         node = next(
             (d for d in domains if str(d.get("name")) == view_name), None

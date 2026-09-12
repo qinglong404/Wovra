@@ -64,6 +64,27 @@ def test_route_hint_is_injected_into_main_agent_context(monkeypatch):
     assert "[路由建议]" not in off
 
 
+def test_route_hint_survives_todo_tail(monkeypatch):
+    """**回归**：有待办尾巴时，`[路由建议]` 不能被丢掉（2026-09-12 修）。
+
+    视图路径原写作 `block = list(lines)`，只要有待办尾巴就把建议覆盖掉——
+    主 agent 明明有起点建议却看不到它（全量路径是 `todo_lines + block`，
+    两条路径不一致）。尾部顺序：待办在前、建议在后，都在运行时信封里。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
+    task.todo = {"milestone": {"goal": "骨架可跑"}, "steps": [{"done": False}]}
+    agent = _agent(task)
+    agent._open_or_reuse_round("改下 src/wovra/tools/safety.py 的判定")
+    messages = agent._assemble_messages()
+    body = "\n".join(str(m.get("content") or "") for m in messages)
+
+    assert "[路由建议]" in body
+    assert "当前阶段" in body or "骨架可跑" in body      # 待办尾巴也在
+    envelope = str(messages[-1].get("content") or "")
+    assert "[路由建议]" in envelope and envelope.startswith("<runtime-reminder>")
+
+
 def test_per_agent_account_is_derived_not_stored(monkeypatch):
     """账本**派生、不落盘**（2026-09-12 用户拍板）：条目只留观测字段。
 

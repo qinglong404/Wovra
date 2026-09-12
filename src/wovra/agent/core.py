@@ -1240,7 +1240,8 @@ class _CoreMixin:
             ttft_info = f" ttft={stats['ttft_seconds']:.1f}s（峰值 {stats['ttft_max']:.1f}s）"
         self.task.record(
             "usage",
-            f"[{self.context_mode}] steps={stats['llm_calls']:,} "
+            f"[{self.context_mode}] round={self._usage_round_seq()} "
+            f"steps={stats['llm_calls']:,} "
             f"context={self.last_context_estimate:,} "
             f"working={stats['purpose']['working']['total']:,} "
             f"org={maint['organization']['total']:,} "
@@ -1250,6 +1251,22 @@ class _CoreMixin:
             f"{cache_info}{ttft_info}{suffix}"
             + self._by_agent_segment(),
         )
+
+    def _usage_round_seq(self) -> int:
+        """本条落账行属于哪一轮（**写进行里**，消费方按号归属）。
+
+        为什么要写：此前靠"按 `steps_used` 逐轮吞行"的事后推断，一旦某一轮的
+        `steps_used` 与实际步数不符（旧检查点轮实测记 13 步、实际 1 个事件），
+        整条链就错位一格——末轮直接分不到账（实测 `20260912-181611-886f42`
+        的 R13 因此不显示成本）。轮号落进行里，归属就不再依赖推断。
+
+        `close_round` 之后 `current_round` 已是 None，故退回 `turn_count`
+        （它在开轮时就被设成本轮序号）。
+        """
+        seq = (self.current_round or {}).get("seq")
+        if seq:
+            return int(seq)
+        return int(self.turn_count or 0)
 
     def _by_agent_segment(self) -> str:
         """落账行尾的**按调用方分账**段（零 LLM；没分账就不加尾巴）。
