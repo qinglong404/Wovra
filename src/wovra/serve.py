@@ -566,13 +566,28 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                     "messages": msgs, "count": len(msgs),
                     "total_chars": total, "tokens": tok, "truncated": trunc})
     if out:
+        # 主 agent 的"整理后、未按域重组"全文：同一套装配路径（_assemble_messages），
+        # 与重组后视图并排供核对；截断规则同上
         full = agent._assemble_messages()
-        out[0]["alt_chars"] = sum(len(m.get("content") or "") for m in full)
-        out[0]["alt_count"] = len(full)
+        alt_chars = sum(len(str(m.get("content") or "")) for m in full)
+        alt_msgs, alt_trunc = [], 0
+        for m in full:
+            raw = str(m.get("content") or "")
+            body = raw
+            if len(raw) > _DUMP_CAP:
+                body = raw[:_DUMP_CAP] + chr(10) + f"…（本条截断，原 {len(raw):,} 字符）"
+                alt_trunc += 1
+            alt_msgs.append({"role": m.get("role"), "content": body, "len": len(raw),
+                             "tool_calls": len(m.get("tool_calls") or [])})
         try:
-            out[0]["alt_tokens"] = int(agent._estimate_messages(full))
+            alt_tok = int(agent._estimate_messages(full))
         except Exception:  # noqa: BLE001
-            out[0]["alt_tokens"] = out[0]["alt_chars"] // 3
+            alt_tok = alt_chars // 3
+        out[0]["alt_chars"] = alt_chars
+        out[0]["alt_count"] = len(full)
+        out[0]["alt_tokens"] = alt_tok
+        out[0]["alt_messages"] = alt_msgs
+        out[0]["alt_truncated"] = alt_trunc
     return {"agents": out, "pending": True,
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 

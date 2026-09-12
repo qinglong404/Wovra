@@ -1945,10 +1945,24 @@ async function openPendingView(name){
     window._pv=d;
     const list=d.agents||[];
     if(!list.length){$('#d-body').innerHTML='<div class="empty">暂无视图（可能产物已生效，请刷新）</div>';return}
-    const pick=list.find(x=>(x.name||'')===name||(x.id||'')===name)||list[0];
-    $('#d-sub').innerHTML=list.map(x=>`<span class="chip ${x===pick?'acc':''}" style="cursor:pointer"
-      onclick="openPendingView('${esc(x.name||x.id||'')}')">${x.is_main?'主 agent':esc(x.id||'')} · ${esc(x.name||'')}</span>`).join(' ');
+    const altOn=name==='__alt__';
+    const mainEntry=list.find(x=>x.is_main)||list[0];
+    const pick=altOn?mainEntry:(list.find(x=>(x.name||'')===name||(x.id||'')===name)||mainEntry);
+    const chips=list.map(x=>`<span class="chip ${(!altOn&&x===pick)?'acc':''}" style="cursor:pointer"
+      onclick="openPendingView('${esc(x.name||x.id||'')}')">${x.is_main?'主 agent（重组后）':esc(x.id||'')+' · '+esc(x.name||'')}</span>`).join(' ');
+    const altChip=mainEntry&&mainEntry.alt_messages?`<span class="chip ${altOn?'acc':''}" style="cursor:pointer"
+      onclick="openPendingView('__alt__')">整理后（未重组）</span>`:'';
+    $('#d-sub').innerHTML=altChip+' '+chips;
     const cmp=(pick.is_main&&pick.alt_chars)?`　对照：全量装配 ${fmtN(pick.alt_count||0)} 条 / ${fmtN(pick.alt_chars)} 字符（分裂前口径）`:'';
+    if(altOn){
+      const fds2=((pick.file_domains||[]).length)
+        ?`<div class="ctx-note">文件域：${pick.file_domains.map(esc).join('、')}</div>`:'';
+      $('#d-body').innerHTML=
+        `<div class="ctx-stat">整理后 · 未按域重组（全量装配口径）· ${pick.alt_count||0} 条 · ≈${fmtN(pick.alt_tokens||0)} tok（${fmtN(pick.alt_chars||0)} 字符）</div>`
+        + `<div class="ctx-note">这是分裂重组生效前的完整上下文：历史轮以折叠索引形式保留，未按域切分。</div>`
+        + ctxMsgHtml(pick.alt_messages);
+      return;
+    }
     const fds=((pick.file_domains||[]).length)
       ?`<div class="ctx-note">文件域：${pick.file_domains.map(esc).join('、')}</div>`:'';
     $('#d-body').innerHTML=
