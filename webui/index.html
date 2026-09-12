@@ -51,6 +51,7 @@ body{background:var(--bg0);color:var(--tx);font-family:var(--sans);font-size:14p
 .s-item.sel{border-color:var(--acc-dim);background:rgba(124,156,255,.09)}
 .s-item .cb{position:absolute;right:10px;top:11px;width:17px;height:17px;border:1px solid var(--line2);border-radius:5px;display:flex;align-items:center;justify-content:center;font-size:11px;color:var(--acc);flex-shrink:0}
 .s-item.sel .cb{background:var(--acc);border-color:var(--acc);color:#0b0e14;font-weight:700}
+.s-item.sel .cb::after{content:'✓'}
 .s-item.bm .s-goal{padding-right:24px}
 .side-foot{padding:10px 16px;border-top:1px solid var(--line);font-size:11px;color:var(--tx3);line-height:1.6}
 .sk{height:52px;border-radius:9px;margin:4px 6px;background:linear-gradient(90deg,var(--bg2) 25%,var(--bg3) 50%,var(--bg2) 75%);background-size:200% 100%;animation:sh 1.2s infinite}
@@ -120,6 +121,7 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .crow.user{flex-direction:row-reverse}
 .avatar{width:34px;height:34px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:700;color:#0a0d13;margin-top:2px;font-family:var(--mono)}
 .ccol{min-width:0;max-width:86%;display:flex;flex-direction:column}
+.crow.agent .ccol{flex:1}   /* 流式文本再长再短，组框宽度恒定，不再跳动 */
 .crow.user .ccol{align-items:flex-end}
 .cname{font-size:11.5px;font-weight:600;margin-bottom:3px;font-family:var(--mono);letter-spacing:.3px}
 .crow.user .cname{color:var(--tx3)}
@@ -476,7 +478,7 @@ function renderList(){
     const hit=fmtP(s.usage?.cached||0,(s.usage?.cached||0)+(s.usage?.miss||0));
     const act=BATCH.on?`batchSel('${s.id}',this.classList.toggle('sel'))`:`select('${s.id}')`;
     return `<div class="s-item${on}${picked}${BATCH.on?' bm':''}" onclick="${act}">
-      ${BATCH.on?`<span class="cb">${BATCH.sel.has(s.id)?'✓':''}</span>`:''}
+      ${BATCH.on?'<span class="cb"></span>':''}
       <div class="s-goal">${esc(title)}</div>
       <div class="s-ws" title="工作目录 ${esc(s.workspace||'')}">📁 ${esc(wsMid(s.workspace))}</div>
       <div class="s-meta"><span>R${s.rounds}·${fmtN(s.steps||0)}步</span><span title="Σ prompt">Σ${fmtN(s.usage?.prompt||0)}</span>
