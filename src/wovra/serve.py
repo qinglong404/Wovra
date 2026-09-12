@@ -199,6 +199,13 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
     try:
         job["status"] = "running"
         task = task_module.Task.load(task_id)
+        if not task.goal:
+            task.goal = content.strip()[:80]   # 目标随对话成形（对齐 CLI）
+            task.save()
+        if task.workspace and Path(task.workspace).is_dir():
+            # Task.load 已切 safety.PROJECT_ROOT；cli 侧是 import 时值快照，
+            # 系统提示词里的"工作区：…"必须一起切（全局单飞下无竞争）
+            _cli_prompt.PROJECT_ROOT = Path(task.workspace)
         with _TURN_GATE:
             _acquire_session_lock(task)  # 被占用时抛 SystemExit（CLI 语义）
             try:
@@ -547,11 +554,7 @@ class _Handler(BaseHTTPRequestHandler):
             return self._json({"error": "bad json"}, 400)
         path = urlparse(self.path).path
         if path == "/api/sessions":
-            goal = str(body.get("goal") or "").strip()
-            if not goal:
-                return self._json({"error": "goal 必填"}, 400)
-            task = task_module.Task.create(goal=goal[:500])
-            return self._json({"id": task.id}, 201)
+            return self._create_session(body)
         m = re.fullmatch(r"/api/sessions/([^/]+)/turn", path)
         if m:
             return self._start_turn(m.group(1), str(body.get("content") or ""))
@@ -571,8 +574,71 @@ class _Handler(BaseHTTPRequestHandler):
         return self._json({"error": "not found"}, 404)
 
     do_PUT = do_POST
-    do_DELETE = do_POST
     do_PATCH = do_POST
+
+    def do_DELETE(self):  # noqa: N802
+        path = urlparse(self.path).path
+        m = re.fullmatch(r"/api/sessions/([^/]+)", path)
+        if m:
+            return self._delete_session(m.group(1))
+        return self._json({"error": "not found"}, 404)
+
+    def _create_session(self, body: dict) -> None:
+        """新建会话：goal 可空（随对话成形）；工作目录可指定（随任务存续）。"""
+        from .tools import safety as _safety
+        goal = str(body.get("goal") or "").strip()
+        ws_raw = str(body.get("workspace") or "").strip()
+        ws_path = None
+        if ws_raw:
+            ws_path = Path(ws_raw)
+            if not ws_path.is_absolute():
+                return self._json({"error": "工作目录必须是绝对路径"}, 400)
+            try:
+                ws_resolved = ws_path.resolve()
+            except OSError:
+                return self._json({"error": "工作目录无法解析"}, 400)
+            if _safety._is_fs_root(ws_resolved):
+                return self._json({"error": "工作目录不能是盘根/文件系统根"}, 400)
+            try:
+                ws_resolved.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                return self._json({"error": f"工作目录无法创建：{e}"}, 400)
+        task = task_module.Task.create(goal=goal[:500])
+        if ws_path is not None:
+            task.workspace = str(ws_path.resolve())
+            task.save()
+        return self._json({"id": task.id, "workspace": task.workspace}, 201)
+
+    def _delete_session(self, task_id: str) -> None:
+        """删除会话目录；有运行中作业或 CLI 持锁时拒绝。"""
+        import shutil
+
+        from .cli.session import _process_alive
+        if not _ID_SAFE.match(task_id):
+            return self._json({"error": "not found"}, 404)
+        with _job_lock:
+            busy = any(j["task_id"] == task_id
+                       and j["status"] in ("queued", "running")
+                       for j in _JOBS.values())
+        if busy:
+            return self._json({"error": "该会话有正在运行的轮，先等它结束"}, 409)
+        tdir = self.tasks_root / task_id
+        if not tdir.is_dir():
+            return self._json({"error": "session not found"}, 404)
+        lock = tdir / ".lock"
+        if lock.is_file():
+            try:
+                pid = int(lock.read_text(encoding="utf-8").strip() or 0)
+            except (OSError, ValueError):
+                pid = 0
+            if _process_alive(pid):
+                return self._json(
+                    {"error": f"会话被进程 {pid} 占用（CLI 还开着），先关闭再删"},
+                    409)
+        shutil.rmtree(tdir, ignore_errors=True)
+        with self.cache._lock:
+            self.cache._cache.pop(task_id, None)
+        return self._json({"ok": True})
 
     def _start_turn(self, task_id: str, content: str) -> None:
         """追加一轮对话：三道互斥（进程内单飞 / CLI 会话锁 / 任务级去重）。"""

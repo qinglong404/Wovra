@@ -220,6 +220,16 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #send:hover{filter:brightness(1.15)}
 #send:disabled{opacity:.5;cursor:wait}
 
+/* ---------- 工作目录 modal ---------- */
+#ws-modal{position:fixed;inset:0;z-index:40;display:none;align-items:center;justify-content:center;background:#000a}
+#ws-modal.open{display:flex}
+.ws-card{width:520px;background:var(--bg1);border:1px solid var(--line2);border-radius:12px;padding:18px 20px;box-shadow:0 24px 60px #000c}
+.ws-card h4{font-size:14px;margin-bottom:6px}
+.ws-hint{font-size:12px;color:var(--tx3);line-height:1.6;margin-bottom:10px}
+#ws-input{width:100%;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:9px 12px;font-family:var(--mono);font-size:12.5px;outline:none}
+#ws-input:focus{border-color:var(--acc-dim)}
+.ws-card .chip{cursor:pointer}
+
 /* ---------- 抽屉 ---------- */
 #drawer{position:fixed;top:0;right:-560px;width:560px;height:100%;background:var(--bg1);border-left:1px solid var(--line2);box-shadow:-18px 0 40px #0009;transition:right .18s ease;display:flex;flex-direction:column;z-index:30}
 #drawer.open{right:0}
@@ -261,6 +271,18 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   </div>
 </main>
 <div id="mask"></div>
+<div id="ws-modal">
+  <div class="ws-card">
+    <h4>新建会话 · 选择工作目录</h4>
+    <div class="ws-hint">目标不填——随对话成形；所有文件工具与命令限定在该目录内（绝对路径，不存在会自动创建）。</div>
+    <input id="ws-input" placeholder="例如 D:\BC\my-project">
+    <div id="ws-err" style="color:var(--red);font-size:12px;min-height:16px"></div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <span class="chip" style="cursor:pointer" onclick="closeWsModal()">取消</span>
+      <span class="chip acc" style="cursor:pointer" onclick="createSession()">创建</span>
+    </div>
+  </div>
+</div>
 <div id="drawer">
   <div class="d-head"><b id="d-title">事件原文</b><span id="d-sub" class="mono" style="font-size:11px;color:var(--tx3)"></span><span class="d-close" onclick="closeDrawer()">✕</span></div>
   <div class="d-body" id="d-body"></div>
@@ -371,7 +393,8 @@ function renderHeader(){
     `<span class="chip" title="${esc(META.workspace)}">${esc(wsBase(META.workspace))}</span>`+
     `<span class="chip">更新 ${fmtT(META.updated_at)}</span>`+
     (META.escalations?`<span class="chip bad">◉ ${META.escalations} 项待拍板</span>`:'')+
-    (META.todo_milestone?`<span class="chip warn">大步进行中</span>`:'');
+    (META.todo_milestone?`<span class="chip warn">大步进行中</span>`:'')+
+    `<span class="chip bad" style="cursor:pointer;margin-left:auto" onclick="deleteSession('${META.id}')">删除会话</span>`;
   const hit=fmtP(u.cached||0,(u.cached||0)+(u.miss||0));
   $('#kpis').innerHTML=[
     ['Σ prompt',fmtN(u.prompt||0),'tok'],
@@ -716,14 +739,38 @@ async function refreshAfterTurn(){
   drawConv($('#content'),true);
   loadSessions();
 }
-async function newSession(){
-  const goal=prompt('新会话目标：');
-  if(!goal||!goal.trim())return;
-  const r=await fetch('/api/sessions',{method:'POST',
-    headers:{'Content-Type':'application/json'},body:JSON.stringify({goal:goal.trim()})});
-  const j=await r.json();
-  if(j.id){await loadSessions();select(j.id)}
-  else alert(j.error||('HTTP '+r.status));
+function newSession(){
+  const cur=(SESSIONS.find(x=>x.id===CUR)||SESSIONS[0]);
+  $('#mask').classList.add('open');
+  $('#ws-modal').classList.add('open');
+  $('#ws-input').value=cur?.workspace||'';
+  $('#ws-err').textContent='';
+  $('#ws-input').focus();
+}
+async function createSession(){
+  const ws=$('#ws-input').value.trim();
+  if(!ws){$('#ws-err').textContent='工作目录必填（绝对路径）';return}
+  try{
+    const r=await fetch('/api/sessions',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({workspace:ws})});
+    const j=await r.json();
+    if(!r.ok){$('#ws-err').textContent=j.error||('HTTP '+r.status);return}
+    closeWsModal();FOLLOW=true;
+    await loadSessions();select(j.id);
+  }catch(e){$('#ws-err').textContent=e.message}
+}
+function closeWsModal(){$('#ws-modal').classList.remove('open');$('#mask').classList.remove('open')}
+async function deleteSession(id){
+  if(!confirm('删除会话 '+id+'？\n删除其全部本地数据，不可恢复。'))return;
+  const r=await fetch('/api/sessions/'+id,{method:'DELETE'});
+  const j=await r.json().catch(()=>({}));
+  if(!r.ok){alert(j.error||('HTTP '+r.status));return}
+  if(CUR===id){CUR=null;META=null;AGENT_STATS=[];
+    $('#goal').classList.add('empty');$('#goal').textContent='从左侧选择一个会话';
+    $('#chips').innerHTML='';$('#kpis').innerHTML='';$('#tabs').innerHTML='';
+    $('#content').innerHTML='<div class="empty">等待选择会话…</div>';
+    $('#composer').classList.remove('show');}
+  loadSessions();
 }
 
 /* ---------- 时间线 ---------- */
@@ -898,8 +945,17 @@ async function openDrawer(seq,hl){
   }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
 }
 function closeDrawer(){$('#drawer').classList.remove('open');$('#mask').classList.remove('open')}
-$('#mask').addEventListener('click',closeDrawer);
-document.addEventListener('keydown',e=>{if(e.key==='Escape')closeDrawer()});
+$('#mask').addEventListener('click',()=>{
+  if($('#ws-modal').classList.contains('open'))closeWsModal();
+  else closeDrawer();
+});
+document.addEventListener('keydown',e=>{
+  if(e.key==='Escape'){
+    if($('#ws-modal').classList.contains('open'))closeWsModal();
+    else closeDrawer();
+  }
+  if(e.key==='Enter'&&$('#ws-modal').classList.contains('open'))createSession();
+});
 
 /* ---------- 启动 ---------- */
 loadSessions();

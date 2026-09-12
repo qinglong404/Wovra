@@ -1,6 +1,7 @@
 """wovra serve 的契约测试：派生函数 + HTTP 冒烟（本机回环，零模型）。"""
 
 import json
+import sys
 import threading
 import urllib.request
 from pathlib import Path
@@ -352,3 +353,88 @@ def test_http_ask_bridge_flow(server, monkeypatch, tmp_path):
     assert captured["ask"] == "用户的回答: A"        # 字母 → 选项原文展开
     assert captured["confirm"] is True               # y → 放行
     serve._JOBS.pop(job_id, None)
+
+
+def _server_on(tmp_tasks: Path):
+    class _H(serve._Handler):
+        pass
+
+    _H.cache = serve.SummaryCache(tmp_tasks)
+    _H.tasks_root = tmp_tasks
+    httpd = serve.ThreadingHTTPServer(("127.0.0.1", 0), _H)
+    port = httpd.server_address[1]
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    return httpd, f"http://127.0.0.1:{port}"
+
+
+def test_http_create_with_workspace(tmp_path, monkeypatch):
+    """新建会话选工作目录：记录到 task.workspace、目录自动创建。"""
+    tasks = tmp_path / "tasks"
+    tasks.mkdir(parents=True)
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    httpd, base = _server_on(tasks)
+    try:
+        ws = tmp_path / "my-project"
+        req = urllib.request.Request(
+            base + "/api/sessions",
+            data=json.dumps({"workspace": str(ws)}).encode("utf-8"),
+            method="POST", headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            assert r.status == 201
+            created = json.loads(r.read())
+        assert created["workspace"] == str(ws)
+        assert ws.is_dir()
+        # 落盘验证：task.workspace 已持久化
+        on_disk = json.loads((tasks / created["id"] / "task.json")
+                             .read_text(encoding="utf-8"))
+        assert on_disk["workspace"] == str(ws)
+    finally:
+        httpd.shutdown()
+
+
+def test_http_create_rejects_fs_root(tmp_path, monkeypatch):
+    tasks = tmp_path / "tasks"
+    tasks.mkdir(parents=True)
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    httpd, base = _server_on(tasks)
+    try:
+        drive_root = Path(sys.executable).drive + "\\"
+        req = urllib.request.Request(
+            base + "/api/sessions",
+            data=json.dumps({"workspace": drive_root}).encode("utf-8"),
+            method="POST", headers={"Content-Type": "application/json"})
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                code = r.status
+        except urllib.error.HTTPError as e:
+            code = e.code
+        assert code == 400          # 盘根不可为工作区
+    finally:
+        httpd.shutdown()
+
+
+def test_http_delete_session(tmp_path, monkeypatch):
+    """删除会话：目录移除 + 摘要缓存清除。"""
+    tasks = tmp_path / "tasks"
+    (tasks / "s1").mkdir(parents=True)
+    (tasks / "s1" / "task.json").write_text(
+        json.dumps(_fake_task(), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    httpd, base = _server_on(tasks)
+    try:
+        req = urllib.request.Request(base + "/api/sessions/s1",
+                                     method="DELETE")
+        try:
+            with urllib.request.urlopen(req, timeout=5) as r:
+                assert r.status == 200
+        except urllib.error.HTTPError as e:
+            raise AssertionError(f"删除失败: {e.code}")
+        assert not (tasks / "s1").exists()
+        # 再 GET → 404
+        try:
+            with urllib.request.urlopen(base + "/api/sessions/s1", timeout=5) as r:
+                raise AssertionError("应 404")
+        except urllib.error.HTTPError as e:
+            assert e.code == 404
+    finally:
+        httpd.shutdown()
