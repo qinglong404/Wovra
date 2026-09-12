@@ -106,6 +106,11 @@ class _CoreMixin:
         # 改装配会让同一批里后续工具看到错乱的上下文。跳数记在轮上
         # （route_hops）随轮持久化，使 `\c` 续跑不会把上限重置掉。
         self._pending_route: str = ""
+        # 视图/产物生效与"开新轮"的互斥锁（2026-09-12，§50）：维护线程跑完
+        # 时若用户没在轮里，就立刻让产物生效（子 agent 与重组上下文在下一轮
+        # 开场前建好）；而"开新轮"是唯一的切换点——两者必须互斥，否则会出现
+        # "正在开轮、产物同时改写装配"的竞选，破坏前缀纪律。
+        self._view_lock = threading.RLock()
         # 维护快照的推迟标记（2026-09-11 实测缺陷的落点）：里程碑闭合发生
         # 在工具方法体**内部**（todo→verify_milestone→close_round），此刻
         # 调用方的 assistant(tool_calls) 还没有 tool 结果。若在此刻取装配
@@ -270,7 +275,14 @@ class _CoreMixin:
         本轮输入并入同一个 Round——直到 AI 产出最终回答才算完整一轮。
         返回是否开启了新 Round：开启时要把上一轮暂存的整理产物生效
         （_promote_org_results），续轮则不动——本轮装配必须保持原样。
+
+        整体持 `_view_lock`（§50）：与后台维护线程的"产物即时生效"互斥，
+        保证"当前有没有开放轮"这个判定与开轮动作不会交错。
         """
+        with self._view_lock:
+            return self._open_or_reuse_round_locked(user_input)
+
+    def _open_or_reuse_round_locked(self, user_input: str) -> bool:
         last = self.rounds[-1] if self.rounds else None
         if last is not None and last.get("end_state") in ("", "open"):
             self.current_round = last
@@ -681,8 +693,15 @@ class _CoreMixin:
         """闭合当前 Round（仅最终回答路径调用）；managed 模式做水位检查。
 
         水位口径 = 当前上下文窗口体量（本轮装配峰值 last_context_estimate）：
-        达标且轮已闭合才批量整理，轮进行中永不打扰；整理产物暂存到
-        下一轮开启才生效（_promote_org_results），对用户静默。
+        达标且轮已闭合才批量整理，轮进行中永不打扰。
+
+        **轮闭合是"产物生效点"**（2026-09-12 用户口径：把重组上下文与子 agent
+        放在「分裂之后、下一轮对话之前」）——同步维护（run / serve）在这里已经
+        把整理+分裂跑完，故随即 `_settle_after_maintenance()` 让产物立刻落地：
+        注册表长出子 agent、历史轮补判归位、每个域的重组上下文可派生。于是
+        **下一轮开场只剩对话这一件事**（不再开场建账）。异步维护（chat 后台
+        线程）此刻还没有产物，由线程跑完时自己结算（同样是"没有开放轮就立刻
+        生效"）。对用户静默。
         """
         if self.current_round is None:
             return
@@ -705,6 +724,9 @@ class _CoreMixin:
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:
             self._maybe_organize_batch()
+            # 产物即时生效（§50）：同步维护已跑完 → 此刻（无开放轮）落地；
+            # 异步维护还没产物 → 空转，由维护线程跑完时自行结算。
+            self._settle_after_maintenance()
 
     def finalize_round(self, end_state: str = "open") -> None:
         """CLI 异常/中断路径：Round 保持开放（不闭合、不整理），仅持久化。

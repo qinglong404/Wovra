@@ -168,9 +168,10 @@ class _MaintenanceMixin:
         水位口径 = last_context_estimate（最近一次装配的估算，轮闭合时
         即本轮峰值）——不是未整理积压量（2026-09-07 用户拍板）。每次轮
         闭合到水位则收编**全部**未整理轮（2026-09-09 用户拍板：批次上限
-        删除，触发只看水位；最老的先整理）。产物暂存不直写：本轮装配
-        保持原样，下一轮开启才生效（_promote_org_results）；过程对用户
-        静默。
+        删除，触发只看水位；最老的先整理）。本函数只负责"把产物算出来并
+        暂存"；**生效点是轮闭合边界**（`close_round` → `_settle_after_
+        maintenance`，§50 用户口径：「分裂之后、下一轮对话之前」就落地）。
+        过程对用户静默。
         """
         if self.last_context_estimate < self._org_watermark:
             return
@@ -240,6 +241,9 @@ class _MaintenanceMixin:
             finally:
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
+            # 注：这里**不**顺手 promote——生效点是 `close_round` 边界（见
+            # `_settle_after_maintenance`）：语义上"轮闭合 → 产物即时生效 →
+            # 下一轮开场可直接对话"，而本函数只负责"把产物算出来并暂存"。
 
     def organize_backlog(self, *, force: bool = False) -> None:
         """整理未整理轮（同步）。
@@ -266,32 +270,37 @@ class _MaintenanceMixin:
             # 故不复制一份条件，直接委托——两处口径不可能再走岔。
             self._maybe_organize_batch()
             return
-        while True:
-            unorganized = self._unorganized_rounds()
-            if not unorganized:
-                return
-            # 收尾整理同走协议闸门：装配不完整（悬空 tool_calls）时宁可不整理，
-            # 也不能发出一条必然 400 的请求（run 模式退出路径，轮多已闭合，
-            # 正常情况下这里一定是干净快照）
-            snapshot = self._maint_snapshot()
-            if snapshot is None:
-                return
-            batch = unorganized
-            for r in batch:
-                r["org_state"] = "pending"
-                self._org_inflight.add(r["seq"])
-            try:
-                org_ok, _split_ok = self._parallel_maintenance(batch, snapshot)
-            except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
+        try:
+            while True:
+                unorganized = self._unorganized_rounds()
+                if not unorganized:
+                    return
+                # 收尾整理同走协议闸门：装配不完整（悬空 tool_calls）时宁可不整理，
+                # 也不能发出一条必然 400 的请求（run 模式退出路径，轮多已闭合，
+                # 正常情况下这里一定是干净快照）
+                snapshot = self._maint_snapshot()
+                if snapshot is None:
+                    return
+                batch = unorganized
                 for r in batch:
-                    r["org_state"] = "failed"
-                self._persist_rounds()
-                return
-            finally:
-                for r in batch:
-                    self._org_inflight.discard(r["seq"])
-            if not org_ok:
-                return
+                    r["org_state"] = "pending"
+                    self._org_inflight.add(r["seq"])
+                try:
+                    org_ok, _split_ok = self._parallel_maintenance(batch, snapshot)
+                except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
+                    for r in batch:
+                        r["org_state"] = "failed"
+                    self._persist_rounds()
+                    return
+                finally:
+                    for r in batch:
+                        self._org_inflight.discard(r["seq"])
+                if not org_ok:
+                    return
+        finally:
+            # 退出前把产物落到位（§50）：run 模式下一次自主推进开局就直接是
+            # "有子 agent、有归属"的状态，不必再等一次轮开启。
+            self._settle_after_maintenance()
 
     def _ensure_worker(self) -> None:
         if self._org_thread is not None and self._org_thread.is_alive():
@@ -315,6 +324,43 @@ class _MaintenanceMixin:
                 self._org_queue.task_done()
                 for r in batch:
                     self._org_inflight.discard(r["seq"])
+                # 后台整理跑完：用户此刻若没在轮里（正在打字/空闲），立刻生效
+                # ——子 agent 与其重组上下文在下一轮开场前就建好（§50）。
+                self._settle_after_maintenance()
+
+    def _settle_after_maintenance(self) -> None:
+        """维护一跑完就让产物**立刻生效**（有开放轮时留给下一轮开场）。
+
+        2026-09-12 用户口径：「把重组上下文、子 agent 都放到分裂后面、下一轮
+        对话前面……下一轮对话开始，基本就只需要追求对话」。旧行为把 promote
+        与渐近归属一律推到下一轮开场，于是会话里看得见"分裂完了但子 agent 还
+        没出现"，而下一轮开场又要多做一轮建账 + 归位。
+
+        安全性（缓存前缀纪律，AGENTS.md §2：**只有整理生效才允许破坏前缀，
+        且不许在轮次中部改写历史字节**）：
+
+        * 同步维护（`run` / `serve` 每轮）：`close_round` 已把
+          `current_round` 置空 → 恒满足"无开放轮"；
+        * 异步维护（chat 后台线程）：与 `_open_or_reuse_round` 共用
+          `_view_lock`，两者不会交错——用户没在轮里就立刻生效，已经开始下一轮
+          则照旧留给下一轮开场。
+
+        生效内容是"完整的开场状态"：产物落实（精修索引/状态补丁/**域树 →
+        注册表条目**）+ 渐近归属补判（各轮归到对应域，子 agent 的重组上下文
+        随之可派生）。两步都是零 LLM 纯函数。
+        """
+        try:
+            with self._view_lock:
+                if self.current_round is not None:
+                    return  # 轮进行中：本轮字节不许动，留给下一轮开场
+                self._promote_org_results()
+                self._settle_views()
+        except Exception as error:  # noqa: BLE001——即时生效失败不该拖垮会话
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"维护产物即时生效失败（{error!r}）——留给下一轮开场补做",
+                )
 
     def flush_organization(self, timeout: float = 10.0) -> bool:
         """等待异步整理队列清空（chat 退出限时等待；run 用同步模式无需调用）。"""
@@ -1142,13 +1188,14 @@ class _MaintenanceMixin:
         return results["org"], results["split"]
 
     def _promote_org_results(self) -> None:
-        """把暂存的整理产物落进正式视图（仅在**新 Round 开启时**调用）。
+        """把暂存的整理产物落进正式视图（轮闭合边界 / 新 Round 开启时调用）。
 
-        本轮对话期间装配必须保持原样（连贯性 + 缓存前缀稳定），所以
-        整理线程只把产物写进各轮的 pending_org 暂存区；直到下一轮
-        开启，才替换精修索引/Normalized 意图、应用状态补丁并落盘。
-        崩溃安全：pending_org 随 rounds 一起持久化，重启后第一次开
-        新轮时补生效。
+        产物为什么不直写：轮进行中改装配会破坏缓存前缀（AGENTS.md §2）；
+        故维护只写各轮的 `pending_org` 暂存区，由**没有开放轮的时刻**落地
+        ——`close_round` 边界的 `_settle_after_maintenance`（§50 即时生效，
+        主流路径），以及新 Round 开启时的兜底（异步维护跑完时用户已经进了
+        下一轮，产物只能等下一次轮开启）。崩溃安全：`pending_org` 随 rounds
+        一起持久化，重启后第一次开新轮时补生效。
         """
         changed = False
         for r in self.rounds:

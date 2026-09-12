@@ -57,23 +57,21 @@ def test_organization_updates_state_and_block_summaries(monkeypatch, tmp_path):
     answer = agent.run("把活干完")
 
     assert answer == "干完了"
-    # 产物先暂存（本轮装配纹丝不动）：正式字段要等下一轮开启才替换
-    assert task.rounds[-1]["pending_org"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
-    assert task.rounds[-1]["pending_org"]["key_constraints"] == "不得修改现有测试用例"
-    assert "R1-B1" in task.rounds[-1]["pending_org"]["block_summaries"]
-    assert task.rounds[-1]["user_input"]["normalized"] == ""
-    # 模拟下一轮开启：暂存生效
-    agent._promote_org_results()
+    # 轮闭合即生效（§50 用户口径：「分裂之后、下一轮对话之前」就该落地）——
+    # 故这里直接读**正式字段**；暂存区只在"有开放轮"时才留东西。
+    assert task.rounds[-1]["user_input"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
+    assert task.rounds[-1]["user_input"]["key_constraints"] == "不得修改现有测试用例"
+    assert "R1-B1" in task.rounds[-1]["block_summaries"]
     # State Patch 增量合并进任务状态
     assert task.task_state["goal"] == "搞清测试覆盖"
     assert task.task_state["is_done"] is True
     assert task.task_state["completed"] == ["梳理测试覆盖"]
     # Round 结构持久化：意图 / 关键约束 / 逐块描述写回
-    assert task.rounds[-1]["user_input"]["normalized"] == "用户想搞清楚项目的测试覆盖情况"
-    assert task.rounds[-1]["user_input"]["key_constraints"] == "不得修改现有测试用例"
     assert task.rounds[-1]["block_summaries"]["R1-B1"].startswith("回应测试覆盖询问")
     assert task.rounds[-1]["org_state"] == "done"
     assert "pending_org" not in task.rounds[-1]  # 生效后暂存区清空
+    agent._promote_org_results()                 # 幂等：再调一次不改动
+    assert task.rounds[-1]["org_state"] == "done"
 
 
 def test_organization_survives_invalid_json(monkeypatch, tmp_path):
@@ -393,7 +391,7 @@ def test_org_auto_repairs_unescaped_quotes(monkeypatch, tmp_path):
 
     assert len(agent.llm.calls) == 2, "自动修复成功就不该再触发重发"
     assert task.rounds[-1]["org_state"] == "done"
-    assert (task.rounds[-1]["pending_org"]["normalized"]
+    assert (task.rounds[-1]["user_input"]["normalized"]
             == "于是\"读到含'不存在'的文件\"整块")   # 引号作为内容被保留
     records = [e["detail"] for e in task.history if e["kind"] == "maintenance"]
     assert any("已自动修复" in d for d in records), f"修复未留痕：{records}"
@@ -433,7 +431,7 @@ def test_organization_retries_once_with_diagnosis(monkeypatch, tmp_path):
     agent.run("问")
 
     assert task.rounds[-1]["org_state"] == "done"
-    assert task.rounds[-1]["pending_org"]["normalized"] == "修正后的意图"
+    assert task.rounds[-1]["user_input"]["normalized"] == "修正后的意图"
 
     # 注意：StubLLM 的 lane 只是"非分裂/非咨询"的默认值，干活调用也是 org——
     # 真正的整理调用按"消息里带 [整理指令]"识别
@@ -538,8 +536,8 @@ def test_org_tool_call_without_seq_matches_positionally(monkeypatch, tmp_path):
 
     agent.run("问")
 
-    assert task.rounds[-1]["pending_org"]["normalized"] == "位置匹配的意图"
-    assert "R1-B1" in task.rounds[-1]["pending_org"]["block_summaries"]
+    assert task.rounds[-1]["user_input"]["normalized"] == "位置匹配的意图"
+    assert "R1-B1" in task.rounds[-1]["block_summaries"]
 
 
 def test_org_partial_coverage_marks_missing_rounds_failed(monkeypatch, tmp_path):
@@ -664,9 +662,9 @@ def test_org_accepts_repairable_json(monkeypatch, tmp_path):
     agent.run("问")
 
     assert task.rounds[-1]["org_state"] == "done"
-    pending = task.rounds[-1]["pending_org"]
-    assert pending["normalized"] == "意图'带单引号'"
-    assert "第二行" in pending["block_summaries"]["R1-B1"]
+    last = task.rounds[-1]
+    assert last["user_input"]["normalized"] == "意图'带单引号'"
+    assert "第二行" in last["block_summaries"]["R1-B1"]
 
 
 def test_assembly_does_not_duplicate_last_closed_round(monkeypatch, tmp_path):
@@ -734,12 +732,14 @@ def test_protection_grace_and_cooldown(monkeypatch, tmp_path):
     assert task.rounds[0]["user_input"]["normalized"] == ""
     assert task.rounds[3]["org_state"] == "done"     # R4 整理
     assert task.rounds[7]["org_state"] == "done"     # R8 批次补齐 R5-R8
-    assert task.rounds[4]["pending_org"]["normalized"] == "R5 意图"
+    assert task.rounds[4]["user_input"]["normalized"] == "R5 意图"
     # 中间三轮在 R5/R6/R7 闭合时都被最小间隔挡住——它们的产物只能来自
     # R8 那次批次（这正是"最少 3 轮内不触发"的直接证据：若沿用旧的 `<`，
-    # R7 闭合就会触发第三批，org_calls 会是 3 次）
+    # R7 闭合就会触发第三批，org_calls 会是 3 次）。§50 之后产物在 R8 闭合
+    # 时即生效，故这里读**已生效**的字段，而不是暂存区。
     for r in task.rounds[4:7]:
-        assert r.get("user_input", {}).get("normalized", "") == ""
+        assert r["org_state"] == "done"                    # 由 R8 批次补齐
+        assert r["user_input"]["normalized"] != ""         # 产物已落地
 
 
 def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
@@ -1467,6 +1467,69 @@ def test_organize_backlog_respects_watermark_unless_forced(monkeypatch, tmp_path
 
     assert task.rounds[0]["org_state"] == "done"
     assert len(agent.llm.calls) == 1
+
+
+def test_product_settles_at_round_close_before_next_round(monkeypatch, tmp_path):
+    """§50：产物在「分裂之后、下一轮对话之前」生效。
+
+    用户口径：「把重组上下文、子 agent 都放到分裂后面、下一轮对话前面……
+    下一轮对话开始，基本就只需要追求对话」。故轮闭合时（同步维护已经跑完、
+    没有开放轮）就把产物落地——注册表长出子 agent、历史轮补判归位，下一轮
+    开场不必再建账。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="目标")
+    agent = Agent(
+        llm=_StubLLM(
+            [[_chunk(_delta(content="干完了"))], [_chunk(_delta(content=_org_json()))]],
+            split_responses=[[_domains_chunk()]],
+        ),
+        tools=[], task=task,
+        org_watermark=0, org_grace_rounds=0, org_cooldown_rounds=0,
+    )
+
+    agent.run("问")                      # 轮闭合 → 水位检查（同步）→ 即时生效
+
+    assert [e["id"] for e in task.registry] == ["Main", "A"]   # 子 agent 已建好
+    assert task.rounds[0]["domains"][0]["name"] == "web 演示"   # 域树已落档
+    assert "pending_org" not in task.rounds[0]                 # 暂存区已清空
+    assert any(
+        "registry：分裂产物落实为注册表条目" in str(h.get("detail"))
+        for h in task.history if h.get("kind") == "maintenance"
+    )
+
+
+def test_product_settle_defers_while_a_round_is_open(monkeypatch, tmp_path):
+    """有开放轮时不生效（缓存前缀纪律：轮内不许改写历史字节）。
+
+    异步维护跑完时用户可能已经进了下一轮——那时产物照旧暂存，等下一次轮开启
+    生效；与 `_open_or_reuse_round` 共用 `_view_lock`，两者不会交错。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_domains_chunk()]],
+    )
+    agent._maybe_organize_batch()         # 同步跑完，产物先暂存
+
+    assert task.rounds[0]["pending_org"]["domains"]      # 暂存区有产物
+    assert [e["id"] for e in task.registry] == ["Main"]
+
+    # 模拟"用户已经在下一轮里"：不生效
+    agent.current_round = {
+        "seq": 2, "user_input": {"original": "继续", "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open",
+        "org_state": "", "active_view": "", "route_hops": 0,
+    }
+    agent._settle_after_maintenance()
+    assert task.rounds[0].get("pending_org")             # 仍暂存
+    assert [e["id"] for e in task.registry] == ["Main"]
+
+    # 轮闭合（无开放轮）→ 下一次结算即落地
+    agent.current_round = None
+    agent._settle_after_maintenance()
+    assert [e["id"] for e in task.registry] == ["Main", "A"]
+    assert "pending_org" not in task.rounds[0]
 
 
 def test_backlog_skips_incomplete_protocol(monkeypatch, tmp_path):

@@ -248,7 +248,7 @@ def test_organization_missing_blocks_get_fallback_route_lines(monkeypatch, tmp_p
     agent.run("问")
 
     blocks = task.rounds[-1]["blocks"]
-    summaries = task.rounds[-1]["pending_org"]["block_summaries"]
+    summaries = task.rounds[-1]["block_summaries"]   # 轮闭合即生效（§50）
     assert set(summaries) == {b["id"] for b in blocks}   # 覆盖完整
     assert all("仅路由" in s for s in summaries.values())
 

@@ -572,8 +572,9 @@ def maint_view(task) -> str:
             lines.append(f"- 最新整理代次：{max(generations)}")
         if pending_count:
             lines.append(
-                f"- 有 {pending_count} 轮整理产物待生效（pending_org 暂存，"
-                "下一轮开启时 promote）"
+                f"- 有 {pending_count} 轮整理产物待生效（pending_org 暂存）："
+                "产物在**轮闭合边界**即时生效（§50）；只有「跑完时用户已经"
+                "进了下一轮」这种情形才会留到下一次开轮补生效"
             )
     ctx = _last_context_estimate(task)
     if ctx is not None:
