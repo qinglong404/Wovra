@@ -152,6 +152,51 @@ def owner_of_file(
     return f"{entry.get('id')}（{entry.get('name')}）"
 
 
+def split_defects(
+    domains: Iterable[dict] | None, files: Iterable[str] | None
+) -> list[str]:
+    """分裂产物的**机械缺陷**（F2 互斥 / F3 完备）——有缺陷就拒收，不静默兜底。
+
+    用户口径（2026-09-12，worklog §62）：
+
+    * **F2**：一个文件不可能两个子 agent 共同维护——任意两个域命中同一个文件
+      就是缺陷（按文件清单与历史前缀两种表达都查，前缀重叠如 `src/` 与
+      `src/wovra/` 也算）；
+    * **F3**：被分裂者名下的文件必须 **100% 分完**——每个现有文件都得恰好一个归宿；
+    * **结构**：域必须给出它维护的文件（空域 = 没说要管什么）。
+
+    返回缺陷描述列表（空 = 通过）。调用方（promote 入口）据此**拒收 + 停 + 报错**
+    ——"有些错误是根基，其错了，测试无意义"（用户原话）。
+    """
+    entries = build_entries(domains)
+    defects: list[str] = []
+    if not entries:
+        return defects
+    all_files = [str(f).strip().strip("/") for f in (files or []) if str(f).strip()]
+    for entry in entries:
+        name = f"{entry.get('id')}（{entry.get('name')}）"
+        if not entry_files(entry) and not entry_prefixes(entry):
+            defects.append(f"空域：{name} 没有给任何文件清单——不知道它维护什么")
+        # 一个域自己内部不许重复声明（同文件既在清单又在某前缀下）
+        if len(all_files):
+            hits = [f for f in all_files if file_owned_by(entry, f)]
+            if not hits:
+                defects.append(f"空域：{name} 的文件清单没有命中任何现有文件")
+    for path in all_files:
+        owners = [f"{e.get('id')}（{e.get('name')}）" for e in entries
+                  if file_owned_by(e, path)]
+        if len(owners) > 1:
+            defects.append(
+                f"重叠：{path} 同时被 " + "、".join(owners) + " 认领"
+                "（一个文件只能属于一个域）"
+            )
+        elif not owners:
+            defects.append(
+                f"未覆盖：{path} 没有任何域认领（分裂必须把现有文件 100% 分完）"
+            )
+    return defects
+
+
 def build_entries(domains: Iterable[dict] | None) -> list[dict]:
     """把分裂产物的域树翻译成注册表条目（纯函数，零 LLM）。
 

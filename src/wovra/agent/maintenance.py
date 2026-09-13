@@ -1016,6 +1016,25 @@ class _MaintenanceMixin:
                     chat += size
         return (chat / total) if total else 0.0
 
+    def _live_files(self) -> list[str]:
+        """**分裂单元** = 现有文件（Q1 口径：只读与已删的算历史，不做分裂单元）。
+
+        用户口径（2026-09-12）：LIVE = 整理时判定"这份内容现在还在"（被写过、
+        没被删/重构）；`read_only`（只读过）与 `dead`（被删/被取代）都挂到最
+        相关 LIVE 块下面当历史，**不单独作为分裂单元**。
+        """
+        ledger = lifecycle_module.FileLedger()
+        for rr in self.rounds:
+            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
+        out: list[str] = []
+        for path, e in ledger.entries().items():
+            if str(e.get("state")) == lifecycle_module.STATE_DEAD:
+                continue
+            if int(e.get("write_count") or 0) <= 0:
+                continue                      # 只读过的：历史，不是分裂单元
+            out.append(str(path))
+        return sorted(out)
+
     def _split_hard_data(self, rounds: list[dict]) -> tuple[list[str], int]:
         """分裂硬数据（零 LLM）：活性文件清单 + 数量。
 
@@ -1220,6 +1239,28 @@ class _MaintenanceMixin:
                 r["merged_skip"] = pending["merged_skip"]
             # 分裂分析产物（Level 1：落档 + 落实为注册表条目）
             if pending.get("domains"):
+                # **入口校验**（2026-09-12 用户口径，worklog §62）：F2 一个文件
+                # 只能一个域、F3 现有文件必须 100% 分完。不过就**拒收**——不落
+                # 注册表、不写 `r["domains"]`、不留 `pending`，并落一条醒目错误。
+                # 为什么不静默兜底：用户原话"有些错误是根基，其错了，我下面
+                # 测试无意义"，静默吸进主 agent 桶正是把这类根基错误藏起来。
+                defects = registry_module.split_defects(
+                    pending["domains"], self._live_files()
+                )
+                if defects:
+                    r.pop("domains", None)
+                    self._split_defects = defects
+                    if self.task is not None:
+                        self.task.record(
+                            "split_defect",
+                            "分裂产物被拒收（根基缺陷，需人工查整理/分裂/重组）："
+                            + "；".join(defects[:8]),
+                        )
+                    if self.on_progress:
+                        self.on_progress(
+                            "⛔ 分裂产物被拒收：" + "；".join(defects[:3])
+                        )
+                    continue
                 r["domains"] = pending["domains"]
                 # 组织层落地点（2026-09-11 用户拍板 A：Level 1 视图分化）：
                 # 域树 → 注册表条目是**机械翻译**（语义归模型、体量归机制）。

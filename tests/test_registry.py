@@ -44,6 +44,43 @@ def test_build_entries_generates_path_ids_from_tree():
     assert child["file_domains"] == ["experiments/"]
 
 
+def test_split_defects_catches_overlap_and_uncovered():
+    """**入口校验**（F2 互斥 + F3 完备）：重叠 / 未覆盖 / 空域都要抓出来。
+
+    用户口径（2026-09-12，worklog §62）：一个文件不可能两个子 agent 共同维护；
+    被分裂者名下的文件必须 100% 分完——有缺陷就**拒收**（"根基错了，测试无意义"）。
+    """
+    files = ["src/a.py", "src/wovra/tools/b.py", "webui/x.js"]
+    # 前缀重叠：`src/` 与 `src/wovra/tools/` 会同时命中 b.py
+    defects = registry_module.split_defects(
+        [{"name": "工具层", "file_domains": ["src/"]},
+         {"name": "深工具", "file_domains": ["src/wovra/tools/"]},
+         {"name": "前端", "file_domains": ["webui/"]}],
+        files,
+    )
+    assert any("重叠" in d and "src/wovra/tools/b.py" in d for d in defects)
+
+    # 未覆盖：webui/x.js 没人认领
+    defects = registry_module.split_defects(
+        [{"name": "工具层", "files": ["src/a.py", "src/wovra/tools/b.py"]}],
+        files,
+    )
+    assert any("未覆盖" in d and "webui/x.js" in d for d in defects)
+
+    # 空域：给了个域但没有任何文件
+    defects = registry_module.split_defects(
+        [{"name": "空壳", "files": []}], ["src/a.py"]
+    )
+    assert any("空域" in d for d in defects)
+
+    # 通过：精确文件清单、恰好覆盖、互不重叠
+    assert registry_module.split_defects(
+        [{"name": "工具层", "files": ["src/a.py", "src/wovra/tools/b.py"]},
+         {"name": "前端", "files": ["webui/x.js"]}],
+        files,
+    ) == []
+
+
 def test_build_entries_empty_and_dirty_parent():
     """空产物 → 无条目；parent 指向不存在的域 → 按顶层处理（不吞子树）。"""
     assert registry_module.build_entries([]) == []
