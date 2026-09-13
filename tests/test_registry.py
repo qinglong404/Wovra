@@ -19,29 +19,48 @@ def test_build_entries_generates_path_ids_from_tree():
     """
     domains = [
         {"name": "工具层", "description": "路径与命令边界",
-         "file_domains": ["src/wovra/tools/"], "goal": "加固"},
+         "files": ["src/wovra/tools/safety.py"], "goal": "加固"},
         {"name": "探针", "description": "安全仪器",
-         "parent": "工具层", "file_domains": ["experiments/"]},
+         "parent": "工具层", "files": ["experiments/probe.py"]},
         {"name": "前端", "description": "演示页",
-         "file_domains": ["index.html"]},
+         "files": ["webui/index.html"]},
     ]
     entries = registry_module.build_entries(domains)
 
     ids = [e["id"] for e in entries]
-    assert ids == ["A", "A-1", "B"]
+    assert ids == ["A", "B"]                   # 只登记**分裂层**（顶层 2 个节点）
     top = entries[0]
     assert top["name"] == "工具层"
-    assert top["file_domains"] == ["src/wovra/tools/"]
     assert top["goal"] == "加固"
+    # 条目的 files = **子树**里的文件名（父域含子域的文件）
+    assert set(top["files"]) == {"src/wovra/tools/safety.py", "experiments/probe.py"}
     assert top["status"] == "dormant"          # 休眠是默认态（零成本）
     assert top["inbox"] == []
     # 只留观测字段（2026-09-12 用户拍板：账本派生、不落盘）——
     # 轮次/步数/承载由 views.agent_ledger 现场算，条目上不再有这三个键
     assert (top["ctx_cur"], top["ctx_peak"], top["window"]) == (0, 0, 0)
     assert not {"rounds", "steps", "handoffs"} & set(top)
-    child = entries[1]
-    assert child["name"] == "探针"
-    assert child["file_domains"] == ["experiments/"]
+
+    # 子 agent 分裂（两级替换）：顶层单节点 → **下钻**一层，产物平级为 A-1
+    sub = registry_module.build_entries(domains[:2], parent_id="A")
+    assert [e["id"] for e in sub] == ["A-1"]
+    assert sub[0]["name"] == "探针"
+
+
+def test_merge_into_retires_the_split_domain():
+    """两级替换：A 分裂后 **A 消失**，产物以 A-1、A-2…平级登记（§63）。"""
+    registry = [{"id": registry_module.MAIN_AGENT_ID, "name": "主agent"},
+                {"id": "A", "name": "工具层", "files": ["src/a.py"]}]
+    added, _updated = registry_module.merge_into(
+        registry,
+        [{"name": "小工具", "files": ["src/a.py"], "parent": "工具层"},
+         {"name": "检测", "files": ["src/detect.py"], "parent": "工具层"}],
+        parent_id="A", retire_id="A",
+    )
+    assert "工具层" not in [e["name"] for e in registry]     # A 已消失
+    assert {e["id"] for e in registry} == {registry_module.MAIN_AGENT_ID,
+                                           "A-1", "A-2"}
+    assert set(added) >= {"A-1", "A-2"}
 
 
 def test_split_defects_catches_overlap_and_uncovered():
@@ -93,13 +112,13 @@ def test_build_entries_empty_and_dirty_parent():
 
 
 def test_build_entries_breaks_cycles():
-    """脏数据成环（A 的父是 B、B 的父是 A）不递归到死：visited 截断。"""
+    """脏数据成环（甲的父是乙、乙的父是甲）不递归到死，条目照长。"""
     entries = registry_module.build_entries([
         {"name": "甲", "parent": "乙"},
         {"name": "乙", "parent": "甲"},
     ])
-    assert len(entries) == 2                      # 各出现一次，不无限展开
-    assert {e["name"] for e in entries} == {"甲", "乙"}
+    assert entries, "环里也要长出条目（信息不切开的兜底）"
+    assert all(e["name"] in ("甲", "乙") for e in entries)
 
 
 def test_merge_into_is_idempotent_and_preserves_runtime_state():
@@ -175,13 +194,13 @@ def test_backfill_materializes_history_once():
                  "file_domains": [], "status": "active", "inbox": []}]
 
     added, updated = registry_module.backfill(registry, rounds)
-    assert added == ["A", "A-1"] and updated == []
+    assert added == ["A"] and updated == []       # **只登记分裂层**（顶层 1 个）
     assert "旧域" not in [e["name"] for e in registry]   # 旧批次被取代
-    assert registry[-1]["name"] == "探针"
+    assert registry[-1]["name"] == "工具层"
 
     # 幂等：再回填一次不动
     assert registry_module.backfill(registry, rounds) == ([], [])
-    assert len(registry) == 3
+    assert len(registry) == 2
 
 
 def test_top_id_and_legacy_migration():

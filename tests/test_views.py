@@ -551,12 +551,18 @@ def test_subdomain_gets_its_own_view_and_watermark():
     assert marks["检测加固"]["blocks"] == 1
     assert marks["工具层"]["blocks"] == 1
 
-    # 路径 ID 是职责路径（A → A-1），由注册表机械生成
+    # 两级：主 agent 分裂只登记**顶层**（A）；子域要成为独立 agent 得靠
+    # 它自己分裂（届时产物是 A-1、A-2…，取代 A）——见 worklog §63
     from wovra import registry as registry_module
     ids = {e["name"]: e["id"] for e in registry_module.build_entries(domains)}
-    assert ids == {"工具层": "A", "检测加固": "A-1"}
+    assert ids == {"工具层": "A"}
+    sub_ids = {e["name"]: e["id"]
+               for e in registry_module.build_entries(domains, parent_id="A")}
+    assert sub_ids == {"检测加固": "A-1"}
     built = views_module.build_views(rounds, TaskState(), domains=domains)
-    assert built["views"]["检测加固"]["path_id"] == "A-1"
+    # 子域还没有自己的 ID（它**不是**注册表里的 agent——两级模型里，它要成为
+    # agent 得靠它自己分裂，届时才拿到 A-1），故视图 path_id 退化成域名
+    assert built["views"]["检测加固"]["path_id"] == "检测加固"
     # 隔离不因层级而破例：子域视图里不含父域那一轮的内容
     child_text = built["views"]["检测加固"]["text"]
     assert "canary.py" in child_text

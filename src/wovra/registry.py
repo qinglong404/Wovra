@@ -115,6 +115,20 @@ def entry_prefixes(entry: dict) -> list[str]:
     return out
 
 
+def entry_history(entry: dict) -> list[str]:
+    """条目下的**历史文件**（被重构替代/只读/已删）——不是分裂单元。
+
+    它们挂在最相关 LIVE 文件所属的域下面当记录；对权限而言**只读**
+    （谁都不写历史），但**有主**（不该报"没有任何域认领"）。
+    """
+    out: list[str] = []
+    for f in entry.get("history_files") or []:
+        rel = str(f).strip().strip("/")
+        if rel:
+            out.append(rel)
+    return out
+
+
 def file_owned_by(entry: dict, rel: str) -> bool:
     """这个文件是不是该条目维护的（精确清单优先，历史前缀兜底）。"""
     want = str(rel or "").strip().strip("/")
@@ -197,25 +211,25 @@ def split_defects(
     return defects
 
 
-def build_entries(domains: Iterable[dict] | None) -> list[dict]:
-    """把分裂产物的域树翻译成注册表条目（纯函数，零 LLM）。
+def build_entries(
+    domains: Iterable[dict] | None, parent_id: str = ""
+) -> list[dict]:
+    """把分裂产物翻译成注册表条目（纯函数，零 LLM）。
 
-    域树的 `parent` 指向父域 name（顶层留空）。父名不存在时按顶层处理
-    ——畸形产物宁可多长一个顶层节点，也不能因为一条脏 parent 把整棵
-    子树吞掉（对齐"排除性判断不做"：不裁视野、不丢块）。环由 visited
-    集合截断，防止脏数据把递归拖死。
+    **两级、分裂层登记**（2026-09-12 用户拍板，worklog §63）：
+    产物是一棵**架构**（LIVE 文件按相关性合并成小域→大域，叶子是文件块）。
+    注册的 agent = **能形成有效分裂的那一层**的节点，**平级**登记；被分裂的
+    那个域（`parent_id`）随之**消失**（两级替换：A 分裂 → A-1、A-2，A 不再存在）。
 
-    顶层域取字母（`A`、`B`、`C`…），子域 `A-1`、`A-2`…（见模块 docstring）。
+    层的取法：主 agent 分裂（`parent_id=""`）时，顶层 1 个节点**也裂**（裂 1 个
+    子 agent，把文件活全搬出主 agent）；子 agent 再分裂时，顶层只有 1 个节点就
+    **往下钻**，直到出现 ≥2 个节点；**最细到一个 LIVE 文件为止**（不再拆到块）。
 
-    条目上只留**观测字段**（2026-09-12 用户拍板：账本派生、不落盘）：
-    `ctx_cur` / `ctx_peak` / `window`——"最近一次装配多大 / 历史峰值多大 / 窗口
-    多大"。这三样是运行时事实，不是材料的函数（峰值还单调、不该随分裂下调），
-    故仍然存。
+    ID：主 agent 分裂出的域取 `A`、`B`、`C`…（`top_id`）；A 再分裂则产物是
+    `A-1`、`A-2`…（名字留血缘，层级仍平级）。
 
-    `rounds` / `steps` / `handoffs` **不再写进条目**：它们是"谁手里有料、谁答的
-    话、谁转过手"，随分裂/补判变动，存下来必然过期（实测：13 轮会话存账 Σ14、
-    主 agent 记 13 轮却只承载 2 块；老会话全 0）。现在由 `views.agent_ledger`
-    从轮与事件流现场派生。历史 task.json 里的旧字段留着不读、也不改写。
+    每个条目的 `files` = 该节点**子树**里全部 LIVE 文件（精确清单）；
+    `history_files` = 子树里的历史文件（被取代/只读/已删，挂在这条线下）。
     """
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     if not domains:
@@ -230,40 +244,70 @@ def build_entries(domains: Iterable[dict] | None) -> list[dict]:
     if not roots:
         # 脏数据兜底：每个节点的 parent 都指向已存在的域（最简单的情形是
         # 成环）→ 没有天然根。取出现顺序第一个节点当根，否则整棵树会被
-        # 吞成空——"信息不切开、不丢块"比树形好看重要（环由 visited 截断）。
+        # 吞成空——"信息不切开、不丢块"比树形好看重要。
         roots = domains[:1]
-    entries: list[dict] = []
-    visited: set[str] = set()
+    level = list(roots)
+    if parent_id or len(level) != 1:
+        # 子 agent 分裂：顶层单节点要下钻；主 agent 分裂：顶层单节点保留
+        while len(level) == 1:
+            kids = _children_of(str(level[0].get("name")), domains)
+            if not kids:
+                break
+            level = list(kids)
 
-    def walk(node: dict, path_id: str) -> None:
-        name = str(node["name"])
-        if name in visited:
-            return  # 环/重复名：截断，不递归
-        visited.add(name)
+    def subtree(node: dict) -> tuple[list[str], list[str], list[str]]:
+        """子树里的 (LIVE 文件, 历史文件, 约束)。"""
+        files: list[str] = []
+        hist: list[str] = []
+        cons: list[str] = []
+        seen: set[str] = set()
+
+        def walk(n: dict) -> None:
+            name = str(n.get("name") or "")
+            if not name or name in seen:
+                return                        # 环/重复名截断
+            seen.add(name)
+            files.extend(str(f) for f in (n.get("files") or []))
+            hist.extend(str(f) for f in (n.get("history_files") or []))
+            cons.extend(str(c) for c in (n.get("constraints") or []))
+            for child in _children_of(name, domains):
+                walk(child)
+
+        walk(node)
+        # 老产物只有 file_domains（路径前缀）：当作历史兼容挂在同一处
+        uniq: list[str] = []
+        for f in files:
+            if f and f not in uniq:
+                uniq.append(f)
+        uniq_hist: list[str] = []
+        for f in hist:
+            if f and f not in uniq and f not in uniq_hist:
+                uniq_hist.append(f)
+        return uniq, uniq_hist, cons
+
+    entries: list[dict] = []
+    for i, node in enumerate(level, start=1):
+        files, hist, cons = subtree(node)
+        path_id = f"{parent_id}-{i}" if parent_id else top_id(i)
         entries.append({
             "id": path_id,
-            "name": name,
+            "name": str(node["name"]),
             "description": str(node.get("description") or ""),
             "goal": str(node.get("goal") or ""),
-            # 归属**按文件**（2026-09-12 用户口径：划分只看内容相关度，不看路径）：
-            # `files` = 该域维护的具体文件清单（精确匹配）；`file_domains` 是
-            # 老产物的路径前缀，留作历史兼容读取。
-            "files": [str(f) for f in (node.get("files") or [])],
+            "constraints": cons,
+            # 归属**按文件**：`files` = 该域维护的具体文件清单（精确匹配）；
+            # `file_domains` 是老产物的路径前缀，留作历史兼容读取
+            "files": files,
             "file_domains": [str(f) for f in (node.get("file_domains") or [])],
-            # 休眠是默认态（不对话即零成本），分裂产生的节点初始即休眠；
-            # 路由/装配分化接入后才会有节点进入 active（后续步骤）
+            "history_files": hist,
+            # 休眠是默认态（不对话即零成本），分裂产生的节点初始即休眠
             "status": "dormant",
             "inbox": [],
-            # ---- 观测字段（不落"账"，见 docstring）----
-            "ctx_cur": 0,     # 它那份上下文最近一次装配的体量（tok）
-            "ctx_peak": 0,    # 峰值
-            "window": 0,      # 它自己的水位/窗口（0 = 用全局默认，见 support）
+            # ---- 观测字段（不落"账"，见模块 docstring）----
+            "ctx_cur": 0,
+            "ctx_peak": 0,
+            "window": 0,
         })
-        for i, child in enumerate(_children_of(name, domains), start=1):
-            walk(child, f"{path_id}-{i}")
-
-    for i, root in enumerate(roots, start=1):
-        walk(root, top_id(i))
     return entries
 
 
@@ -373,18 +417,34 @@ def backfill(
 
 
 def merge_into(
-    registry: list[dict] | None, domains: Iterable[dict] | None
+    registry: list[dict] | None,
+    domains: Iterable[dict] | None,
+    parent_id: str = "",
+    retire_id: str = "",
 ) -> tuple[list[str], list[str]]:
-    """把域树条目幂等并入注册表，返回 (新增 id 列表, 更新 id 列表)。
+    """把分裂产物幂等并入注册表，返回 (新增 id 列表, 更新 id 列表)。
 
-    已存在的 id 只更新职责描述/文件域/目标（现状变了就跟着变），
+    已存在的 id 只更新职责描述/文件清单/目标（现状变了就跟着变），
     **不动 status 与 inbox**——那是运行时状态，重放产物不该把它抹掉。
+
+    **两级替换**（2026-09-12 用户口径，worklog §63）：`parent_id` = 正在分裂的
+    那个域；它的产物平级登记为 `parent_id-1`、`parent_id-2`…，被分裂的域
+    自己**随之消失**（`retire_id`，默认同 `parent_id`）。故注册表里永远是
+    "主 agent + 一排平级子域"，不会长出三层。
     """
-    entries = build_entries(domains)
+    entries = build_entries(domains, parent_id)
     if not entries:
         return [], []
     if registry is None:
         registry = []
+    gone = str(retire_id or parent_id or "")
+    retired: list[str] = []
+    if gone and gone != MAIN_AGENT_ID:
+        keep = [e for e in registry
+                if not (isinstance(e, dict) and str(e.get("id")) == gone)]
+        if len(keep) != len(registry):
+            retired = [gone]
+            registry[:] = keep
     by_id = {str(e.get("id")): e for e in registry if isinstance(e, dict)}
     added: list[str] = []
     updated: list[str] = []
@@ -396,10 +456,11 @@ def merge_into(
             added.append(entry["id"])
             continue
         changed = False
-        for key in ("name", "description", "goal", "file_domains"):
+        for key in ("name", "description", "goal", "files", "file_domains",
+                    "history_files"):
             if existing.get(key) != entry[key]:
                 existing[key] = entry[key]
                 changed = True
         if changed:
             updated.append(entry["id"])
-    return added, updated
+    return added + retired, updated

@@ -1267,8 +1267,25 @@ class _MaintenanceMixin:
                 # 幂等合并：崩溃补做/重启重放只更新既有条目。注册表在此
                 # 才第一次长出主 agent 之外的条目——此前永远只有 A。
                 if self.task is not None:
+                    # **两级替换**（2026-09-12 用户口径，worklog §63）：正在分裂的
+                    # 那个域随之消失，产物平级登记成它的 `-1`、`-2`…；主 agent
+                    # 分裂则取 A、B、C…。分裂主体 = 产出该批次时的视图，记在
+                    # pending 里（`_stage_org_state` 写入），缺省退回本轮视图。
+                    parent = str(pending.get("split_parent") or "")
+                    if not parent:
+                        parent = str((self.current_round or {}).get("active_view") or "")
+                    parent_id = ""
+                    if parent and parent != registry_module.MAIN_AGENT_ID:
+                        ent = next(
+                            (e for e in (self.task.registry or [])
+                             if isinstance(e, dict)
+                             and parent in (str(e.get("id")), str(e.get("name")))),
+                            None,
+                        )
+                        parent_id = str((ent or {}).get("id") or "")
                     added, updated = registry_module.merge_into(
-                        self.task.registry, pending["domains"]
+                        self.task.registry, pending["domains"],
+                        parent_id=parent_id, retire_id=parent_id,
                     )
                     if added or updated:
                         detail = []
