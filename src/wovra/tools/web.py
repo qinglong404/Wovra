@@ -2,6 +2,7 @@
 
 import ipaddress
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -13,15 +14,41 @@ from . import limits, safety
 _WEB_UA = "Mozilla/5.0 (X11; Linux x86_64) Wovra/0.1"
 
 
+# Fake-IP 劫持伪影段：clash 等代理开 TUN 时把所有域名都解析到这些段，
+# 但连接实际由代理路由到真实目标。把它们当内网会把整个互联网拦在门外
+# （实测教训，2026-09-11）。代理的段可配置，故做成清单 + 环境变量可扩。
+_FAKE_IP_NETS = (
+    "198.18.0.0/15",        # RFC 2544 基准测试段（clash IPv4 fake-ip 默认）
+    "fdfe:dcba:9876::/48",  # clash IPv6 fake-ip 默认段（与上一行同一机制）
+)
+
+
+def _fake_ip_nets() -> tuple:
+    """伪影段清单；WOVRA_FAKE_IP_NETS 可用逗号分隔追加自定义段。"""
+    import os
+
+    extra = os.environ.get("WOVRA_FAKE_IP_NETS", "")
+    nets = list(_FAKE_IP_NETS) + [s.strip() for s in extra.split(",") if s.strip()]
+    out = []
+    for net in nets:
+        try:
+            out.append(ipaddress.ip_network(net))
+        except ValueError:
+            continue  # 配置写错不致命，忽略该条
+    return tuple(out)
+
+
 def _is_internal(ip: "ipaddress.IPv4Address | ipaddress.IPv6Address") -> bool:
     """判定 IP 是否内网/回环/保留地址（SSRF 防护的判定核心）。
 
-    例外：198.18.0.0/15（基准测试段）是 clash 等代理 Fake-IP 模式的
-    劫持伪影——开 TUN 时所有域名都解析到这一段，但连接实际由代理
-    路由到真实目标。把它当内网会把整个互联网都拦在门外（实测教训）。
+    Fake-IP 伪影段（见 _FAKE_IP_NETS）不算内网——它们是代理的解析劫持，
+    不是真实目的地址。注意 IPv4 与 IPv6 段必须同时放行：getaddrinfo 双栈
+    返回两族，_assert_public_url 逐条检查、一条判死即整体拒绝，只放行
+    v4 会被 v6 抵消掉（2026-09-13 实测：v4 放行 + v6 拒绝 = 全网打不开）。
     """
-    if ip.version == 4 and ip in ipaddress.ip_network("198.18.0.0/15"):
-        return False
+    for net in _fake_ip_nets():
+        if ip.version == net.version and ip in net:
+            return False
     return ip.is_private or ip.is_loopback or ip.is_reserved or ip.is_link_local
 
 
@@ -49,10 +76,101 @@ def _assert_public_url(url: str) -> str | None:
     return None
 
 
-def _html_to_text(raw: bytes) -> str:
+def _unwrap_redirect(href: str) -> str:
+    """把搜索引擎的跳转壳还原成真实目标 URL（拿不到就原样返回）。
+
+    Bing 的结果链接是 `https://www.bing.com/ck/a?...&u=a1<base64url>`，
+    base64 段以 `a1` 前缀标记——直接抽 `u=` 参数解出来，用户/模型看到的就是
+    目标网址，而不是一长串几百字符的跳转壳（2026-09-13 实测：搜索结果里
+    全是 `bing.com/ck/a?...` 噪声）。DDG 的 `uddg=` 已是明文，不走这里。
+    """
+    import base64
     from html import unescape
 
-    text = raw.decode("utf-8", errors="replace")
+    href = unescape(href)  # HTML 里 & 写成 &amp;，不还原则 u 键变成 "amp;u" 取不到值
+    try:
+        query = urllib.parse.parse_qs(urllib.parse.urlparse(href).query)
+    except ValueError:
+        return href
+    raw = (query.get("u") or [""])[0]
+    if not raw:
+        return href
+    payload = raw[2:] if raw.startswith("a1") else raw
+    try:
+        decoded = base64.urlsafe_b64decode(payload + "=" * (-len(payload) % 4)).decode(
+            "utf-8", errors="replace")
+    except Exception:  # noqa: BLE001——解不开就退回原链，不影响搜索
+        return href
+    return decoded if decoded.startswith(("http://", "https://")) else href
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """禁止 urlopen 自动跟随重定向——每一跳都要重新过 SSRF 校验。
+
+    urllib 默认自动跟随 3xx，且**不再校验新目标**：一个公网 URL 302 跳到
+    http://169.254.169.254/latest/meta-data/ 就绕过了 _assert_public_url
+    （云元数据窃取的经典 SSRF 手法）。这里让 3xx 直接抛出，由 _open_url
+    逐跳校验后再跳。
+    """
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def _open_url(url: str, timeout: int = 30, max_hops: int = 5):
+    """打开 URL 并手动跟随重定向，逐跳做 SSRF 校验。
+
+    返回 (response, 最终 URL)。目标被校验为内网时抛 ValueError，
+    网络层失败抛 OSError（由调用方转成可读消息）。
+    """
+    opener = urllib.request.build_opener(_NoRedirect)
+    current = url
+    for _ in range(max_hops + 1):
+        request = urllib.request.Request(current, headers={"User-Agent": _WEB_UA})
+        try:
+            return opener.open(request, timeout=timeout), current
+        except urllib.error.HTTPError as error:
+            if error.code not in (301, 302, 303, 307, 308):
+                raise
+            location = error.headers.get("Location")
+            if not location:
+                raise
+            current = urllib.parse.urljoin(current, location)
+            blocked = _assert_public_url(current)
+            if blocked:  # 跳转目标指向内网 → 拒绝，不发请求
+                raise ValueError(f"重定向被拦截：{blocked}")
+    raise OSError(f"重定向次数超过 {max_hops} 次，已中止")
+
+
+def _decode_body(raw: bytes, ctype: str) -> str:
+    """按响应声明的编码解码正文；GBK 等中文页面不再乱码。
+
+    优先级：Content-Type 的 charset → HTML 内 <meta charset> → UTF-8 兜底。
+    2026-09-13 之前固定 UTF-8 解码，GBK 页面整页乱码。
+    """
+    charset = ""
+    match = re.search(r"charset=([\w\-]+)", ctype or "", re.I)
+    if match:
+        charset = match.group(1)
+    if not charset:
+        head = raw[:4096].decode("ascii", errors="ignore")
+        meta = re.search(r'(?i)<meta[^>]+charset=["\']?([\w\-]+)', head)
+        if meta:
+            charset = meta.group(1)
+    for candidate in (charset, "utf-8"):
+        if not candidate:
+            continue
+        try:
+            return raw.decode(candidate, errors="strict")
+        except (LookupError, UnicodeDecodeError):
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def _html_to_text(raw: bytes, ctype: str = "") -> str:
+    from html import unescape
+
+    text = _decode_body(raw, ctype)
     text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", text)
     text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)[^>]*>", "\n", text)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
@@ -74,14 +192,15 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
     blocked = _assert_public_url(url)
     if blocked:
         return blocked
-    request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
     try:
-        with urllib.request.urlopen(request, timeout=30) as resp:
+        with _open_url(url, timeout=30)[0] as resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             raw = resp.read(8_000_000)
+    except ValueError as error:  # 重定向跳到内网
+        return str(error)
     except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
         return f"抓取失败: {error!r}"
-    text = _html_to_text(raw) if ("html" in ctype or not ctype) else raw.decode("utf-8", errors="replace")
+    text = _html_to_text(raw, ctype) if ("html" in ctype or not ctype) else _decode_body(raw, ctype)
     if not text.strip():
         return f"URL 无文本内容（Content-Type: {ctype}）。"
     head = f"[{url}] Content-Type: {ctype or '未知'}，抓取 {len(raw)} 字节\n\n"
@@ -138,7 +257,7 @@ def _search_bing(query: str, max_results: int) -> str:
         m = re.search(r'<h2[^>]*><a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.S | re.I)
         if not m:
             continue
-        link = m.group(1)
+        link = _unwrap_redirect(m.group(1))
         title = " ".join(unescape(re.sub(r"<[^>]+>", "", m.group(2))).split())
         p = re.search(r"<p[^>]*>(.*?)</p>", chunk, re.S | re.I)
         snippet = (" ".join(unescape(re.sub(r"<[^>]+>", "", p.group(1))).split())[:200]

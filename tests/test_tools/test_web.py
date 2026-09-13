@@ -39,6 +39,32 @@ def test_assert_public_url_fake_ip_is_proxy_artifact(monkeypatch):
     assert "拒绝访问内网" in tools_module.web._assert_public_url("http://169.254.169.254/meta")
 
 
+def test_fake_ip_ipv6_artifact_not_blocked(monkeypatch):
+    """Fake-IP 是双栈的：v6 伪影段（fdfe:dcba:9876::/48）必须与 v4 一样放行。
+
+    回归 2026-09-13 实测缺陷：v4 段放行、v6 段被判 is_private，而
+    getaddrinfo 双栈返回两族、逐条检查一条判死即整体拒绝 → 全网打不开。
+    """
+    import ipaddress as _ipaddress
+    import socket as _socket
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    # 双栈解析：v4 伪影段 + v6 伪影段同时返回 → 必须放行
+    monkeypatch.setattr(
+        _socket, "getaddrinfo",
+        lambda host, port, **kw: [
+            (_socket.AF_INET, None, None, "", ("198.18.0.5", 0)),
+            (_socket.AF_INET6, None, None, "", ("fdfe:dcba:9876::6", 0, 0, 0)),
+        ])
+    assert tools_module.web._assert_public_url("https://docs.python.org/3/") is None
+    # 自定义段可由环境变量追加
+    monkeypatch.setenv("WOVRA_FAKE_IP_NETS", "10.99.0.0/16")
+    assert tools_module.web._is_internal(_ipaddress.ip_address("10.99.1.1")) is False
+    # 真实内网 v6（ULA fc00::/7 中非伪影段）仍然拒绝
+    assert tools_module.web._is_internal(_ipaddress.ip_address("fd00::1")) is True
+
+
 def test_search_engines_parse_canned_html(monkeypatch):
     """两个搜索引擎的解析器：对罐头 HTML 提取标题/链接/摘要。"""
     import sys as _sys
@@ -58,6 +84,63 @@ def test_search_engines_parse_canned_html(monkeypatch):
                         lambda req, timeout=None: _FakeUrllib._Resp(bing))
     result = tools_module.web._search_bing("x", 5)
     assert "Bing Result" in result and "Bing snippet" in result
+
+
+def test_redirect_to_internal_is_blocked(monkeypatch):
+    """重定向 SSRF：公网 URL 302 跳到内网必须被拦（不发第二跳请求）。"""
+    import urllib.error
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.web, "_assert_public_url", lambda url: None)
+
+    def fake_open(req, timeout=None):
+        raise urllib.error.HTTPError(
+            "https://public.example.com/", 302, "Found",
+            {"Location": "http://169.254.169.254/latest/meta-data/"}, None)
+
+    monkeypatch.setattr(tools_module.web.urllib.request, "build_opener",
+                        lambda *a: type("O", (), {"open": staticmethod(fake_open)})())
+    # 第二跳目标重新校验 → 命中 169.254 元数据地址，被拦
+    monkeypatch.setattr(tools_module.web, "_assert_public_url",
+                        lambda url: (f"拒绝访问内网/保留地址（{url}）"
+                                    if "169.254" in url else None))
+    try:
+        tools_module.web._open_url("https://public.example.com/")
+        assert False, "应当抛出被拦截"
+    except ValueError as error:
+        assert "重定向被拦截" in str(error) and "169.254" in str(error)
+
+
+def test_gbk_page_decodes_without_mojibake(monkeypatch):
+    """GBK 页面按 charset 解码：中文不再乱码（2026-09-13 之前固定 UTF-8）。"""
+    from wovra import tools as tools_module
+
+    gbk_html = "<html><body><p>中文测试内容</p></body></html>".encode("gbk")
+    assert "中文测试内容" in tools_module.web._html_to_text(gbk_html, "text/html; charset=gbk")
+    # 未声明 charset 时读 <meta charset>
+    gbk_meta = ('<html><head><meta charset="gbk"></head><body>元数据编码</body></html>'
+                ).encode("gbk")
+    assert "元数据编码" in tools_module.web._html_to_text(gbk_meta, "text/html")
+    # 声明了 UTF-8 的页面照常
+    assert "正常" in tools_module.web._html_to_text("正常内容".encode(), "text/html; charset=utf-8")
+
+
+def test_bing_redirect_shell_is_unwrapped(monkeypatch):
+    """Bing 的 bing.com/ck/a?u=a1<base64> 跳转壳要还原成目标 URL。"""
+    import base64
+    from wovra import tools as tools_module
+
+    target = "https://docs.python.org/3/library/asyncio.html"
+    shell = "https://www.bing.com/ck/a?!&&p=abc&u=a1" + base64.urlsafe_b64encode(
+        target.encode()).decode().rstrip("=")
+    assert tools_module.web._unwrap_redirect(shell) == target
+    # HTML 转义过的壳（&amp;）也必须解开——实测搜索结果里全是这种
+    assert tools_module.web._unwrap_redirect(shell.replace("&u=", "&amp;u=")) == target
+    # 解不开 / 非 http 的原样返回，不影响搜索
+    assert tools_module.web._unwrap_redirect("https://real.example.com/x") == "https://real.example.com/x"
+    assert tools_module.web._unwrap_redirect("https://www.bing.com/ck/a?!&&p=x&u=a1!!!") .startswith(
+        "https://www.bing.com/ck/a")
 
 
 def test_web_search_falls_back_to_second_engine(monkeypatch):
