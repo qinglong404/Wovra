@@ -8,6 +8,7 @@
 机制不透明（cache_ttl_probe.py 待跑）。
 """
 import json
+import os
 import re
 from datetime import datetime
 
@@ -50,6 +51,11 @@ def usage_miss(path):
 
 
 def report(label, path, actual_miss):
+    if not os.path.exists(path):
+        print(f"[{label}] 跳过：数据不在盘上（{path}）")
+        print("  说明：A/D/E 三组是受版本库跟踪的数据资产，缺盘说明被误删或未 checkout；"
+              "用 `git checkout -- tasks` 恢复后重跑。")
+        return
     calls = calls_of(path)
     ptok = [c["prefix"] / 2.9 for c in calls]
     atok = [c["append"] / 2.9 for c in calls]

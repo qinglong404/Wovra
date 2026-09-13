@@ -83,3 +83,10 @@ node_modules/
 # （若要入库：git add -f "docs/结构化.md" "docs/讨论v2.md"）
 docs/结构化.md
 docs/讨论v2.md
+
+# 仓库杂物（2026-09-13，执行者排查 §69.4 的小账）：
+# vr*.png = 前端人工核对截图（有意不入库，保留在磁盘）；*.bak-* = 手工/脚本
+# 迁移前的备份（同属本地状态）。不写进忽略会在每次 git status 里当噪声。
+webui/vr*.png
+tasks/**/task.json.bak-*
+*.bak-agentids-*

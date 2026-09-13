@@ -795,6 +795,134 @@ def test_cmd_option_with_value_is_not_a_path():
     assert abs_paths("cat /etc/passwd") == ["/etc/passwd"]
 
 
+def test_multi_letter_win_switches_are_not_paths():
+    """多字母 / 带连字符的 cmd 开关不是路径（worklog §70，§9 同类真洞）。
+
+    现场（2026-09-13 执行者排查）：`dir /a /tc .wovra`、`dir /o-d /b docs`
+    里的 `/tc`、`/o-d` 既非单字母、也不在词表、也没有冒号 → 被判"界外绝对
+    路径" → 授权门把 `/tc` 规范化成 `D:\\tc` **写进授权清单**（实测清单从
+    5 条变 7 条，多出 `D:\\tc`、`D:\\o-d`）。与 §9 同类，那一版只堵了单字母。
+
+    判据看**上下文命令词**：段内首个词是 Windows 命令才按开关放行，
+    于是 `cat /etc/passwd` 里的 `/etc` 照旧受检（词法上无法区分，见 §70.1）。
+    """
+    from wovra import tools as tools_module
+
+    safety = tools_module.safety
+    abs_paths = safety._outside_absolute_paths
+    # 多字母开关 + 连字符开关：不报（上下文是 Windows 命令）
+    for command in (
+        "dir /a /tc .wovra",
+        "dir /o-d /b docs",
+        "dir /o-s /b docs",
+        "dir /tw .wovra",
+        "dir /aa /b docs",
+        "tasklist /v /fi x",
+        'cmd /c dir /tc "docs"',
+        "dir /a /s /b tasks",
+    ):
+        assert abs_paths(command) == [], f"{command} 不该报越界"
+    # 同形态的 token 作真实路径时照旧受检（POSIX 命令上下文 / 根级目录名）
+    assert abs_paths("cat /etc/passwd") == ["/etc/passwd"]
+    assert abs_paths("ls /tmp") == ["/tmp"]
+    assert abs_paths("dir /etc") == ["/etc"]  # 根级目录名永远不是开关
+    assert safety._is_cmd_option("/tc") is False          # 无上下文：旧口径
+    assert safety._is_cmd_option("/tc", head="dir ") is True
+    assert safety._is_cmd_option("/etc", head="cat ") is False
+    assert safety._is_cmd_option("/etc", head="dir ") is False
+
+
+def test_broad_authorization_targets_are_rejected(workspace, monkeypatch):
+    """授权目标过宽一律驳回：盘根 **与工作区祖先目录**（worklog §70）。
+
+    祖先目录是根目录同性质的第二类：工作区是 `<tmp>/workspace`，授权它的
+    父目录 = 放行界外整棵树（实测 `is_authorized("D:/BC/AInfinite/x.txt")=True`）。
+    清理靠**过滤**而不是人工改文件——历史脏条目在读取时即失效。
+    """
+    import json
+    from pathlib import Path
+
+    from wovra import tools as tools_module
+
+    safety = tools_module.safety
+    root = workspace.root            # fixture 已把 PROJECT_ROOT 设成它
+    parent = root.parent
+    outside = workspace.outside      # 同级界外目录：应照旧可授权
+
+    # 规范化：盘根与祖先目录都驳回（工作区自身也在其中——授权它等于全放行）
+    for target in (str(root), str(parent), str(Path(root.anchor))):
+        valid, rejected = safety._normalize_auth_targets([target])
+        assert valid == [] and rejected == [str(Path(target).resolve())], target
+    # 兄弟目录（界外普通目录）：照旧可授权
+    valid, rejected = safety._normalize_auth_targets([str(outside)])
+    assert valid == [str(outside.resolve())] and rejected == []
+
+    # 既有脏条目（手工写进清单）在读取时失效
+    store = root / ".wovra" / "authorized-paths.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    store.write_text(
+        json.dumps([str(parent), str(root), str(outside)], ensure_ascii=False),
+        encoding="utf-8",
+    )
+    assert safety.is_authorized(str(root / "sub" / "t1.txt")) is False  # 祖先条目不作数
+    assert safety.is_authorized(str(outside / "victim.txt")) is True    # 正常条目仍生效
+    # 写入口也拒（add_authorization 不落盘过宽目标）——先清掉手写的脏条目，
+    # 再确认它不会被重新写回
+    store.write_text(json.dumps([], ensure_ascii=False), encoding="utf-8")
+    safety.add_authorization(str(parent))
+    safety.add_authorization(str(root))
+    assert safety._load_authorized() == []
+
+
+def test_junk_targets_from_text_fragments_are_rejected(workspace):
+    """文本碎片不得进清单（worklog §70.8）。
+
+    现场：`echo === NOW === /tc）===` 这类**命令文本**里的斜杠片段被判成绝对
+    路径，规范化后落成 `D:\\tc）===` 写进清单。提取侧只能"尽量捞"，守不变量
+    的是**写入口**：真实目标名里不会出现 `=`、全角标点、Windows 非法字符。
+    读取侧同样过滤，故历史脏条目也不会生效。
+    """
+    import json
+    from pathlib import Path
+
+    from wovra import tools as tools_module
+
+    safety = tools_module.safety
+    root = workspace.root
+
+    for junk in (str(root / "tc）==="), "/tc）===", str(root / "a=b.txt"),
+                 str(root / "x*?"), str(root / "名称；")):
+        valid, rejected = safety._normalize_auth_targets([junk])
+        assert valid == [], f"{junk} 不该被接受为授权目标"
+    # 正常目标不受影响
+    ok = root.parent / "outside" / "data.txt"
+    valid, _ = safety._normalize_auth_targets([str(ok)])
+    assert valid == [str(ok.resolve())], valid
+
+    # 历史脏条目读取即失效（不必人工清文件）
+    store = root / ".wovra" / "authorized-paths.json"
+    store.parent.mkdir(parents=True, exist_ok=True)
+    junk_path = root / "tc）==="
+    store.write_text(json.dumps([str(junk_path)], ensure_ascii=False), encoding="utf-8")
+    assert safety.is_authorized(str(junk_path)) is False
+    assert safety.is_authorized(str(junk_path / "x.txt")) is False
+
+
+def test_text_with_slash_fragment_is_not_an_escape():
+    """命令文本里的斜杠片段不该被当路径（worklog §70.8 的提取侧）。
+
+    `echo === NOW === /tc）===` 曾把 `/tc）===` 整段当 token。
+    """
+    from wovra import tools as tools_module
+
+    abs_paths = tools_module.safety._outside_absolute_paths
+    for cmd in ("echo === NOW === /tc）===", "echo a / b", "echo x=y / z"):
+        assert abs_paths(cmd) == [], f"{cmd} 不该报越界"
+    # 真路径照旧（含 `=` 的选项形态不误伤后续路径）
+    assert abs_paths("cat /etc/passwd") == ["/etc/passwd"]
+    assert abs_paths("find / -name x") == ["/"]
+
+
 def test_bare_dotdot_traversal_is_blocked(workspace):
     """纯 `..` / `../..` token 也是越界（worklog §49 ① 真洞）。
 

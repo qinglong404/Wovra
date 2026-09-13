@@ -354,7 +354,7 @@ This makes it possible to experiment with different underlying agents without ch
 > consult). Next: real long-task validation, and a dedicated human-view
 > frontend (the terminal is a stopgap cockpit).
 
-* [x] Minimal agent runtime (25 tools: files / commands / background tasks / web / interactive confirmation / plan ledger / history expansion)
+* [x] Minimal agent runtime (29 tools: files / commands / background tasks / web / interactive confirmation / plan ledger / history expansion / routing / notify-consult / join / responsibility)
 * [x] Task representation and persistent task state (Task / TaskState / report.md / workspace-bound sessions)
 * [x] Context management V3: zero truncation during execution, window guard, file map, anchor self-healing
 * [x] Watermark-triggered batch organization → split (serial append pipeline, promoted on the next round; older views folded by current file state)

@@ -266,6 +266,33 @@ _KNOWN_UNIX_ROOT_DIRS = frozenset({
 })
 
 
+def _segment_command_word(head: str) -> str:
+    """取 `head` 所在**段**（最后一个 `;`/`&`/`|`/`(` 之后）的首个词（小写）。
+
+    `git log & dir /a /tc x` 的 `/tc` 属 `dir` 段 → "dir"；
+    `cmd /c dir /tc` → "cmd"（包装器也算段首词，由调用方判）。
+    去 `\\` 路径前缀与 `.exe/.cmd/.bat` 后缀，便于与词表比对。
+    """
+    seg = re.split(r"[;&|(]", head)[-1]
+    m = re.search(r"[^\s'\"|;&<>=()$`]+", seg)
+    if not m:
+        return ""
+    word = m.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    for ext in (".exe", ".cmd", ".bat"):
+        if word.endswith(ext):
+            word = word[: -len(ext)]
+    return word
+
+
+# **纯文本命令**（2026-09-13，§70.8）：它们的参数是文本而非路径，斜杠片段
+# 一律不判（与既有口径一致——`echo ..` 本来就是文本，见 `_follows_path_command`
+# 的注释）。现场：`echo === NOW === /tc）===` 这类**回显**里的斜杠片段被判成
+# 绝对路径 `/tc）===`，经授权门规范化后落进授权清单。
+_TEXT_COMMANDS = frozenset({
+    "echo", "printf", "rem", "ver", "title", "pause", "setlocal", "print",
+})
+
+
 def _win_switch_context(head: str) -> bool:
     """token 前面的文本是否处在一条 **Windows 命令** 的参数位置。
 
@@ -273,14 +300,17 @@ def _win_switch_context(head: str) -> bool:
     `git log & dir /a /tc x` 里 `/tc` 属于 `dir` 段，命令词是 `dir`。
     包装器（`cmd /c dir /tc`）看第一个词 `cmd`，也算 Windows 命令。
     """
-    seg = re.split(r"[;&|(]", head)[-1]
-    m = re.search(r"[^\s'\"|;&<>=()$`]+", seg)
-    if not m:
-        return False
-    word = m.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
-    if word.endswith(".exe") or word.endswith(".cmd") or word.endswith(".bat"):
-        word = word[:-4]
-    return word in _WIN_SWITCH_COMMANDS or word in ("cmd", "cmd.exe")
+    word = _segment_command_word(head)
+    return word in _WIN_SWITCH_COMMANDS or word == "cmd"
+
+
+def _follows_redirect(masked: str, start: int) -> bool:
+    """token 是否紧跟重定向符（`>` / `>>` / `<`）——那就是真路径，不是文本。
+
+    `echo x > /etc/passwd` 的 `/etc/passwd` 是**写通道**，必须照旧受检；
+    而 `echo abc /tmp` 里的 `/tmp` 只是被打印的文本（§70.8）。
+    """
+    return masked[:start].rstrip().endswith((">", "<"))
 
 
 def _is_cmd_option(token: str, head: str | None = None) -> bool:
@@ -501,9 +531,21 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
     # 前导断言必须排除 `.` 和 `-`：`./x`、`../x`、`a/../b` 都是**相对**
     # 路径，把其中的 `/x` 当绝对路径会误拦（自我测试抓到的：一条
     # `cat ./t1.txt` 被报成"访问工作区之外的绝对路径 /t1.txt"）。
+    # 排除集补 `=` 与全角标点（2026-09-13，§70.8）：`echo ... /tc）===` 这类
+    # 文本里的斜杠片段曾被整段当成路径 token（`/tc）===`）→ 授权门规范化成
+    # `D:\tc）===` 写进清单。全角括号/顿号/逗号出现在路径里的概率极低，
+    # 出现在**文本**里的概率极高。
     for m in re.finditer(r"(?<![\w:/.\-])/[^\s'\"|;&><)]*", masked):
         token = m.group(0).rstrip(",;")
+        head = masked[: m.start()]
         if not token or token == "/":
+            continue
+        # 纯文本命令（echo/printf/rem…）的参数是文本：其中的 `/x` 片段不是
+        # 访问。**重定向目标除外**（`echo x > /etc/passwd` 是真写通道）。
+        if (
+            _segment_command_word(head) in _TEXT_COMMANDS
+            and not _follows_redirect(masked, m.start())
+        ):
             continue
         # 传 head（token 之前的文本）供上下文判据用：多字母/带连字符开关
         # （`/tc`、`/o-d`）词法上与根目录同名，只有看段内命令词才分得清（§70）
@@ -874,11 +916,29 @@ def _is_fs_root(path: Path) -> bool:
         return False
 
 
+def _is_junk_target(path: Path) -> bool:
+    """目标形态不像真路径 → 拒收（2026-09-13，§70.8）。
+
+    现场：`echo === … /tc）===` 这类**文本**里的斜杠片段被判成绝对路径，
+    经规范化落成 `D:\\tc）===` 写进授权清单。根因在提取侧（token 切分），
+    但提取侧永远是"尽量捞"、无法穷尽；**写入口才是不变量该守的地方**：
+    一个真实的授权目标，其文件名里不会出现 `=`、全角标点、Windows 非法
+    字符（`: * ? " < > |`）。含它们的一律按碎片驳回。
+    """
+    name = path.name
+    if not name:
+        return True  # 盘根/目录尾：交给 _is_too_broad
+    if any(ch in name for ch in '=：；！？，。、（）【】《》""\'\'*?"<>|'):
+        return True
+    return False
+
+
 def _normalize_auth_targets(targets: list[str]) -> tuple[list[str], list[str]]:
-    """授权目标规范化：一律解析为绝对路径，并剔除过于宽泛的目标。
+    """授权目标规范化：一律解析为绝对路径，并剔除过于宽泛/碎片形态的目标。
 
     返回 (可用目标, 被驳回目标)。被驳回的进不了清单——`/t`、`/b` 这类
-    开关碎片、`D:\\` 这类盘根、工作区的**祖先目录**都在此拦下（§70）。
+    开关碎片、`D:\\` 这类盘根、工作区的**祖先目录**（§70）以及形态不像
+    路径的文本碎片（§70.8）都在此拦下。
     """
     valid: list[str] = []
     rejected: list[str] = []
@@ -888,7 +948,7 @@ def _normalize_auth_targets(targets: list[str]) -> tuple[list[str], list[str]]:
         except (OSError, ValueError):
             rejected.append(str(raw))
             continue
-        if _is_too_broad(resolved):
+        if _is_too_broad(resolved) or _is_junk_target(resolved):
             rejected.append(str(resolved))
             continue
         text = str(resolved)
@@ -927,7 +987,7 @@ def is_authorized(target: str) -> bool:
             ap = Path(str(p)).resolve()
         except (OSError, ValueError):
             continue
-        if _is_too_broad(ap):
+        if _is_too_broad(ap) or _is_junk_target(ap):
             continue
         if t == ap or t.is_relative_to(ap):
             return True
