@@ -985,8 +985,13 @@ def test_http_shutdown(server):
 
 
 def test_http_live_stream_and_live_job(server):
-    """轮直播：job.live 增量按 after 取；会话元数据带运行中作业 id。"""
-    serve._JOBS["jt"] = {"task_id": "s1", "status": "running",
+    """轮直播：job.live 增量按 after 取；会话元数据带运行中作业 id。
+
+    还要带 **`round`（本轮 seq）**：前端靠它把直播内容挂进"本轮的消息块"。
+    旧做法让前端猜（取 round_list 末条）——刚发出去那一瞬间 round_list 还没
+    刷新，seq=0，直播内容就挂到页面底部、看着在消息块外面（用户 2026-09-13 报）。
+    """
+    serve._JOBS["jt"] = {"task_id": "s1", "status": "running", "round": 7,
                          "pending": {"type": "confirm", "question": "跑 git tag？"},
                          "live": [{"k": "think", "s": "想"},
                                   {"k": "ans", "s": "答"}]}
@@ -994,14 +999,24 @@ def test_http_live_stream_and_live_job(server):
         code, body = _get(server + "/api/jobs/jt/live?after=0")
         assert code == 200 and body["status"] == "running"
         assert len(body["chunks"]) == 2 and body["next"] == 2
+        assert body["round"] == 7                     # 本轮 seq 由服务端给
         assert body["pending"]["type"] == "confirm"   # 审批栏由轮询驱动
         code, body = _get(server + "/api/jobs/jt/live?after=1")
         assert body["chunks"] == [{"k": "ans", "s": "答"}] and body["next"] == 2
+        code, body = _get(server + "/api/jobs/jt")
+        assert body["round"] == 7                     # 单次快照也带
         code, body = _get(server + "/api/jobs/ghost/live")
         assert code == 404
         code, body = _get(server + "/api/sessions/s1")
         assert body["live_job"] == "jt"      # 页面刷新后据此重挂直播
     finally:
         serve._JOBS.pop("jt", None)
+    # 没开轮的作业（刚建、还没跑）不该编一个轮号出来
+    serve._JOBS["jz"] = {"task_id": "s1", "status": "queued", "live": []}
+    try:
+        _code, body = _get(server + "/api/jobs/jz/live?after=0")
+        assert body["round"] == 0
+    finally:
+        serve._JOBS.pop("jz", None)
     code, body = _get(server + "/api/sessions/s1")
     assert body["live_job"] is None

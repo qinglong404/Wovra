@@ -164,13 +164,14 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .ctx-bar{width:64px;height:5px;border-radius:3px;background:var(--bg4);overflow:hidden;flex-shrink:0}
 .ctx-bar i{display:block;height:100%}
 .rsep .ra{font-weight:600}
-#livebox{margin:2px 0 0}
-#content>#livebox{margin:6px 0 6px}   /* 轮未落账时的暂挂位 */
 .live-line{display:flex;align-items:center;gap:8px;color:var(--acc);font-size:12px;margin:10px 0;font-family:var(--mono)}
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:pulse 1.2s infinite;flex-shrink:0}
-.think-live{white-space:pre-wrap;word-break:break-word;font-size:11.5px;color:var(--tx3);background:var(--bg2);border-left:2px solid var(--acc-dim);border-radius:0 8px 8px 0;padding:8px 12px;max-height:200px;overflow-y:auto;line-height:1.6;font-family:var(--mono);transition:max-height .25s ease,padding .25s ease,opacity .25s}
-.think-live.folding{max-height:0!important;padding-top:0;padding-bottom:0;opacity:0}
-.ans-live{white-space:pre-wrap;margin-top:8px}
+/* 直播区（2026-09-13 大改）：条目走与事件区**同一个渲染器**（思考=.think-box
+   一行折叠、正文=.bub.md），所以这里只补布局，不再有自己的一套样式；
+   `#live-ans` 是 `.bub.md`，**不能** pre-wrap（那是纯文本时代的写法）。 */
+#livebox{margin:2px 0 0}
+#livebox #live-done:empty{display:none}
+#livebox #live-ans{margin-top:8px}
 .think-box{background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin:3px 0;overflow:hidden}
 .think-head{padding:5px 11px;font-size:11px;color:var(--tx3);cursor:pointer;font-family:var(--mono);user-select:none}
 .think-head:hover{color:var(--tx2)}
@@ -786,10 +787,30 @@ function consultSender(content){
 }
 
 /* ---- 轮直播（思考/回答流式 + 步骤状态）：serve 把 agent 流式回调写进 job.live ----
-   时间线顺序 = 你要的：思考流式 → 完成原地折叠 → 工具卡落位 → 下一段思考 → 正文。
-   已落账的段（事件带 thinking）由正式渲染负责，直播区只补还没落账的段。 */
+
+   2026-09-13 **大改**（用户口径："思考内容在消息块外面"、"出现完消失一下才能
+   出现"、"思考不展开、和工具一样只显示一行、可以自行展开"、"正文要实时渲染
+   MD"）。四个症状同一个根因：直播区原先**另起一套临时 DOM**——
+     * `LIVE.seq` 为 0 时（刚发出去、分片还没到）找不到本轮消息块，于是直接挂到
+       `#content` 底部 → 思考/正文**跑到消息块外面**；
+     * 一步结束时 `applyChunk` 把思考缓冲**清空**（旧注释的理由是"防重复"），
+       内容当场消失，等正式渲染再出现 → **"消失一下才出现"**；
+     * 思考块是自成一套的 `<details open>`：默认展开、形态与事件区不一样；
+     * 正文用 `textContent`（纯文本），**不渲染 MD**。
+
+   改法不是打补丁，而是把直播区变成**同一套渲染器的前端**：
+     * 条目一律走 `itemHtml()`（与事件区**逐字同款**：思考=一行折叠、正文=MD）；
+     * 挂载点一律是**本轮的消息块**（正式块还没渲染就先造临时块，**不依赖
+       seq**——seq 未知也照样挂在消息流里）；
+     * 一步结束只把内容**移进已完成列表**（`LIVE.events`）继续显示，绝不清空；
+     * 轮收尾时由正式渲染在**同一位置**接管同样的内容，所以交接没有空档。 */
 const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
-            seq:0,baseRounds:0,sse:false};
+            seq:0,baseRounds:0,sse:false,
+            events:[],       // 已完成步骤的条目（{t:'think'|'text'}），交接前一直显示
+            doneSig:'',      // 已完成列表签名（变了才重绘）
+            prov:null,       // 临时消息块（正式块出现后撤掉）
+            keep:null,       // drawConv 重绘时保活的直播节点（见 drawConv）
+            closing:false};  // 轮已收尾：正式渲染接管，直播区不再回挂
 let SSE=null;
 function sseClose(){if(SSE){SSE.close();SSE=null}LIVE.sse=false}
 function sseConnect(jobId,after){   // SSE：分片到达即推（替代高频轮询的正确形态）
@@ -824,6 +845,19 @@ function tickRunlineTime(){
   const st=rl.querySelector('.rl-st');
   if(st&&LIVE.status&&st.textContent!==LIVE.status)st.textContent=LIVE.status;
 }
+/* 一步收口：把这一步已产出的思考/正文**移进已完成列表**，不清空。
+   用户口径（2026-09-13）："其出现完，消失一下，才能出现"——旧实现在这里
+   `LIVE.think='';LIVE.ans=''`，内容当场从页面上消失，要等正式渲染才回来。 */
+function flushLiveStep(){
+  const t=LIVE.think,a=LIVE.ans;
+  LIVE.think='';LIVE.ans='';LIVE.mode='';
+  if(!t&&!a)return false;
+  if(t)LIVE.events.push({t:'think',text:t,
+                         k:'live:'+LIVE.events.length+':think'});
+  if(a)LIVE.events.push({t:'text',text:a,md:true,
+                         k:'live:'+LIVE.events.length+':ans'});
+  return true;
+}
 function applyChunk(c){
   let dirty=false;
   if(c.k==='think'){
@@ -835,45 +869,45 @@ function applyChunk(c){
     LIVE.ans+=c.s;dirty=true;
   }
   else if(c.k==='status'){
+    // "等待模型响应…"（每步开头）与"正在<动作>…"（工具执行前）都意味着
+    // **上一段内容已经产出完**——移进已完成列表继续显示，不清空（见上）
     LIVE.mode='status';LIVE.status=c.s;dirty=true;
-    // 该段已完结（新一步开始 / 本步已产出动作）：清空流式缓冲。
-    // 直播区不做"留档折叠"——完成的内容一律由事件区正式渲染，
-    // 否则去重计数一旦滞后，同一段思考就会在底部重复挂出（实测错位）
-    if(/等待模型/.test(c.s)||/^正在/.test(c.s)){LIVE.think='';LIVE.ans=''}
+    if(flushLiveStep())dirty=true;
   }
   return dirty;
 }
 async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用）
   const wasCur=CUR===LIVE.cur;
   if(!wasCur){liveDetach();return}
-  // 先让正式渲染落位（正文 md 上屏），再撤直播区——否则正文会"消失一瞬再出现"
+  // **先让正式渲染落位**（同位置、同款渲染器），再撤直播区——`closing` 让
+  // drawConv 这一次重绘**不回挂**直播节点，于是"官方正文上屏"与"直播节点退场"
+  // 发生在同一次 innerHTML 交换里：既没有空档，也不会一帧里出现两份正文。
+  LIVE.closing=true;
   FOLLOW=true;$('#send').disabled=false;
   try{await refreshAfterTurn()}catch(e){}
   liveDetach();
 }
 async function liveAttach(jobId,resume){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
-                      status:'',mode:'',seq:0,
-                      startedAt:Date.now(),
+                      status:'',mode:'',seq:0,startedAt:Date.now(),
+                      events:[],doneSig:'',prov:null,keep:null,closing:false,
                       baseRounds:(META&&META.round_list||[]).length});
   // **刷新后的重新挂载**：先做一次单次 catch-up（一次请求拿全量分片、
   // **只重绘一次**），再让 SSE 从 next 接上——避免"从 0 重放几百个分片"
-  // 把页面刷爆、也避免重放里的状态分片把思考缓冲清空（实测 bug）。
+  // 把页面刷爆。
   let after=0;
   try{
     const d=await api(`/api/jobs/${jobId}/live?after=0`);
     let dirty=false;
+    // **轮号由服务端给**（job.round：开轮那一刻的 seq）。旧做法取
+    // `round_list` 末条的 seq——刚发出去那一瞬间 round_list 还没刷新，于是
+    // seq=0、直播内容挂到 `#content` 底部（"思考跑到消息块外面"的根因）。
+    if(d&&d.round)LIVE.seq=Number(d.round)||0;
     for(const c of (d&&d.chunks)||[])dirty=applyChunk(c)||dirty;
     after=Number((d&&d.next)||0);
     LIVE.next=after;
     if(dirty)renderLive();
   }catch(e){}
-  if(resume||META&&META.live_job){
-    // 重新挂载：/c 续跑或刷新，**轮的序号不会变长**——必须锁到当前开放轮，
-    // 否则直播区挂在页面底部、思考/回答跑到消息块外面去（实测 bug）
-    const rl=(META&&META.round_list)||[];
-    LIVE.seq=rl.length?rl[rl.length-1].seq:0;
-  }
   const st=document.getElementById('stop');if(st)st.style.display='';
   const rb=document.getElementById('runbar');if(rb)rb.classList.add('on');
   const rl=document.getElementById('runline');if(rl)rl.classList.add('on');
@@ -884,6 +918,8 @@ function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
   sseClose();clearPendingBar();
   document.getElementById('livebox')?.remove();
+  document.querySelector('.crow.live-prov')?.remove();
+  LIVE.prov=null;LIVE.keep=null;LIVE.events=[];LIVE.doneSig='';LIVE.closing=false;
   const st=document.getElementById('stop');if(st)st.style.display='none';
   const rb=document.getElementById('runbar');if(rb)rb.classList.remove('on');
   const rl=document.getElementById('runline');if(rl){rl.classList.remove('on');rl.innerHTML=''}
@@ -1007,7 +1043,16 @@ function blockKey(d){
 function snapshotOpenBlocks(){
   const open=new Set();
   document.querySelectorAll('#content details[open]').forEach(d=>open.add(blockKey(d)));
+  // 思考块（`.think-box`）与工具卡（`.tcard`）的展开状态同样要保住——
+  // 用户口径："可以自行展开"（点开一个块，下一次重绘不该把它合上）
+  document.querySelectorAll('#content .think-box.open,#content .tcard.open')
+    .forEach(d=>open.add(openKey(d)));
   return open;
+}
+function openKey(d){
+  if(d.dataset&&d.dataset.k)return d.dataset.k;
+  if(d.classList.contains('tcard'))return 'tcard:'+(d.dataset.call||'');
+  return blockKey(d);
 }
 function restoreOpenBlocks(open){
   if(!open||!open.size)return;
@@ -1020,92 +1065,133 @@ function restoreOpenBlocks(open){
     const k=blockKey(d);
     if(open.has(k)&&!d.open)d.open=true;
   });
+  // 思考块/工具卡：**只补开**（同一条口径，绝不强制折叠——用户手动点开的
+  // 东西不许被机制合上）
+  document.querySelectorAll('#content .think-box,#content .tcard').forEach(d=>{
+    if(d.closest('#livebox'))return;
+    const k=openKey(d);
+    if(open.has(k))d.classList.add('open');
+  });
 }
+/* 直播区骨架：**与事件区同款**——思考走 `.think-box`（一行折叠、点击展开），
+   正文走 `.bub.md`（MD 渲染）。不是另画一套样式。 */
+const LIVE_SKELETON=
+  `<div id="live-done"></div>`+
+  `<div class="think-box" id="live-think" style="display:none" onclick="toggleThink(this)">`+
+    `<div class="think-head" id="live-think-head"></div>`+
+    `<div class="think-body" id="live-think-body"></div></div>`+
+  `<div class="bub md" id="live-ans" style="display:none"></div>`;
+
+/* 本轮**消息块**的 gbox：正式块优先；还没有就先造/复用临时块。
+   **不依赖 LIVE.seq**（用户报的"思考跑到消息块外面"就是这里：seq=0 时旧代码
+   直接挂 `#content` 底部，于是没有头像/没有边框、看着在块外）。 */
+function liveHost(keep){
+  const seq=String(LIVE.seq||'');
+  if(seq){
+    const g=document.querySelector(`.crow.agent[data-seq="${seq}"] .gbox`);
+    if(g){
+      document.querySelector('.crow.live-prov')?.remove();   // 别留一个空的 agent 行
+      LIVE.prov=null;
+      return g;
+    }
+  }
+  let prov=(keep&&keep.prov)
+          ||((LIVE.prov&&LIVE.prov.isConnected)?LIVE.prov
+             :document.querySelector('.crow.live-prov'));
+  if(!prov){
+    prov=document.createElement('div');
+    prov.className='crow agent live-prov';
+    if(seq)prov.dataset.seq=seq;
+    const meta=(META&&META.round_list||[]).find(r=>String(r.seq)===seq)||{};
+    const s=senderOf(meta);
+    prov.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
+      +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
+      +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`
+      +`<div class="gbox" style="border-color:${s.color}55"></div></div>`;
+  }
+  const c=$('#content');
+  if(c&&prov.parentNode!==c)c.appendChild(prov);   // 被 drawConv 摘下来的：接回去
+  LIVE.prov=prov;
+  return prov.querySelector('.gbox');
+}
+
+/* 完成区的条目：与事件区同款渲染，但**扣掉正式渲染已经画过的部分**
+   （刷新后用 catch-up 重放了整条流，而事件区可能已经画过前几步——不扣会重复）。 */
+function liveDoneHtml(){
+  const seq=String(LIVE.seq||'');
+  let covT=0,covX=0;
+  if(seq){
+    const row=document.querySelector(`.crow[data-seq="${seq}"]`);
+    const g=(row&&!row.classList.contains('live-prov'))
+      ?row.querySelector('.gbox'):null;
+    if(g){
+      covT=g.querySelectorAll('.think-box').length;
+      covX=g.querySelectorAll('.bub').length;
+    }
+  }
+  let t=0,x=0;
+  const items=LIVE.events.filter(it=>{
+    if(it.t==='think'){t++;return t>covT}
+    x++;return x>covX;
+  });
+  return items.map(it=>itemHtml(it,{})).join('');
+}
+
 function renderLive(){
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
-  let el=document.getElementById('livebox');
-  let g=LIVE.seq?document.querySelector(`.crow.agent[data-seq="${LIVE.seq}"] .gbox`):null;
-  if(!g&&LIVE.seq){
-    // 本轮的消息块还没渲染出来 → **就地造一个临时块**并挂进消息流。
-    // 复用已有的同名临时块（不重复造，否则看起来像"越堆越多、跑到块外面"）；
-    // drawConv 重绘会把它冲掉，故每次都检查、缺了就补。
-    let prov=document.querySelector(`.crow.live-prov[data-seq="${LIVE.seq}"]`);
-    if(!prov){
-      prov=document.createElement('div');
-      prov.className='crow agent live-prov';
-      prov.dataset.seq=String(LIVE.seq);
-      const s=senderOf({active_view:(META&&META.round_list||[]).find(r=>String(r.seq)===String(LIVE.seq))?.active_view||''});
-      prov.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
-        +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
-        +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`
-        +`<div class="gbox" style="border-color:${s.color}55"></div></div>`;
-      ($('#content')||document.body).appendChild(prov);
-    }
-    g=prov.querySelector('.gbox');
+  // 保活的节点优先复用（drawConv 重绘时把它摘下来交给这里接回去）
+  const keep=LIVE.keep;LIVE.keep=null;
+  const host=liveHost(keep);
+  if(!host)return;
+  let box=(keep&&keep.box)||document.getElementById('livebox');
+  if(!box){
+    box=document.createElement('div');
+    box.id='livebox';
   }
-  if(g){if(el&&el.parentNode!==g)g.appendChild(el)}
-  if(!el){el=document.createElement('div');el.id='livebox';(g||$('#content')).appendChild(el)}
-  // 结构（状态行文案）变化才重建骨架；流式文本走 textContent 增量赋值
-  if(!el._built){
-    el._built=true;
-    // **先有思考块，再往里灌文本**（用户口径）：思考中保持展开，思考完**折叠
-    // 但仍留在原地**（不是 display:none 消失），后面正文平滑接在它下面；等
-    // 事件区渲染出正式块后，liveDetach 才把这块撤掉——中间不会出现"消失一下
-    // 再冒出来"的空档。
-    el.innerHTML=`<details class="think-live" id="live-think" open>`+
-        `<summary id="live-think-sum">💭 思考中…</summary>`+
-        `<div class="think-live-body" id="live-think-body"></div></details>`+
-      `<div class="bub ans-live" id="live-ans" style="display:none"></div>`;
+  // 缺骨架就补（**不能只按"节点在不在"判断**：保活/旧版残留都可能给出一个
+  // 空盒子，里面没有 #live-done/#live-think/#live-ans）
+  if(!box.querySelector('#live-done'))box.innerHTML=LIVE_SKELETON;
+  if(box.parentNode!==host)host.appendChild(box);
+  // ① 已完成步骤：内容不再变 → 签名变了才重绘
+  const done=box.querySelector('#live-done');
+  if(done){
+    const sig=LIVE.events.length+':'+LIVE.seq;
+    if(sig!==LIVE.doneSig){
+      done.innerHTML=liveDoneHtml();
+      LIVE.doneSig=sig;
+      highlightIn(done);
+    }
+  }
+  // ② 在飞思考：**一行折叠**（和工具卡一样），要看得自己点开
+  const tb=box.querySelector('#live-think');
+  const tbody=box.querySelector('#live-think-body');
+  const thead=box.querySelector('#live-think-head');
+  if(tb&&tbody&&thead){
+    if(LIVE.think){
+      tb.style.display='';
+      if(tbody.textContent!==LIVE.think)tbody.textContent=LIVE.think;
+      const head=`💭 ${LIVE.status||'思考中'} · ${fmtN(LIVE.think.length)} 字（点击展开）`;
+      if(thead.textContent!==head)thead.textContent=head;
+    }else{
+      tb.style.display='none';          // 没有在飞思考就不留空块
+    }
+  }
+  // ③ 在飞正文：**实时 MD**（用户口径：不要等加载完才渲染）
+  const ab=box.querySelector('#live-ans');
+  if(ab){
+    if(LIVE.ans){
+      ab.style.display='';
+      const html=md(LIVE.ans);
+      if(ab._md!==html){ab.innerHTML=html;ab._md=html;highlightIn(ab)}
+    }else{
+      ab.style.display='none';ab._md='';
+    }
   }
   const rl=document.getElementById('runline');
   if(rl){
     rl.classList.add('on');
     rl.innerHTML=`<span class="rl-dot"></span><span class="rl-st">${esc(LIVE.status||'思考中…')}</span>`+
       `<span class="rl-time">${esc(fmtDur((Date.now()-(LIVE.startedAt||Date.now()))/1000)||'<1s')}</span>`;
-  }
-  const tb=el.querySelector('#live-think');
-  const tbody=el.querySelector('#live-think-body');
-  const tsum=el.querySelector('#live-think-sum');
-  if(tb&&tbody){
-    const show=LIVE.think?LIVE.think.slice(-4000):'';
-    if(show){
-      // 有文本：块**展开**并灌入（块先于文本存在，但**没有文本时不留空块**）
-      tb.style.display='';
-      if(!tb.dataset.user&&!tb.open)tb.open=true;
-      if(tbody.textContent!==show)tbody.textContent=show;
-      if(tsum)tsum.textContent=LIVE.status?('💭 '+LIVE.status):'💭 思考中…';
-    }else if(tbody.textContent){
-      // 这一段思考结束：**折叠但不移除**（文本留着、位置不动）
-      tb.style.display='';
-      if(!tb.dataset.user&&tb.open)tb.open=false;
-      if(tsum)tsum.textContent='💭 思考内容（已折叠，点开看）';
-    }else{
-      // 还没有任何思考文本：**整块藏起来**——否则页面末尾会挂一个"思考中…"的
-      // 空白块（用户报的 bug：老出现一个空白思考块；是我上一批放宽条件引入的）
-      tb.style.display='none';
-    }
-  }
-  const ab=el.querySelector('#live-ans');
-  if(ab){
-    // **官方渲染优先**：事件区已经出现这一轮的 `final_answer` → 直播区的原始
-    // 文本立刻退场，否则尾部会挂一段"没有 MD 渲染的原始回复"不动（用户报的 bug）
-    let official=false;
-    try{
-      const seq=String(LIVE.seq);
-      const cached=Object.entries(CONV.cache||{}).find(([s])=>String(s)===seq);
-      const evs=(cached&&cached[1]&&cached[1].events)||[];
-      official=evs.some(e=>e&&e.type==='final_answer');
-      if(!official){   // 兜底：轮里已有正式块且正文非空也算
-        const off=document.querySelector(`.crow.agent:not(.live-prov)[data-seq="${seq}"] .bub`);
-        official=!!(off&&String(off.textContent||'').trim().length>40);
-      }
-    }catch(e){}
-    if(official&&!LIVE.keepAns){
-      ab.style.display='none';ab.textContent='';
-    }else{
-      ab.style.display=LIVE.ans?'':'none';
-      if(ab.textContent!==LIVE.ans)ab.textContent=LIVE.ans;
-    }
   }
   if(FOLLOW){
     // **只在用户本来就在底部附近时才自动跟随**：阈值取可视高度的 1/4（至少
@@ -1117,7 +1203,6 @@ function renderLive(){
     const near=(c.scrollHeight-c.scrollTop-c.clientHeight)<tol;
     if(near){c.scrollTop=c.scrollHeight;}
     else if(window._followNagged!==true){window._followNagged=true;renderFollowChip&&renderFollowChip();}
-    if(tb)near&&(tb.scrollTop=tb.scrollHeight);
   }
 }
 
@@ -1221,7 +1306,7 @@ function drawConv(c,toBottom){
         continue;
       }
       if(e.type==='tool_call'){
-        if(e.thinking)feed(es,{t:'think',text:e.thinking});
+        if(e.thinking)feed(es,{t:'think',text:e.thinking,k:`${seq}:E${ei}:think`});
         // 带工具调用的这步的正文是"过程发言"（边做边说），不是最终回答——
         // 视觉上弱化，最终回答才醒目地收在最后
         if(String(content||'').trim())feed(es,{t:'text',text:content,tm:when(ei),interim:true});
@@ -1242,7 +1327,7 @@ function drawConv(c,toBottom){
         push({kind:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`,tm:when(ei)});continue;
       }
       if(role==='assistant'&&content){
-        if(e.thinking)feed(es,{t:'think',text:e.thinking});
+        if(e.thinking)feed(es,{t:'think',text:e.thinking,k:`${seq}:E${ei}:think`});
         feed(es,{t:'text',text:content,md:e.type==='final_answer',tm:when(ei)});continue;
       }
       if(role==='user'){
@@ -1311,43 +1396,26 @@ function drawConv(c,toBottom){
     html+=`<div class="crow agent" data-seq="${row.seq||''}"><div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>
       <div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}<span style="color:var(--tx3);font-weight:400"> · ${esc(s.id)}</span>${agentStatChip(s.key)}</div>
       <div class="gbox" data-agent="${esc(s.id||'')}" style="border-color:${s.color}55">`+
-      row.items.map(it=>{
-        if(it.t==='sys'){
-          return `<div class="sysline${it.bad?' sys-bad':''}" title="${esc(it.title||'')}">${esc(it.text)}`+
-            (it.tm?`<span class="stime">${esc(it.tm)}</span>`:'')+`</div>`;
-        }
-        if(it.t==='think'){
-          return `<div class="think-box" onclick="toggleThink(this)">
-            <div class="think-head">💭 思考过程 · ${fmtN(it.text.length)} 字（点击展开）</div>
-            <div class="think-body">${esc(it.text)}</div></div>`;
-        }
-        if(it.t==='text'){
-          if(it.interim){   // 过程发言：左边一条细线，弱化呈现
-            return `<div class="bub interim">${esc(it.text)}</div>${mtm(it.tm)}`;
-          }
-          const inner=it.md?md(it.text):esc(it.text);
-          return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
-            `<div class="bub md">${inner}</div>${mtm(it.tm)}`;
-        }
-        const st=ci_status(calls[it.id]);
-        return `<div class="tcard" data-call="${esc(it.id)}" data-round="${it.seq}" data-event="">
-          <div class="t-head" onclick="this.parentNode.classList.toggle('open')">
-            <span class="t-icon">${TOOL_ICON[it.name]||'◆'}</span><span class="t-name">${esc(it.name)}</span>
-            <span class="t-sum" title="${esc(argSummary(it.name,it.args))}">${esc(argSummary(it.name,it.args))}</span>
-            ${it.tm?`<span class="t-when" title="开始 · 持续（至下一事件）">${esc(it.tm)}</span>`:''}
-            <span class="t-st ${st[1]}">${st[0]}</span>
-            <span class="t-jump" title="在时间线中定位" onclick="event.stopPropagation();jumpToTimeline(${it.seq},'')">⇢</span></div>
-          <div class="t-args">${esc(prettyArgs(it.args))}</div>
-          <div class="t-result"></div></div>`;
-      }).join('')+`</div></div></div>`;
+      row.items.map(it=>itemHtml(it,calls)).join('')+`</div></div></div>`;
   }
   // 重建会瞬间把滚动高度掐到很小，浏览器把 scrollTop 钳到顶部——这是
   // "一生成新内容就跳到最开头"的根源：先记锚点，重建后按增量恢复
+  // **直播节点保活**：`c.innerHTML=html` 会把直播区连同它的展开状态一起抹掉
+  // （表现为思考/正文"闪一下"）。这里先把它摘下来，重绘后交给 renderLive 接回
+  // 原位置——同一个节点、同一份内容，没有空档。
+  if(LIVE.job&&CUR===LIVE.cur&&!LIVE.closing){
+    LIVE.keep={box:document.getElementById('livebox'),
+               prov:document.querySelector('.crow.live-prov')};
+    LIVE.keep.box?.remove();
+    LIVE.keep.prov?.remove();
+  }else{
+    LIVE.keep=null;
+  }
   const anchorTop=c.scrollTop,anchorH=c.scrollHeight;
   REBUILDING=true;
   c.innerHTML=html;
   restoreOpenBlocks(openKeys);          // **保住用户展开的块**：整段重绘会把
-                                        // <details> 全部打回折叠态（"一闪就折叠了"）
+                                        // 展开态打回折叠（"一闪就折叠了"）
   // 回填结果与状态
   for(const [id,ci] of Object.entries(calls)){
     const el=c.querySelector(`[data-call="${CSS.escape(id)}"]`);if(!el)continue;
@@ -1380,6 +1448,42 @@ function ci_status(ci){
       ?['● 运行中…','st-running']:['无结果','st-run'];
   }
   const [t,c]=resultStatus(ci.name,ci.result);return[t,c];
+}
+
+/* 条目渲染器——**唯一一份**。事件区与直播区都走它。
+   用户口径（2026-09-13）：「思考内容不在展开，和工具一样，只显示一行，可以
+   自行展开」、「正文要实时渲染 MD」。所以思考块 = 一行折叠（`.think-box`，
+   点击展开、`data-k` 记住展开状态），正文 = `.bub.md`（`md()` 渲染）。
+   直播区复用同一个函数，形态与事件区**逐字同款**，交接时不会变形。 */
+function itemHtml(it,calls){
+  const mtm=tm=>tm?`<div class="mtime">${esc(tm)}</div>`:'';
+  if(it.t==='sys'){
+    return `<div class="sysline${it.bad?' sys-bad':''}" title="${esc(it.title||'')}">${esc(it.text)}`+
+      (it.tm?`<span class="stime">${esc(it.tm)}</span>`:'')+`</div>`;
+  }
+  if(it.t==='think'){
+    return `<div class="think-box"${it.k?` data-k="${esc(it.k)}"`:''} onclick="toggleThink(this)">
+      <div class="think-head">💭 思考过程 · ${fmtN((it.text||'').length)} 字（点击展开）</div>
+      <div class="think-body">${esc(it.text)}</div></div>`;
+  }
+  if(it.t==='text'){
+    if(it.interim){   // 过程发言：左边一条细线，弱化呈现
+      return `<div class="bub interim">${esc(it.text)}</div>${mtm(it.tm)}`;
+    }
+    const inner=it.md?md(it.text):esc(it.text);
+    return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
+      `<div class="bub md">${inner}</div>${mtm(it.tm)}`;
+  }
+  const st=ci_status(calls[it.id]);
+  return `<div class="tcard" data-call="${esc(it.id)}" data-round="${it.seq}" data-event="">
+    <div class="t-head" onclick="this.parentNode.classList.toggle('open')">
+      <span class="t-icon">${TOOL_ICON[it.name]||'◆'}</span><span class="t-name">${esc(it.name)}</span>
+      <span class="t-sum" title="${esc(argSummary(it.name,it.args))}">${esc(argSummary(it.name,it.args))}</span>
+      ${it.tm?`<span class="t-when" title="开始 · 持续（至下一事件）">${esc(it.tm)}</span>`:''}
+      <span class="t-st ${st[1]}">${st[0]}</span>
+      <span class="t-jump" title="在时间线中定位" onclick="event.stopPropagation();jumpToTimeline(${it.seq},'')">⇢</span></div>
+    <div class="t-args">${esc(prettyArgs(it.args))}</div>
+    <div class="t-result"></div></div>`;
 }
 
 /* ---- 对话页顶部的 agent 上下文条 ----

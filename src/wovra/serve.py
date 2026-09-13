@@ -428,6 +428,14 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                 def _live(chunk: dict) -> None:
                     # 轮直播流（思考/回答增量、步骤状态）。单消费者轮询读，
                     # append 原子足够；量级 = 单轮流式分片，无需封顶。
+                    # **顺手把本轮的 seq 报出去**（2026-09-13）：前端要靠它把直播
+                    # 内容挂进"本轮的消息块"。旧做法让前端猜（取 round_list 末条），
+                    # 刚发出去那一瞬间 round_list 还没刷新 → seq=0 → 直播内容挂到
+                    # 页面底部、看着在消息块外面。轮号这里**现取现报**，最准。
+                    if not job.get("round"):
+                        cur = getattr(agent, "current_round", None) or {}
+                        if cur.get("seq"):
+                            job["round"] = int(cur["seq"])
                     job["live"].append(chunk)
 
                 job["live"] = []
@@ -1404,7 +1412,7 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "job not found"}, 404)
             return self._json({k: job.get(k)
                                for k in ("status", "answer", "error",
-                                         "pending")})
+                                         "pending", "round")})
         ml = re.fullmatch(r"/api/jobs/([^/]+)/live", path)
         if ml:
             job = _JOBS.get(ml.group(1))
@@ -1415,6 +1423,7 @@ class _Handler(BaseHTTPRequestHandler):
             chunks = job.get("live") or []
             return self._json({"status": job["status"],
                                "pending": job.get("pending"),
+                               "round": job.get("round") or 0,
                                "chunks": chunks[after:],
                                "next": len(chunks)})
         mss = re.fullmatch(r"/api/jobs/([^/]+)/stream", path)
