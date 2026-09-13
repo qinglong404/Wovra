@@ -241,3 +241,64 @@ def test_route_to_schema_is_registered_in_managed_mode():
     assert "route_to" in names
     assert _ROUTE_TO_SCHEMA["function"]["name"] == "route_to"
     assert _ROUTE_TO_SCHEMA["function"]["parameters"]["required"] == ["agent", "reason"]
+
+
+def test_route_hint_gives_prev_landing_as_a_fact_not_a_weight():
+    """给主 agent 的**路由依据**：上一轮落点（事实）+ 建议（非命令）。
+
+    用户口径（2026-09-13）："给主agent的提示词中，添加考虑与上一次用户询问关联
+    程度，特别一些接近于续说的，优先考虑路由给上一次路由的选择。这个是看情况而定的，
+    **不能说这次[路由建议]对了，就提升其权重，还是得交给 LLM 来**，更灵活。"
+
+    所以两段分工必须分明：**事实**由 Runtime 机械给（它要判"是不是续说"就得先知道
+    上一轮谁在答）；**建议**仍然只是起点，写明"判断权在你"。（现场：会话
+    20260913-151842-2628dd 的 R8 只是顺着追问，主 agent 按职责表字面改判给了 B。）
+    """
+    agent = Agent(llm=_StubLLM(), tools=[])
+    agent.rounds = [{"seq": 1, "active_view": "A", "events": [],
+                     "end_state": "completed"}]
+    agent.current_round = {"seq": 2, "active_view": "", "route_hint": {}, "events": []}
+    agent.rounds.append(agent.current_round)
+    assert agent._prev_landing() == "A"
+
+    # ① 没有规则建议时也要给事实（R7/R8 那种"规则层没命中"的情形）
+    lines = agent._route_hint_lines()
+    text = "\n".join(lines)
+    assert "上一轮落点" in text and "A" in text
+    assert "续说" in text and "优先沿用" in text
+    assert "事实" in text                      # 标明这是事实，不是权重
+
+    # ② 有规则建议时两段并存，且建议照旧写"不是命令…判断权在你"
+    agent.current_round["route_hint"] = {"view": "A", "reason": "粘滞：延续上一轮视图 A"}
+    text = "\n".join(agent._route_hint_lines())
+    assert "路由建议" in text and "不是命令" in text and "判断权在你" in text
+    assert "上一轮落点" in text
+
+
+def test_responsibility_table_shows_real_files_and_split_demands_boundaries():
+    """职责说明书收紧（用户口径："现在太松散了"）——两处机械可查。
+
+    ① 全局职责表要给人**具体文件**：新口径是 `files`，此前只渲染 `file_domains`
+       （新产物留空 → 表上写"未划定" → 主 agent 看不到各域管哪些文件，路由缺一半依据）；
+    ② 分裂指令与 `update_responsibility` 都要求写满三件：干什么/产出、**边界**、
+       **什么信号落到我这里**。
+    """
+    from wovra import routing
+    from wovra.agent import prompts as prompts_module
+
+    lines = routing.responsibility_lines([{
+        "id": "A", "name": "工具层", "description": "越界守卫与授权口径",
+        "files": ["src/a.py", "tests/test_a.py"], "file_domains": [],
+        "status": "active",
+    }])
+    assert "维护文件" in lines[0]
+    assert "src/a.py" in lines[0] and "tests/test_a.py" in lines[0]
+    assert "未划定" not in lines[0]
+
+    split_text = prompts_module._SPLIT_INSTRUCTIONS
+    assert "②**边界**" in split_text and "什么不归我" in split_text
+    assert "③**什么信号落到我这里**" in split_text
+    responsibility = prompts_module._RESPONSIBILITY_SCHEMA["function"][
+        "parameters"]["properties"]["description"]["description"]
+    assert "职责说明书" in responsibility
+    assert "边界" in responsibility and "什么信号落到我这里" in responsibility

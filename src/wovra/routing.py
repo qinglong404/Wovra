@@ -204,16 +204,27 @@ def responsibility_lines(registry: Optional[Iterable[dict]]) -> list[str]:
     """全局职责表（注册表机械渲染，一行一条；零 LLM）。
 
     这是**跨 agent 的唯一公共信息**：路由只读它，主 agent 也只看得到它
-    （隔离第一）。故它必须自足——id、名字、一句话职责、所有权文件域。
+    （隔离第一）。故它必须自足——id、名字、**具体文件**、一句话职责、状态。
+
+    渲染口径（2026-09-13 收紧）：文件清单取**新口径 `files`**（谁维护哪些具体
+    文件），只为老产物退回 `file_domains` 前缀。此前只渲染 `file_domains`，
+    而新分裂产物把它留空 → 表上写"未划定" → **主 agent 看不到各域到底管哪些
+    文件**，只能从描述正文里认路径，路由判断缺一半依据（用户口径："职责说明书
+    现在太松散了"）。
     """
     lines: list[str] = []
     for entry in _entries(registry):
-        fds = "、".join(str(f) for f in (entry.get("file_domains") or [])) or "未划定"
+        files = [str(f) for f in (entry.get("files") or []) if str(f).strip()]
+        if files:
+            shown = "、".join(files[:8]) + ("…" if len(files) > 8 else "")
+            fds = f"{shown}（共 {len(files)} 个）" if len(files) > 1 else shown
+        else:
+            fds = "、".join(str(f) for f in (entry.get("file_domains") or [])) or "未划定"
         desc = str(entry.get("description") or "").strip()
         status = str(entry.get("status") or "dormant")
         lines.append(
             f"- {entry.get('id')}（{entry.get('name')}）：{desc or '（无描述）'}"
-            f"｜文件域：{fds}｜状态：{status}"
+            f"｜维护文件：{fds}｜状态：{status}"
         )
     return lines
 
@@ -228,7 +239,15 @@ def identity_card(name: str, registry: Optional[Iterable[dict]]) -> list[str]:
     if str(name) == MAIN_AGENT_ID:
         return [
             f"[当前身份] {MAIN_AGENT_ID}（主agent）：**路由器 + 兜底执行者**。"
-            "收到用户消息先对职责表问一句「这活落在谁的域里」：\n"
+            "收到用户消息，**先看这一条与上一条的关系**，再对职责表问一句"
+            "「这活落在谁的域里」：\n"
+            "0. **先看关联**（这一步常常比抠职责表更管用）：用户在**续说**——顺着"
+            "上一句追问、补充条件、要细节、接着刚才那个话题往下讲——就**优先沿用"
+            "上一轮的域**：同一摊活连着干是常态，用户视角里那是同一个「你」，换人"
+            "会让接手方把已知事实再查一遍（实测代价：重跑一遍取证）。用户**换了"
+            "话题或换了对象**（点名别人的活、提到别的域的文件、又开了一摊）才重新"
+            "判。**这是你按上下文做的判断，不是一条硬规则**：拿不准就以关联程度为准，"
+            "续说优先；但也别把明显的新活硬留在老地方。\n"
             "1. 落得到 → 用 route_to 把**用户原话**转给它，"
             "然后就此停手（不要自己动手、不要复述、不要写方案或解释）——"
             "它在本回合内直接接手，结果直接给用户；\n"

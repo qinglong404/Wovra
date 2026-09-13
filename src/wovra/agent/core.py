@@ -744,21 +744,57 @@ class _CoreMixin:
     # （实测 Σ14 vs 会话 13 轮）。现在由 `views.agent_ledger` 现场算承载轮/
     # 答复轮/步数，条目上只留 ctx_cur/ctx_peak/window 这些**观测**字段。
 
+    def _prev_landing(self) -> str:
+        """上一轮的**落点**（谁在答）——给主 agent 判断"这条是不是续说"用的事实。
+
+        2026-09-13 用户口径：提示词里要让主 agent 考虑"与上一次用户询问的关联程度，
+        特别是一些接近于续说的，优先考虑路由给上一次的那个域"。可它要判"是不是
+        续说"就得先知道**上一次是谁在答**——这一条由 Runtime 机械给出（事实），
+        权重仍归它自己判（用户：「不能说[路由建议]对了就提升其权重，还是得交给
+        LLM 来，更灵活」）。
+        """
+        cur = (self.current_round or {}).get("seq")
+        prev: Optional[dict] = None
+        for r in (self.rounds or []):
+            if not isinstance(r, dict):
+                continue
+            if cur is not None and r.get("seq") == cur:
+                break                      # 到本轮为止，`prev` 就是上一条
+            prev = r
+        if prev is None:
+            return ""
+        return str(prev.get("active_view") or "").strip()
+
     def _route_hint_lines(self) -> list[str]:
-        """主 agent 起手时的**路由建议**（规则层给的起点，不是命令）。"""
+        """主 agent 起手时的**路由依据**：上一轮落点（事实）+ 规则层建议（非命令）。
+
+        两段各有分工（2026-09-13 用户口径）：
+        * **事实**（上一轮谁在答）——Runtime 机械给，供主 agent 判"这条是不是续说"；
+        * **建议**（规则层按文件域/粘滞给的起点）——只是起点，判断权仍在主 agent。
+        """
+        lines: list[str] = []
+        prev = self._prev_landing()
+        if prev and prev != views_module.MAIN_AGENT_ID:
+            lines.append(
+                f"[上一轮落点]（事实）上一轮是 {prev} 在答。"
+                "判这一条要不要换人时，先看它**与上一条的关联程度**："
+                "顺着上一句追问/补充/要细节/接着那个话题讲（续说）→ **优先沿用"
+                "同一个域**；换了话题或换了对象（点名别人的活、提到别的域的文件、"
+                "又开了一摊）→ 重新判。"
+            )
         hint = (self.current_round or {}).get("route_hint") or {}
         view = str(hint.get("view") or "")
-        if not view or view == views_module.MAIN_AGENT_ID:
-            return []
-        reason = str(hint.get("reason") or "")
-        return [
-            "[路由建议]（规则层按文件域/粘滞给的起点，**不是命令**）",
-            f"这一轮按规则更像 {view} 的活"
-            + (f"（{reason}）" if reason else "")
-            + "。你若同意就用 route_to 把**用户原话**转给它（它本回合内直接"
-            "接手回话）；不同意就自己干——判断权在你，规则只是起点，转错了"
-            "对方会自己转出去。",
-        ]
+        if view and view != views_module.MAIN_AGENT_ID:
+            reason = str(hint.get("reason") or "")
+            lines += [
+                "[路由建议]（规则层按文件域/粘滞给的起点，**不是命令**）",
+                f"这一轮按规则更像 {view} 的活"
+                + (f"（{reason}）" if reason else "")
+                + "。你若同意就用 route_to 把**用户原话**转给它（它本回合内直接"
+                "接手回话）；不同意就自己干——判断权在你，规则只是起点，转错了"
+                "对方会自己转出去。",
+            ]
+        return lines
 
     def _apply_pending_route(self) -> bool:
         """把 `route_to` 登记的转交落到本轮 `active_view` 上（回合内换视图）。
