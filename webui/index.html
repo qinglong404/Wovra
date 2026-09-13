@@ -810,6 +810,20 @@ function scheduleLive(){
   if(window._liveTimer)return;
   window._liveTimer=setTimeout(()=>{window._liveTimer=null;renderLive()},120);
 }
+function tickRunlineTime(){
+  // 运行时长**自己走字**：原先只在分片到达时更新，长命令/长思考期间时间会冻住
+  //（用户报的"终止本轮按钮后面时间不刷新"）。这里挂在 300ms 轮询上，与分片无关。
+  if(!LIVE.job)return;
+  const rl=document.getElementById('runline');
+  if(!rl||!rl.classList.contains('on'))return;
+  const t=rl.querySelector('.rl-time');
+  if(!t)return;
+  const sec=(Date.now()-(LIVE.startedAt||Date.now()))/1000;
+  const text=fmtDur(sec)||'<1s';
+  if(t.textContent!==text)t.textContent=text;
+  const st=rl.querySelector('.rl-st');
+  if(st&&LIVE.status&&st.textContent!==LIVE.status)st.textContent=LIVE.status;
+}
 function applyChunk(c){
   let dirty=false;
   if(c.k==='think'){
@@ -946,6 +960,7 @@ async function pollPlan(){
 async function pollLive(){
   if(!LIVE.job||document.hidden)return;
   pollPlan();                      // 计划页随 todo 调用即时同步（轻量，几十字节）
+  tickRunlineTime();               // 运行时长自己走字（不依赖分片到达）
   if(LIVE.sse){   // SSE 健康时零轮询；断开则 300ms 兜底
     const d=await api(`/api/jobs/${LIVE.job}`).catch(()=>null);
     if(d){

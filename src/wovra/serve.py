@@ -324,6 +324,9 @@ def _main_or_landing(r: dict, ledger: dict, main_id: str) -> str:
 _JOBS: dict[str, dict] = {}
 _JOB_SEQ = itertools.count(1)
 _TURN_GATE = threading.Lock()
+# 安全模式覆盖表（会话 id → approve/auto）：切换按钮**运行中**改档时写这里，
+# 闸门每次判定都先读它——运行中的 job 握着独立 Task 对象，光落盘改不到它。
+_SAFETY_OVERRIDE: dict[str, str] = {}
 _job_lock = threading.Lock()
 
 
@@ -378,7 +381,12 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
         """确认闸门（审批模式）：自主模式全放行；"以后同类"命中白名单放行；
         三选项回答 always 时把标签记进会话白名单。"""
         tag = confirm_tag(question)
-        mode = str(getattr(task, "safety_mode", "approve") or "approve")
+        # 模式每次都**现读**：先看进程级覆盖表（切换按钮运行时写的），再退回
+        # 本 job 手里那份 Task——否则"运行中切自主模式"永远不生效（实测 bug）
+        mode = str(
+            _SAFETY_OVERRIDE.get(str(getattr(task, "id", "")) or "")
+            or getattr(task, "safety_mode", "approve") or "approve"
+        )
         if mode == "auto":
             job["live"].append({"k": "status", "s": "自主运行：敏感操作自动放行"})
             return True
@@ -1396,6 +1404,22 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "session not found"}, 404)
             task.safety_mode = mode
             task.save()
+            # **正在跑的那一轮也要立刻换挡**（2026-09-13 用户报的 bug：任务进行中
+            # 切到自主模式不生效）。运行中的 job 手里握着**自己那份 Task 对象**，
+            # 上面那次 save 只落盘、改不到它——于是闸门继续按老模式拦。
+            # 用进程级覆盖表把它接上：闸门每次判定都先看这张表。
+            _SAFETY_OVERRIDE[msf.group(1)] = mode
+            for job in list(_JOBS.values()):
+                if getattr(job.get("task"), "id", "") == msf.group(1):
+                    try:
+                        job["task"].safety_mode = mode
+                    except Exception:  # noqa: BLE001
+                        pass
+                    job["live"].append({
+                        "k": "status",
+                        "s": "已切到自主运行：敏感操作自动放行" if mode == "auto"
+                             else "已切回审批模式：敏感操作先问你",
+                    })
             with self.cache._lock:
                 self.cache._cache.pop(msf.group(1), None)
             return self._json({"ok": True, "mode": mode})
