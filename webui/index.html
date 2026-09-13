@@ -987,11 +987,22 @@ function tickStopBtn(){
 }
 setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
 function blockKey(d){
-  // 展开状态的稳定键：优先用元素自己标的 data-k，否则用它的 summary/首行文本
+  // 展开状态的稳定键：**不能拿文案当键**——思考块的标题带时长/状态
+  //（"思考中…" → "思考 12.3s" → "已折叠"），新一轮思考一开始标题就变，
+  // 键跟着变 → 恢复匹配不到 → 用户展开的块被折叠（这正是实测的 bug）。
+  // 故用**结构位**：所属轮(seq) + 工具调用 id + 事件 id + 同容器内第几个 details。
   if(d.dataset&&d.dataset.k)return d.dataset.k;
-  const s=d.querySelector('summary');
-  const t=(s?s.textContent:d.textContent)||'';
-  return (d.className||'')+'|'+String(t).replace(/\s+/g,' ').trim().slice(0,60);
+  const row=d.closest('.crow[data-seq]');
+  const seq=row?(row.dataset.seq||''):'';
+  const call=(d.dataset&&d.dataset.call)||'';
+  const eid=(d.dataset&&d.dataset.eid)||'';
+  let idx=-1;
+  const p=d.parentElement;
+  if(p){
+    const all=[...p.children].filter(x=>x.tagName==='DETAILS');
+    idx=all.indexOf(d);
+  }
+  return `${seq}|${call}|${eid}|${idx}|${(d.className||'').split(' ')[0]}`;
 }
 function snapshotOpenBlocks(){
   const open=new Set();
@@ -1066,10 +1077,13 @@ function renderLive(){
   if(ab){ab.style.display=LIVE.ans?'':'none';
     if(ab.textContent!==LIVE.ans)ab.textContent=LIVE.ans;}
   if(FOLLOW){
-    // **只在用户本来就在底部时才自动跟随**：否则你在上面点开一个块看内容，
-    // 每次流式重绘都把你拽回底部——看起来就像"块被自己遮挡了"（实测 bug）
+    // **只在用户本来就在底部附近时才自动跟随**：阈值取可视高度的 1/4（至少
+    // 160px）——80px 太小，稍微往回滚一点就"不算在底部"，反而更容易被拽走
+    // （用户口径：80px 太小）。否则你在上面点开一个块看内容，每次流式重绘都
+    // 把你拽回底部，看起来就像"块被自己遮挡了"。
     const c=$('#content');
-    const near=(c.scrollHeight-c.scrollTop-c.clientHeight)<80;
+    const tol=Math.max(160,Math.round((c.clientHeight||600)*0.25));
+    const near=(c.scrollHeight-c.scrollTop-c.clientHeight)<tol;
     if(near){c.scrollTop=c.scrollHeight;}
     else if(window._followNagged!==true){window._followNagged=true;renderFollowChip&&renderFollowChip();}
     if(tb)near&&(tb.scrollTop=tb.scrollHeight);
