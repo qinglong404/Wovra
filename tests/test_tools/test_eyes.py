@@ -1,0 +1,227 @@
+"""工具层测试：眼睛（screenshot / view_image）与多模态图片注入口径。
+
+本模块锁住三件在 2026-09-13 实测确定的事实（「眼睛」的成立基础）：
+
+1. **端点通道**：user 消息的 parts 数组能带图（模型答对颜色）；tool 角色的
+   数组 content 被端点 400 拒（`param: messages.2.content`）——故图片走
+   「工具结果留引用 + 装配期以 user 注入」。探针 `scripts/probe_vision_channel.py`。
+2. **图片不进存档**：工具结果只留一行 `【图片】path=...`，task.json 不被
+   base64 撑爆（真实会话已 16MB 级）。
+3. **估算口径**：图片按固定 token 折算，绝不按 base64 文本长度算——否则
+   一张 1MB 的图会被估成上百万 tok，把水位与紧急折叠一起带偏。
+
+不联网、不开浏览器的用例为主（快且稳）；真截图用例在找不到浏览器时跳过。
+"""
+
+import base64
+import struct
+import zlib
+
+import pytest
+
+from wovra.tools import eyes
+from wovra.tools import screenshot, view_image
+
+from ._helpers import *  # noqa: F401,F403
+
+
+def _png_solid(w: int, h: int, rgb: tuple) -> bytes:
+    """纯 stdlib 造一张纯色 PNG（与探针同一手法，不引依赖）。"""
+    raw = b"".join(b"\x00" + bytes(rgb) * w for _ in range(h))
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+
+def _png_noise(w: int, h: int, seed: int = 7) -> bytes:
+    """造一张**压不动**的噪声 PNG（base64 长度可观，用于口径断言）。"""
+    state = seed
+    rows = []
+    for _ in range(h):
+        line = bytearray()
+        for _ in range(w):
+            state = (state * 1103515245 + 12345) & 0x7FFFFFFF
+            line += bytes(((state >> 16) & 0xFF, (state >> 8) & 0xFF, state & 0xFF))
+        rows.append(b"\x00" + bytes(line))
+    raw = b"".join(rows)
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        return (struct.pack(">I", len(data)) + tag + data
+                + struct.pack(">I", zlib.crc32(tag + data) & 0xFFFFFFFF))
+
+    ihdr = struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+            + chunk(b"IDAT", zlib.compress(raw, 0)) + chunk(b"IEND", b""))
+
+
+@pytest.fixture
+def eye_root(tmp_path, monkeypatch):
+    """把 PROJECT_ROOT 指到临时目录（截图/看图都在界内操作）。"""
+    from wovra import tools as tools_module
+
+    root = tmp_path / "ws"
+    root.mkdir()
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", root)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.eyes.safety, "PROJECT_ROOT", root)
+    return root
+
+
+# ---- 看图：入参校验与引用标记 -------------------------------------------------
+
+def test_view_image_missing_file_is_actionable(eye_root):
+    out = view_image("nope.png")
+    assert "文件不存在" in out and "screenshot" in out
+
+
+def test_view_image_rejects_non_image(eye_root):
+    (eye_root / "a.txt").write_text("x", encoding="utf-8")
+    out = view_image("a.txt")
+    assert "不是支持的图片格式" in out and "read_file" in out
+
+
+def test_view_image_rejects_directory(eye_root):
+    (eye_root / "d").mkdir()
+    out = view_image("d")
+    assert "是目录" in out
+
+
+def test_view_image_rejects_outside_workspace(eye_root):
+    out = view_image("../outside.png")
+    assert "越界" in out
+
+
+def test_view_image_emits_marker_and_not_base64(eye_root):
+    """结果只留一行引用——base64 绝不进工具结果（task.json 的命）。"""
+    raw = _png_solid(8, 8, (10, 20, 30))
+    (eye_root / "pic.png").write_bytes(raw)
+    out = view_image("pic.png", note="看配色")
+    assert "【图片】path=pic.png" in out
+    assert "看配色" in out
+    assert base64.b64encode(raw).decode()[:40] not in out
+    assert "下一次请求" in out
+
+
+def test_view_image_too_large_is_refused(eye_root, monkeypatch):
+    monkeypatch.setattr(eyes, "_MAX_IMAGE_BYTES", 16)
+    (eye_root / "big.png").write_bytes(_png_solid(8, 8, (1, 2, 3)))
+    out = view_image("big.png")
+    assert "超过" in out and "调小截图尺寸" in out
+
+
+# ---- 图片加载（装配期用） -----------------------------------------------------
+
+def test_load_image_part_builds_data_uri(eye_root):
+    (eye_root / "pic.png").write_bytes(_png_solid(4, 4, (200, 0, 0)))
+    part = eyes.load_image_part("pic.png")
+    assert part["type"] == "image_url"
+    assert part["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_load_image_part_returns_none_on_junk(eye_root):
+    assert eyes.load_image_part("missing.png") is None
+    (eye_root / "e.png").write_bytes(b"")
+    assert eyes.load_image_part("e.png") is None
+    (eye_root / "x.txt").write_text("t", encoding="utf-8")
+    assert eyes.load_image_part("x.txt") is None      # 后缀不是图片
+
+
+def test_eye_parts_from_marker_finds_multiple(eye_root):
+    (eye_root / "a.png").write_bytes(_png_solid(4, 4, (1, 1, 1)))
+    (eye_root / "b.png").write_bytes(_png_solid(4, 4, (2, 2, 2)))
+    text = "【图片】path=a.png\n【图片】path=b.png\n【图片】path=gone.png"
+    parts = eyes.eye_parts_from_marker(text)
+    assert len(parts) == 2                              # 坏引用静默跳过
+
+
+# ---- 口径：图片不按 base64 文本算 token ---------------------------------------
+
+def test_image_tokens_use_fixed_caliber(eye_root):
+    """一张大图不得被算成上百万 tok（否则水位误判触发紧急折叠）。"""
+    from wovra.agent import Agent
+    from wovra.tokens import breakdown
+
+    (eye_root / "big.png").write_bytes(_png_noise(160, 160))
+    part = eyes.load_image_part("big.png")
+    data_len = len(part["image_url"]["url"])
+    assert data_len > 50_000                            # 确实有可观的 base64
+
+    msgs = [{"role": "user", "content": [{"type": "text", "text": "看图"},
+                                         part]}]
+    est = Agent._estimate_messages(msgs)
+    assert est < eyes.TOKENS_PER_IMAGE * 4              # 只按固定口径 + 少量文字
+    assert est >= eyes.TOKENS_PER_IMAGE                 # 但确实算了一张图
+
+    table = breakdown("s", "c", [{"type": "function", "function": {
+        "name": "x", "parameters": {}}}], msgs)
+    assert table["user"] < eyes.TOKENS_PER_IMAGE * 4    # 成本账同口径
+
+
+def test_content_to_text_hides_base64(eye_root):
+    (eye_root / "p.png").write_bytes(_png_solid(8, 8, (3, 4, 5)))
+    part = eyes.load_image_part("p.png")
+    text = eyes.content_to_text([{"type": "text", "text": "说明"}, part])
+    assert "说明" in text and "[图片" in text
+    assert "base64," not in text                        # 一个字符都不泄漏
+
+
+# ---- 截图：CSS 与入参（不开浏览器的部分） -------------------------------------
+
+def test_screenshot_rejects_bad_target(eye_root):
+    assert "不接受 file://" in screenshot("file:///C:/x.html")
+    assert "仅支持 http/https" in screenshot("ftp://x/y")
+    assert "target 为空" in screenshot("   ")
+    assert "目录" in screenshot(".")
+
+
+def test_screenshot_reports_missing_browser(eye_root, monkeypatch):
+    monkeypatch.setattr(eyes, "find_browser", lambda: None)
+    (eye_root / "a.html").write_text("<html></html>", encoding="utf-8")
+    out = screenshot("a.html")
+    assert "找不到 Chrome/Edge" in out and "WOVRA_BROWSER" in out
+
+
+def test_screenshot_surfaces_browser_failure(eye_root, monkeypatch):
+    monkeypatch.setattr(eyes, "find_browser", lambda: "C:/fake/chrome.exe")
+    monkeypatch.setattr(eyes, "_run_browser",
+                        lambda *a, **k: (False, "页面一直不静止"))
+    (eye_root / "a.html").write_text("<html></html>", encoding="utf-8")
+    assert "截图失败" in screenshot("a.html") and "不静止" in screenshot("a.html")
+
+
+def test_pixel_stats_detect_blank_and_dark():
+    """像素统计要能把「全黑/全白/纯色」判出来——这就是机器的那只眼。"""
+    white = eyes._describe_pixels(_png_solid(32, 32, (255, 255, 255)))
+    assert "几乎全白" in white
+    black = eyes._describe_pixels(_png_solid(32, 32, (0, 0, 0)))
+    assert "几乎全黑" in black
+    red = eyes._describe_pixels(_png_solid(32, 32, (220, 40, 40)))
+    assert "主色" in red and "#c02020" in red   # 主色按 32 级量化（220>>5<<5=192）
+    assert "几乎全黑" not in red and "几乎全白" not in red
+
+
+def test_pixel_stats_handles_non_png():
+    assert "不支持" in eyes._describe_pixels(b"not a png")
+
+
+# ---- 真截图（有浏览器才跑） ---------------------------------------------------
+
+def test_screenshot_real_browser_when_available(eye_root):
+    """真跑一次无头截图：产出 PNG + 尺寸 + 像素统计（红底应被判为红主色）。"""
+    if eyes.find_browser() is None:
+        pytest.skip("本机无 Chrome/Edge，跳过真截图用例")
+    (eye_root / "page.html").write_text(
+        '<html><body style="margin:0;background:#dc2828;width:100vw;height:100vh">'
+        "</body></html>", encoding="utf-8")
+    out = screenshot("page.html", width=200, height=120)
+    assert "已截图" in out, out
+    assert "像素统计" in out
+    assert "200×120" in out
+    assert "几乎全白" not in out
+    shots = list((eye_root / ".shots").glob("*.png"))
+    assert shots, "截图应当落盘到 .shots/"

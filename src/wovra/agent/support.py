@@ -34,6 +34,13 @@ _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 
 # 分裂判据的体量门槛（2026-09-11 用户拍板）：主 agent 残留桶（纯对话/
+# 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），
+# 可以与其他只读工具并发执行。`screenshot` 则**不**进这个集合——它要启动无头
+# 浏览器（共用同一 user-data-dir），并发跑会互相抢 profile；且它落盘文件，属变更类。
+# 本行刻意远离上方那个集合（相隔 >3 行）：提交边界上 git 才会把它算成独立
+# hunk，从而能只提交自己这一份（见 `scripts/git_stage_hunks.py`）。
+_READ_ONLY_TOOLS = _READ_ONLY_TOOLS | {"view_image"}
+
 # 未入域块）与域并列构成顶层节点；但其占比 ≤ 该值（≈15K @ 100K 水位）
 # 时不拆出——并入主 agent、不计入节点数。纯聊天单独拆出去不合理。
 _SPLIT_CHAT_MERGE_RATIO = float(os.environ.get("WOVRA_SPLIT_CHAT_RATIO", "0.15"))

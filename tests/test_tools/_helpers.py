@@ -111,6 +111,10 @@ _TOOL_SURFACE_BASELINE = {
     "search_files": ["pattern", "directory", "glob", "context"],
     "web_fetch": ["url", "max_chars"],
     "web_search": ["query", "max_results"],
+    # 2026-09-13「眼睛」（用户拍板：将眼睛和 diff 都做了）：新增两工具，
+    # 参数表已按约定在此显式确认——本次改动使前缀缓存全量失效一次。
+    "screenshot": ["target", "width", "height", "wait_ms", "out"],
+    "view_image": ["path", "note"],
     "run_command": ["command", "timeout"],
     "run_background": ["command", "keep_alive"],
     "check_background": ["task_id"],

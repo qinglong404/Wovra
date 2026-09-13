@@ -70,6 +70,34 @@ LABELS = {
 CATEGORIES = tuple(LABELS)
 
 
+def content_to_text(content) -> str:
+    """把一条消息的 content 压成纯文本（图片只留一行说明，不带 base64）。"""
+    from .tools import eyes
+
+    return eyes.content_to_text(content)
+
+
+def _content_tokens(content) -> int:
+    """估一条消息内容的 token：文本走分词器，图片按固定口径折算。
+
+    2026-09-13（眼睛）：装配期可能注入 parts 列表（图片）。图片绝不能用
+    文本口径估——它的 base64 长度会算出天文数字，把成本账与水位一起带偏。
+    这里刻意不在模块顶层 import 眼睛（tokens 是被广泛引用的底层模块，
+    保持它的导入面最小），函数内取。
+    """
+    from .tools import eyes
+
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                total += eyes.TOKENS_PER_IMAGE
+            else:
+                total += estimate(eyes.part_text(part))
+        return total
+    return estimate(str(content or ""))
+
+
 def caliber() -> str:
     """当前估算用的是哪把尺子（展示用，别让页面把估算说成实测）。
 
@@ -118,12 +146,12 @@ def breakdown(
         if role == "system":
             continue  # 已按 system/context 单独计过，避免重复
         if role == "user":
-            result["user"] += estimate(message.get("content") or "")
+            result["user"] += _content_tokens(message.get("content"))
         elif role == "tool":
-            result["tool"] += estimate(message.get("content") or "")
+            result["tool"] += _content_tokens(message.get("content"))
         elif role == "assistant":
             # 助手消息的 token 既有正文，也有 tool_calls 的参数 JSON
-            result["assistant"] += estimate(message.get("content") or "")
+            result["assistant"] += _content_tokens(message.get("content"))
             for call in message.get("tool_calls") or []:
                 result["assistant"] += estimate(
                     json.dumps(call.get("function", {}), ensure_ascii=False)

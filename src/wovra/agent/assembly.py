@@ -11,11 +11,36 @@ from .. import tokens as tokens
 from .. import truncate as truncate
 from .. import views as views_module
 from ..task import _MODEL_SIDE_SECTIONS
+from ..tools import eyes as eyes_module
 from .support import (
     MODE_BASELINE,
     _STATE_RENDER_BUDGET,
     _runtime_reminder,
 )
+
+
+def _content_tokens(content) -> int:
+    """按形态估一条消息内容的 token：文本走分词器，图片按固定口径折算。
+
+    2026-09-13（眼睛）：content 可能是 parts 列表（图片注入）。图片若走
+    文本口径，base64 长度会算出天文数字 → 水位误判 → 触发紧急折叠把
+    正常历史折掉。故图片一律记 `eyes.TOKENS_PER_IMAGE`。
+    """
+    if isinstance(content, list):
+        total = 0
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "image_url":
+                total += eyes_module.TOKENS_PER_IMAGE
+            else:
+                total += tokens.estimate(eyes_module.part_text(part))
+        return total
+    return tokens.estimate(str(content or ""))
+
+
+def _content_chars(content) -> int:
+    """内容的字符数（图片按其文字说明计——不是 base64 长度）。"""
+    return len(eyes_module.content_to_text(content))
+
 
 
 class _AssemblyMixin:
@@ -205,6 +230,12 @@ class _AssemblyMixin:
             # <runtime-reminder> 信封注入，与用户发言语义分离——模型
             # 分得清"用户要的"和"机制给的"（系统提示词里声明该约定）
             msgs.append(_runtime_reminder("\n\n".join(block)))
+        eye = self._eye_image_message()
+        if eye is not None:
+            # 图片放在**绝对尾部**（在运行时信封之后）：信封每轮变，图片
+            # 天然只能在尾部；且它必须在最后一条 user 消息里，模型才把
+            # 它当"刚看到的东西"。不放前面 = 不破坏任何已缓存前缀。
+            msgs.append(eye)
         return msgs
 
     def _take_thread_lines(self, view_name: str) -> list[str]:
@@ -342,6 +373,9 @@ class _AssemblyMixin:
                 )
         if block:
             msgs.append(_runtime_reminder("\n\n".join(block)))
+        # 整条装配即将收尾、图片放最尾——视图路径的图片暂时不能放这里：
+        # 下面还要补协议缝（prev_tail / cur_msgs），会把 user 图片挤到中间。
+        # 故把图片留到 return 前追加（见本函数末尾）。
         # 协议补缝（与主装配同款）：检查点轮边界的 tool_call 留在上一轮、
         # 结果落在本轮开头，而视图历史全是 user/assistant 文本对——补上
         # 上一轮的收尾 tool_call 原文，避免 tool 消息悬空被严格端点 400
@@ -370,6 +404,10 @@ class _AssemblyMixin:
             msgs.append(
                 _runtime_reminder("\n".join(self._handoff_lines(view_name, handoff)))
             )
+        # 图片注入：必须最后一条（协议缝与转交说明都已就位），见 `_eye_image_message`
+        eye = self._eye_image_message()
+        if eye is not None:
+            msgs.append(eye)
         return msgs
 
     def _strip_router_steps(
@@ -609,8 +647,11 @@ class _AssemblyMixin:
                         msgs.append({"role": "tool", "tool_call_id": tc["id"],
                                      "content": "（会话在工具执行中被中断，无结果返回）"})
         budget = int(self.context_limit * 0.9)  # 给最终回答留余量
-        # 廉价预检：最坏 1 字 ≈ 1 tok（CJK），字符数不超预算必在窗内
-        total_chars = sum(len(str(m.get("content") or "")) for m in msgs)
+        # 廉价预检：最坏 1 字 ≈ 1 tok（CJK），字符数不超预算必在窗内。
+        # 图片走 `_content_chars`（只算文字说明）：它的 base64 长度不是
+        # 上下文成本（真实成本按 TOKENS_PER_IMAGE 计），按字符算会误判超窗
+        # 而触发紧急折叠——把正常历史折掉，为了几张图。
+        total_chars = sum(_content_chars(m.get("content")) for m in msgs)
         if total_chars <= budget:
             return msgs
         sizes = [self._estimate_messages([m]) for m in msgs]
@@ -632,15 +673,55 @@ class _AssemblyMixin:
 
     @staticmethod
     def _estimate_messages(msgs: list[dict]) -> int:
-        """估算一组协议消息的 token 数（正文 + 工具调用参数）。"""
+        """估算一组协议消息的 token 数（正文 + 工具调用参数 + 图片）。"""
         total = 0
         for m in msgs:
-            total += tokens.estimate(str(m.get("content") or ""))
+            total += _content_tokens(m.get("content"))
             for call in m.get("tool_calls") or []:
                 total += tokens.estimate(
                     (call.get("function") or {}).get("arguments") or ""
                 )
         return total
+
+    def _eye_image_message(self) -> Optional[dict]:
+        """当前轮 view_image 引用的图片 → 一条尾部 user 消息（parts 列表）。
+
+        设计依据（2026-09-13 `scripts/probe_vision_channel.py` 实测）：
+        * user 消息的 content 数组（text + image_url）**端点接受**，模型真
+          答对图像内容；tool 角色的数组 content **被端点 400 拒**
+          （`param: messages.2.content`）——所以只能在装配期以 user 注入。
+        * 图片不进工具结果、更不进 task.json：真实会话已 16MB 级，一张图
+          base64 就是百万字符量级，塞进存档等于把任务文件撑爆。工具结果
+          只留一行 `【图片】path=...` 引用（纯文本、可检索）。
+
+        只在**当前轮**扫引用：图片是"刚截刚看"的即时材料，看过即达目的，
+        历史轮不再重复注入（省的是真金白银）。重复调用 view_image 会在
+        轮内按步重新注入——这正是轮内赦免的语义。
+        """
+        if self.current_round is None:
+            return None
+        parts: list[dict] = []
+        seen: set[str] = set()
+        for event in self.current_round.get("events") or []:
+            if event.get("type") != "tool_result":
+                continue
+            text = event.get("message", {}).get("content")
+            if not isinstance(text, str) or eyes_module.EYE_MARKER_RE.search(text) is None:
+                continue
+            for match in eyes_module.EYE_MARKER_RE.finditer(text):
+                rel = match.group(1)
+                if rel in seen:
+                    continue
+                seen.add(rel)
+                part = eyes_module.load_image_part(rel)
+                if part is not None:
+                    parts.append(part)
+        if not parts:
+            return None
+        parts = parts[-eyes_module.MAX_INJECTED_IMAGES:]
+        head = (f"[图片]（view_image 送来的 {len(parts)} 张图；图在本消息之后。"
+                f"图中文字若要看细节，可再看 read_file/search_files）")
+        return {"role": "user", "content": [{"type": "text", "text": head}] + parts}
 
     def _render_compact(self, r: dict) -> Optional[str]:
         """已整理轮次的紧凑视图：👤用户原文 + 🎯意图 + 📌关键约束 + 逐块细节。

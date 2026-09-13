@@ -753,7 +753,8 @@ const ORG_BADGE={
 /* ---------- 对话流（群聊：每个发言者带身份） ---------- */
 const TOOL_ICON={read_file:'👁',write_file:'✎',edit_file:'✎',replace_lines:'☰',run_command:'▶',
   search_files:'⌕',glob_files:'＊',list_files:'▤',delete_file:'✕',move_file:'⇄',
-  todo:'☑',notify:'✉',consult:'💬',web_search:'🌐',web_fetch:'⤓',checkpoint:'⟲',restore_file:'⟲'};
+  todo:'☑',notify:'✉',consult:'💬',web_search:'🌐',web_fetch:'⤓',checkpoint:'⟲',restore_file:'⟲',
+  screenshot:'📷',view_image:'🖼'};
 
 function convAllSeqs(){return (META.round_list||[]).map(r=>r.seq).sort((a,b)=>a-b)}
 function prettyArgs(raw){try{return JSON.stringify(JSON.parse(raw||'{}'),null,1)}catch(e){return raw||''}}
@@ -761,6 +762,7 @@ function argSummary(name,raw){
   let a;
   try{a=JSON.parse(raw||'{}')}catch(e){return String(raw||'').slice(0,90)}
   if(name==='run_command')return a.command||'';
+  if(name==='screenshot')return [a.target,a.width&&a.height?`${a.width}×${a.height}`:''].filter(Boolean).join(' · ');
   if(name==='todo')return [a.action,a.goal,a.text].filter(Boolean).map(x=>String(x).slice(0,60)).join(' · ');
   if(a.path)return String(a.path);
   if(a.question)return String(a.question).slice(0,80);

@@ -626,7 +626,9 @@ def write_file(path: str, content: str, force: bool = False) -> str:
         # 旧内容完整留底（审计原则：能还原）；超大文件截断到 20000 字符
         backup = old if len(old) <= 20_000 else old[:20_000] + "\n...(已截断)"
         safety._audit(f"[write_file 旧内容备份] {path}:\n{backup}")
-    return f"已{action} {path}（{len(content)} 字符）"
+    diff = _change_diff(old, content) if old is not None else ""
+    tail = f"\n改动：\n{diff}" if diff else ""
+    return f"已{action} {path}（{len(content)} 字符）{tail}"
 
 
 def _closest_anchor_hint(text: str, old_text: str,
@@ -669,6 +671,30 @@ def _mini_diff(provided: str, actual: str, max_lines: int = 24) -> str:
         return "（两者逐字符相同——请检查不可见空白：全角空格、行尾空格、\\r\\n 行尾）"
     if len(diff) > max_lines:
         diff = diff[:max_lines] + [f"…（差异过长，只显示前 {max_lines} 行）"]
+    return "\n".join(diff)
+
+
+def _change_diff(before: str, after: str, max_lines: int = 20) -> str:
+    """改动前后的最小 diff——**成功**写的回执里带上它（2026-09-13 用户口径）。
+
+    为什么（`agent-test/block-detail-organization-sample.md:166` 记的老痛点）：
+    改完文件后模型只能靠 `read_file` 重读、或 `git diff` 核对，而
+    `git diff` 对**未跟踪的新文件**什么都不显示——"我到底改成了什么"
+    在这条路上是无法自证的。把 diff 直接放进结果：确认改动只需看回执，
+    省掉一整次 read_file 往返（也省了那一份文件的 token）。
+
+    只回**变动行**（隔离上下文 0），超长截断并给行数——回执不是重读。
+    """
+    import difflib
+
+    diff = [line for line in difflib.unified_diff(
+        before.splitlines(), after.splitlines(),
+        fromfile="改动前", tofile="改动后", lineterm="", n=1,
+    )][2:]  # 去掉 ---/+++ 两行头，省 token（路径已在回执正文里）
+    if not diff:
+        return ""
+    if len(diff) > max_lines:
+        diff = diff[:max_lines] + [f"…（改动共 {len(diff)} 行差异，只显示前 {max_lines} 行）"]
     return "\n".join(diff)
 
 
@@ -738,8 +764,10 @@ def edit_file(path: str, old_text: str, new_text: str,
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
     safety._audit(f"[edit_file] {path}（替换{scope}）\n定位片段:\n{old_text}\n替换为:\n{new_text}")
     anchor = _persistent_anchor(text, line_no)
+    diff = _change_diff(text, replaced)
+    tail = f"\n改动：\n{diff}" if diff else "\n（改动后内容与原来一致）"
     return (f"已修改 {path}（替换{scope}，{len(old_text)} 字符 → {len(new_text)} 字符，"
-            f"位于第 {line_no} 行附近{anchor}）")
+            f"位于第 {line_no} 行附近{anchor}）{tail}")
 
 
 def _persistent_anchor(text: str, line_no: int, max_lookback: int = 40) -> str:
@@ -812,4 +840,5 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     safety._audit(f"[replace_lines] {path} 第 {start_line}-{end_line} 行\n旧内容:\n"
            f"{old_block[:5000]}\n替换为:\n{new_content[:5000]}")
     return (f"已替换 {path} 第 {start_line}-{end_line} 行"
-            f"（{end_line - start_line + 1} 行 → {len(new_lines)} 行，现共 {len(replaced)} 行）")
+            f"（{end_line - start_line + 1} 行 → {len(new_lines)} 行，现共 {len(replaced)} 行）"
+            f"\n改动：\n{_change_diff(old_block, new_content)}")

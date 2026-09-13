@@ -28,6 +28,16 @@ from . import registry as registry_module
 from . import task as task_module
 from . import tokens as tokens_module
 from . import views as views_module
+from .tools import eyes as eyes_module
+
+
+def _content_text(content) -> str:
+    """消息内容的纯文本投影（图片只留一行说明，不带 base64）。
+
+    2026-09-13（眼睛）：装配尾部可能有图片 parts。前端 JSON 里塞 base64
+    等于把几百万字符发给浏览器且毫无用处——只投影文字说明。
+    """
+    return eyes_module.content_to_text(content)
 
 _WEBUI = Path(__file__).resolve().parents[2] / "webui" / "index.html"
 _STARTED = time.strftime("%Y-%m-%d %H:%M:%S")

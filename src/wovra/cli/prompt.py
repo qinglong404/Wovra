@@ -21,8 +21,10 @@ from ..tools import (
     run_background,
     run_command,
     search_files,
+    screenshot,
     stop_background,
     web_fetch,
+    view_image,
     web_search,
     write_file,
 )
@@ -202,6 +204,11 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
             glob_files,
             read_file,
             search_files,
+            # 眼睛（2026-09-13）：放这里而不是紧挨 web 那一带——提交边界上要与
+            # 并行会话的改动拉开行距，git 才会把它算成独立 hunk，从而能只提交
+            # 自己这一份（`scripts/git_stage_hunks.py`）。
+            screenshot,
+            view_image,
             write_file,
             edit_file,
             replace_lines,

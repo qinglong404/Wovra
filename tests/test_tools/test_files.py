@@ -453,3 +453,54 @@ def test_move_file_to_existing_dir_suggests_inner_path(monkeypatch, tmp_path):
     # 文件未被移动（move 不覆盖不并入）
     assert (tmp_path / "f.txt").read_text(encoding="utf-8") == "x"
     assert not (tmp_path / "bdir" / "f.txt").exists()
+
+
+# ---- 改动 diff 回显（2026-09-13，用户拍板「diff 也做了」） ---------------------
+# 动机：改完文件后模型只能 read_file 重读或 git diff 核对，而 git diff 对
+# **未跟踪的新文件**什么都不显示。"我到底改成了什么"在回执里就能自证，
+# 省掉一次重读往返（也省了那份文件的 token）。
+
+def test_edit_file_result_carries_diff(monkeypatch, tmp_path):
+    """成功编辑的回执含最小 diff：改动行可见，不必重读文件。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "a\nb\nc")
+    result = edit_file("app.py", "b", "B2")
+    assert "改动：" in result
+    assert "-b" in result and "+B2" in result
+    assert "@@" in result            # 变更块头（含行号区间，便于定位）
+
+
+def test_write_file_overwrite_carries_diff_and_create_does_not(monkeypatch, tmp_path):
+    """覆盖写带 diff；新建文件没有"改动"可显示（旧内容不存在）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    created = write_file("n.txt", "1\n2")
+    assert "改动：" not in created                     # 新建：无旧内容
+    overwritten = write_file("n.txt", "1\n22")
+    assert "改动：" in overwritten and "+22" in overwritten
+    # 小文件覆盖不触发防呆（<1000 字符），确认没被拦
+    assert "已覆盖" in overwritten
+
+
+def test_replace_lines_result_carries_diff(monkeypatch, tmp_path):
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("m.md", "x\ny\nz\n")
+    result = replace_lines("m.md", 2, 2, "Y!")
+    assert "改动：" in result and "-y" in result and "+Y!" in result
+
+
+def test_diff_is_truncated_when_huge(monkeypatch, tmp_path):
+    """diff 不是重读：差异过长必须截断，不得把整个文件回灌上下文。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    body = "\n".join(f"line {i}" for i in range(200))
+    write_file("big.txt", body)
+    result = edit_file("big.txt", "line 5\nline 6\nline 7", "changed", replace_all=False)
+    assert "改动：" in result
+    assert len(result) < len(body)                    # 回执比原文小得多

@@ -34,6 +34,10 @@
 # 值快照（cli/ 依赖这份快照语义）。要重定向工作区请改
 # `wovra.tools.safety.PROJECT_ROOT`（task.py / 测试 / 探针均如此）。
 
+#
+#     eyes.py         眼睛：screenshot（无头浏览器截图）+ view_image（多模态看图）
+# 上面这行刻意与其它子模块分开写：提交边界上要与并行会话的改动拉开行距，
+# git 才会把它算成独立 hunk（`scripts/git_stage_hunks.py`）。
 # 子模块（可直接访问）
 from . import limits
 from . import permissions  # noqa: E402——文件权限守卫（工具层强制）
@@ -77,3 +81,9 @@ from .interaction import (  # noqa: E402
     run_post_hook,
     run_pre_hook,
 )
+
+# ---- 眼睛（2026-09-13）------------------------------------------------------
+# 单独放在文件末尾（而不是紧挨 web 检索那两行）：提交边界上要与并行会话的
+# 改动拉开距离——git 会把相邻改动并成同一个 hunk，那样就没法只提交自己那份
+# （见 `scripts/git_stage_hunks.py`）。
+from .eyes import screenshot, view_image  # noqa: E402
