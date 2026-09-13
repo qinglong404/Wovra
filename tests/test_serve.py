@@ -186,6 +186,44 @@ def test_pending_views_preview_is_readonly(tmp_path, monkeypatch):
     assert serve.pending_views("ghost") is None
 
 
+def test_view_sizes_carries_window_and_caliber(tmp_path, monkeypatch):
+    """「重组后分给每个 agent 多少」**登记完就能算**，不必等一轮对话。
+
+    用户口径（2026-09-13）："我重组上下文，给每个 agent 分了多少内容？不是分完
+    agent 就知道了吗？非得新消息干嘛？不知道准确 tok，不能拿字符推算吗？"——
+    视图字节本来就从 rounds+registry 确定性派生，故投影随时可算；而且估算与
+    运行时**同一把尺子**（tiktoken），不是拍脑袋。投影要"占窗口多少"就得给
+    分母（未运行过的条目注册表 `window=0`），尺子也要如实交代。
+    """
+    import json as _json
+    from dataclasses import asdict as _asdict
+    from wovra.task import Task
+    tasks = tmp_path / "tasks5"
+    (tasks / "s1").mkdir(parents=True)
+    task = Task(id="s1", goal="g", workspace=str(tmp_path))
+    task.rounds = [{
+        "seq": 1, "user_input": {"original": "干活"},
+        "events": [{"id": "R1-E01", "type": "user", "truncated": "干活",
+                    "message": {"role": "user", "content": "干活"}}],
+        "end_state": "completed", "org_state": "done",
+        "pending_org": {
+            "domains": [{"name": "域甲", "description": "d",
+                         "file_domains": ["a.py"]}],
+            "split_assessment": {"splittable": True, "reason": "r"},
+        },
+    }]
+    (tasks / "s1" / "task.json").write_text(
+        _json.dumps(_asdict(task), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+
+    d = serve.view_sizes("s1")
+    assert d is not None
+    assert d["window"] == 1_000_000            # 投影的分母（模型窗口）
+    assert d["basis"].startswith(("tiktoken", "heuristic"))   # 尺子摆明
+    assert d["agents"] and all("tokens" in a for a in d["agents"])
+    assert any(a["is_main"] for a in d["agents"])
+
+
 def test_todo_log_derives_calls():
     """计划页流水：从轮事件抽 todo 调用（动作/文本/结果配对）。"""
     data = _fake_task()

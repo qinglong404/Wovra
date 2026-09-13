@@ -25,6 +25,7 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 from . import registry as registry_module
 from . import task as task_module
+from . import tokens as tokens_module
 from . import views as views_module
 
 _WEBUI = Path(__file__).resolve().parents[2] / "webui" / "index.html"
@@ -840,24 +841,45 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                     "total_chars": total, "tokens": tok, "truncated": trunc,
                     "messages": msgs, "description": "", "file_domains": []})
     return {"agents": out, "pending": True,
+            # 该会话的模型上下文窗口（各视图共用）——投影要"占窗口多少"当分母，
+            # 未运行过的条目注册表里 window=0（没有观测），分母得从这里给
+            "window": int(agent._agent_window()),
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 
 
 def view_sizes(task_id: str) -> dict | None:
-    """各 agent 重组后视图体量（走 pending_views 的物化，剥掉消息正文）。
+    """各 agent **重组后视图体量**（走 pending_views 的物化，剥掉消息正文）。
 
-    顶部状态栏用：未生效的分裂产物也要显示"重组后各 agent 各看到多少"，
-    不然注册表里只剩分裂前那次装配的旧数（实测：显示 17K，实际重组后 5.9K）。
+    顶部状态栏用。**登记完就能算，不必等下一轮对话**（2026-09-13 用户口径：
+    "我重组上下文，给每个 agent 分了多少内容？不是分完 agent 就知道了吗？
+    非得新消息干嘛？"）：视图字节本来就从 `rounds + registry` 确定性派生，
+    这里在内存里把注册表每个条目装配一遍，数出来的就是"它现在会看到多少"。
+
+    口径如实交代，不许含糊成实测：
+    * `tokens` = 与运行时**同一把尺子**（`tokens.estimate`，装了 tiktoken 就是
+      官方分词器），故与注册表里的 `ctx_cur`（实测观测）**可直接比较**；
+    * `basis` = 用的是哪把尺子（`tiktoken:cl100k_base` / `heuristic`）；
+    * `window` = 该会话的模型上下文窗口（`WOVRA_CONTEXT_LIMIT`）——未运行过的
+      条目注册表里 `window=0`（没有观测），但"占窗口多少"这个投影是要分母的。
     """
     got = pending_views(task_id)
     if got is None:
         return None
+    basis = tokens_module.caliber()
+    try:
+        from .agent.support import _DEFAULT_CONTEXT_LIMIT
+        window = int(got.get("window") or _DEFAULT_CONTEXT_LIMIT)
+    except Exception:  # noqa: BLE001——拿不到就留 0，前端按"无分母"渲染
+        window = int(got.get("window") or 0)
     return {"agents": [{k: a.get(k) for k in
                         ("id", "name", "is_main", "count", "total_chars",
                          "tokens", "alt_count", "alt_chars",
                          "alt_tokens")}
                        for a in got.get("agents") or []],
-            "pending": True, "note": got.get("note")}
+            "window": window, "basis": basis,
+            "pending": True,
+            "note": "零 LLM 机械投影：在内存里按当前注册表 + 轮材料装配各视图"
+                    "所得（会话一个字节都不改）"}
 
 
 def _event_agents(r: dict, main_id: str) -> list[str]:

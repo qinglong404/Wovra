@@ -70,6 +70,17 @@ LABELS = {
 CATEGORIES = tuple(LABELS)
 
 
+def caliber() -> str:
+    """当前估算用的是哪把尺子（展示用，别让页面把估算说成实测）。
+
+    2026-09-13 用户口径："不知道准确 tok，不能拿字符推算吗？"——可以，而且
+    比"字符推算"更好：装了 tiktoken 时用的是官方分词器（与运行时**同一把
+    尺子**，故与 `ctx_cur` 同口径可比），退化时才是字符启发式。页面上要如实
+    写明是哪一种，不许含糊成"准确值"。
+    """
+    return "tiktoken:cl100k_base" if _get_encoding() is not None else "heuristic"
+
+
 def estimate(text: str) -> int:
     """估算一段文本的 token 数。"""
     if not text:

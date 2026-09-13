@@ -1382,43 +1382,78 @@ function ci_status(ci){
   const [t,c]=resultStatus(ci.name,ci.result);return[t,c];
 }
 
-/* ---- 对话页顶部的 agent 上下文条（注册表运行时账）----
+/* ---- 对话页顶部的 agent 上下文条 ----
+   两种数，分得清清楚楚（2026-09-13 用户口径）：
+   * **重组后 ≈N**：零 LLM 机械投影。视图字节本来就从 rounds+registry 确定性
+     派生，所以**登记完就能算，不必等下一轮对话**（用户原话："我重组上下文，
+     给每个 agent 分了多少内容？不是分完 agent 就知道了吗？非得新消息干嘛？"）。
+     估算与运行时**同一把尺子**（tiktoken 分词器），故与实测可直接比较；
+     tiktoken 不可用时退化为字符启发式，标签里写明是哪一种。
+   * **实测 M**：该 agent 上一次真装配时记下的 ctx_cur —— 是**历史事实**，会被
+     下一轮刷新，不是"当前"。整理压缩过后它通常远大于投影（实测会话
+     20260913-125849-2963df：Main 实测 235.4K vs 重组后 ≈4.6K）。
    分母 window = 模型上下文窗口（WOVRA_CONTEXT_LIMIT，默认 1M），不是整理水位 */
-let VIEWSIZES=null;   // {sig, agents:[{id,name,is_main,count,total_chars,...}]}
+let VIEWSIZES=null;   // {sig, agents:[{id,name,is_main,count,total_chars,tokens,...}], window, basis}
 async function ensureViewSizes(force){
   if(!META)return;
+  const reg=(META.registry||[]).filter(e=>e&&e.name);
   const pend=(META.round_list||[]).filter(r=>r.split&&r.split.pending&&(r.split.domains||[]).length);
-  if(!pend.length){VIEWSIZES=null;return}   // 无暂存产物：状态栏用注册表现值即可
-  const sig=CUR+'|'+(META.round_list||[]).length+'|'+pend.length;
+  /* **登记了就要显示分到多少**：老条件只在"产物未生效"时才拉，于是已生效的
+     会话只剩注册表观测——没跑过的 agent 就成了"未运行（无观测）"。可那个数
+     分完就有，不该等一轮对话。 */
+  if(reg.length<2&&!pend.length){VIEWSIZES=null;return}
+  const sig=CUR+'|'+(META.round_list||[]).length+'|'+reg.length+'|'+pend.length;
   if(!force&&VIEWSIZES&&VIEWSIZES.sig===sig)return;
   try{
     const d=await api(`/api/sessions/${CUR}/view-sizes`);
-    VIEWSIZES={sig,agents:d.agents||[]};
+    VIEWSIZES={sig,agents:d.agents||[],window:d.window||0,basis:d.basis||''};
   }catch(e){VIEWSIZES=null}
 }
+function fmtBasis(b){
+  return b==='tiktoken:cl100k_base'?'tiktoken 分词器':(b?'字符启发式':'');
+}
 function renderCtxbar(){
-  // 有暂存产物时显示"重组后"各 agent 体量（含尚未并入注册表的子 agent），
-  // 否则用注册表运行时账——两种口径都在标签里写明
-  if(VIEWSIZES&&(VIEWSIZES.agents||[]).length){
-    const bar=document.getElementById('ctxbar');
-    bar.classList.add('show');
-    bar.innerHTML=VIEWSIZES.agents.map(a=>{
-      const col=agentColor(a.id||a.name);
-      const win=((META.registry||[]).find(e=>e.id===a.id||e.name===a.name)||{}).window||1000000;
-      const tk=a.tokens||Math.round((a.total_chars||0)/3);
-      const share=win?tk/win*100:0;
-      const lab=a.is_main?'主 agent':(a.id||'');
-      return `<div class="ctx-cell" title="${esc(a.name||'')}（${esc(a.id||'')}）&#10;重组后视图 ≈${fmtN(tk)} tok · ${a.count} 条（${fmtN(a.total_chars)} 字符）&#10;各视图各自带一份系统提示词与全局职责表，故相加≠原全量${a.alt_chars?`
-对照：全量装配 ${fmtN(a.alt_chars)} 字符`:''}">
-        <span class="ctx-dot" style="background:${col}"></span>
-        <span class="mono" style="color:${col}">${esc(lab)}</span>
-        <span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${col}"></i></span>
-        <span class="mono">${fmtN(tk)}/${fmtN(win)}（${(share>=10?share.toFixed(1):share.toFixed(2))}%）</span>
-        </div>`;
-    }).join('');
-    return;
-  }
-  renderCtxbarReg();
+  const bar=document.getElementById('ctxbar');
+  const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
+  const pv=((VIEWSIZES&&VIEWSIZES.agents)||[]);
+  // 暂存产物的域还没进注册表 → 也要列出来（"分完就知道"的那个数就在这）
+  const extra=pv.filter(a=>!entries.some(e=>e.id===a.id||e.name===a.name));
+  const rows=entries.map(e=>({e,pv:pv.find(a=>a.id===e.id||a.name===e.name)}))
+    .concat(extra.map(a=>({e:{id:a.id,name:a.name,status:'pending'},pv:a})));
+  bar.classList.toggle('show',!!rows.length);
+  if(!rows.length){bar.innerHTML='';return}
+  const winDefault=(VIEWSIZES&&VIEWSIZES.window)||0;
+  const cells=rows.map(({e,pv})=>{
+    const col=agentColor(e.id||e.name);
+    const proj=pv?(pv.tokens||0):0;                 // 重组后视图（机械投影）
+    const cur=e.ctx_cur||0, obsWin=e.window||0;     // 实测观测（上次装配）
+    const win=obsWin||winDefault;                   // 有观测用观测，没有用模型窗口
+    const main=proj||cur, share=win?main/win*100:0; // 主数 = 重组后；无投影才退实测
+    const pct=share>=10?share.toFixed(1):share.toFixed(2);
+    const barHtml=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`:'';
+    const num=proj?`≈${fmtN(proj)}${win?`/${fmtN(win)}（${pct}%）`:''} tok`
+      :(obsWin?`${fmtN(cur)}/${fmtN(win)}（${pct}%） tok`:'无数据');
+    // 实测只在**与投影并存**时并列显示：有投影时它是"上次"，容易被误当现状
+    const obs=(proj&&obsWin)
+      ?`<span class="mono" style="color:var(--tx3);font-size:10px"> · 实测 ${fmtN(cur)}</span>`:'';
+    const lines=[`重组后视图 ≈${fmtN(proj||0)} tok · ${(pv&&pv.count)||0} 条（${fmtN((pv&&pv.total_chars)||0)} 字符）`
+      +`\n（零 LLM 机械投影：按当前注册表 + 轮材料装配所得，会话一字不改）`];
+    if(win)lines.push(`占窗口 ${fmtN(win)} tok 的 ${pct}%`);
+    if(obsWin)lines.push(`实测（上次装配）${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok`
+      +`\n——历史观测，会被下一轮刷新；整理压缩后通常远大于重组后`);
+    if(pv&&pv.alt_tokens)lines.push(`对照：全量装配（未按域重组）≈${fmtN(pv.alt_tokens)} tok`);
+    lines.push(`各视图各自带一份系统提示词与全局职责表，故相加 ≠ 原全量`);
+    lines.push(`名下 ${e.rounds||0} 轮${seqRangeOf(e)} · 步 ${fmtN(e.steps||0)} · 峰值 ${fmtN(e.ctx_peak||0)} tok`
+      +`${e.handoffs?` · 转出 ${e.handoffs} 次`:''}`);
+    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;${esc(lines.join('\n'))}">
+      <span class="ctx-dot" style="background:${col}"></span>
+      <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${barHtml}
+      <span class="mono">${num}</span>${obs}</div>`;
+  }).join('');
+  // 尺子摆明：估算不许含糊成实测
+  const legend=VIEWSIZES?`<span class="mono" style="color:var(--tx3);font-size:10px">`
+    +`≈ 重组后（${esc(fmtBasis(VIEWSIZES.basis))}估算，登记即可算） · 实测 = 上次装配</span>`:'';
+  bar.innerHTML=cells+legend;
 }
 /* 名下轮的**总轮 R 号**区间（默认「计数 + 首末范围」，号多了不逐条列） */
 function seqRangeOf(o){
@@ -1428,28 +1463,10 @@ function seqRangeOf(o){
   if(!f)return '';
   return f===l?`（R${f}）`:`（R${f}–R${l}）`;
 }
-function renderCtxbarReg(){
-  const bar=document.getElementById('ctxbar');
-  const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
-  bar.classList.toggle('show',!!entries.length);
-  if(!entries.length){bar.innerHTML='';return}
-  bar.innerHTML=entries.map(e=>{
-    const col=agentColor(e.id||e.name);
-    const cur=e.ctx_cur||0,win=e.window||0,share=win?cur/win*100:0;
-    const pct=share>=10?share.toFixed(1):share.toFixed(2);
-    /* window=0 = **这个 agent 一次都没跑过**（不是"窗口空着"）。曾经这里靠
-       后端补的默认窗口演成 `0/1M（0.00%）`，看着像"有 1M 窗口没用"——
-       实测会话里 4 个刚登记的域全这样，被读成"运行异常"。没观测就直说。 */
-    const bar=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`+
-      `<span class="mono">${fmtN(cur)}/${fmtN(win)}（${pct}%）</span>`
-      :`<span class="mono" style="color:var(--tx3)">未运行（无观测）</span>`;
-    const tip=win?`上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）`
-      :`上下文 未运行（该 agent 尚无装配观测：window=0）`;
-    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;${tip}&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · 名下 ${e.rounds||0} 轮${seqRangeOf(e)} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
-      <span class="ctx-dot" style="background:${col}"></span>
-      <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${bar}</div>`;
-  }).join('');
-}
+function renderCtxbarReg(){/* 已并入 renderCtxbar（2026-09-13）：两种数在一个
+  渲染器里分列——重组后机械投影为主、实测观测为辅。留着这个旧函数会让"只在
+  注册表观测不够时才显示"的老口径重新长回来（未运行过的 agent 就又变成
+  "没有数"），故删掉而不是留着当备胎。 */}
 
 async function loadEarlier_ref(){return loadEarlier()}
 
@@ -2091,9 +2108,11 @@ function renderProject(c){
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
       <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">名下${a.rounds||0}轮${seqRangeOf(a)} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));
-      if(pv){const before=pv.alt_tokens||a.ctx_cur||0;return ` · 整理后 ≈${fmtN(before)} tok → 重组后 ≈${fmtN(pv.tokens||Math.round((pv.total_chars||0)/3))} tok`}
-      /* 没观测就写"未运行"：`0/1M` 会被读成"运行了但没占上下文"（实测误读） */
-      return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:' · 未运行（无观测）'})()}</span></div>
+      /* **重组后是主数**（登记即可算，不必等一轮对话）；实测只是"上次装配" */
+      if(pv){const tk=pv.tokens||0;
+        return ` · 重组后 ≈${fmtN(tk)} tok${pv.alt_tokens?`（全量装配 ≈${fmtN(pv.alt_tokens)}）`:''}`
+          +(a.ctx_cur?` · 实测 ${fmtN(a.ctx_cur)}`:'')}
+      return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:' · 无数据'})()}</span></div>
       <div class="desc desc-clamp">${esc(a.description||'')}</div>
       ${(a.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
       ${(a.files||[]).map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="它维护的文件（LIVE）——在左树中过滤">${esc(f)}</span>`).join('')}
