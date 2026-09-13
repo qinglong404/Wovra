@@ -608,6 +608,94 @@ renderLive();
   console.log(`   O 主块有内容=${!!mainDone} A块有内容=${!!aBody} 互不串=${!(boxA&&/主 agent 的思考/.test(boxA.innerHTML))}`);
 }
 
+console.log('场景 P｜多步多 agent：干活那一方的那行**不许出现"什么都没有"的空档**');
+resetLive();
+const P1 = mountRound(DOM.content, 7, false, 'Main');
+const P2 = mountRound(DOM.content, 7, false, 'B');
+META.round_list = [{seq:7, active_view:'B', events:4, steps_used:3}];
+META.status = 'in_progress';
+{
+  // 复现一次真实跑轮：主 agent 想一步 → 转交 → B 想两步（中间夹工具执行）
+  const chunks = [
+    {k:'think', s:'主 agent 先看这活归谁', ag:'Main'},
+    {k:'status', s:'正在转交…', ag:'Main'},          // 收口 → Main 的完成区
+    {k:'think', s:'B 第一步的思考', ag:'B'},
+    {k:'status', s:'正在执行 read_file…', ag:'B'},   // 收口 → B 的完成区
+    {k:'think', s:'B 第二步的思考', ag:'B'},
+    {k:'ans', s:'**最终**答复', ag:'B'},
+  ];
+  // 注意：迷你 DOM 把 innerHTML 解析成**扁平**子节点（不还原嵌套），所以查询一律
+  // **从 box 根出发**（产品代码也是这么查的）。从 `.live-think` 里再查它的子节点
+  // 会永远找不到——这一条踩过一次，让场景 P 报了假空档。
+  const visible = aid => {
+    const row = (aid === 'Main' ? P1 : P2).gbox.querySelector('.livebox');
+    if (!row) return false;
+    const th = row.querySelector('.live-think');
+    const head = row.querySelector('.live-think-head');
+    const dn = row.querySelector('.live-done');
+    const an = row.querySelector('.live-ans');
+    const thinkOn = !!(th && th.style.display !== 'none' && head && head.textContent);
+    const doneOn = !!(dn && String(dn.innerHTML).trim().length > 0);
+    const ansOn = !!(an && an.style.display !== 'none'
+      && String(an.innerHTML).trim().length > 0);
+    return !!(thinkOn || doneOn || ansOn);
+  };
+  const trace = [];
+  for (const c of chunks) {
+    applyChunk(c);
+    renderLive();
+    const row = (c.ag === 'Main' ? P1 : P2).gbox.querySelector('.livebox');
+    if (process.env.WEBUI_RENDER_DUMP) {
+      const th = row && row.querySelector('.live-think');
+      const hd = th && th.querySelector('.live-think-head');
+      console.log(`   [dbg ${c.k}/${c.ag}] row=${!!row} box=${!!LIVE.boxes[c.ag]}`
+        + ` think=${JSON.stringify(LIVE.think).slice(0, 20)}`
+        + ` thinkDisp=${th ? JSON.stringify(th.style.display) : 'n/a'}`
+        + ` head=${hd ? JSON.stringify(hd.textContent).slice(0, 30) : 'n/a'}`
+        + ` html=${row ? JSON.stringify(String(row.innerHTML).slice(0, 40)) : 'n/a'}`);
+    }
+    trace.push(`${c.k}/${c.ag}:Main=${visible('Main') ? '有' : '空'}`
+      + `,B=${visible('B') ? '有' : '空'}`);
+  }
+  // 前两条是"主 agent 在转交"，B 还没轮到，允许空；从 B 开始干活起不许空
+  const afterB = trace.slice(2);
+  if (afterB.some(t => t.endsWith('B=空'))) {
+    problems.push('P: B 干活期间那一行出现过"什么都没有"的空档（=用户看到的一闪一闪）');
+  }
+  console.log('   P ' + trace.join(' | '));
+}
+
+console.log('场景 Q｜事件区已画过一部分时：直播内容**不许被去重吃掉**（一闪一闪的真因）');
+resetLive();
+const Q1 = mountRound(DOM.content, 7, false, 'Main');
+const Q2 = mountRound(DOM.content, 7, false, 'B');
+META.round_list = [{seq:7, active_view:'B', events:4, steps_used:2}];
+META.status = 'in_progress';
+{
+  // 模拟"切页/刷新后事件区已经画过一步"：往 B 的块里塞一个**正式**思考块
+  // （它是 B 那一步的官方渲染，内容是"转交那一步"的——**和我这边的第 1 条
+  // 不是同一条**，这正是按条数扣会错位的地方）
+  const official = mkEl('div');
+  official.className = 'think-box';
+  const ob = mkEl('div'); ob.className = 'think-body';
+  ob.textContent = '官方已渲染的（转交那一步的）思考';
+  official.appendChild(ob);
+  Q2.gbox.appendChild(official);
+  Q2.gbox.appendChild(Q1.gbox.children[0] || mkEl('div'));   // 占位：保持 B 块非空
+
+  applyChunk({k:'think', s:'B 真正的新思考', ag:'B'});
+  renderLive();
+  applyChunk({k:'status', s:'正在执行 read_file…', ag:'B'});
+  renderLive();
+  const box = Q2.gbox.querySelector('.livebox');
+  const done = box && box.querySelector('.live-done');
+  const txt = done ? String(done.innerHTML) : '';
+  if (!/B 真正的新思考/.test(txt)) {
+    problems.push('Q: 事件区已画过别的内容时，直播这一步的思考被去重吃掉了（=一闪一闪）');
+  }
+  console.log(`   Q 新思考还在=${/B 真正的新思考/.test(txt)}`);
+}
+
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('.livebox'); }
 
 console.log('');

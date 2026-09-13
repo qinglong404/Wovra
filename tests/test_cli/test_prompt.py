@@ -42,6 +42,41 @@ def test_system_prompt_matches_mode_and_environment(monkeypatch):
     assert ".venv/bin" in managed
 
 
+def test_system_prompt_splits_user_intent_into_three_classes():
+    """用户意图三分：**问 / 思想对齐 / 行动**（2026-09-13 用户口径）。
+
+    用户原话："那将用户需要分成三类：1 问，这个时候只需读…只需回答用户问题即可，
+    而不去做。2 思想对齐…只需分析其可行性，查漏补缺，给出建议。3 行动…应先将
+    细节问清晰，收敛范围等等，然后开始行动，直到做完…收敛范围必须开始定好，
+    后面无论是多少条，都做完，那怕是一百条，也做完再汇报。"
+
+    为什么必须钉住：这是**语义判断**，机制管不了。判错的现场就在会话
+    `20260913-151842-2628dd`——R4「如果让你写…你准备如何写？」直接开工、
+    R7「可以实现吗？」跑了 42 条命令 25 次改文件、R8 已明说「先不提交，给我讲讲」
+    仍跑了 7 条命令 1 次改文件。两模式都要带这三条。
+    """
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    for mode in (MODE_MANAGED, MODE_BASELINE):
+        prompt = _system_prompt(mode)
+        assert "问 / 思想对齐 / 行动" in prompt
+        # ① 问：只回答，不改
+        assert "只回答" in prompt and "不改文件、不提交、不安装、不删除" in prompt
+        # ② 思想对齐：只分析，不动手实现
+        assert "只分析" in prompt and "不要动手实现" in prompt
+        # ③ 行动：先收敛范围，然后一次做完（哪怕一百条）
+        assert "把范围收敛定死" in prompt
+        assert "哪怕一百条" in prompt and "做完再汇报" in prompt
+        # 判不准时的兜底：问一句 + 默认按最保守的那一类
+        assert "ask_user" in prompt and "默认按最保守的那一类办" in prompt
+    # 路由只对第 3 类做（否则"我顺着问一句"就被转给别的域回答了）
+    assert "路由只对第 3 类（行动）做" in _system_prompt(MODE_MANAGED)
+    from wovra.agent import _ROUTE_TO_SCHEMA
+    desc = _ROUTE_TO_SCHEMA["function"]["description"]
+    assert "只转「要动手的活」" in desc
+
+
 def test_system_prompt_forbids_ack_on_runtime_injection():
     """系统提示词要求模型对运行时注入（非用户输入）不做确认性回复。
 

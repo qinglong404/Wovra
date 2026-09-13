@@ -1233,20 +1233,29 @@ function insideLive(el){
   return false;
 }
 /* 某个 agent 的"完成区"：与事件区同款渲染，但**扣掉正式渲染已经画过的部分**
-   （刷新后 catch-up 重放了整条流，而事件区可能已经画过前几步——不扣会重复）。
-   **必须把直播区自己排除在外**：`.live-think` 与完成区的思考块也是 `.think-box`，
-   一起数进去会越扣越多，最后连刚做完的思考都被吃掉（写这段时踩到）。 */
+   （刷新/切页时事件区可能已经画过前几步——不扣会重复）。
+
+   去重按**内容**，不按条数（2026-09-13 修的 bug）：原先数"正式那边有几个
+   `.think-box`/`.bub`"就从我这边扣掉前几个——**数一错位就把直播内容整段藏掉**，
+   表现为"思考中那一行一闪一闪、一会有一会无"（用户报的），因为事件区里那个
+   "第 N 个"往往**不是**我这边第 N 条（比如事件区画的是转交那一步的思考）。
+   现在按文本/渲染结果精确比对：**内容真在屏幕上才不重复画**。 */
 function liveDoneHtml(aid,host){
-  let covT=0,covX=0;
+  let seen=null;
   if(host){
-    covT=[...host.querySelectorAll('.think-box')].filter(x=>!insideLive(x)).length;
-    covX=[...host.querySelectorAll('.bub')].filter(x=>!insideLive(x)).length;
+    seen=new Set();
+    [...host.querySelectorAll('.think-body')].forEach(b=>{
+      if(!insideLive(b))seen.add(String(b.textContent||''));
+    });
+    [...host.querySelectorAll('.bub')].forEach(b=>{
+      if(!insideLive(b))seen.add(String(b.innerHTML||''));
+    });
   }
-  const list=LIVE.steps[aid]||[];
-  let t=0,x=0;
-  const items=list.filter(it=>{
-    if(it.t==='think'){t++;return t>covT}
-    x++;return x>covX;
+  const items=(LIVE.steps[aid]||[]).filter(it=>{
+    if(!seen||!seen.size)return true;
+    return it.t==='think'
+      ? !seen.has(String(it.text||''))
+      : !seen.has(md(it.text));
   });
   return items.map(it=>itemHtml(it,{})).join('');
 }
