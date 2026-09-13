@@ -678,6 +678,14 @@ async function select(id){
   renderHeader();renderTab();
   watchMaintenance();   // 打开一个"后台还在整理"的会话：界面要自己跟上（§86）
 }
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
+  // **没有会话元数据就什么都不做**（2026-09-13 修，用户报"页面一直加载中"）：
+  // 原先 `META.usage` 直接取属性——META 为 null 时抛 TypeError，而 `setTab`/`renderTab`
+  // 都会调到这里。于是**只要有一次在"会话还没选中/元数据还没到"时渲染**（点页签、
+  // 轮询刷新、首屏还没 select 完），整页就停在"加载中"再也画不出来。渲染入口不对
+  // "数据还没到"负责——那是加载状态，不是错误。
+  if(!META)return;
 function renderHeader(){
   const u=META.usage||{};
   $('#goal').classList.remove('empty');
@@ -733,6 +741,8 @@ async function shutdownServer(el){   // 偏僻角落的 ⏻：终止服务进程
 }
 
 /* ---------- 视图 ---------- */
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderTab(){
   const c=$('#content');
   $('#composer').classList.toggle('show',TAB==='conv'&&!!CUR);
@@ -1287,6 +1297,7 @@ function insideLive(el){
     if(p.classList&&p.classList.contains('livebox'))return true;
     p=p.parentNode||p.parentElement;
   }
+}
   return false;
 /* **官方已经画过哪些事件**（按轮，事件 id 集合）。
 
@@ -1299,7 +1310,7 @@ function insideLive(el){
    现在改成**全轮范围按事件 id 去重**：直播只画官方还没画到的部分；两边都不剩内容时
    直播块直接隐藏（不再留一个空块挂在最下面）。
    这个集合只在"官方事件数变了"时重算（零成本驻留）。 */
-let _covArr=null;_covLen=-1;_covSet=null;
+let _covArr=null,_covLen=-1,_covSet=null;
 function coveredEvIds(){
   const d=(CONV&&CONV.cache)?CONV.cache[LIVE.seq]:null;
   const evs=(d&&d.events)||null;
@@ -1313,7 +1324,6 @@ function coveredEvIds(){
   return _covSet;
 }
 
-}
 /* 某个 agent 的"直播区"：**事件 → 条目走与官方渲染同一个映射**
    （`eventItems` + `itemHtml`），所以思考、工具卡、正文按**时间顺序**排出来，
    运行中就能看到工具块。只画**官方还没画过**的事件（见 `coveredEvIds`）。 */
@@ -1457,6 +1467,7 @@ function renderLiveOne(aid,isActor){
     }else{
       if(tail._md!==''){tail.innerHTML='';tail._md=''}
       tail.style.display='none';
+  }
     }
   // ③ **两边都不剩内容就整块隐藏**（2026-09-13，用户报"方块重复、续到最下面"）：官方
   //    已经画过这一轮的（部分）事件、直播也没在飞内容时，这个块是**纯重复**——收起来，
@@ -1469,9 +1480,10 @@ function renderLiveOne(aid,isActor){
   const prov=box.parentNode&&box.parentNode.closest
     ? box.parentNode.closest('.crow.live-prov') : null;
   if(prov)prov.style.display=hide?'none':'';
-  }
 }
 
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 async function renderConv(c,fresh){
   if(CONV.session!==CUR||fresh){
     CONV={session:CUR,seqs:[],cache:{}};
@@ -1831,6 +1843,8 @@ async function ensureViewSizes(force){
   }catch(e){VIEWSIZES=null}
   finally{VIEWSIZES_BUSY=false}
 }
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderCtxbar(){
   const bar=document.getElementById('ctxbar');
   const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
@@ -2179,9 +2193,6 @@ function useBrowsed(){
 document.getElementById('ws-dirs').addEventListener('click', e => {
   const el = e.target.closest('[data-p]');
   if (el) browseTo(el.dataset.p);
-});document.getElementById('ws-dirs').addEventListener('click', e => {
-  const el = e.target.closest('[data-p]');
-  if (el) browseTo(el.dataset.p);
 });
 function batchSel(id,on){
   on?BATCH.sel.add(id):BATCH.sel.delete(id);
@@ -2217,6 +2228,8 @@ function blockChip(b){
   return `<span class="blk" onclick="jumpToConv(${b.id.match(/^R(\d+)/)[1]},'${esc(b.id)}')" title="在对话流中查看 ${esc(b.id)}">
     <span class="f">${esc(b.file||b.id)}</span>${nOps}${tags}</span>`;
 }
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderTimeline(c){
   const rl=META.round_list||[];
   if(!rl.length){c.innerHTML='<div class="empty">此会话还没有轮次</div>';return}
@@ -2238,6 +2251,8 @@ function renderTimeline(c){
 }
 
 /* ---------- 账本 ---------- */
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderLedger(c){
   const t=META.task_state||{};
   // 账本由"上下文整理"产出（state_patch 写 TaskState）：未触发时不是坏了，
@@ -2288,6 +2303,8 @@ function renderLedger(c){
 }
 
 /* ---------- 计划 ---------- */
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderTodo(c){
   const t=META.todo||{},m=t.milestone;
   let html='<h3 class="sec">阶段 / 工作项（深度恒 1）</h3>';
@@ -2529,6 +2546,8 @@ function ctxViz(){
       <div>${usage}</div>
     </div>`;
 }
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderProject(c){
   const reg=META.registry||[];
   const status=fileStatusIndex();
@@ -2604,6 +2623,8 @@ function renderProject(c){
       </div>
     </div>`;
 }
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 async function loadTree(force){
   if(TREE.loading)return;
   if(!force&&TREE.cur===CUR&&TREE.root)return;   // 同会话复用
@@ -2740,6 +2761,8 @@ async function openViewDrawer(view,id){
 }
 
 /* ---------- 用量 ---------- */
+  // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
+  if(!META)return;
 function renderUsage(c){
   const u=META.usage||{};
   const hit=u.cached||0, miss=u.miss||0, tot=hit+miss;

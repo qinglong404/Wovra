@@ -1320,6 +1320,38 @@ META.status = 'in_progress';
   console.log(`   AB 重复=${dup.length === 0 ? '无' : dup.join('/')} 直播块=${boxes} 临时块=${provs}`);
 }
 
+console.log('场景 AC｜元数据还没到时渲染：任何入口都不许抛错（用户报"页面一直加载中"的真因）');
+resetLive();
+META = null;                       // 会话还没选中 / 元数据还没到
+{
+  const bad = [];
+  // 页面函数在同一个词法作用域里（不在 globalThis 上）→ 直接按名字调，`typeof` 兜底
+  const probe = (label, thunk) => {
+    try {
+      const r = thunk();
+      if (r && typeof r.then === 'function') r.catch(() => {});
+    } catch (e) {
+      bad.push(`${label} 抛错：${e && e.message}`);
+    }
+  };
+  const entries = [
+    ['renderHeader', () => renderHeader()],
+    ['renderTab', () => renderTab()],
+    ['renderConv', () => renderConv(DOM.content)],
+    ['renderTimeline', () => renderTimeline(DOM.content)],
+    ['renderLedger', () => renderLedger(DOM.content)],
+    ['renderTodo', () => renderTodo(DOM.content)],
+    ['renderProject', () => renderProject(DOM.content)],
+    ['renderUsage', () => renderUsage(DOM.content)],
+    ['renderCtxbar', () => renderCtxbar()],
+    ['loadTree', () => loadTree()],
+    ['setTab:conv', () => setTab('conv')],
+  ];
+  for (const [label, thunk] of entries) probe(label, thunk);
+  bad.forEach(b => problems.push('AC: 元数据缺失时 ' + b));
+  console.log(`   AC 入口 ${entries.length} 个 → ${bad.length === 0 ? '全都不抛错' : bad.length + ' 个抛错'}`);
+}
+
 console.log('场景 R｜运行中按**时间顺序**画：思考 → 工具卡 → 思考 → 最终回答（用户报的核心）');
 resetLive();
 const R1 = mountRound(DOM.content, 7, false, 'Main');
@@ -1394,7 +1426,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（29 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（30 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 
