@@ -430,6 +430,116 @@ class _LedgerMixin:
             "不要写方案或解释；下一步就是它干活。"
         )
 
+    def update_responsibility(self, description: str = "", goal: str = "",
+                              add_files: str = "", remove_files: str = "",
+                              note: str = "") -> str:
+        """更新**自己**的职责与文件清单——**干完立马生效**（2026-09-12 用户口径）。
+
+        为什么要它：分裂时写下的职责是**当时的现状**；活干着干着就长出新的文件
+        与新的产出目标（用户口径：「写完记得更新新增的自己的职责，以及其所属
+        文件，同时这个文件说明」）。没有它，新文件在**下一次分裂批次**之前不属
+        于任何域——路由匹配不到、材料归属也认不出。
+
+        约束是**机械守卫**不是纪律：只能改自己那条；`add_files` 不许抢别人的
+        文件（已属其它域 → 拒）；新建文件另有工具层的 `claim` 通道自动落册，
+        这里补的是"改描述/目标"与"补记/移出清单"。
+        """
+        if self.task is None:
+            return "update_responsibility：当前无任务绑定。"
+        from .. import registry as registry_module
+
+        entry = self._registry_entry_for(self._active_view())
+        if entry is None:
+            return "update_responsibility：找不到你自己的注册表条目。"
+        changed: list[str] = []
+        if str(description or "").strip():
+            entry["description"] = str(description).strip()
+            changed.append("描述")
+        if str(goal or "").strip():
+            entry["goal"] = str(goal).strip()
+            changed.append("目标")
+        files = list(registry_module.entry_files(entry))
+        mine = f"{entry.get('id')}（{entry.get('name')}）"
+        for raw in str(add_files or "").split(","):
+            rel = str(raw).strip().strip("/")
+            if not rel or rel in files:
+                continue
+            owner = registry_module.owner_of_file(self.task.registry, rel)
+            if owner and owner != mine:
+                return (f"update_responsibility：{rel} 已经属于 {owner}——"
+                        "归属不能抢（一个文件只能一个域）。")
+            files.append(rel)
+            changed.append(f"+{rel}")
+        for raw in str(remove_files or "").split(","):
+            rel = str(raw).strip().strip("/")
+            if rel in files:
+                files.remove(rel)
+                changed.append(f"-{rel}")
+        entry["files"] = files
+        detail = "、".join(changed) or "（无变化）"
+        tail = f"｜{str(note).strip()}" if str(note or "").strip() else ""
+        self.task.record(
+            "ownership",
+            f"[职责] {entry.get('id')}（{entry.get('name')}）更新：{detail}{tail}",
+        )
+        self.task.save()
+        if self.on_progress:
+            self.on_progress(f"📇 职责更新 → {entry.get('name')}：{detail[:60]}")
+        return (f"已更新 {entry.get('id')}（{entry.get('name')}）的{detail}，"
+                "立即生效：路由与装配下一轮就按新职责走。")
+
+    def join_with(self, agent: str, task: str) -> str:
+        """**会合**：把目标排进本轮的参与者队列（2026-09-12 用户口径）。
+
+        用户模型：对齐谈定之后「A、B 各自干各自的，**都干完这一轮才算闭合**，
+        最终回答就是 A、B 各自的回答，不汇总」。当前是**串行交棒**：我在本轮
+        干完自己的那份后不立刻收轮，而是把队列里的下一个交给它接着干。
+
+        传话内容落进 `task.chat`（**像聊天软件**：接手方只看到"谁交来的 + 传话
+        内容"，看不到我的历史）——这正是用户要的"B 天然被唤醒"的载体。
+        """
+        if self.task is None:
+            return "join_with：当前无任务绑定。"
+        entry = self._registry_entry(agent)
+        if entry is None:
+            known = "、".join(
+                f"{e.get('id')}({e.get('name')})" for e in (self.task.registry or [])
+            )
+            return f"join_with：未找到 agent：{agent}。现存：{known}"
+        target = str(entry.get("name") or entry.get("id"))
+        from .. import views as views_module
+
+        me = self._active_view()
+        if target == me:
+            return "join_with：目标就是你自己——把别人排进来才有意义。"
+        task_text = str(task or "").strip() or "（未写明它要干什么，请补）"
+        rounds = self.current_round or {}
+        rounds.setdefault("participants", []).append(
+            {"agent": target, "task": task_text}
+        )
+        self.task.chat.append({
+            "round": rounds.get("seq"),
+            "from": str(me or views_module.MAIN_AGENT_ID),
+            "to": target,
+            "text": task_text,
+            "kind": "join",
+        })
+        # **投递**：写进它的收件箱，装配时作为 [传话] 摆进它的运行时信封
+        # （B 由此"天然被唤醒"并按你写的边界接着干）
+        entry.setdefault("inbox", []).append({
+            "from": str(me or views_module.MAIN_AGENT_ID),
+            "message": f"[会合] 你要做的那一份：{task_text}",
+        })
+        self.task.save()
+        if self.on_progress:
+            self.on_progress(f"🤝 会合 → {target}：{task_text[:50]}")
+        return (
+            f"已排队：本轮参与者加上 {entry.get('id')}（{target}）。"
+            "**你先干自己那一份**，干完（给出最终回答）之后 Runtime 会把接力棒"
+            "交给它，它按你写的边界接着干；**它干完这一轮才闭合**，用户会分别"
+            "看到你们各自的结果（不汇总）。干的过程中需要对齐就用 consult/notify。"
+        )
+
     def notify(self, agent: str, message: str) -> str:
         """单向通信（机制五）：转交/通知/交接，只发不等——落目标收件箱，
         对方下次被激活（consult/路由）时送达。"""

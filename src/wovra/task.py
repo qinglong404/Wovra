@@ -513,6 +513,10 @@ class Task:
     # `switch_view` 工具已删）：只剩历史 task.json 里可能有的旧值，加载期
     # 迁移仍会把旧体系的 `A` 归一到 `Main`（数据卫生），但**没有任何读取方**。
     pending_view: str = ""
+    # **对齐/传话线程**（2026-09-12 用户口径：像聊天软件）——每条
+    # `{round, from, to, text, kind}`：接手方只看到"谁交来的 + 传话内容"，
+    # 看不到对方的历史。`join_with`（会合）与通信工具都往里写。
+    chat: list = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
 

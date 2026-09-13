@@ -207,6 +207,27 @@ class _AssemblyMixin:
             msgs.append(_runtime_reminder("\n\n".join(block)))
         return msgs
 
+    def _take_thread_lines(self, view_name: str) -> list[str]:
+        """取走并返回**发给本视图的传话**（收件箱投递，送达即清）。
+
+        用户口径（2026-09-12）：传话就像聊天软件——接手方只看到"谁交来的 +
+        内容"，看不到对方的历史。故这里只投递收件箱里发给我的条目，并把它
+        渲染成一段显式的线程说明，摆在运行时信封的最前面。
+        """
+        if self.task is None:
+            return []
+        entry = self._registry_entry_for(view_name)
+        if entry is None:
+            return []
+        pending = [it for it in (entry.get("inbox") or []) if isinstance(it, dict)]
+        if not pending:
+            return []
+        entry["inbox"] = []
+        out = ["[传话]（别人交给你的消息，只看到内容、看不到对方的历史）"]
+        for item in pending[-8:]:
+            out.append(f"- 来自 {item.get('from') or '?'}：{item.get('message') or ''}")
+        return out
+
     def _active_view(self) -> str:
         """本轮生效的视图名（无标记或开关关闭时返回主 agent）。
 
@@ -294,6 +315,13 @@ class _AssemblyMixin:
             # `[路由建议]` 丢掉——主 agent 明明有建议却看不到它，与全量
             # 装配路径（`todo_lines + block`）不一致。
             block = list(lines) + block
+        # **传话 / 对齐线程**（2026-09-12 用户口径：像聊天软件）：只把"发给我的"
+        # 消息摆进来，看不到对方历史；送达即清（收件箱是投递箱，`task.chat`
+        # 才是那条公开线程）。放在运行时信封里（绝对尾部），故投递只作废信封
+        # 本身，历史前缀不动。
+        thread_lines = self._take_thread_lines(view_name)
+        if thread_lines:
+            block = thread_lines + block
         state = self.task.get_state()
         node = next(
             (d for d in domains if str(d.get("name")) == view_name), None

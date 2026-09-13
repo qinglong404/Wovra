@@ -37,10 +37,12 @@ from .support import (
 )
 from .prompts import (
     _CONSULT_SCHEMA,
+    _JOIN_WITH_SCHEMA,
     _LIST_AGENTS_SCHEMA,
     _NOTIFY_SCHEMA,
     _ORG_DOMAINS_SCHEMA,
     _ORG_SUBMIT_SCHEMA,
+    _RESPONSIBILITY_SCHEMA,
     _ROUTE_TO_SCHEMA,
     _TODO_SCHEMA,
 )
@@ -218,6 +220,11 @@ class _CoreMixin:
             # 直接接续干活（不需要再回主 agent 转述）。只在 managed 下注册：
             # baseline 装配不看视图，转交没有落点。
             self.register(self.route_to, schema=_ROUTE_TO_SCHEMA)
+            # 职责/文件清单：**自己改自己的，干完立马生效**（2026-09-12 用户口径）
+            self.register(self.update_responsibility,
+                          schema=_RESPONSIBILITY_SCHEMA)
+            # 会合：把谁排进本轮的参与者队列（都干完才收轮）
+            self.register(self.join_with, schema=_JOIN_WITH_SCHEMA)
 
     def _bind_globals(self) -> None:
         """把进程级全局绑定对准本会话（审计记录器、后台任务归属）。
@@ -587,6 +594,42 @@ class _CoreMixin:
         )
         self.task.save()
 
+    def _relay_to_next_participant(self, answer: str) -> bool:
+        """会合交棒：本轮还有排队的参与者就把接力棒交给下一个（返回 True）。
+
+        只在 `join_with` 排过队时生效（`round["participants"]` 非空）——没排过队
+        的轮走原来那条路（干活 → 收轮），逐字节不变。交棒复用 `route_to` 的落地
+        机制（登记 `_pending_route`，由批次边界换视图），区别是**谁触发**：
+        那个是模型转交，这个是"我干完了，轮到你了"的机械接力。
+        """
+        r = self.current_round or {}
+        queue = list(r.get("participants") or [])
+        if not queue:
+            return False
+        nxt = queue.pop(0)
+        target = str((nxt or {}).get("agent") or "")
+        r["participants"] = queue
+        if not target:
+            return self._relay_to_next_participant(answer)
+        me = self._active_view()
+        if self.task is not None:
+            self.task.chat.append({
+                "round": r.get("seq"), "from": str(me or ""), "to": target,
+                "text": f"[我已干完我这部分] {answer.strip()[:2000]}",
+                "kind": "handoff",
+            })
+        self._pending_route = target
+        self._apply_pending_route()
+        ent = self._registry_entry_for(target)
+        if ent is not None:
+            ent.setdefault("inbox", []).append({
+                "from": str(me or ""),
+                "message": "[会合] 轮到你了：接着干你那部分（上一手的产出见这条线程）。",
+            })
+        if self.on_progress:
+            self.on_progress(f"🤝 交棒 → {target}（本轮还有 {len(queue)} 位待干）")
+        return True
+
     def _registry_entry_for(self, view: str) -> Optional[dict]:
         """按视图名或 ID 取注册表条目（`active_view` 两种形态都可能出现）。"""
         want = str(view or "").strip()
@@ -823,8 +866,53 @@ class _CoreMixin:
         self._record_event("user", {"role": "user", "content": user_input})
         if self.task is not None:
             self.task.record("user_input", user_input)
+            self._deliver_user_input(user_input)
             self._persist_rounds()
         return self._work_loop(on_thinking, on_answer_delta)
+
+    def _deliver_user_input(self, user_input: str) -> None:
+        """用户插话**像群聊**（2026-09-12 用户口径）：默认广播给正在干活的，
+        `@X` 则只给被 @ 的（其他人不受影响、继续干自己的）。
+
+        收件人 = 本轮的参与者（`round["participants"]` 里还排着队的 + 当前接手方）；
+        `@` 匹配注册表的 id 或名称（多个 @ 就是多个收件人）。用户的消息本身
+        已经记在轮里（`_record_event` 之前那步），这里只做**投递**——写进收件箱
+        （装配时以 [传话] 出现）与公开线程 `task.chat`。
+        """
+        assert self.task is not None
+        import re as _re
+
+        text = str(user_input or "")
+        mentions = _re.findall(r"@([0-9A-Za-z_\-\u4e00-\u9fff]+)", text)
+        targets: list[str] = []
+        for token in mentions:
+            ent = self._registry_entry_for(token)
+            if ent is not None:
+                name = str(ent.get("name") or ent.get("id"))
+                if name not in targets:
+                    targets.append(name)
+        r = self.current_round or {}
+        if not targets:
+            # 没 @ → 广播给本轮参与者（含还排着队的）
+            cur = str(r.get("active_view") or "") or views_module.MAIN_AGENT_ID
+            targets = [cur] + [str(p.get("agent") or "")
+                               for p in (r.get("participants") or [])]
+            targets = [t for t in dict.fromkeys(targets) if t and t != cur]
+            if not targets:
+                return                    # 只有当前接手方：走正常路径，不用投递
+        for name in targets:
+            ent = self._registry_entry_for(name)
+            if ent is None:
+                continue
+            ent.setdefault("inbox", []).append({
+                "from": "用户（插话）",
+                "message": text.strip()[:2000],
+            })
+            self.task.chat.append({
+                "round": r.get("seq"), "from": "用户", "to": name,
+                "text": text.strip()[:2000], "kind": "user",
+            })
+        self.task.save()
 
     def resume(
         self,
@@ -975,6 +1063,12 @@ class _CoreMixin:
                 ev_ans["thinking"] = self._last_thinking
             if self.task is not None:
                 self.task.record("final_answer", answer)
+            # **会合**（2026-09-12 用户口径）：本轮还有排队的参与者 →
+            # 我这一份干完了，但**不收轮**，把接力棒交给下一个（串行交棒）。
+            # 我的回答落进对齐线程，接手方据此知道"上一手干了什么"；全部
+            # 参与者干完才闭合，用户会分别看到各自的回答（不汇总）。
+            if self._relay_to_next_participant(answer):
+                continue
             self.close_round()
             if self.task is not None:
                 self._usage_record_and_drain(closed=True)

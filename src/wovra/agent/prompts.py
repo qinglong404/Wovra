@@ -593,8 +593,61 @@ _LIST_AGENTS_SCHEMA: dict = {
     },
 }
 
-_ROUTE_TO_SCHEMA: dict = {
+_JOIN_WITH_SCHEMA: dict = {
     "type": "function",
+    "function": {
+        "name": "join_with",
+        "description": (
+            "**会合**：宣布「这一轮还有谁也得出活」——把目标排进本轮的参与者队列。"
+            "你在本轮把活干完后不立刻收轮，而是交给队列里的下一个 agent 接着干；"
+            "**所有参与者都干完，这一轮才算闭合**。用它来做「对齐之后各自并行"
+            "（当前串行交棒）把活干完」：先把协议谈定（consult/notify），再用 "
+            "join_with 约定各自的任务边界，然后自己先干自己的那份。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "agent": {"type": "string", "description": "参与者（id 或名称）"},
+                "task": {
+                    "type": "string",
+                    "description": "它要做的那一份（写清边界：它动哪些文件、产出什么）",
+                },
+            },
+            "required": ["agent", "task"],
+        },
+    },
+}
+
+_RESPONSIBILITY_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "update_responsibility",
+        "description": (
+            "更新**你自己**的职责描述/目标/文件清单——**立即生效**。"
+            "新建了文件、或这摊活的范围变了，就立刻把新文件补进自己的清单；"
+            "否则下一次分裂之前它不属于任何域（路由找不到、材料归属也认不出）。"
+            "不能把别人的文件写进自己的清单（归属不能抢）。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "description": {"type": "string", "description": "一句话职责（可选）"},
+                "goal": {"type": "string", "description": "这摊活的目标（可选）"},
+                "add_files": {
+                    "type": "string",
+                    "description": "要补进自己清单的文件，逗号分隔（全路径）",
+                },
+                "remove_files": {
+                    "type": "string",
+                    "description": "要从自己清单移出的文件，逗号分隔（全路径）",
+                },
+                "note": {"type": "string", "description": "变更原因（可选，会留痕）"},
+            },
+        },
+    },
+}
+
+_ROUTE_TO_SCHEMA: dict = {    "type": "function",
     "function": {
         "name": "route_to",
         "description": (
