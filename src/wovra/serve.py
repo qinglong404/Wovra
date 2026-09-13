@@ -488,15 +488,44 @@ _TREE_MAX = 4000
 _DUMP_CAP = 6000   # 上下文导出的单条消息上限（页面展示用，机械截断并标注）
 
 
-def project_tree(workspace: str) -> dict:
+def project_tree(workspace: str, data: dict | None = None) -> dict:
     """会话工作区的文件树（扁平相对路径列表，前端建树）。
 
     排除重型/生成目录（.git、node_modules、虚拟环境、构建产物…）；
     条数上限 _TREE_MAX，超出标注 truncated（大仓不拖垮页面）。
+
+    2026-09-12 加三样（前端项目页要用）：`owner`（哪个域认领它——"文件标签"）、
+    `state`（LIVE/只读/已删的历史状态，来自现场重算的 ledger）、`desc`（它的
+    块摘要，没有则退回所属域的职责描述）。`tagged` = 有归属（前端把有标签的排最前）。
     """
     root = Path(workspace or "")
     if not workspace or not root.is_dir():
         return {"root": workspace, "files": [], "error": "工作目录不存在"}
+    registry = list((data or {}).get("registry") or [])
+    rounds = list((data or {}).get("rounds") or [])
+    # 状态：现场重算 ledger（不信落盘状态）
+    states: dict[str, str] = {}
+    summaries: dict[str, str] = {}
+    if data is not None:
+        try:
+            from . import blocks as blocks_module
+            from . import lifecycle as lifecycle_module
+
+            ledger = lifecycle_module.FileLedger()
+            for r in rounds:
+                if not isinstance(r, dict):
+                    continue
+                blocks = blocks_module.segment_round_by_file(r)
+                ledger.update(r, blocks=blocks)
+                marks = r.get("block_summaries") or {}
+                for b in blocks:
+                    f = str(b.get("file") or "")
+                    if f and str(b.get("kind") or "") == "file" and marks.get(b["id"]):
+                        summaries[f] = str(marks[b["id"]])      # 后者覆盖前者（更新）
+            for path, e in ledger.entries().items():
+                states[str(path)] = str(e.get("state") or "")
+        except Exception:  # noqa: BLE001——树不能因为账本算不出来就整页崩
+            states, summaries = {}, {}
     files: list[dict] = []
     truncated = False
     for cur, dirs, names in os.walk(root):
@@ -507,14 +536,28 @@ def project_tree(workspace: str) -> dict:
                 st = p.stat()
             except OSError:
                 continue
-            files.append({"p": str(p.relative_to(root)).replace("\\", "/"),
-                          "s": st.st_size})
+            rel = str(p.relative_to(root)).replace("\\", "/")
+            owner = ""
+            for e in registry:
+                if isinstance(e, dict) and e.get("name"):
+                    if registry_module.file_owned_by(e, rel):
+                        owner = str(e.get("name"))
+                        break
+            files.append({
+                "p": rel,
+                "s": st.st_size,
+                "owner": owner,                              # 文件标签（哪个域维护）
+                "tagged": bool(owner),
+                "state": states.get(rel, ""),                # live / dead / read_only
+                "desc": summaries.get(rel, ""),              # 块摘要优先
+            })
             if len(files) >= _TREE_MAX:
                 truncated = True
                 break
         if truncated:
             break
-    files.sort(key=lambda x: x["p"].lower())
+    # 有标签的排最前（同组按路径），前端就不必再排一遍
+    files.sort(key=lambda x: (0 if x["tagged"] else 1, x["p"].lower()))
     return {"root": str(root), "files": files, "truncated": truncated}
 
 
@@ -1213,7 +1256,7 @@ class _Handler(BaseHTTPRequestHandler):
             data = self._load_task(mtree.group(1))
             if data is None:
                 return self._json({"error": "session not found"}, 404)
-            return self._json(project_tree(str(data.get("workspace") or "")))
+            return self._json(project_tree(str(data.get("workspace") or ""), data))
         m = re.fullmatch(r"/api/sessions/([^/]+)/rounds/(\d+)", path)
         if m:
             data = self._load_task(m.group(1))

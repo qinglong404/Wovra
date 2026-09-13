@@ -1130,6 +1130,15 @@ function drawConv(c,toBottom){
         `<span class="seg">${row.n} 事件</span>`,
         row.stage===0?`<span class="seg" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'',
         tot?`<span class="seg acc" title="${esc(tip)}">Σ ${fmtN(tot)} tok · 命中 ${hit}${byKeys.length>1?' · 分账 '+byKeys.length+' 方':''}</span>`:'',
+        // **多 agent 的轮**：把每个 agent 自己的用量与缓存命中摆出来
+        // （用户口径：R13 这种一轮里两个 agent 干活的，要看得见各自花了多少、命中多少）
+        byKeys.length>1?`<span class="seg" style="display:flex;gap:8px;align-items:center">${
+          byKeys.map(k=>{
+            const b=byA[k]||{};const pr=b.prompt||0;
+            const r=fmtP(b.cached||0,(b.cached||0)+(b.miss||0));
+            const col=agentColor(REG[k]?.id||k);
+            return `<span class="mono" style="color:${col}" title="${esc(REG[k]?.name||k)}：Σprompt ${fmtN(pr)} tok · 命中 ${r} · 输出 ${fmtN(b.completion||0)}">⬤${fmtN(pr)}·${r}</span>`;
+          }).join('')}</span>`:'',
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
       html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+chip+
@@ -1722,6 +1731,12 @@ function toggleDesc(el){
   const open=box.classList.toggle('desc-open');
   el.textContent=open?'收起职责':'展开职责';
 }
+function stateBadge(s){
+  if(s==='live')return '<span class="fbadge" style="background:#3ddc9733;color:#3ddc97" title="LIVE：这份内容现在还在（被写过、没被删/重构）">LIVE</span>';
+  if(s==='read_only'||s==='readonly')return '<span class="fbadge" style="background:#7c9cff22;color:#7c9cff" title="只读过：算历史，不是分裂单元">只读</span>';
+  if(s==='dead')return '<span class="fbadge" style="background:#ff6b7a22;color:#ff6b7a" title="已被删除/被取代：算历史">已删</span>';
+  return '';
+}
 function fileRowHtml(f,status){
   const st=status[f.p]||null;
   const ops=st?Object.entries(st.ops).map(([k,n])=>{
@@ -1732,10 +1747,15 @@ function fileRowHtml(f,status){
     `<span class="adot" style="background:${agentColor(a)}" title="${esc(a)}"></span>`).join(''):'';
   const on=TREESEL.has(f.p)?' on':'';
   const name=f.p.split('/').pop();
-  return `<div class="frow${on}" data-path="${esc(f.p)}" onclick="pickPath(event,this.dataset.path)" title="${esc(f.p)} · 点击复制相对路径 · Ctrl/⌘ 点击多选">
+  // 归属标签（哪个域维护它）+ LIVE 状态 + 文件描述（块摘要优先）
+  const own=f.owner?`<span class="fd" style="font-size:10px" title="归属：${esc(f.owner)} 维护这个文件">${esc(f.owner)}</span>`:'';
+  const sb=stateBadge(f.state);
+  const desc=f.desc?`<div class="fdesc" title="${esc(f.desc)}">${esc(f.desc)}</div>`:'';
+  const tip=`${f.p} · 点击复制相对路径 · Ctrl/⌘ 点击多选${f.owner?` · 归属 ${f.owner}`:''}${f.desc?`\n${f.desc}`:''}`;
+  return `<div class="frow${on}" data-path="${esc(f.p)}" onclick="pickPath(event,this.dataset.path)" title="${esc(tip)}">
     <span class="ficon">${fileIcon(name)}</span><span class="fname">${esc(name)}</span>
     <span class="fpath2">${esc(f.p)}</span>
-    <span class="fmeta">${agents}${ops}<span class="fsz">${fmtBytes(f.s)}</span></span></div>`;
+    <span class="fmeta">${own}${sb}${agents}${ops}<span class="fsz">${fmtBytes(f.s)}</span></span>${desc}</div>`;
 }
 function buildTree(files){
   const root={dirs:new Map(),files:[]};
