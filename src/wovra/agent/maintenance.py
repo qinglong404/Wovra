@@ -15,6 +15,7 @@ from .. import split_lifecycle as split_lifecycle_module
 from .. import views as views_module
 from .. import tokens as tokens
 from .. import truncate as truncate
+from ..tools import safety as safety_module
 from .support import (
     MODE_MANAGED,
     _COMPRESS_THRESHOLD,
@@ -942,6 +943,19 @@ class _MaintenanceMixin:
         # 暂存到批首轮（与 state_patch 同通道），下一轮开启随 promote 生效
         pending = rounds[0].setdefault("pending_org", {})
         pending["domains"] = domains
+        # **分裂主体**（2026-09-12，worklog §64）：这批轮里出现最多的那个视图。
+        # 为什么不取"promote 那一刻的本轮视图"：异步维护可能跨轮完成，届时
+        # 当前轮早已换人（甚至换成主 agent）——产物就会被登记成"主 agent 分裂"
+        # （A、B…），而它其实是 A 在裂（应为 A-1、A-2…）。
+        view_counts: dict[str, int] = {}
+        for rr in rounds:
+            v = str(rr.get("active_view") or "").strip()
+            if v:
+                view_counts[v] = view_counts.get(v, 0) + 1
+        dominant = max(view_counts, key=lambda k: view_counts[k]) if view_counts else ""
+        if dominant == views_module.MAIN_AGENT_ID:
+            dominant = ""
+        pending["split_parent"] = dominant
         if unassigned:
             pending["unassigned"] = unassigned
         if split:
@@ -1032,6 +1046,31 @@ class _MaintenanceMixin:
                 continue
             if int(e.get("write_count") or 0) <= 0:
                 continue                      # 只读过的：历史，不是分裂单元
+            out.append(str(path))
+        return sorted(out)
+
+    def _history_files(self) -> list[str]:
+        """**历史文件**（非 LIVE）：只读过的 + 被删/被取代的**且仍在盘上**的。
+
+        校验它们必须有落脚点（挂在某个域下当历史）。**仍在盘上**这个限制是
+        必要的：已被删掉的文件只存在于账里，要求模型逐个列举它们会变成
+        "每天都拒收"；而盘上还在的只读/历史文件是能被误当成分裂单元或漏掉
+        的东西，正是要防的。
+        """
+        ledger = lifecycle_module.FileLedger()
+        for rr in self.rounds:
+            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
+        out: list[str] = []
+        for path, e in ledger.entries().items():
+            dead = str(e.get("state")) == lifecycle_module.STATE_DEAD
+            live = (not dead) and int(e.get("write_count") or 0) > 0
+            if live:
+                continue
+            try:
+                if not (safety_module.PROJECT_ROOT / str(path)).exists():
+                    continue                  # 已不在盘上：纯账目，不强制落点
+            except OSError:
+                continue
             out.append(str(path))
         return sorted(out)
 
@@ -1245,7 +1284,7 @@ class _MaintenanceMixin:
                 # 为什么不静默兜底：用户原话"有些错误是根基，其错了，我下面
                 # 测试无意义"，静默吸进主 agent 桶正是把这类根基错误藏起来。
                 defects = registry_module.split_defects(
-                    pending["domains"], self._live_files()
+                    pending["domains"], self._live_files(), self._history_files()
                 )
                 if defects:
                     r.pop("domains", None)

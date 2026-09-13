@@ -99,6 +99,25 @@ def test_split_defects_catches_overlap_and_uncovered():
         files,
     ) == []
 
+    # **非 LIVE（历史）也要有落点**（只读/被取代/被删都挂在最相关 LIVE 块下）
+    hist = ["docs/old-notes.md", "src/legacy.py"]
+    defects = registry_module.split_defects(
+        [{"name": "工具层", "files": ["src/a.py"],
+          "history_files": ["src/legacy.py"]},
+         {"name": "前端", "files": ["webui/x.js"]}],
+        ["src/a.py", "webui/x.js"], hist,
+    )
+    assert any("历史未落点" in d and "docs/old-notes.md" in d for d in defects)
+    assert not any("src/legacy.py" in d for d in defects)   # 已挂在工具层下
+
+    # 历史文件也不能两个域都认领
+    defects = registry_module.split_defects(
+        [{"name": "甲", "files": ["src/a.py"], "history_files": ["src/legacy.py"]},
+         {"name": "乙", "files": ["webui/x.js"], "history_files": ["src/legacy.py"]}],
+        ["src/a.py", "webui/x.js"], ["src/legacy.py"],
+    )
+    assert any("历史重叠" in d for d in defects)
+
 
 def test_build_entries_empty_and_dirty_parent():
     """空产物 → 无条目；parent 指向不存在的域 → 按顶层处理（不吞子树）。"""

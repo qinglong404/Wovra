@@ -167,7 +167,9 @@ def owner_of_file(
 
 
 def split_defects(
-    domains: Iterable[dict] | None, files: Iterable[str] | None
+    domains: Iterable[dict] | None,
+    files: Iterable[str] | None,
+    history_files: Iterable[str] | None = None,
 ) -> list[str]:
     """分裂产物的**机械缺陷**（F2 互斥 / F3 完备）——有缺陷就拒收，不静默兜底。
 
@@ -207,6 +209,27 @@ def split_defects(
         elif not owners:
             defects.append(
                 f"未覆盖：{path} 没有任何域认领（分裂必须把现有文件 100% 分完）"
+            )
+    # **非 LIVE 的落点**（用户口径：只读/被取代/被删的都挂在最相关 LIVE 块
+    # 下面当历史）——它们不属于分裂单元，但**必须有归宿**（写在某个域的
+    # history_files 或 files 里），否则就是漏项。
+    hist_entries = [(e, f"{e.get('id')}（{e.get('name')}）") for e in entries]
+
+    def _claims(entry: dict, path: str) -> bool:
+        return (file_owned_by(entry, path) or path in entry_history(entry))
+
+    for path in [str(f).strip().strip("/")
+                 for f in (history_files or []) if str(f).strip()]:
+        owners = [label for e, label in hist_entries if _claims(e, path)]
+        if len(owners) > 1:
+            defects.append(
+                f"历史重叠：{path} 同时被 " + "、".join(owners) + " 认领"
+                "（历史文件也只能挂一处）"
+            )
+        elif not owners:
+            defects.append(
+                f"历史未落点：{path} 没有任何域认领（非 LIVE 也要挂在最相关"
+                " LIVE 块所属的域下当历史）"
             )
     return defects
 

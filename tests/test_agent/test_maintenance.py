@@ -791,6 +791,9 @@ def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
     r1 = task.rounds[0]
     assert r1["org_state"] == "done"
     assert r1["pending_org"]["domains"][0]["name"] == "web 演示项目"
+    # **分裂主体**在提单时落笔（worklog §64）：异步维护跨轮完成时，promote
+    # 那一刻的"本轮视图"早已换人，不能拿它当分裂主体
+    assert "split_parent" in r1["pending_org"]
     assert r1["pending_org"]["split_assessment"]["splittable"] is False
     agent._promote_org_results()
     assert r1["domains"][0]["name"] == "web 演示项目"
