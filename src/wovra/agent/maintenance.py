@@ -34,6 +34,15 @@ _ORG_SUBMIT_TOOL = "submit_organization"
 
 _SPLIT_SUBMIT_TOOL = "submit_domains"
 
+class SplitCoverageError(RuntimeError):
+    """分裂漏认领：有文件块没有任何域要它（用户口径 2026-09-13）。
+
+    "现在如果分裂完主 agent 有文件，直接给我报错，不要往下进行了。"
+    这类失败**必须约束住**（不只是记一笔）：产物不 promote、本批轮回入水位下批重做，
+    否则轮已被整理标 `done`、分裂再也不会重跑——"主 agent 有文件"就永远留在那儿。
+    """
+
+
 # 带诊断重发的修正要求（见 _MaintenanceMixin._org_repair_messages）。
 # 第 2 条直接针对实测根因：长中文叙述里混进未转义 ASCII 双引号会截断
 # JSON 串（worklog-20260911.md §11.2）。
@@ -288,7 +297,16 @@ class _MaintenanceMixin:
                     self._org_inflight.add(r["seq"])
                 try:
                     org_ok, _split_ok = self._parallel_maintenance(batch, snapshot)
-                except Exception:  # noqa: BLE001——收尾整理失败不阻塞任务退出
+                except Exception as error:  # noqa: BLE001——收尾整理失败不阻塞任务退出
+                    # **把异常原文记下来**（2026-09-13 用户口径："直接给我报错"）：
+                    # 原先只把轮标成 failed、异常本身一声不响——必须让人看见的失败
+                    # （如"文件块没有域认领"）就沉进状态里了。
+                    if self.task is not None:
+                        self.task.record(
+                            "maintenance",
+                            f"整理管线异常中止：{type(error).__name__}: {str(error)[:180]}",
+                        )
+                        r.pop("pending_org", None)
                     for r in batch:
                         r["org_state"] = "failed"
                     self._persist_rounds()
@@ -928,6 +946,44 @@ class _MaintenanceMixin:
             b for b in ((unassigned or {}).get("block_ids") or [])
             if b in all_ids
         ]
+
+        # **主 agent 不许持有文件块**（2026-09-13 用户口径："现在如果分裂完主 agent
+        # 有文件，直接给我报错，不要往下进行了"）。
+        # 判据**必须与 `views.ownership` 完全一致**，否则两边打架：那边允许"文件没人
+        # 认领时跟本轮的归属走"，这边若只认域的文件集合，就会对着已经归好域的轮报错。
+        # 故：文件被某域文件集合命中 ✓ 或它所在轮已归某域（`active_view` 是域）✓
+        # 都算认领；**两者都不成立**才是真漏认领 → 抛错中止。
+        _entries = views_module._file_domain_entries(domains)
+        view_of = {r["seq"]: str(r.get("active_view") or "") for r in rounds}
+        file_of = {
+            b["id"]: (str(b.get("file") or ""), seq)
+            for seq, blocks in round_blocks.items() for b in blocks
+            if b.get("kind") == "file" and b.get("file")
+        }
+
+        def _claimed(path: str, seq: int) -> bool:
+            if views_module._match_domain(path, _entries) is not None:
+                return True
+            view = view_of.get(seq, "")
+            return bool(view) and view != views_module.MAIN_AGENT_ID
+
+        unclaimed = sorted({
+            f for f, seq in file_of.values() if not _claimed(f, seq)
+        })
+        if unclaimed:
+            shown = "、".join(unclaimed[:8]) + ("…" if len(unclaimed) > 8 else "")
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：**中止**——{len(unclaimed)} 个文件没有任何域认领：{shown}",
+                )
+                self._persist_rounds()
+            raise SplitCoverageError(
+                f"分裂中止：这批 {len(unclaimed)} 个文件块没有域认领"
+                f"（{shown}）。文件必须有归属——请让分裂把它们认领进某个域，"
+                f"不允许留在主 agent（用户口径 2026-09-13）。"
+            )
+
         orphans = sorted(all_ids - covered - set(kept))
         if orphans:
             unassigned = {
@@ -1244,6 +1300,15 @@ class _MaintenanceMixin:
                 if self.task is not None:
                     self.task.record(
                         "maintenance", f"split 阶段失败：{str(error)[:150]}"
+                # **漏认领是约束性失败**（2026-09-13 用户口径："直接给我报错，不要
+                # 往下进行了"）：此刻 org 那一路已经把本批标成 `done` 了，若只记一笔，
+                # 这些轮**永远不会再被分析**（批次选取排除 `done`）→ "主 agent 有文件"
+                # 就永久留在那儿。故把本批**回入水位**（撤暂存 + 判 failed），下批重做。
+                if isinstance(error, SplitCoverageError):
+                    for r in batch:
+                        r.pop("pending_org", None)
+                        r["org_state"] = "failed"
+                    self._persist_rounds()
                     )
 
         thread = threading.Thread(

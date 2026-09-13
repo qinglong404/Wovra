@@ -1057,6 +1057,94 @@ def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):
     assert chat_bid in task.rounds[0]["pending_org"]["unassigned"]["block_ids"]
 
 
+def test_split_aborts_when_a_file_block_has_no_domain(monkeypatch, tmp_path):
+    """分裂完**主 agent 不许有文件**：文件块没有域认领 → 直接报错中止，不许往下走。
+
+    用户口径（2026-09-13）："现在如果分裂完主 agent 有文件，直接给我报错，不要往下
+    进行了。" 判据用 `views.ownership` 的同一套（文件集合匹配；匹配不到时跟本轮
+    `active_view` 走）——这里让轮**没有**归属、文件**也没人认领**，于是它是真漏认领：
+    必须记下错误、把轮标成 failed、且**什么都不暂存**（产物不 promote）。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    # 域只认领 src/other.py —— 轮里写的 src/a.py 没人要
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "后端",
+            "description": "服务端逻辑",
+            "file_domains": ["src/other.py"],
+            "block_ids": [],
+        }],
+        "unassigned": {"block_ids": [], "reason": ""},
+        "split_assessment": {"splittable": True, "reason": "可拆"},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    task = Task.create(goal="目标")
+    task.rounds = [_mk_file_round(1, "写文件", ["src/a.py"])]
+    for r in task.rounds:
+        r["org_state"] = ""
+        r["active_view"] = ""            # 本轮也没归域 → 兜底不成立，是真漏认领
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json()))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+
+    # ① 报出来：账本里留下"中止"+ 文件名
+    entries = [str(e.get("detail") or "") for e in (task.history or [])
+               if e.get("kind") == "maintenance"]
+    assert any("中止" in x and "src/a.py" in x for x in entries), entries[-3:]
+    # ② 不往下进行：轮标 failed，且**没有暂存任何产物**（不 promote）
+    assert task.rounds[0]["org_state"] == "failed"
+    assert not (task.rounds[0].get("pending_org") or {}).get("domains")
+
+
+def test_split_does_not_abort_when_round_is_already_routed(monkeypatch, tmp_path):
+    """文件没人认领、但**本轮已归某域** → 不算漏认领（跟 `views.ownership` 同判据）。
+
+    这条正是实测会话 20260913-175945-533c5d 的情形：R5 的 `active_view` 已经是
+    「眼睛（视觉通道）与改文件回显」，它的 7 个文件块按轮归属本来就该进那个域——
+    分裂检查不能对着已经归好域的轮报错。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "甲",
+            "description": "别的活儿",
+            "file_domains": ["src/other.py"],
+            "block_ids": [],
+        }],
+        "unassigned": {"block_ids": [], "reason": ""},
+        "split_assessment": {"splittable": True, "reason": "可拆"},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    task = Task.create(goal="目标")
+    task.rounds = [_mk_file_round(1, "写文件", ["src/a.py"])]
+    for r in task.rounds:
+        r["org_state"] = ""
+        r["active_view"] = "甲"          # 本轮已归"甲" → 文件块跟着它
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json()))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+
+    entries = [str(e.get("detail") or "") for e in (task.history or [])
+               if e.get("kind") == "maintenance"]
+    assert not any("分裂中止" in x or "SplitCoverageError" in x for x in entries)
+    # 产物正常暂存（照旧往下走）
+    assert (task.rounds[0].get("pending_org") or {}).get("domains")
+
+
 def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
     """机制二：一次调用为全部块产出路由式摘要 + 大类归类。"""
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)

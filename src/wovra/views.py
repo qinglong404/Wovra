@@ -117,15 +117,38 @@ def is_folded(r: dict, keep_min: Optional[int]) -> bool:
 
 
 def _file_domain_entries(domains: Iterable[dict]) -> list[tuple[str, str]]:
-    """(路径前缀, 域名) 列表，按前缀长度降序（最长前缀优先匹配）。"""
+    """(文件路径或路径前缀, 域名) 列表，按长度降序（最长匹配优先）。
+
+    **判据是域的"文件集合"**：新产物（2026-09-11 起）按分裂指令只给**具体文件
+    清单 `files`**，`file_domains` 已退化为「旧字段，仅为兼容」的路径前缀
+    （见 `_ORG_DOMAINS_SCHEMA` 的字段说明）。历史上这里只读 `file_domains`，
+    导致**新产物一个文件块都认领不到**：`ownership()` 把全部块判给主 agent，
+    各子域的装配视图于是永远是「本域尚无命中轮」——项目页里 A/B 看不到任何
+    整理后历史（2026-09-13 用户实测会话 20260913-175945-533c5d）。
+    故两者取并集：`files` 是具体文件路径，`file_domains` 是老的目录前缀，
+    走同一个匹配函数（`_match_domain` 本就支持精确相等），按长度降序保证
+    "具体文件"压过"目录前缀"。
+
+    **`history_files` 也并入**（2026-09-13 用户口径："去掉"那条"历史文件留主 agent
+    残留桶"）：
+    历史文件是"某域曾经拥有、后来被重构替代/只读/被删"的记录——**它仍然是那个域的
+    历史**，不属于主 agent。此前把它排除在外，结果是这些文件的块全被扫进主 agent 的
+    unassigned 残留桶（实测该会话 21 个文件、32 块），把主 agent 的上下文从"路由+兜底"
+    挤成"文件垃圾场"。
+    顺序上 `files`（活文件）排在 `history_files` 前面：同一路径两处都出现时，
+    `_match_domain` 的最长优先 + 同长先者优先会让**活文件那份**胜出。
+    """
     out: list[tuple[str, str]] = []
     for d in domains or []:
         if not isinstance(d, dict) or not d.get("name"):
             continue
-        for fd in d.get("file_domains") or []:
-            path = str(fd).strip().strip("/")
+        name = str(d["name"])
+        live = list(d.get("files") or []) + list(d.get("file_domains") or [])
+        hist = list(d.get("history_files") or [])
+        for raw in live + hist:
+            path = str(raw).strip().strip("/")
             if path:
-                out.append((path, str(d["name"])))
+                out.append((path, name))
     out.sort(key=lambda x: len(x[0]), reverse=True)
     return out
 
@@ -167,11 +190,18 @@ def ownership(
 
     判据四条（按序）：
     1. **环境块 → 主 agent**（用户口径：环境准备不是任何域的活）；
-    2. **文件块**：`file` 落在某域 `file_domains` 下即归它（最长前缀优先）；
+    2. **文件块**：`file` 落在某域文件集合里即归它（最长匹配优先；三个来源：
+       活文件 `files` / 老目录前缀 `file_domains` / 历史 `history_files`）；
+       **匹配不到时跟本轮 `active_view` 走**（2026-09-13 用户口径："R5 没被整理，
+       但按机制它应该已经被判断分给哪个 agent 了"——**轮的归属早就定了，文件块不该
+       另起一套规则**，原先一律丢给主 agent，于是实测 32 块文件史全堆在主 agent 桶里）；
     3. **保底块（纯聊天/结论）→ 跟本轮 `active_view` 走**（渐近归属，
        2026-09-12 用户口径）：维护窗口内到达的轮次补判归域之后，它的聊天
        块随轮一起进那个域的视图——"只把上下文归过去"；
-    4. 其余（用户块、不属于任何域的文件块）→ 主 agent（unassigned 残留桶）。
+    4. 其余（用户块、**本轮也没归域的文件块**）→ 主 agent。
+      **注意**：落到判据 4 的文件块表示"文件没域认领、连它所在轮都没域"——
+      那是**分裂漏认领**：分裂落地时会直接报错中止（`maintenance._run_split`，
+      用户口径 2026-09-13："分裂完主 agent 有文件就直接报错，不要往下进行"）。
 
     用户块虽然记在主 agent 名下，但**渲染时随命中轮进域视图**（R68 口径：
     用户块和最上面的用户输入规则一样）——见 `view_for_domain` 的逐轮归堆。
@@ -187,14 +217,18 @@ def ownership(
         kind = str(block.get("kind") or "")
         if kind == "environment":
             out[bid] = MAIN_AGENT_ID
+        round_view = str((item.get("round") or {}).get("active_view") or "")
             continue
         path = str(block.get("file") or "")
         name = _match_domain(path, entries) if path else None
         if name:
             out[bid] = name
+        if kind == "file":
+            # 文件没被任何域认领 → 跟本轮的归属走（轮早已判给谁，就归谁）
+            out[bid] = round_view or MAIN_AGENT_ID
+            continue
             continue
         if kind == "fallback":
-            round_view = str((item.get("round") or {}).get("active_view") or "")
             out[bid] = round_view or MAIN_AGENT_ID
             continue
         out[bid] = MAIN_AGENT_ID

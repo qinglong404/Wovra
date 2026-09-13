@@ -77,6 +77,50 @@ def test_ownership_priority_and_no_lost_blocks():
             assert owners[bid] == views_module.MAIN_AGENT_ID   # 无匹配 → 兜底
 
 
+def test_unclaimed_file_block_follows_its_round_view():
+    """文件没被任何域认领时，**跟本轮的归属走**（2026-09-13 用户口径）。
+
+    用户原话："R5 没被整理，但是按之前的机制，其应该被判断应该分配给那个 agent 了
+    啊，这些都是一块进行的。"——轮的归属（`active_view`）早就定了，文件块不该另起
+    一套规则；原先一律丢给主 agent，实测把 32 块文件史全堆进主 agent 桶。
+    """
+    r = _block_round(1, ["notes.md"])
+    r["active_view"] = "甲"
+    idx = views_module.block_index([r])
+    bid = next(iter(idx))
+    assert idx[bid]["block"].get("file") == "notes.md"
+
+    # ① 本轮归了"甲" → 未认领文件块跟着走
+    owners = views_module.ownership([{"name": "甲", "file_domains": ["src/"]}], idx)
+    assert owners[bid] == "甲"
+
+    # ② 本轮也没归域（或归主 agent）→ 仍落主 agent（分裂落地时这会直接报错中止）
+    r2 = _block_round(2, ["notes.md"])
+    idx2 = views_module.block_index([r2])
+    bid2 = next(iter(idx2))
+    owners2 = views_module.ownership([{"name": "甲", "file_domains": ["src/"]}], idx2)
+    assert owners2[bid2] == views_module.MAIN_AGENT_ID
+
+    # ③ 域的文件集合命中永远优先于轮的归属
+    owners3 = views_module.ownership([{"name": "乙", "file_domains": ["notes.md"]}], idx)
+    assert owners3[bid] == "乙"
+
+
+def test_history_files_still_belong_to_their_domain():
+    """`history_files`（被替代/只读/被删的历史）**仍属于那个域**，不落主 agent。
+
+    2026-09-13 用户口径：去掉"历史文件留主 agent 残留桶"那条。实测会话
+    20260913-175945-533c5d 因此从 28 个未覆盖文件降到 0。
+    """
+    r = _block_round(1, ["old/legacy.py"])
+    idx = views_module.block_index([r])
+    bid = next(iter(idx))
+    domains = [{"name": "甲", "files": ["new/impl.py"],
+                "history_files": ["old/legacy.py"]}]
+    owners = views_module.ownership(domains, idx)
+    assert owners[bid] == "甲"
+
+
 def test_block_ids_no_longer_decide_ownership():
     """产物里的 block_ids 不参与归属（判据只有文件集合本身）。
 
