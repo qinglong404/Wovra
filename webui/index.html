@@ -792,15 +792,23 @@ const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             seq:0,baseRounds:0,sse:false};
 let SSE=null;
 function sseClose(){if(SSE){SSE.close();SSE=null}LIVE.sse=false}
-function sseConnect(jobId){   // SSE：分片到达即推（替代高频轮询的正确形态）
+function sseConnect(jobId,after){   // SSE：分片到达即推（替代高频轮询的正确形态）
   sseClose();
+  const from=Number(after||0);
   try{
-    SSE=new EventSource(`/api/jobs/${jobId}/stream`);
+    SSE=new EventSource(`/api/jobs/${jobId}/stream?after=${from}`);
     SSE.onopen=()=>{LIVE.sse=true};
-    SSE.onmessage=e=>{try{if(applyChunk(JSON.parse(e.data)))renderLive()}catch(err){}};
+    SSE.onmessage=e=>{try{
+      if(applyChunk(JSON.parse(e.data)))scheduleLive();   // 节流重绘，别每个分片都刷 DOM
+    }catch(err){}};
     SSE.addEventListener('done',()=>{sseFinish()});
     SSE.onerror=()=>{sseClose()};   // 断开不自动重连（重连会从头重放）——pollLive 兜底
   }catch(e){}
+}
+function scheduleLive(){
+  // 合并 120ms 内的多次变化只重绘一次：思考分片每秒几十条，逐条重绘会卡
+  if(window._liveTimer)return;
+  window._liveTimer=setTimeout(()=>{window._liveTimer=null;renderLive()},120);
 }
 function applyChunk(c){
   let dirty=false;
@@ -829,14 +837,26 @@ async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用�
   try{await refreshAfterTurn()}catch(e){}
   liveDetach();
 }
-function liveAttach(jobId,resume){
+async function liveAttach(jobId,resume){
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
                       status:'',mode:'',seq:0,
                       startedAt:Date.now(),
                       baseRounds:(META&&META.round_list||[]).length});
-  if(resume){
-    // /c 续跑的是**已存在的开放轮**——轮列表不会变长，必须直接锁定它，
-    // 否则直播区挂在页面底部、事件进度却长到上面的老轮里（实测错位）
+  // **刷新后的重新挂载**：先做一次单次 catch-up（一次请求拿全量分片、
+  // **只重绘一次**），再让 SSE 从 next 接上——避免"从 0 重放几百个分片"
+  // 把页面刷爆、也避免重放里的状态分片把思考缓冲清空（实测 bug）。
+  let after=0;
+  try{
+    const d=await api(`/api/jobs/${jobId}/live?after=0`);
+    let dirty=false;
+    for(const c of (d&&d.chunks)||[])dirty=applyChunk(c)||dirty;
+    after=Number((d&&d.next)||0);
+    LIVE.next=after;
+    if(dirty)renderLive();
+  }catch(e){}
+  if(resume||META&&META.live_job){
+    // 重新挂载：/c 续跑或刷新，**轮的序号不会变长**——必须锁到当前开放轮，
+    // 否则直播区挂在页面底部、思考/回答跑到消息块外面去（实测 bug）
     const rl=(META&&META.round_list)||[];
     LIVE.seq=rl.length?rl[rl.length-1].seq:0;
   }
@@ -844,7 +864,7 @@ function liveAttach(jobId,resume){
   const rb=document.getElementById('runbar');if(rb)rb.classList.add('on');
   const rl=document.getElementById('runline');if(rl)rl.classList.add('on');
   document.title='● 运行中 · Wovra 现场';
-  sseConnect(jobId);
+  sseConnect(jobId,after);
 }
 function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
@@ -954,7 +974,22 @@ setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent �
 function renderLive(){
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
   let el=document.getElementById('livebox');
-  const g=LIVE.seq?document.querySelector(`.crow.agent[data-seq="${LIVE.seq}"] .gbox`):null;
+  let g=LIVE.seq?document.querySelector(`.crow.agent[data-seq="${LIVE.seq}"] .gbox`):null;
+  if(!g&&LIVE.seq){
+    // 本轮的消息块还没渲染出来（直播先于事件区）→ **就地造一个临时块**再挂进去。
+    // 不能退化成直接塞进 #content：那会让思考/回答跑到**消息块外面、页面最下面**
+    // （实测 bug）。等事件区追上后 renderConv 会把它换成正式块。
+    g=document.createElement('div');
+    g.className='crow agent live-prov';
+    g.dataset.seq=String(LIVE.seq);
+    const s=senderOf({active_view:(META&&META.round_list||[]).find(r=>String(r.seq)===String(LIVE.seq))?.active_view||''});
+    g.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
+      +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
+      +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`
+      +`<div class="gbox" style="border-color:${s.color}55"></div></div>`;
+    ($('#content')||document.body).appendChild(g);
+    g=g.querySelector('.gbox');
+  }
   if(g){if(el&&el.parentNode!==g)g.appendChild(el)}
   if(!el){el=document.createElement('div');el.id='livebox';(g||$('#content')).appendChild(el)}
   // 结构（状态行文案）变化才重建骨架；流式文本走 textContent 增量赋值
@@ -985,8 +1020,13 @@ function renderLive(){
   if(ab){ab.style.display=LIVE.ans?'':'none';
     if(ab.textContent!==LIVE.ans)ab.textContent=LIVE.ans;}
   if(FOLLOW){
-    const c=$('#content');c.scrollTop=c.scrollHeight;
-    if(tb)tb.scrollTop=tb.scrollHeight;
+    // **只在用户本来就在底部时才自动跟随**：否则你在上面点开一个块看内容，
+    // 每次流式重绘都把你拽回底部——看起来就像"块被自己遮挡了"（实测 bug）
+    const c=$('#content');
+    const near=(c.scrollHeight-c.scrollTop-c.clientHeight)<80;
+    if(near){c.scrollTop=c.scrollHeight;}
+    else if(window._followNagged!==true){window._followNagged=true;renderFollowChip&&renderFollowChip();}
+    if(tb)near&&(tb.scrollTop=tb.scrollHeight);
   }
 }
 
@@ -1814,6 +1854,15 @@ const ORG_COLOR={done:'#3ddc97',pending:'#ffb454',failed:'#ff6b7a',raw:'#3a4356'
 const ORG_NAME={done:'已整理',pending:'整理中',failed:'整理失败',raw:'未整理','':'未整理'};
 const PURPOSE_COLOR={working:'#5b8def',organization:'#ffb454',compaction:'#3ddc97',
   split:'#b07cff',consult:'#7c9cff',empty_stream:'#ff6b7a'};
+function fileChips(d){
+  // 域的文件标签：新口径优先（files = LIVE，history_files = 历史层），
+  // 两者都空时才退回旧口径 file_domains（路径前缀，历史数据）——§66.3 的待办
+  const live=(d&&d.files)||[], hist=(d&&d.history_files)||[];
+  if(live.length||hist.length)
+    return live.map(f=>`<span class="fd" title="LIVE 文件（这个域维护它）">${esc(f)}</span>`).join('')
+      + hist.map(f=>`<span class="fd" style="opacity:.55" title="历史文件（被取代/只读/已删）——挂在它下面当记录">${esc(f)}</span>`).join('');
+  return ((d&&d.file_domains)||[]).map(f=>`<span class="fd" style="opacity:.7" title="旧口径的路径前缀（历史数据）">${esc(f)}</span>`).join('');
+}
 function pendingAgentCards(reg){
   // 分裂产物里的域（尚未出现在注册表）也按正常 agent 卡片呈现
   const have=new Set(reg.map(e=>e.name));
@@ -1832,7 +1881,7 @@ function pendingAgentCards(reg){
         </div>
         <div class="desc desc-clamp" id="desc-${esc((d.name||'').slice(0,10))}">${esc(d.description||'')}</div>
         ${(d.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
-        ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}</div>`);
+        ${fileChips(d)}</div>`);
     }
   }
   return out.join('');
@@ -1898,7 +1947,7 @@ function ctxViz(){
         return `<div class="split-dom" style="border-left-color:${merged?'var(--teal)':'var(--gold)'}">
           <b>${esc(d.name||'?')}</b>${merged?'<span class="fbadge t-create">已入注册表</span>':''}
           <div style="color:var(--tx3);font-size:11px;margin-top:3px">${esc((d.description||'').slice(0,140))}</div>
-          ${(d.file_domains||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}
+          ${fileChips(d)}
           <div style="margin-top:6px"><span class="chip acc" style="cursor:pointer"
             onclick="openPendingView('${esc(d.name||'')}')">查看上下文</span></div></div>`;
       }).join('');
@@ -1928,7 +1977,6 @@ function renderProject(c){
   const rows=treeHtml(buildTree(files),status,q,0);
   const agents=reg.map(a=>{
     const col=agentColor(a.id);
-    const dom=(a.file_domains||[]);
     return `<div class="agent"><div class="top">
       <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="${esc(a.status)}"></span>
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
@@ -2073,16 +2121,16 @@ async function openPendingView(name){
     $('#d-sub').innerHTML=altChip+chips;
     const cmp=(pick.is_main&&pick.alt_chars)?`　对照：全量装配 ${fmtN(pick.alt_count||0)} 条 / ${fmtN(pick.alt_chars)} 字符（分裂前口径）`:'';
     if(altOn){
-      const fds2=((pick.file_domains||[]).length)
-        ?`<div class="ctx-note">文件域：${pick.file_domains.map(esc).join('、')}</div>`:'';
+      const fds2=fileChips(pick)
+        ?`<div class="ctx-note">文件：${fileChips(pick)}</div>`:'';
       $('#d-body').innerHTML=
         `<div class="ctx-stat">整理后 · 未按域重组（全量装配口径）· ${pick.alt_count||0} 条 · ≈${fmtN(pick.alt_tokens||0)} tok（${fmtN(pick.alt_chars||0)} 字符）</div>`
         + `<div class="ctx-note">这是分裂重组生效前的完整上下文：历史轮以折叠索引形式保留，未按域切分。</div>`
         + ctxMsgHtml(pick.alt_messages);
       return;
     }
-    const fds=((pick.file_domains||[]).length)
-      ?`<div class="ctx-note">文件域：${pick.file_domains.map(esc).join('、')}</div>`:'';
+    const fds=fileChips(pick)
+      ?`<div class="ctx-note">文件：${fileChips(pick)}</div>`:'';
     $('#d-body').innerHTML=
       `<div class="ctx-stat">${pick.is_main?'主 agent':esc(pick.id||'')} ${esc(pick.name||'')} · ${pick.count} 条 · ≈${fmtN(pick.tokens||Math.round((pick.total_chars||0)/3))} tok（${fmtN(pick.total_chars)} 字符）${cmp}</div>`
       + fds

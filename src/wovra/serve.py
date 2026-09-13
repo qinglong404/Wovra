@@ -784,6 +784,10 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                     "is_main": is_main,
                     "description": str(e.get("description") or "")[:160],
                     "file_domains": list(e.get("file_domains") or []),
+                    # 新口径（§61/§63）：具体文件清单 + 历史层。前端优先渲染这两个，
+                    # 只在都为空时退回 file_domains（历史数据）——§66.3 待办收口
+                    "files": list(e.get("files") or []),
+                    "history_files": list(e.get("history_files") or []),
                     "messages": msgs, "count": len(msgs),
                     "total_chars": total, "tokens": tok, "truncated": trunc})
     if out:
@@ -877,7 +881,9 @@ def _split_meta(r: dict) -> dict | None:
     return {
         "assessment": sa if isinstance(sa, dict) else {},
         "domains": [{"name": d.get("name"), "description": d.get("description") or "",
-                     "file_domains": d.get("file_domains") or []}
+                     "file_domains": d.get("file_domains") or [],
+                     "files": d.get("files") or [],
+                     "history_files": d.get("history_files") or []}
                     for d in (dm or []) if isinstance(d, dict)],
         "unassigned": len(un or []),
         "pending": bool(po.get("domains") or po.get("split_assessment")),
@@ -1322,7 +1328,15 @@ class _Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "no-store")
             self.send_header("Connection", "close")
             self.end_headers()
-            last = 0
+            # `?after=N`：从第 N 个分片起推（刷新后的重新挂载先做一次
+            # 单次 catch-up 拉全量，再从这里接上，**不重复重放**——从 0 重放
+            # 几百个分片会把页面刷爆，而且重放里的状态分片会把思考缓冲清空，
+            # 表现为"刷新后卡住 + 思考内容消失"，实测 2026-09-13）
+            try:
+                _q = parse_qs(urlparse(self.path).query)
+                last = max(0, int((_q.get("after") or ["0"])[0] or 0))
+            except (TypeError, ValueError):
+                last = 0
             try:
                 while True:
                     chunks = job.get("live") or []
