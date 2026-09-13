@@ -1230,7 +1230,7 @@ def _files_domains_chunk():
 
 
 def test_promote_settles_ownership_out_of_main_agent(monkeypatch, tmp_path):
-    """**归属结算**（2026-09-13，worklog §76）：分裂产物认领的文件，promote 时
+    """**归属结算**（2026-09-13，worklog §78）：分裂产物认领的文件，promote 时
     从主 agent 的清单里减掉——否则一个文件同时挂在两个 agent 名下，而
     `_file_permission` 先看 mine，两家都会放行，F2 互斥事实上失效。
 

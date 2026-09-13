@@ -449,7 +449,7 @@ def backfill(
 def settle_ownership(registry: list[dict] | None, entries: list[dict]) -> list[str]:
     """**归属结算**：产物认领的文件，从其他条目的清单里减掉（原地改，返回明细）。
 
-    为什么必须有这一步（2026-09-13 实测缺陷，worklog §76）：分裂产物是
+    为什么必须有这一步（2026-09-13 实测缺陷，worklog §78）：分裂产物是
     **全体 LIVE 文件的完全划分**（F3 强制每个 LIVE 文件恰好落一个域），可
     `merge_into` 原先只写新条目、只更新同 id 条目——**分裂方（主 agent）自己
     的清单谁也不碰**。于是主 agent 从创建时累积的清单（F5 谁创建谁拥有）会
@@ -504,7 +504,7 @@ def registry_defects(registry: Iterable[dict] | None) -> list[str]:
 
     `split_defects` 只查**新产物内部**的互斥与完备——它看不见注册表里早已
     据着同一批文件的旧条目，于是 `产物 ⊕ 现状` 那一步无人查，F2 破坏被静默
-    合并（worklog §76）。这里把互斥判据抬到**整个注册表**：任意两个条目的
+    合并（worklog §78）。这里把互斥判据抬到**整个注册表**：任意两个条目的
     `files`/`history_files` 都不许交集。
 
     只查精确清单，理由同 `settle_ownership`（前缀属历史兼容口径）。
@@ -618,7 +618,7 @@ def merge_into(
     自己**随之消失**（`retire_id`，默认同 `parent_id`）。故注册表里永远是
     "主 agent + 一排平级子域"，不会长出三层。
 
-    **归属结算**（2026-09-13，worklog §76）：产物认领的文件从其他条目（含分裂
+    **归属结算**（2026-09-13，worklog §78）：产物认领的文件从其他条目（含分裂
     方主 agent）的清单里减掉——否则一个文件会同时挂在两个 agent 名下。传
     `settle_lines` 可以取回结算明细（给维护流水记账用）。
     """
