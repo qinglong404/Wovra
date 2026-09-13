@@ -238,8 +238,56 @@ def _value_is_abs_path(value: str) -> bool:
     return bool(re.match(r"[A-Za-z]:[\\/]", text))
 
 
-def _is_cmd_option(token: str) -> bool:
+# 带 `/开关` 的 **Windows 专属命令**（2026-09-13，worklog §70）。
+# 只收"在 POSIX 上不存在或用法完全不同"的词，用来给 `_is_cmd_option` 提供
+# **上下文**：`dir /TC` 里的 `/TC` 是开关，而 `cat /etc/passwd` 里的 `/etc`
+# 是路径——两者词法上无法区分（§70.1 的根因），只有看**段内命令词**才能分。
+# 因此 `cat`/`ls`/`grep`/`find` 这类跨平台词**一律不收**。
+_WIN_SWITCH_COMMANDS = frozenset({
+    "dir", "attrib", "icacls", "cacls", "takeown", "copy", "xcopy",
+    "robocopy", "del", "erase", "rd", "rmdir", "move", "ren", "rename",
+    "findstr", "fc", "comp", "compact", "expand", "makecab", "subst",
+    "certutil", "fsutil", "tasklist", "taskkill", "chkdsk", "diskpart",
+    "schtasks", "reg", "net", "sc", "wmic", "where", "vol", "label",
+    "cipher", "openfiles", "esentutl", "bitsadmin", "wevtutil", "msiexec",
+    "replace", "assoc", "ftype", "setx", "shutdown", "nslookup", "ping",
+    "ipconfig", "netstat", "route", "arp", "tracert", "pathping",
+    "systeminfo", "whoami", "hostname", "driverquery", "verifier",
+})
+
+
+# 根目录下**真实存在的常见目录名**（POSIX）。它们是路径、永远不是 Windows 开关
+# ——即使上下文命令词像 Windows 命令（`dir /etc` 在 GNU coreutils 下也合法）。
+# 只列"真实的根级目录"，长度 ≤4、纯字母，正是多字母开关判据的形态（§70）。
+_KNOWN_UNIX_ROOT_DIRS = frozenset({
+    "etc", "tmp", "usr", "var", "opt", "bin", "sbin", "lib", "dev",
+    "mnt", "run", "sys", "home", "root", "srv", "proc", "boot", "media",
+    "www", "api", "app",
+})
+
+
+def _win_switch_context(head: str) -> bool:
+    """token 前面的文本是否处在一条 **Windows 命令** 的参数位置。
+
+    取**当前段**（最后一个 `;`/`&`/`|`/`(` 之后）的第一个词作为命令词——
+    `git log & dir /a /tc x` 里 `/tc` 属于 `dir` 段，命令词是 `dir`。
+    包装器（`cmd /c dir /tc`）看第一个词 `cmd`，也算 Windows 命令。
+    """
+    seg = re.split(r"[;&|(]", head)[-1]
+    m = re.search(r"[^\s'\"|;&<>=()$`]+", seg)
+    if not m:
+        return False
+    word = m.group(0).replace("\\", "/").rstrip("/").rsplit("/", 1)[-1].lower()
+    if word.endswith(".exe") or word.endswith(".cmd") or word.endswith(".bat"):
+        word = word[:-4]
+    return word in _WIN_SWITCH_COMMANDS or word in ("cmd", "cmd.exe")
+
+
+def _is_cmd_option(token: str, head: str | None = None) -> bool:
     """`/x` 形态的 token 是否是**命令开关**而不是路径。
+
+    head：token 之前的命令文本（可选）。给了才能用**上下文**判多字母/
+    带连字符开关（`/tc`、`/o-d`、`/fi`）；不给则退回只看 token 的旧口径。
 
     2026-09-11 实测（worklog-20260911.md §9）：cmd 世界大量使用 `/s`
     `/b` `/t` `/nobreak` `/r` `/d` 这类开关，守卫把它们当成"界外绝对
@@ -280,6 +328,25 @@ def _is_cmd_option(token: str) -> bool:
             return True
         if name.lower() in _CMD_OPTION_WORDS:
             return True
+    # 多字母 / 带连字符开关（2026-09-13，worklog §70）：
+    # `/tc`（dir 的创建时间开关）、`/o-d`（按日期倒序）、`/fi`、`/tw`、`/aa`
+    # 既不是单字母、也不在词表、也没有冒号——旧判据把它们当"界外绝对路径"，
+    # 于是合法命令被弹授权，用户答 y 后 `/tc` 被规范化成 `D:\tc` **写进授权
+    # 清单**（实测污染，见 §69.1）。词法上 `/tc` 与根目录 `/tc` 无法区分，
+    # 故必须看上下文：**段内命令词是 Windows 命令**时才按开关放行。
+    # 这样 `cat /etc/passwd`（POSIX 命令）里的 `/etc` 照旧受检。
+    body_l = body.lower()
+    if (
+        head is not None
+        and 1 <= len(body) <= 4
+        and all(c.isalpha() or c == "-" for c in body_l)
+        and body_l.strip("-") != ""
+        and body_l not in _KNOWN_UNIX_ROOT_DIRS
+        and _win_switch_context(head)
+    ):
+        # `-` 开头的 token 由 `_outside_absolute_paths` 的 `_is_cmd_option`
+        # 调用点统一排除，这里不必再判；`/a-d`、`/tc` 都落进来
+        return True
     return False
 
 
@@ -434,12 +501,14 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
     # 前导断言必须排除 `.` 和 `-`：`./x`、`../x`、`a/../b` 都是**相对**
     # 路径，把其中的 `/x` 当绝对路径会误拦（自我测试抓到的：一条
     # `cat ./t1.txt` 被报成"访问工作区之外的绝对路径 /t1.txt"）。
-    for raw in re.findall(r"(?<![\w:/.\-])/[^\s'\"|;&><)]*", masked):
-        token = raw.rstrip(",;")
+    for m in re.finditer(r"(?<![\w:/.\-])/[^\s'\"|;&><)]*", masked):
+        token = m.group(0).rstrip(",;")
         if not token or token == "/":
             continue
-        if _is_cmd_option(token):
-            continue  # `/s`、`/b`、`/t`、`/nobreak` 是命令开关，不是路径
+        # 传 head（token 之前的文本）供上下文判据用：多字母/带连字符开关
+        # （`/tc`、`/o-d`）词法上与根目录同名，只有看段内命令词才分得清（§70）
+        if _is_cmd_option(token, head=masked[: m.start()]):
+            continue  # `/s`、`/b`、`/t`、`/tc`、`/o-d` 是命令开关，不是路径
         if token.startswith(root):          # 工作区内的绝对路径：放行
             continue
         if any(token == p or token.startswith(p + "/")
@@ -773,6 +842,25 @@ def _authorized_store() -> Path:
     return PROJECT_ROOT / ".wovra" / "authorized-paths.json"
 
 
+def _is_too_broad(path: Path) -> bool:
+    """目标是否**过于宽泛**：文件系统根，或者工作区本身的祖先目录。
+
+    根目录那条是 §9 的教训（`D:\\` 让整块盘放行）；**祖先目录**是同一性质
+    的第二类（2026-09-13，worklog §70）：`D:\\BC` 是工作区 `D:\\BC\\Wovra` 的
+    父目录，授权它 = 放行界外整棵 `D:\\BC` 树（实测
+    `is_authorized("D:/BC/AInfinite/x.txt")=True`）。清单里躺着这样一条时，
+    "越界守卫"在真实通道上等于不存在。判据：解析后的目标是工作区的祖先
+    （含自身）→ 一律驳回。
+    """
+    try:
+        if path.parent == path:
+            return True
+        root = PROJECT_ROOT.resolve()
+        return root.is_relative_to(path)
+    except (OSError, ValueError):
+        return True  # 判不了就保守驳回
+
+
 def _is_fs_root(path: Path) -> bool:
     """文件系统根 / 盘根（`D:\\`、`/`）——授权它等于放行**整块盘**。
 
@@ -787,10 +875,10 @@ def _is_fs_root(path: Path) -> bool:
 
 
 def _normalize_auth_targets(targets: list[str]) -> tuple[list[str], list[str]]:
-    """授权目标规范化：一律解析为绝对路径，并剔除过于宽泛的根目录。
+    """授权目标规范化：一律解析为绝对路径，并剔除过于宽泛的目标。
 
     返回 (可用目标, 被驳回目标)。被驳回的进不了清单——`/t`、`/b` 这类
-    开关碎片与 `D:\\` 这类盘根都在此拦下。
+    开关碎片、`D:\\` 这类盘根、工作区的**祖先目录**都在此拦下（§70）。
     """
     valid: list[str] = []
     rejected: list[str] = []
@@ -800,7 +888,7 @@ def _normalize_auth_targets(targets: list[str]) -> tuple[list[str], list[str]]:
         except (OSError, ValueError):
             rejected.append(str(raw))
             continue
-        if _is_fs_root(resolved):
+        if _is_too_broad(resolved):
             rejected.append(str(resolved))
             continue
         text = str(resolved)
@@ -828,9 +916,10 @@ def _save_authorized(paths: list[str]) -> None:
 def is_authorized(target: str) -> bool:
     """target（绝对路径）是否已被授权：自身精确匹配或位于某授权目录下。
 
-    防御性过滤（§9 教训）：清单里的**根目录条目一律不作数**——手工编辑、
-    历史遗留或旧版本写入的 `D:\\` 不能让整块盘放行。边界不能因为一条
-    脏条目就失效。
+    防御性过滤（§9 教训 + §70）：清单里的**过宽条目一律不作数**——根目录
+    （`D:\\`）、工作区的**祖先目录**（`D:\\BC`，曾让整棵界外树放行）都不能
+    因为一条脏数据就让工作区边界失效。历史遗留、手工编辑、旧版本写入的
+    条目都走这条过滤，无需人去清理文件。
     """
     t = Path(target).resolve()
     for p in _load_authorized():
@@ -838,7 +927,7 @@ def is_authorized(target: str) -> bool:
             ap = Path(str(p)).resolve()
         except (OSError, ValueError):
             continue
-        if _is_fs_root(ap):
+        if _is_too_broad(ap):
             continue
         if t == ap or t.is_relative_to(ap):
             return True
@@ -880,8 +969,8 @@ def _request_path_authorization(targets: list[str], tool: str) -> bool:
     if rejected:
         _audit(f"[授权] 驳回过于宽泛的目标: {rejected}")
         _auth_reject_note = (
-            "该目标过于宽泛（文件系统根/盘根），不能作为授权对象："
-            + "、".join(rejected)
+            "该目标过于宽泛（文件系统根/盘根，或工作区的祖先目录），"
+            "不能作为授权对象：" + "、".join(rejected)
         )
         return False
     new = [t for t in valid if not is_authorized(t)]

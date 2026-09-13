@@ -1260,6 +1260,18 @@ class _Handler(BaseHTTPRequestHandler):
             if result is None:
                 return self._json({"error": "session not found"}, 404)
             return self._json(result)
+        # **计划页的轻量轮询口**（2026-09-12 用户要求："只有调用 todo 就同步更新到
+        # 那边"）：只回计划账本本身，几十字节级——前端在跑轮时每 tick 拉一次，
+        # 一变化就把「当前进行中的阶段 / 验收通过」重画，不必等一轮结束。
+        mplan = re.fullmatch(r"/api/sessions/([^/]+)/plan", path)
+        if mplan:
+            data = self._load_task(mplan.group(1))
+            if data is None:
+                return self._json({"error": "session not found"}, 404)
+            return self._json({
+                "todo": data.get("todo") or {},
+                "todo_log": todo_log(data),
+            })
         mtree = re.fullmatch(r"/api/sessions/([^/]+)/tree", path)
         if mtree:
             data = self._load_task(mtree.group(1))

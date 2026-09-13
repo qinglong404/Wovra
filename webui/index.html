@@ -904,8 +904,28 @@ function showCmdOutput(title,text){
   pre.textContent=String(text).replace(/\x1b\[\[\d;]*m/g,'');   // 剥 ANSI
   const b=$('#d-body');b.innerHTML='';b.appendChild(pre);
 }
+async function pollPlan(){
+  // 跑轮期间把**计划账本**单拉一次（轻量口 /plan）：`todo` 一被调用就重画
+  // 「当前进行中的阶段（上）/ 已验收阶段（下）」，不必等这一轮结束
+  if(!LIVE.job||!CUR)return;
+  const now=Date.now();
+  if(now-(window._planAt||0)<900)return;        // 节流：不到 1 秒不重复拉
+  window._planAt=now;
+  let d=null;
+  try{d=await api(`/api/sessions/${CUR}/plan`)}catch(e){return}
+  if(!d)return;
+  const sig=JSON.stringify(d.todo||{})+'|'+JSON.stringify(d.todo_log||[]);
+  if(sig===(window._planSig||''))return;        // 没变化 → 什么都不动
+  window._planSig=sig;
+  if(!META)return;
+  META.todo=d.todo||{};
+  META.todo_log=d.todo_log||[];
+  if(TAB==='todo')renderTab();                  // 正在看计划页 → 立刻重画
+  else if(typeof renderHeader==='function')renderHeader();
+}
 async function pollLive(){
   if(!LIVE.job||document.hidden)return;
+  pollPlan();                      // 计划页随 todo 调用即时同步（轻量，几十字节）
   if(LIVE.sse){   // SSE 健康时零轮询；断开则 300ms 兜底
     const d=await api(`/api/jobs/${LIVE.job}`).catch(()=>null);
     if(d){
