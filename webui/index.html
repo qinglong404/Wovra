@@ -1437,9 +1437,15 @@ function renderCtxbarReg(){
     const col=agentColor(e.id||e.name);
     const cur=e.ctx_cur||0,win=e.window||0,share=win?cur/win*100:0;
     const pct=share>=10?share.toFixed(1):share.toFixed(2);
+    /* window=0 = **这个 agent 一次都没跑过**（不是"窗口空着"）。曾经这里靠
+       后端补的默认窗口演成 `0/1M（0.00%）`，看着像"有 1M 窗口没用"——
+       实测会话里 4 个刚登记的域全这样，被读成"运行异常"。没观测就直说。 */
     const bar=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`+
-      `<span class="mono">${fmtN(cur)}/${fmtN(win)}（${pct}%）</span>`:'';
-    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · 名下 ${e.rounds||0} 轮${seqRangeOf(e)} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
+      `<span class="mono">${fmtN(cur)}/${fmtN(win)}（${pct}%）</span>`
+      :`<span class="mono" style="color:var(--tx3)">未运行（无观测）</span>`;
+    const tip=win?`上下文 ${fmtN(cur)} tok / 窗口 ${fmtN(win)} tok（${pct}%）`
+      :`上下文 未运行（该 agent 尚无装配观测：window=0）`;
+    return `<div class="ctx-cell" title="${esc(e.name||'')}（${esc(e.id||'')}）&#10;${tip}&#10;峰值 ${fmtN(e.ctx_peak||0)} tok · 名下 ${e.rounds||0} 轮${seqRangeOf(e)} · 步 ${fmtN(e.steps||0)}${e.handoffs?` · 转出 ${e.handoffs} 次`:''}">
       <span class="ctx-dot" style="background:${col}"></span>
       <span class="mono" style="color:${col}">${esc(e.id||e.name)}</span>${bar}</div>`;
   }).join('');
@@ -2067,6 +2073,15 @@ function renderProject(c){
   const pendingDoms=(META.round_list||[]).reduce((n,r)=>
     n+((r.split&&r.split.pending)?(r.split.domains||[]).length:0),0);
   const q=(window._treeQ||'').toLowerCase();
+  const defects=META.registry_defects||[];
+  const defectHtml=defects.length?`<div class="lcard" style="border-color:var(--red);margin-bottom:10px">
+    <h4 style="color:var(--red)">⛔ 注册表归属冲突 · ${defects.length} 条（F2：一个文件只能一个域）</h4>
+    <div style="padding:8px 16px;font-size:12px;line-height:1.8;color:var(--tx2)">
+      ${defects.slice(0,8).map(d=>`<div>· ${esc(d)}</div>`).join('')}
+      ${defects.length>8?`<div style="color:var(--tx3)">…另有 ${defects.length-8} 条</div>`:''}
+      <div style="color:var(--tx3);margin-top:6px">这类冲突来自旧分裂（落点未做归属结算）——
+      数据原样保留不改写；新分裂在 promote 前做落点预演，重叠即拒收。</div>
+    </div></div>`:'';
   const files=TREE.files.filter(f=>!q||f.p.toLowerCase().includes(q));
   const rows=treeHtml(buildTree(files),status,q,0);
   const agents=reg.map(a=>{
@@ -2077,7 +2092,8 @@ function renderProject(c){
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
       <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">名下${a.rounds||0}轮${seqRangeOf(a)} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));
       if(pv){const before=pv.alt_tokens||a.ctx_cur||0;return ` · 整理后 ≈${fmtN(before)} tok → 重组后 ≈${fmtN(pv.tokens||Math.round((pv.total_chars||0)/3))} tok`}
-      return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:''})()}</span></div>
+      /* 没观测就写"未运行"：`0/1M` 会被读成"运行了但没占上下文"（实测误读） */
+      return a.ctx_cur?` · ${fmtN(a.ctx_cur)}/${fmtN(a.window||0)}`:' · 未运行（无观测）'})()}</span></div>
       <div class="desc desc-clamp">${esc(a.description||'')}</div>
       ${(a.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
       ${(a.files||[]).map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="它维护的文件（LIVE）——在左树中过滤">${esc(f)}</span>`).join('')}
@@ -2118,6 +2134,7 @@ function renderProject(c){
       <div class="proj-right">
         <h3 class="sec">多 agent 职责划分 · ${reg.length+pendingDoms}${pendingDoms?` <span style="font-weight:400;color:var(--tx3)">（其中 ${pendingDoms} 个来自本次分裂产物）</span>`:''}</h3>
         <div class="reg-grid">${agents}${pendingAgentCards(reg)}</div>
+        ${defectHtml}
         ${ctxViz()}
       </div>
     </div>`;

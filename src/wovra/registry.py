@@ -446,43 +446,119 @@ def backfill(
     return merge_into(registry, latest_domains(rounds))
 
 
-def merge_into(
+def settle_ownership(registry: list[dict] | None, entries: list[dict]) -> list[str]:
+    """**归属结算**：产物认领的文件，从其他条目的清单里减掉（原地改，返回明细）。
+
+    为什么必须有这一步（2026-09-13 实测缺陷，worklog §76）：分裂产物是
+    **全体 LIVE 文件的完全划分**（F3 强制每个 LIVE 文件恰好落一个域），可
+    `merge_into` 原先只写新条目、只更新同 id 条目——**分裂方（主 agent）自己
+    的清单谁也不碰**。于是主 agent 从创建时累积的清单（F5 谁创建谁拥有）会
+    与子域清单**重叠**：实测会话 `20260913-125849-2963df` 里 `Main.files`(17)
+    ∩ `D.files`(17) = 16 个文件，另有一个 `output/_verify_state.py` 一边在
+    `Main.files` 算 LIVE、一边在 `D.history_files` 算已删，而盘上确实不存在。
+    后果不是"页面难看"：`_file_permission` 先看 `mine`，两家 `file_owned_by`
+    都返回 True → **两个 agent 都能写同一批文件**，F2 互斥事实上失效。
+
+    口径来源是分裂指令自己写的那句「把**全部文件活**搬进它，主 agent 只剩
+    闲聊 + 环境块」——写在提示词里不算数，机制负责执行（用户口径：机制机械
+    强制，不靠提示词纪律）。所以：
+
+    * 产物认领的 LIVE（`files`）→ 从其他条目的 `files` **和** `history_files` 减掉；
+    * 产物认领的历史（`history_files`）→ 同样从两处减掉（一个文件只能有一个归宿）；
+    * 清单里没了的文件，`file_notes` 一并摘掉，不给主 agent 留空抽屉。
+
+    只查**精确文件清单**：老产物只有 `file_domains` 路径前缀，前缀归属是历史
+    兼容读取（`entry_prefixes`），不参与结算——旧会话原样保留（用户口径
+    2026-09-13：「旧会话原样保留，只修机制」）。
+    """
+    if not entries:
+        return []
+    claimed = {f for e in entries for f in entry_files(e)}
+    claimed_hist = {f for e in entries for f in entry_history(e)}
+    taken = claimed | claimed_hist
+    new_ids = {str(e.get("id") or "") for e in entries}
+    moved: list[str] = []
+    for e in registry or []:
+        if not isinstance(e, dict) or str(e.get("id") or "") in new_ids:
+            continue
+        who = f"{e.get('id')}（{e.get('name')}）"
+        old_files = entry_files(e)          # 已归一（去空格/去首尾斜杠）
+        old_hist = entry_history(e)
+        keep_files = [f for f in old_files if f not in taken]
+        keep_hist = [f for f in old_hist if f not in taken]
+        lost = [f for f in old_files if f in taken]
+        if len(keep_files) != len(old_files) or len(keep_hist) != len(old_hist):
+            e["files"] = keep_files
+            e["history_files"] = keep_hist
+            alive = set(keep_files) | set(keep_hist)
+            notes = {k: v for k, v in (e.get("file_notes") or {}).items()
+                     if k in alive}
+            if notes != (e.get("file_notes") or {}):
+                e["file_notes"] = notes
+            moved.extend(f"{who} 交出 {f}" for f in lost)
+    return moved
+
+
+def registry_defects(registry: Iterable[dict] | None) -> list[str]:
+    """**跨条目**归属互斥体检（F2 的全注册表版，2026-09-13）。
+
+    `split_defects` 只查**新产物内部**的互斥与完备——它看不见注册表里早已
+    据着同一批文件的旧条目，于是 `产物 ⊕ 现状` 那一步无人查，F2 破坏被静默
+    合并（worklog §76）。这里把互斥判据抬到**整个注册表**：任意两个条目的
+    `files`/`history_files` 都不许交集。
+
+    只查精确清单，理由同 `settle_ownership`（前缀属历史兼容口径）。
+    """
+    entries = [e for e in (registry or []) if isinstance(e, dict) and e.get("name")]
+    defects: list[str] = []
+    for i, a in enumerate(entries):
+        for b in entries[i + 1:]:
+            for ka in ("files", "history_files"):
+                for kb in ("files", "history_files"):
+                    left = set(entry_history(a) if ka == "history_files" else entry_files(a))
+                    right = set(entry_history(b) if kb == "history_files" else entry_files(b))
+                    both = sorted(left & right)
+                    if both:
+                        defects.append(
+                            f"F2 违反：{a.get('id')}.{ka} 与 {b.get('id')}.{kb} "
+                            f"共认 {len(both)} 个文件（{'、'.join(both[:5])}"
+                            + ("…" if len(both) > 5 else "") + "）——一个文件只能一个域"
+                        )
+    return defects
+
+
+def project_merge(
     registry: list[dict] | None,
     domains: Iterable[dict] | None,
     parent_id: str = "",
     retire_id: str = "",
-) -> tuple[list[str], list[str]]:
-    """把分裂产物幂等并入注册表，返回 (新增 id 列表, 更新 id 列表)。
+) -> tuple[list[dict], list[str], list[str], list[str]]:
+    """**预演**一次分裂合并（纯函数，不改传入的注册表）。
 
-    已存在的 id 只更新职责描述/文件清单/目标（现状变了就跟着变），
-    **不动 status 与 inbox**——那是运行时状态，重放产物不该把它抹掉。
-
-    **两级替换**（2026-09-12 用户口径，worklog §63）：`parent_id` = 正在分裂的
-    那个域；它的产物平级登记为 `parent_id-1`、`parent_id-2`…，被分裂的域
-    自己**随之消失**（`retire_id`，默认同 `parent_id`）。故注册表里永远是
-    "主 agent + 一排平级子域"，不会长出三层。
+    返回 `(合并后的注册表, 新增 id, 更新 id, 归属结算明细)`。存在的理由：合并
+    必须**先看结果再落地**——`registry_defects` 要在写入之前跑，不通过就整批
+    拒收（"根基错误直接停，不许静默兜底"）。故 `merge_into` 内部走同一条路，
+    只是最后把投影结果写回去：门与落地**同一套代码**，不会各算各的。
     """
     entries = build_entries(domains, parent_id)
+    merged = [dict(e) for e in (registry or []) if isinstance(e, dict)]
     if not entries:
-        return [], []
-    if registry is None:
-        registry = []
+        return merged, [], [], []
     gone = str(retire_id or parent_id or "")
     retired: list[str] = []
     if gone and gone != MAIN_AGENT_ID:
-        keep = [e for e in registry
-                if not (isinstance(e, dict) and str(e.get("id")) == gone)]
-        if len(keep) != len(registry):
+        keep = [e for e in merged if str(e.get("id")) != gone]
+        if len(keep) != len(merged):
             retired = [gone]
-            registry[:] = keep
-    by_id = {str(e.get("id")): e for e in registry if isinstance(e, dict)}
+            merged[:] = keep
+    by_id = {str(e.get("id")): e for e in merged}
     added: list[str] = []
     updated: list[str] = []
     for entry in entries:
         existing = by_id.get(entry["id"])
         if existing is None:
-            registry.append(entry)
-            by_id[entry["id"]] = entry
+            merged.append(dict(entry))
+            by_id[entry["id"]] = merged[-1]
             added.append(entry["id"])
             continue
         changed = False
@@ -500,4 +576,58 @@ def merge_into(
             changed = True
         if changed:
             updated.append(entry["id"])
-    return added + retired, updated
+    # 归属结算必须在"新条目都在场"之后：结算要拿产物的全集去减别人的清单
+    settle = settle_ownership(merged, [by_id[e["id"]] for e in entries])
+    return merged, added + retired, updated, settle
+
+
+def land(registry: list[dict], merged: list[dict]) -> None:
+    """把投影结果写回注册表（原地），**按 id 复用原条目对象**。
+
+    投影为了无副作用用的是浅拷贝，但运行时有别人握着条目引用（`_claim_new_file`/
+    `update_responsibility` 拿到后就地改），整表换成拷贝会让那些引用变成"改了
+    也不生效"的僵尸。故落地时把内容搬回原对象，只对真正新增的 id 用新对象。
+    """
+    by_old = {str(e.get("id")): e for e in registry if isinstance(e, dict)}
+    landed: list[dict] = []
+    for entry in merged:
+        old = by_old.get(str(entry.get("id") or ""))
+        if old is None:
+            landed.append(entry)
+        else:
+            old.clear()
+            old.update(entry)
+            landed.append(old)
+    registry[:] = landed
+
+
+def merge_into(
+    registry: list[dict] | None,
+    domains: Iterable[dict] | None,
+    parent_id: str = "",
+    retire_id: str = "",
+    settle_lines: list[str] | None = None,
+) -> tuple[list[str], list[str]]:
+    """把分裂产物幂等并入注册表，返回 (新增 id 列表, 更新 id 列表)。
+
+    已存在的 id 只更新职责描述/文件清单/目标（现状变了就跟着变），
+    **不动 status 与 inbox**——那是运行时状态，重放产物不该把它抹掉。
+
+    **两级替换**（2026-09-12 用户口径，worklog §63）：`parent_id` = 正在分裂的
+    那个域；它的产物平级登记为 `parent_id-1`、`parent_id-2`…，被分裂的域
+    自己**随之消失**（`retire_id`，默认同 `parent_id`）。故注册表里永远是
+    "主 agent + 一排平级子域"，不会长出三层。
+
+    **归属结算**（2026-09-13，worklog §76）：产物认领的文件从其他条目（含分裂
+    方主 agent）的清单里减掉——否则一个文件会同时挂在两个 agent 名下。传
+    `settle_lines` 可以取回结算明细（给维护流水记账用）。
+    """
+    merged, added, updated, settle = project_merge(
+        registry, domains, parent_id, retire_id
+    )
+    if registry is None:
+        registry = []
+    land(registry, merged)
+    if settle_lines is not None:
+        settle_lines.extend(settle)
+    return added, updated

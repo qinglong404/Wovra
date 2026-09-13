@@ -1300,32 +1300,63 @@ class _MaintenanceMixin:
                             "⛔ 分裂产物被拒收：" + "；".join(defects[:3])
                         )
                     continue
+                # **落点预演**（2026-09-13，worklog §76）：产物内部合规 ≠ 落进
+                # 注册表后合规。`split_defects` 只看新域树自己，看不见注册表里
+                # 早已据着同一批文件的旧条目——实测曾把 F2 破坏（一个文件同时
+                # 挂在主 agent 与子域名下）静默合并进注册表。故这里先做纯投影：
+                # 结算归属 + 跑**跨条目**互斥体检，不通过就与内部缺陷同等拒收。
+                parent = str(pending.get("split_parent") or "")
+                if not parent:
+                    parent = str((self.current_round or {}).get("active_view") or "")
+                parent_id = ""
+                if parent and parent != registry_module.MAIN_AGENT_ID:
+                    ent = next(
+                        (e for e in (self.task.registry or [])
+                         if isinstance(e, dict)
+                         and parent in (str(e.get("id")), str(e.get("name")))),
+                        None,
+                    )
+                    parent_id = str((ent or {}).get("id") or "")
+                projected: list[dict] = []
+                added: list[str] = []
+                updated: list[str] = []
+                settle_lines: list[str] = []
+                if self.task is not None:
+                    projected, added, updated, settle_lines = (
+                        registry_module.project_merge(
+                            self.task.registry, pending["domains"],
+                            parent_id=parent_id, retire_id=parent_id,
+                        )
+                    )
+                    cross = registry_module.registry_defects(projected)
+                    if cross:
+                        r.pop("domains", None)
+                        self._split_defects = cross
+                        if self.task is not None:
+                            self.task.record(
+                                "split_defect",
+                                "分裂产物被拒收（落点会造成跨条目 F2 违反）："
+                                + "；".join(cross[:6]),
+                            )
+                        if self.on_progress:
+                            self.on_progress(
+                                "⛔ 分裂产物被拒收（归属重叠）：" + "；".join(cross[:3])
+                            )
+                        continue
                 r["domains"] = pending["domains"]
                 # 组织层落地点（2026-09-11 用户拍板 A：Level 1 视图分化）：
                 # 域树 → 注册表条目是**机械翻译**（语义归模型、体量归机制）。
                 # 幂等合并：崩溃补做/重启重放只更新既有条目。注册表在此
                 # 才第一次长出主 agent 之外的条目——此前永远只有 A。
                 if self.task is not None:
-                    # **两级替换**（2026-09-12 用户口径，worklog §63）：正在分裂的
-                    # 那个域随之消失，产物平级登记成它的 `-1`、`-2`…；主 agent
-                    # 分裂则取 A、B、C…。分裂主体 = 产出该批次时的视图，记在
-                    # pending 里（`_stage_org_state` 写入），缺省退回本轮视图。
-                    parent = str(pending.get("split_parent") or "")
-                    if not parent:
-                        parent = str((self.current_round or {}).get("active_view") or "")
-                    parent_id = ""
-                    if parent and parent != registry_module.MAIN_AGENT_ID:
-                        ent = next(
-                            (e for e in (self.task.registry or [])
-                             if isinstance(e, dict)
-                             and parent in (str(e.get("id")), str(e.get("name")))),
-                            None,
+                    registry_module.land(self.task.registry, projected)
+                    if settle_lines:
+                        self.task.record(
+                            "maintenance",
+                            f"归属结算：{len(settle_lines)} 个文件的清单从旧条目"
+                            "移到新域（" + "；".join(settle_lines[:6])
+                            + ("…" if len(settle_lines) > 6 else "") + "）",
                         )
-                        parent_id = str((ent or {}).get("id") or "")
-                    added, updated = registry_module.merge_into(
-                        self.task.registry, pending["domains"],
-                        parent_id=parent_id, retire_id=parent_id,
-                    )
                     if added or updated:
                         detail = []
                         if added:

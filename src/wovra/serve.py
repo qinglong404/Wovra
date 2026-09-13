@@ -938,12 +938,19 @@ def session_meta(task_id: str, data: dict) -> dict:
     # 对齐/传话线程（像聊天软件）：谁交给谁、内容是什么（前端「线程」面板用）
     meta["chat"] = data.get("chat") or []
     meta["registry"] = data.get("registry") or []
+    # 跨条目归属互斥体检（2026-09-13，worklog §76）：**只报不改**——旧会话的
+    # 数据原样保留（用户口径），但一个文件同时挂在两个 agent 名下这件事不该
+    # 静默躺在页面上。新分裂由 promote 的落点预演拦住，不会再长出这种条目。
+    meta["registry_defects"] = registry_module.registry_defects(meta["registry"])
     # 窗口语义纠正（2026-09-12）：旧数据把整理水位 100K 存进了 registry
-    # window——投影层按真实窗口展示；落盘值随下一轮活动由 core 自愈
+    # window——投影层按真实窗口展示；落盘值随下一轮活动由 core 自愈。
+    # **未观测的条目不要补默认窗口**（2026-09-13，worklog §76）：`window=0`
+    # 是"这个 agent 一次都没跑过"的事实，补成 1M 会在页面上演成
+    # `0/1M（0.00%）`——看起来像"窗口空着没用"，其实是"没有观测"。前端据此
+    # 显示「未运行（无观测）」。
     from .agent.support import _DEFAULT_CONTEXT_LIMIT
     for e in meta["registry"] or []:
-        if isinstance(e, dict) and (not int(e.get("window") or 0)
-                                    or int(e["window"]) == 100_000):
+        if isinstance(e, dict) and int(e.get("window") or 0) == 100_000:
             e["window"] = _DEFAULT_CONTEXT_LIMIT
     # per-agent 账**派生后补进条目**（2026-09-12 用户拍板：账本不落盘）——
     # 前端照旧读 `rounds`/`steps`/`handoffs`，但那些值现在是现场算的：

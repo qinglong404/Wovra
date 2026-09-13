@@ -211,6 +211,43 @@ def test_session_meta_corrects_legacy_window():
     assert meta["registry"][0]["window"] == 1_000_000
 
 
+def test_session_meta_keeps_unobserved_window_at_zero():
+    """`window=0` 是"这个 agent 一次都没跑过"的事实，不许补成默认窗口。
+
+    实测误读（会话 20260913-125849-2963df）：刚登记的 4 个域一个都没运行，
+    投影层补上 1M 后页面显示 `0/1M（0.00%）`，被读成"窗口空着没用"。真值
+    `window=0` → 前端显示「未运行（无观测）」。
+    """
+    data = _fake_task()
+    data["registry"] = [{"id": "Main", "name": "主agent", "status": "active",
+                         "inbox": [], "ctx_cur": 235398, "window": 1_000_000},
+                        {"id": "A", "name": "探针域", "status": "dormant",
+                         "inbox": [], "ctx_cur": 0, "ctx_peak": 0, "window": 0}]
+    meta = serve.session_meta("s1", data)
+    by_id = {e["id"]: e for e in meta["registry"]}
+    assert by_id["Main"]["window"] == 1_000_000
+    assert by_id["A"]["window"] == 0                     # 未观测就是未观测
+
+
+def test_session_meta_surfaces_cross_entry_registry_defects():
+    """旧分裂留下的归属重叠**只报不改**（用户口径：旧会话原样保留），
+    但一个文件同时挂在两个 agent 名下这件事不许静默躺在页面上。"""
+    data = _fake_task()
+    data["registry"] = [
+        {"id": "Main", "name": "主agent", "status": "active", "inbox": [],
+         "files": ["output/_p1.py"]},
+        {"id": "D", "name": "探针域", "status": "dormant", "inbox": [],
+         "files": ["output/_p1.py"]},
+    ]
+    meta = serve.session_meta("s1", data)
+    assert len(meta["registry_defects"]) == 1
+    assert "output/_p1.py" in meta["registry_defects"][0]
+    assert data["registry"][0]["files"] == ["output/_p1.py"]   # 数据未改写
+
+    clean = _fake_task()
+    assert serve.session_meta("s1", clean)["registry_defects"] == []
+
+
 def test_round_detail_flattens_events():
     d = serve.round_detail(_fake_task(), 1)
     assert d["user_input"] == "干活"

@@ -257,3 +257,130 @@ def test_top_id_and_legacy_migration():
     assert rounds[1]["active_view"] == "工具层"         # 域名不动
     assert rounds[1]["route_explicit"] == "Main"
     assert moved >= 5
+
+
+# ---------------------------------------------------------------------------
+# 归属结算 + 跨条目互斥体检（2026-09-13，worklog §76）
+#
+# 实测缺陷（会话 20260913-125849-2963df）：`merge_into` 原先只写新条目、
+# 只更新同 id 条目，**分裂方（主 agent）自己的清单谁也不碰**。主 agent 从
+# 创建时累积的清单（F5 谁创建谁拥有）于是与子域清单重叠——Main.files(17)
+# ∩ D.files(17) = 16 个文件，另有一个已删文件一边在 Main.files 算 LIVE、
+# 一边在 D.history_files 算已删。后果不是"页面难看"：`_file_permission`
+# 先看 mine，两家 file_owned_by 都 True → **两个 agent 都能写同一批文件**。
+# ---------------------------------------------------------------------------
+
+
+def _splitter_with_files():
+    """分裂前的主 agent + 三个探针文件（其中一个已删）。"""
+    return [{
+        "id": registry_module.MAIN_AGENT_ID, "name": "主agent",
+        "description": "全局协调", "status": "active", "inbox": [],
+        "files": ["output/_p1.py", "output/_p2.py", "output/_dead.py"],
+        "history_files": [],
+        "file_notes": {"output/_p1.py": "探针一", "output/_p2.py": "探针二",
+                       "output/_dead.py": "已删的探针"},
+    }]
+
+
+def test_settle_ownership_subtracts_claimed_files_from_the_splitter():
+    """产物认领的文件从主 agent 清单里减掉——"全部文件活搬进子 agent"。"""
+    registry = _splitter_with_files()
+    entries = registry_module.build_entries([{
+        "name": "诊断探针与常驻仪器", "description": "取证脚本",
+        "files": ["output/_p1.py", "output/_p2.py"],
+        "history_files": ["output/_dead.py"],
+    }])
+
+    moved = registry_module.settle_ownership(registry, entries)
+    main = registry[0]
+    assert registry_module.entry_files(main) == []
+    assert registry_module.entry_history(main) == []
+    # 清单里没了的文件，描述一并摘掉（不给主 agent 留空抽屉）
+    assert main["file_notes"] == {}
+    assert len(moved) == 3
+    assert all("交出" in m for m in moved)
+
+
+def test_settle_ownership_is_end_to_end_via_merge_into():
+    """`merge_into` 落地后全注册表无重叠——这正是实测缺的那一步。"""
+    registry = _splitter_with_files()
+    added, _updated = registry_module.merge_into(registry, [{
+        "name": "诊断探针与常驻仪器", "description": "取证脚本",
+        "files": ["output/_p1.py", "output/_p2.py"],
+        "history_files": ["output/_dead.py"],
+    }])
+    assert added == ["A"]
+    assert registry_module.entry_files(registry[0]) == []
+    assert registry_module.registry_defects(registry) == []
+    # 归属收敛到子域：一个文件只有一个主人
+    assert registry_module.owner_of_file(registry, "output/_p1.py").startswith("A")
+
+
+def test_settle_ownership_noop_without_claims_and_keeps_legacy_prefixes():
+    """产物没给文件清单 → 不动别人的账；老前缀口径（file_domains）不参与结算。
+
+    用户口径（2026-09-13）：「旧会话原样保留，只修机制」——前缀归属是历史
+    兼容读取（`entry_prefixes`），不在结算范围内。
+    """
+    registry = _splitter_with_files()
+    registry[0]["file_domains"] = ["output/"]
+    # ① 无文件清单的产物：一字不动
+    registry_module.settle_ownership(
+        registry, registry_module.build_entries([{"name": "空域"}])
+    )
+    assert len(registry_module.entry_files(registry[0])) == 3
+    # ② 前缀仍在 → 仍算它维护（兼容读取），但清单不被前缀牵连
+    registry_module.settle_ownership(
+        registry, registry_module.build_entries(
+            [{"name": "别处", "files": ["src/other.py"]}]
+        )
+    )
+    assert len(registry_module.entry_files(registry[0])) == 3
+    assert registry[0]["file_domains"] == ["output/"]      # 历史字段原样
+
+
+def test_project_merge_is_pure():
+    """预演不改传入的注册表（门与落地同一套代码，但门不能有副作用）。"""
+    registry = _splitter_with_files()
+    before = json.dumps(registry, ensure_ascii=False, sort_keys=True)
+    merged, added, _updated, settle = registry_module.project_merge(registry, [{
+        "name": "探针", "description": "取证",
+        "files": ["output/_p1.py", "output/_p2.py", "output/_dead.py"],
+    }])
+    assert json.dumps(registry, ensure_ascii=False, sort_keys=True) == before
+    assert added == ["A"] and len(settle) == 3
+    assert registry_module.entry_files(merged[0]) == []
+    assert [e["id"] for e in merged] == ["Main", "A"]
+
+
+def test_registry_defects_reports_all_three_overlap_shapes():
+    """互斥体检覆盖 files∩files、files∩history、history∩history 三种形态。"""
+    assert registry_module.registry_defects([]) == []
+    assert registry_module.registry_defects([
+        {"id": "Main", "name": "主", "files": ["a.py"]},
+        {"id": "A", "name": "甲", "files": ["b.py"]},
+    ]) == []
+
+    bad = [
+        {"id": "Main", "name": "主", "files": ["a.py", "x.py"],
+         "history_files": ["h.py"]},
+        {"id": "A", "name": "甲", "files": ["a.py"]},
+        {"id": "B", "name": "乙", "history_files": ["x.py", "h.py"]},
+    ]
+    defects = registry_module.registry_defects(bad)
+    kinds = {" ".join(d.split("共认")[0].split()) for d in defects}
+    assert "F2 违反：Main.files 与 A.files" in kinds
+    assert "F2 违反：Main.files 与 B.history_files" in kinds
+    assert "F2 违反：Main.history_files 与 B.history_files" in kinds
+    assert all("一个文件只能一个域" in d for d in defects)
+    # 无 name 的脏条目跳过（注册表里可能有半截条目）
+    assert registry_module.registry_defects([{"id": "X"}]) == []
+
+
+def test_registry_defects_ignores_legacy_prefixes():
+    """前缀是兼容读取口径，不让它把旧会话天天报成冲突。"""
+    assert registry_module.registry_defects([
+        {"id": "Main", "name": "主", "file_domains": ["output/"]},
+        {"id": "A", "name": "甲", "files": ["output/_p1.py"]},
+    ]) == []

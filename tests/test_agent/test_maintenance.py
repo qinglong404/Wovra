@@ -1212,6 +1212,89 @@ def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
     assert [e["id"] for e in task.registry] == ["Main", "A"]
 
 
+def _files_domains_chunk():
+    """分裂产物：显式给出 files 清单（走归属结算那条路）。"""
+    args = json.dumps({
+        "thoughts": [],
+        "domains": [{
+            "name": "诊断探针与常驻仪器",
+            "description": "取证脚本与常驻仪器",
+            "files": ["output/_p1.py", "output/_p2.py"],
+            "block_ids": [],
+        }],
+        "split_assessment": {"splittable": True, "reason": "两条独立工作线"},
+    }, ensure_ascii=False)
+    return _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=args),
+    ]))
+
+
+def test_promote_settles_ownership_out_of_main_agent(monkeypatch, tmp_path):
+    """**归属结算**（2026-09-13，worklog §76）：分裂产物认领的文件，promote 时
+    从主 agent 的清单里减掉——否则一个文件同时挂在两个 agent 名下，而
+    `_file_permission` 先看 mine，两家都会放行，F2 互斥事实上失效。
+
+    实测缺陷：会话 20260913-125849-2963df 里 `Main.files`(17) ∩ `D.files`(17)
+    = 16 个文件（`output/` 下的一堆 `_` 探针），页面就成了"主 agent 挂着一堆
+    临时测试脚本"。口径来源是分裂指令自己那句"把**全部文件活**搬进它，主
+    agent 只剩闲聊 + 环境块"——写在提示词里不算数，机制负责执行。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_files_domains_chunk()]],
+    )
+    main = next(e for e in task.registry if e["id"] == "Main")
+    main["files"] = ["output/_p1.py", "output/_p2.py", "output/_stale.py"]
+    main["file_notes"] = {"output/_p1.py": "旧描述", "output/_p2.py": "旧描述",
+                         "output/_stale.py": "旧描述"}
+
+    agent._maybe_organize_batch()
+    agent._promote_org_results()
+
+    entry = next(e for e in task.registry if e["id"] == "A")
+    assert registry_module.entry_files(entry) == ["output/_p1.py", "output/_p2.py"]
+    # 搬走的走了、没被认领的留着（不是清空，是结算）
+    assert registry_module.entry_files(main) == ["output/_stale.py"]
+    assert set(main["file_notes"]) == {"output/_stale.py"}
+    # 全注册表无重叠 —— 这一条就是实测缺的那一步
+    assert registry_module.registry_defects(task.registry) == []
+    assert any(
+        "归属结算" in str(h.get("detail"))
+        for h in task.history if h.get("kind") == "maintenance"
+    )
+
+
+def test_promote_rejects_product_that_would_break_cross_entry_f2(monkeypatch, tmp_path):
+    """**落点预演**是道真闸门：产物内部合规 ≠ 落进注册表后合规。
+
+    `split_defects` 只看新域树自己（看不见注册表里早已据着同一批文件的旧
+    条目），所以 promote 必须**先投影、再体检、后落地**：不通过就与内部缺陷
+    同等拒收——不写 `r["domains"]`、不动注册表、落一条醒目 split_defect。
+    用户口径："有些错误是根基，其错了，我下面测试无意义"。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_files_domains_chunk()]],
+    )
+    monkeypatch.setattr(
+        registry_module, "registry_defects",
+        lambda _reg: ["F2 违反：Main.files 与 A.files 共认 1 个文件（output/_p1.py）"],
+    )
+    notes: list[str] = []
+    agent.on_progress = notes.append
+
+    agent._maybe_organize_batch()
+    agent._promote_org_results()
+
+    assert [e["id"] for e in task.registry] == ["Main"]        # 注册表一字未动
+    assert not task.rounds[0].get("domains")                   # 产物不落档
+    assert not task.rounds[0].get("pending_org")               # 不留暂存
+    assert any(h.get("kind") == "split_defect" for h in task.history)
+    assert any("⛔" in n for n in notes)
+
+
 def test_split_skipped_when_org_fails(monkeypatch, tmp_path):
     """org 失败则 split 跳过（分裂依赖整理质量，失败批次不产出）。"""
     agent, task = _split_fixture(
