@@ -1022,12 +1022,25 @@ async function pollPlan(){
   if(TAB==='todo')renderTab();                  // 正在看计划页 → 立刻重画
   else if(typeof renderHeader==='function')renderHeader();
 }
+/* 作业状态查询：**404 不当失败，当"作业已不存在"**（2026-09-13 加的兜底）。
+   服务重启过之后，旧页面手里的 job id 在新进程里根本不存在——原先 fetch 抛错、
+   被 catch 吞掉，于是运行线永远停在最后一个状态（"回答中…"），看着就是卡死。 */
+async function jobStatus(jobId){
+  try{
+    const r=await fetch(`/api/jobs/${jobId}`);
+    if(r.status===404)return {gone:true};
+    if(!r.ok)return null;
+    return await r.json();
+  }catch(e){return null}
+}
+function isGone(err){return /→\s*404\s*$/.test(String((err&&err.message)||''))}
 async function pollLive(){
   if(!LIVE.job||document.hidden)return;
   pollPlan();                      // 计划页随 todo 调用即时同步（轻量，几十字节）
   tickRunlineTime();               // 运行时长自己走字（不依赖分片到达）
   if(LIVE.sse){   // SSE 健康时零轮询；断开则 300ms 兜底
-    const d=await api(`/api/jobs/${LIVE.job}`).catch(()=>null);
+    const d=await jobStatus(LIVE.job);
+    if(d&&d.gone){sseFinish();return}     // 作业没了（服务重启/已清理）→ 收尾
     if(d){
       if(d.round)syncLiveSeq(d.round);
       if(d.pending)renderPendingBar(LIVE.job,d.pending);else clearPendingBar();
@@ -1036,7 +1049,8 @@ async function pollLive(){
     return;
   }
   let d;
-  try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}catch(e){return}
+  try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}
+  catch(e){if(isGone(e)){sseFinish()}return}
   if(d.round)syncLiveSeq(d.round);
   if(d.pending)renderPendingBar(LIVE.job,d.pending);else clearPendingBar();
   // **SSE 断了也要能收尾**（2026-09-13 修的 bug：这条分支原先只看分片、不看
@@ -1756,8 +1770,7 @@ async function send(){
         // **必须走 sseFinish**（refreshAfterTurn + liveDetach 一条路）：原先这里
         // 只 refreshAfterTurn()、不撤直播区 → 临时块带着思考留在正式块下面
         //（用户 2026-09-13 报的"一轮分成两个消息块"）。sseFinish 幂等，重复调无害。
-        await sseFinish();
-      }catch(e){clearInterval(iv);$('#send').disabled=false;
+        await sseFinish();      }catch(e){clearInterval(iv);$('#send').disabled=false;
         const pr=$('#pend-run');if(pr)pr.textContent='✗ 轮询失败：'+e.message}
     },1500);
   }catch(e){$('#send').disabled=false;const pr=$('#pend-run');if(pr)pr.textContent='✗ '+e.message}

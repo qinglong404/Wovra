@@ -485,6 +485,13 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                     job["status"] = "cancelled"
                     job["answer"] = "已终止——轮保持开放，发 /c 可续跑"
                     return
+                # **整理也是这一轮的一部分，必须报状态**（2026-09-13 用户报
+                # "卡到回答中了"）：`organize_backlog()` 会真发整理 + 分裂两次
+                # LLM 调用（实测这批 106 秒：org 75s + split 31s），而这段时间
+                # **一个分片都不推** —— 界面就停在最后一段流留下的"回答中…"
+                # 不动，看起来像卡死。先推一条状态，让运行线说清楚在干什么
+                # （秒数由前端自己走字，不停）。
+                _live({"k": "status", "s": "回答已产出，正在整理上下文…"})
                 agent.organize_backlog()
             finally:
                 _release_session_lock(task)

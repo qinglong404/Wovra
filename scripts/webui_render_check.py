@@ -520,6 +520,29 @@ renderLive();
   console.log(`   L 临时块残留=${!!prov2} 消息块=${rows.length}`);
 }
 
+console.log('场景 M｜回答产出后进"整理"：状态要更新、内容不许消失');
+resetLive();
+mountRound(DOM.content, 7, false);
+CONV = realConv();
+META.round_list = [{seq:7, active_view:'A', events:2, steps_used:1}];
+META.status = 'in_progress';
+applyChunk({k:'ans', s:'**最终**回答'});
+renderLive();
+// serve 在整理/分裂开始前推的状态（2026-09-13 新增；此前这 100+ 秒一个分片都
+// 不推，界面停在"回答中…"不动 —— 用户报"卡到回答中了"）
+applyChunk({k:'status', s:'回答已产出，正在整理上下文…'});
+renderLive();
+{
+  const rl = document.getElementById('runline');
+  const has = rl && /整理/.test(rl.innerHTML);
+  if (!has) problems.push('M: 运行线没显示"正在整理"（用户会以为卡死）');
+  const box = DOM.content.querySelector('#livebox');
+  const done = box && box.querySelector('#live-done');
+  if (!done || !/strong/.test(done.innerHTML))
+    problems.push('M: 进整理后回答消失了（应留在完成区，等正式渲染接管）');
+  console.log(`   M 运行线含整理=${!!has} 回答留在完成区=${!!(done&&/strong/.test(done.innerHTML))}`);
+}
+
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('#livebox'); }
 
 console.log('');
@@ -528,7 +551,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（12 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号不变量全查）');
+console.log('渲染核对：通过（13 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 

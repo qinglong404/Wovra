@@ -1205,8 +1205,20 @@ class _MaintenanceMixin:
         results = {"org": False, "split": False}
         box: dict = {}
 
+        def stage(text: str) -> None:
+            """往**直播流**报一句阶段状态（2026-09-13 用户报"卡到回答中了"）。
+
+            整理 + 分裂是真发 LLM 调用的（实测一批 106 秒），这段时间一个分片都
+            不推 —— 界面停在"回答中…"不动，看起来像卡死。报一句阶段名，让运行线
+            说得清在干什么。CLI 侧只是多两行提示，无副作用。
+            """
+            if self.on_progress:
+                self.on_progress(text)
+
         def run() -> None:
             try:
+                stage("整理上下文…（整理批次 R%d-R%d）"
+                      % (batch[0]["seq"], batch[-1]["seq"]))
                 results["org"], exchange = self._organize_rounds(batch, base)
                 box["exchange"] = exchange
             except Exception as error:  # noqa: BLE001——失败不拖垮管线
@@ -1222,9 +1234,11 @@ class _MaintenanceMixin:
             if not results["org"]:
                 return  # org 失败：split 跳过（依赖整理质量）
             try:
+                stage("分裂分析…")
                 results["split"] = self._split_rounds(
                     batch, box.get("exchange"), base
                 )
+                stage("整理完成")
             except Exception as error:  # noqa: BLE001
                 if self.task is not None:
                     self.task.record(

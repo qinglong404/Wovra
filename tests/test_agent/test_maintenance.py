@@ -1295,6 +1295,28 @@ def test_promote_rejects_product_that_would_break_cross_entry_f2(monkeypatch, tm
     assert any("⛔" in n for n in notes)
 
 
+def test_maintenance_reports_stage_progress(monkeypatch, tmp_path):
+    """整理/分裂两个阶段都要往**直播流**报状态（2026-09-13 用户报"卡到回答中了"）。
+
+    实测一批维护 = org 75s + split 31s（共 **106 秒**），而这期间**一个分片都不推**
+    —— 界面就停在最后一段流留下的"回答中…"不动，看着像卡死。阶段名推出去，
+    运行线才说得清在干什么（CLI 侧只是多两行提示，无副作用）。
+    """
+    agent, task = _split_fixture(
+        monkeypatch, tmp_path,
+        org_pool=[[_chunk(_delta(content=_org_json()))]],
+        split_pool=[[_domains_chunk()]],
+    )
+    seen: list[str] = []
+    agent.on_progress = seen.append
+    agent._maybe_organize_batch()
+
+    assert seen, "维护必须报阶段状态，否则这一个多钟头界面是死的"
+    assert any("整理上下文" in s for s in seen), seen
+    assert any("分裂分析" in s for s in seen), seen
+    assert any("整理完成" in s for s in seen), seen
+
+
 def test_split_skipped_when_org_fails(monkeypatch, tmp_path):
     """org 失败则 split 跳过（分裂依赖整理质量，失败批次不产出）。"""
     agent, task = _split_fixture(
