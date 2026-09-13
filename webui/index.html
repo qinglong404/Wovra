@@ -971,6 +971,26 @@ function tickStopBtn(){
   st.textContent='⏹ 终止本轮'+(du?' · '+du:'');
 }
 setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
+function blockKey(d){
+  // 展开状态的稳定键：优先用元素自己标的 data-k，否则用它的 summary/首行文本
+  if(d.dataset&&d.dataset.k)return d.dataset.k;
+  const s=d.querySelector('summary');
+  const t=(s?s.textContent:d.textContent)||'';
+  return (d.className||'')+'|'+String(t).replace(/\s+/g,' ').trim().slice(0,60);
+}
+function snapshotOpenBlocks(){
+  const open=new Set();
+  document.querySelectorAll('#content details[open]').forEach(d=>open.add(blockKey(d)));
+  return open;
+}
+function restoreOpenBlocks(open){
+  if(!open||!open.size)return;
+  document.querySelectorAll('#content details').forEach(d=>{
+    const k=blockKey(d);
+    if(open.has(k)&&!d.open)d.open=true;
+    else if(!open.has(k)&&d.open&&!d.dataset.user)d.open=false;
+  });
+}
 function renderLive(){
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
   let el=document.getElementById('livebox');
@@ -995,7 +1015,13 @@ function renderLive(){
   // 结构（状态行文案）变化才重建骨架；流式文本走 textContent 增量赋值
   if(!el._built){
     el._built=true;
-    el.innerHTML=`<div class="think-live" id="live-think" style="display:none"></div>`+
+    // **先有思考块，再往里灌文本**（用户口径）：思考中保持展开，思考完**折叠
+    // 但仍留在原地**（不是 display:none 消失），后面正文平滑接在它下面；等
+    // 事件区渲染出正式块后，liveDetach 才把这块撤掉——中间不会出现"消失一下
+    // 再冒出来"的空档。
+    el.innerHTML=`<details class="think-live" id="live-think" open>`+
+        `<summary id="live-think-sum">💭 思考中…</summary>`+
+        `<div class="think-live-body" id="live-think-body"></div></details>`+
       `<div class="bub ans-live" id="live-ans" style="display:none"></div>`;
   }
   const rl=document.getElementById('runline');
@@ -1005,15 +1031,20 @@ function renderLive(){
       `<span class="rl-time">${esc(fmtDur((Date.now()-(LIVE.startedAt||Date.now()))/1000)||'<1s')}</span>`;
   }
   const tb=el.querySelector('#live-think');
-  if(tb){
+  const tbody=el.querySelector('#live-think-body');
+  const tsum=el.querySelector('#live-think-sum');
+  if(tb&&tbody){
     const show=LIVE.think?LIVE.think.slice(-4000):'';
     if(show){
-      tb.style.display='';tb.classList.remove('folding');
-      if(tb.textContent!==show)tb.textContent=show;
-    }else if(tb.style.display!=='none'){
-      // 思考完毕：先平滑收拢（.25s），再隐藏——顺序不变、下方不跳
-      tb.classList.add('folding');
-      setTimeout(()=>{if(tb.classList.contains('folding')){tb.style.display='none';tb.classList.remove('folding')}},280);
+      // 思考中：块**展开**，文本增量灌进去（块先于文本存在）
+      if(!tb.open&&tb.dataset.user!=='1')tb.open=true;
+      if(tbody.textContent!==show)tbody.textContent=show;
+      if(tsum)tsum.textContent='💭 思考中…';
+    }else if(tbody.textContent){
+      // 这一段思考结束：**折叠但不移除**（文本留着、位置不动），
+      // 后续正文接在它下面——不再"消失一下再冒出来"
+      if(tb.open&&tb.dataset.user!=='1')tb.open=false;
+      if(tsum)tsum.textContent='💭 思考内容（已折叠，点开看）';
     }
   }
   const ab=el.querySelector('#live-ans');
@@ -1071,6 +1102,7 @@ async function loadEarlier(){
 }
 
 function drawConv(c,toBottom){
+  const openKeys=snapshotOpenBlocks();
   const rl=CONV.seqs;
   if(!rl.length){c.innerHTML='<div class="empty">此会话还没有对话</div>';return}
   const metaBy={};(META.round_list||[]).forEach(r=>metaBy[r.seq]=r);
@@ -1254,6 +1286,8 @@ function drawConv(c,toBottom){
   const anchorTop=c.scrollTop,anchorH=c.scrollHeight;
   REBUILDING=true;
   c.innerHTML=html;
+  restoreOpenBlocks(openKeys);          // **保住用户展开的块**：整段重绘会把
+                                        // <details> 全部打回折叠态（"一闪就折叠了"）
   // 回填结果与状态
   for(const [id,ci] of Object.entries(calls)){
     const el=c.querySelector(`[data-call="${CSS.escape(id)}"]`);if(!el)continue;
