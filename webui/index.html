@@ -677,6 +677,7 @@ async function select(id){
   }
   renderHeader();renderTab();
   watchMaintenance();   // 打开一个"后台还在整理"的会话：界面要自己跟上（§86）
+function renderHeader(){
 }
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
@@ -686,7 +687,6 @@ async function select(id){
   // 轮询刷新、首屏还没 select 完），整页就停在"加载中"再也画不出来。渲染入口不对
   // "数据还没到"负责——那是加载状态，不是错误。
   if(!META)return;
-function renderHeader(){
   const u=META.usage||{};
   $('#goal').classList.remove('empty');
   $('#goal').textContent=META.goal||META.id;
@@ -740,10 +740,10 @@ async function shutdownServer(el){   // 偏僻角落的 ⏻：终止服务进程
   $('#foot-ver').textContent='服务已停止——重启 wovra serve 后刷新此页';
 }
 
+function renderTab(){
 /* ---------- 视图 ---------- */
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderTab(){
   const c=$('#content');
   $('#composer').classList.toggle('show',TAB==='conv'&&!!CUR);
   if(TAB==='conv')return renderConv(c);
@@ -1481,10 +1481,10 @@ function renderLiveOne(aid,isActor){
     ? box.parentNode.closest('.crow.live-prov') : null;
   if(prov)prov.style.display=hide?'none':'';
 }
+async function renderConv(c,fresh){
 
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-async function renderConv(c,fresh){
   if(CONV.session!==CUR||fresh){
     CONV={session:CUR,seqs:[],cache:{}};
     const batch=convAllSeqs().slice(-5);
@@ -1842,10 +1842,10 @@ async function ensureViewSizes(force){
     VIEWSIZES={sig,agents:d.agents||[],window:d.window||0,basis:d.basis||''};
   }catch(e){VIEWSIZES=null}
   finally{VIEWSIZES_BUSY=false}
+function renderCtxbar(){
 }
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderCtxbar(){
   const bar=document.getElementById('ctxbar');
   const entries=((META&&META.registry)||[]).filter(e=>e&&e.name);
   const pv=((VIEWSIZES&&VIEWSIZES.agents)||[]);
@@ -2227,10 +2227,10 @@ function blockChip(b){
   const nOps=ops.length>1?`<span class="ops">×${ops.length}</span>`:'';
   return `<span class="blk" onclick="jumpToConv(${b.id.match(/^R(\d+)/)[1]},'${esc(b.id)}')" title="在对话流中查看 ${esc(b.id)}">
     <span class="f">${esc(b.file||b.id)}</span>${nOps}${tags}</span>`;
+function renderTimeline(c){
 }
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderTimeline(c){
   const rl=META.round_list||[];
   if(!rl.length){c.innerHTML='<div class="empty">此会话还没有轮次</div>';return}
   c.innerHTML='<h3 class="sec">轮次时间线（新 → 旧）· 点块跳对话流</h3>'+[...rl].reverse().map(r=>{
@@ -2250,10 +2250,10 @@ function renderTimeline(c){
     </div>`}).join('');
 }
 
+function renderLedger(c){
 /* ---------- 账本 ---------- */
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderLedger(c){
   const t=META.task_state||{};
   // 账本由"上下文整理"产出（state_patch 写 TaskState）：未触发时不是坏了，
   // 而是还没到水位——把机制与进度直接写在页面上，别让用户对着空白猜
@@ -2302,10 +2302,10 @@ function renderLedger(c){
     '</div>';
 }
 
+function renderTodo(c){
 /* ---------- 计划 ---------- */
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderTodo(c){
   const t=META.todo||{},m=t.milestone;
   let html='<h3 class="sec">阶段 / 工作项（深度恒 1）</h3>';
   if(m){
@@ -2545,10 +2545,10 @@ function ctxViz(){
       <div class="viz-lab" style="margin-top:14px">调用开销构成 <span style="color:var(--tx3);font-weight:400">（整轮对话 vs 维护开销：整理/压缩/分裂）</span></div>
       <div>${usage}</div>
     </div>`;
+function renderProject(c){
 }
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderProject(c){
   const reg=META.registry||[];
   const status=fileStatusIndex();
   // 待生效的分裂产物（暂存区里的域，尚未并入注册表）
@@ -2622,10 +2622,10 @@ function renderProject(c){
         ${ctxViz()}
       </div>
     </div>`;
+async function loadTree(force){
 }
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-async function loadTree(force){
   if(TREE.loading)return;
   if(!force&&TREE.cur===CUR&&TREE.root)return;   // 同会话复用
   TREE.loading=true;
@@ -2760,10 +2760,10 @@ async function openViewDrawer(view,id){
   }catch(e){$('#d-body').innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>'}
 }
 
+function renderUsage(c){
 /* ---------- 用量 ---------- */
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
-function renderUsage(c){
   const u=META.usage||{};
   const hit=u.cached||0, miss=u.miss||0, tot=hit+miss;
   const fin=u.finish||{};
