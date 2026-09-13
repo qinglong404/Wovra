@@ -4,6 +4,7 @@
 assembly.py；水位维护管线在 maintenance.py——四者由 __init__.py 组装为
 同一个 Agent 类（mixin）。方法体里的跨模块调用走 self，与拆分前一致。
 """
+import copy
 import json
 import queue
 import threading
@@ -200,6 +201,10 @@ class _CoreMixin:
         self._baseline_prompt_used = task.baseline_prompt_used if task else 0
 
         self.last_stats = self._fresh_stats()
+        # 账本按**轮**累计（供显示），落账写**增量**：这两个是增量基线与轮号标记
+        # （2026-09-13，见 `_work_loop` / `_usage_record_and_drain`）
+        self._stats_drained: Optional[dict] = None
+        self._stats_round: Optional[int] = None
 
         if self.context_mode == MODE_MANAGED:
             self.register(self.expand_history)
@@ -1124,8 +1129,22 @@ class _CoreMixin:
         on_thinking: Optional[Callable[[str], None]] = None,
         on_answer_delta: Optional[Callable[[str], None]] = None,
     ) -> str:
-        """单轮的工具调用主循环：run 与 resume 共用。"""
-        self.last_stats = self._fresh_stats()
+        """单轮的工具调用主循环：run 与 resume 共用。
+
+        **账本按"轮"不按"段"**（2026-09-13 修，实测缺陷）：`last_stats` 原先每次
+        进入本方法就清零，于是同一轮的**后续段**（步数超限后的 `\\c` 续跑、会合交棒
+        后的第二段）会把前一段的按调用方分账**连同它的 token 一起丢掉**——
+        现场会话 `20260913-151842-2628dd` 的 R7：轮总 `steps=43`，分账只有
+        `[web 网络工具… steps=25]`，且该行 `prompt=2,104,250` **恰好等于**那一段
+        的分账额，说明那 18 步的钱在轮账里整个消失（汇总与分账同时少钱）。
+        现在：**同一轮再次进入就接着累**；清零只发生在"新的一轮"或"刚落过账"
+        （`_usage_record_and_drain`）——后者保证行与行不重叠。
+        """
+        seq = (self.current_round or {}).get("seq")
+        if getattr(self, "_stats_round", None) != seq:
+            self.last_stats = self._fresh_stats()
+            self._stats_drained = None      # 新轮的增量基线归零
+            self._stats_round = seq
         # 空响应护栏：流被端点/代理掐断时只有思考没有正文，连续空响应计数
         empty_streak = 0
         # 回调暂存：跨 agent 通信工具（consult）流式展示时借用同一管线，
@@ -1573,9 +1592,24 @@ class _CoreMixin:
             self._baseline_accounting()
         maint = self.drain_maintenance_usage()
         stats = self.last_stats
-        prompt = stats["prompt_tokens"]
-        cached = stats["cached_tokens"]
-        miss = stats["cache_miss_tokens"]
+        # **落账写"增量"**（2026-09-13）：`last_stats` 是**轮内累计**（`cli/render.py`
+        # 在轮收尾后读它显示本轮花费，故不许清零），而同一轮可能落多次账（中断一次、
+        # 续跑收尾再一次）——所以这里减去上次落账时的快照，行与行不重叠；
+        # `round_usage_map` 按轮把多行相加即得整轮。一轮只落一次账时快照为空，
+        # 等价于原先的全量写法。
+        prev = self._stats_drained or {}
+
+        def grew(key: str) -> int:
+            return int(stats.get(key, 0) or 0) - int(prev.get(key, 0) or 0)
+
+        def grew_purpose(name: str) -> int:
+            cur = ((stats.get("purpose") or {}).get(name) or {}).get("total", 0)
+            old = ((prev.get("purpose") or {}).get(name) or {}).get("total", 0)
+            return int(cur or 0) - int(old or 0)
+
+        prompt = grew("prompt_tokens")
+        cached = grew("cached_tokens")
+        miss = grew("cache_miss_tokens")
         cache_info = ""
         if prompt:
             cache_info = (
@@ -1590,16 +1624,18 @@ class _CoreMixin:
         self.task.record(
             "usage",
             f"[{self.context_mode}] round={self._usage_round_seq()} "
-            f"steps={stats['llm_calls']:,} "
+            f"steps={grew('llm_calls'):,} "
             f"context={self.last_context_estimate:,} "
-            f"working={stats['purpose']['working']['total']:,} "
+            f"working={grew_purpose('working'):,} "
             f"org={maint['organization']['total']:,} "
             f"compaction={maint['compaction']['total']:,} "
-            f"prompt={prompt:,} completion={stats['completion_tokens']:,} "
-            f"total={stats['total_tokens']:,}（思考 {stats['reasoning_tokens']:,}）"
+            f"prompt={prompt:,} completion={grew('completion_tokens'):,} "
+            f"total={grew('total_tokens'):,}（思考 {grew('reasoning_tokens'):,}）"
             f"{cache_info}{ttft_info}{suffix}"
-            + self._by_agent_segment(),
+            + self._by_agent_segment(prev),
         )
+        # 记下"已经写出去到哪儿了"：`last_stats` 本身**不清零**（它是轮内累计视图）。
+        self._stats_drained = copy.deepcopy(stats)
 
     def _usage_round_seq(self) -> int:
         """本条落账行属于哪一轮（**写进行里**，消费方按号归属）。
@@ -1617,24 +1653,33 @@ class _CoreMixin:
             return int(seq)
         return int(self.turn_count or 0)
 
-    def _by_agent_segment(self) -> str:
-        """落账行尾的**按调用方分账**段（零 LLM；没分账就不加尾巴）。
+    def _by_agent_segment(self, prev: Optional[dict] = None) -> str:
+        """落账行尾的**按调用方分账**段（零 LLM；这一段谁都没花就不加尾巴）。
 
         形态：` by=[Main steps=12 prompt=1000 cached=900 miss=100 completion=50] [A …]`
         ——每个执行方一段，段内键值固定（数字不带千分位，便于机械解析）。
         轮的总消费 = 各段之和（用户口径：A 300K + B 400K = 700K）。
+
+        `prev` = **上次落账时的快照**：只写增量，行与行不重叠（`round_usage_map`
+        按轮把多行相加）。一轮只落一次账时 `prev` 为空、等价于全量。
         """
         buckets = (self.last_stats or {}).get("by_agent") or {}
-        if not buckets:
-            return ""
-        parts = []
+        # `prev` 是整份 stats 快照 → 分账要从它的 `by_agent` 里取（踩过：直接
+        # `prev.get(name)` 拿到的是 None，于是每行都写全量、行与行重复计）
+        prev_by = (prev.get("by_agent") if isinstance(prev, dict) else None) or {}
+        keys = ("steps", "prompt", "cached", "miss", "completion")
+        parts: list[str] = []
         for name, b in buckets.items():
+            p = prev_by.get(name) or {}
+            d = {k: int(b.get(k, 0) or 0) - int(p.get(k, 0) or 0) for k in keys}
+            if not any(d.values()):
+                continue                 # 这一段它没花钱：不写空段
             parts.append(
-                f"[{name} steps={b.get('steps', 0)} prompt={b.get('prompt', 0)}"
-                f" cached={b.get('cached', 0)} miss={b.get('miss', 0)}"
-                f" completion={b.get('completion', 0)}]"
+                f"[{name} steps={d['steps']} prompt={d['prompt']}"
+                f" cached={d['cached']} miss={d['miss']}"
+                f" completion={d['completion']}]"
             )
-        return " by=" + " ".join(parts)
+        return (" by=" + " ".join(parts)) if parts else ""
 
     def _accumulate_usage(self, usage, purpose: str) -> None:
         """把一次调用的 usage 记进账本。

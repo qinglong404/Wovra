@@ -40,8 +40,16 @@ _USAGE_MISS = re.compile(r"未命中 ([\d,]+) tok")
 # 落账行尾的**按调用方分账**段（core._by_agent_segment 写的）：
 # ` by=[Main steps=12 prompt=1000 cached=900 miss=100 completion=50] [A …]`
 # 数字容忍千分位（写侧不带，读侧宽容——历史/手改都不至于静默丢段）。
+#
+# **名字允许含空格**（2026-09-13 修）：域名是模型起的中文短语，实测
+# `web 网络工具（web_fetch / web_search 实现与回归）`、`LLM 网络检索方案调研
+# （外部开源方案选型）` 都带空格——原正则用 `[^\]\s]+` 取名字，于是这些段**整条
+# 匹配不上被静默丢掉**：会话 20260913-151842-2628dd 的 R8 记录里明明有两段
+# （Main + 调研域），投影出来只剩 Main；R7 更是整条丢空 → 页面上只剩一个汇总，
+# 用户看到的"多 agent 轮只显示汇总"就是这个。
+# 只在 `by=` 之后的尾巴里匹配，避免撞上轮级前缀（` round=7 steps=43 …`）。
 _USAGE_BY_AGENT = re.compile(
-    r"\[([^\]\s]+) steps=([\d,]+) prompt=([\d,]+) cached=([\d,]+)"
+    r"\[(.+?) steps=([\d,]+) prompt=([\d,]+) cached=([\d,]+)"
     r" miss=([\d,]+) completion=([\d,]+)\]"
 )
 
@@ -54,17 +62,26 @@ def parse_usage_row(detail: str) -> dict | None:
     故这里把它解析成 `by_agent`（老会话的落账行没有这段 → 空 dict，不编数）。
     """
     out: dict = {}
-    for k, v in _KV.findall(detail or ""):
+    # **先切掉分账段再解析轮级键**（2026-09-13 修）：`by=[… prompt=167709 …]` 里
+    # 也有 `prompt=`/`cached=`/`miss=`/`completion=` 这些**同名键**，而 `_KV` 是
+    # 全行扫描、后写的覆盖先写的——于是轮级数字被**最后一段分账**顶掉。
+    # 实测 R8：轮总本来 404,157，页面上显示成 236,448（= 最后那一段），
+    # 会话级的 Σprompt 也跟着少算。
+    text = detail or ""
+    cut = text.find("by=")
+    head = text[:cut] if cut >= 0 else text
+    for k, v in _KV.findall(head):
         v = v.replace(",", "")
         out[k] = float(v) if "." in v else int(v)
     if "prompt" not in out:
         return None
-    mh = _USAGE_HIT.search(detail)
-    mm = _USAGE_MISS.search(detail)
+    mh = _USAGE_HIT.search(head)
+    mm = _USAGE_MISS.search(head)
     out["cached"] = int(mh.group(1).replace(",", "")) if mh else 0
     out["miss"] = int(mm.group(1).replace(",", "")) if mm else 0
     by: dict[str, dict] = {}
-    for m in _USAGE_BY_AGENT.finditer(detail or ""):
+    tail = text[cut + 3:] if cut >= 0 else ""      # 只解析分账段
+    for m in _USAGE_BY_AGENT.finditer(tail):
         nums = [int(v.replace(",", "")) for v in m.groups()[1:]]
         by[m.group(1)] = {
             "steps": nums[0], "prompt": nums[1], "cached": nums[2],
