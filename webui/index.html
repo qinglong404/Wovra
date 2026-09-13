@@ -830,6 +830,9 @@ const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             events:{},       // aid → 该 agent 的**流式事件**（与 /rounds 同形状）
             calls:{},        // tool_call_id → {name,args,result}（工具卡的回填状态）
             boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
+            seenEv:{},       // 事件 id 去重表（重连/刷新重叠投递时只收一次）
+            callsVer:0,      // 工具结果版本号（变了才重新回填卡片）
+            filledSig:{},    // aid → 已回填到哪个版本
             provs:{},        // aid → 该 agent 的临时消息块
             doneSig:{},      // aid → 完成区签名（变了才重绘）
             keep:null,       // drawConv 重绘时保活的节点（见 drawConv）
@@ -876,42 +879,55 @@ function flushLiveStep(){
   const had=!!(LIVE.think||LIVE.ans);
   LIVE.think='';LIVE.ans='';LIVE.mode='';
   return had;
+/* 吃一个分片。返回**变化级别**：0=没变；1=只有文字在长（可合并渲染）；
+   2=结构性变化（事件/状态/换手——必须立刻重绘）。调用方：
+   `dirty=Math.max(dirty, applyChunk(c)||0)`，再按 `dirty>=2 ? renderLive() :
+   (dirty ? scheduleLiveRender() : 0)` 决定。 */
 }
 function applyChunk(c){
-  let dirty=false;
+  let level=0;
+  const bump=v=>{ if(v>level)level=v };
   // agent 换手（route_to 之后）：先把上一个的"在飞"内容清掉再切
   if(c.ag&&c.ag!==LIVE.agent){
+    LIVE.agent=c.ag;bump(2);LIVE.structural=2;
     flushLiveStep();
   }
-    LIVE.agent=c.ag;dirty=true;
   // **事件分片**（2026-09-13 大改）：与 `/rounds/{seq}` 同一形状 → 走同一套
   // "事件 → 条目"映射。工具调用/工具结果/最终回答都在这里按时间顺序落地，
   // 于是运行中能看到工具块（此前只推文本增量，工具块在服务端就没推）。
   if(c.k==='event'&&c.e){
     const ev=c.e;
+    // **同一个事件只收一次**（2026-09-13 修）：刷新后的 catch-up 与 SSE 首帧、
+    // 或重连时重拉的区间可能**重叠**，同一批分片喂两遍就会把思考/工具卡画两遍
+    // （实测：1 张卡变 2 张）。按事件 id 去重——事件 id 是服务端给的稳定标识。
+    const key=String(ev.id||'');
+    if(key&&LIVE.seenEv[key])return 0;
+    if(key)LIVE.seenEv[key]=1;
     const who=resolveAgentId(ev.agent||c.ag)||'Main';
     (LIVE.events[who]=LIVE.events[who]||[]).push(ev);
     LIVE.think='';LIVE.ans='';LIVE.mode='';   // 事件覆盖了在飞文本
     LIVE.agent=ev.agent||LIVE.agent;
     LIVE.doneSig[who]='';
-    return true;
+    // 工具结果到达 → 让回填跑一次（版本号一变，`renderLiveOne` 才会去碰 DOM）
+    if(ev.tool_call_id||ev.role==='tool')LIVE.callsVer++;
+    return 2;
   }
   if(c.k==='think'){
-    if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
-    LIVE.think+=c.s;dirty=true;
+    if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…'}
+    LIVE.think+=c.s;bump(1);
   }
   else if(c.k==='ans'){
-    if(LIVE.mode!=='ans'){LIVE.mode='ans';LIVE.status='回答中…';dirty=true}
-    LIVE.ans+=c.s;dirty=true;
+    if(LIVE.mode!=='ans'){LIVE.mode='ans';LIVE.status='回答中…'}
+    LIVE.ans+=c.s;bump(1);
   }
   else if(c.k==='status'){
     // "等待模型响应…"（每步开头）与"正在<动作>…"（工具执行前）都意味着
     // **上一段内容已经产出完**——清掉在飞缓冲（内容由事件接住，见上）
-    LIVE.mode='status';LIVE.status=c.s;dirty=true;
-    if(flushLiveStep())dirty=true;
+    LIVE.mode='status';LIVE.status=c.s;bump(2);
+    flushLiveStep();
+  return level;
   }
 }
-  return dirty;
 /* 服务端报的"现在谁在干"（`chunk.ag` = 本轮 `active_view`）→ 注册表 id。
    一轮里若有多名 agent，`drawConv` 给**每个发送者各建一个块**，所以必须按
    agent 定位，不能只按轮号（用户 2026-09-13 报："下面 agent 的思考内容老是挂到
@@ -978,21 +994,23 @@ async function liveAttach(jobId,resume){
    找不到它——收尾时若它又被挂回去（另一次 drawConv、切页、任何一次重绘），就没人再
    管它了：**内容冻在那一刻**（在飞正文缓冲区里正好是最后那段回答的开头两行），
    于是"卡住、一直显示"。所以这里把 `LIVE.boxes`/`LIVE.provs`/`LIVE.keep` 里
+function purgeLiveDom(){
    记着的节点**逐个**摘掉（无论它在不在文档里），再做一次文档清扫兜底。 */
   const nodes=[];
   Object.values(LIVE.boxes||{}).forEach(b=>b&&nodes.push(b));
   Object.values(LIVE.provs||{}).forEach(p=>p&&nodes.push(p));
   (LIVE.keep||[]).forEach(n=>n&&nodes.push(n));
   nodes.forEach(n=>{ try{n.remove()}catch(e){} });
-function purgeLiveDom(){
   document.querySelectorAll('.livebox').forEach(b=>b.remove());
   LIVE.boxes={};LIVE.provs={};LIVE.keep=null;
   document.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
 }
 function liveDetach(){
+  cancelLiveRender();            // 合并渲染的定时器也撤掉（收尾后不许再有待办）
   LIVE.job=null;LIVE.cur=null;
   sseClose();clearPendingBar();
   purgeLiveDom();
+  LIVE.callsVer=0;LIVE.filledSig={};LIVE.seenEv={};
   LIVE.events={};LIVE.calls={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};
   LIVE.keep=null;LIVE.agent='';
   LIVE.closing=false;LIVE.finishing=false;
@@ -1104,13 +1122,16 @@ async function pollLive(){
   // 状态，于是轮结束没人撤直播区——正式块在上面、直播临时块带着思考挂在下面，
   // 看起来就是"一轮被切成两个消息块"）
   if(d.status&&d.status!=='running'&&d.status!=='queued'){sseFinish();return}
-  let dirty=false;
-  for(const c of d.chunks||[])dirty=applyChunk(c)||dirty;
+  let dirty=0;
+  for(const c of d.chunks||[])dirty=Math.max(dirty,applyChunk(c)||0);
   LIVE.next=d.next||LIVE.next;
   // 这一轮有任何直播节点缺失（首次/被重绘冲掉）也要重绘一次把它挂回来
   const aid=resolveAgentId(LIVE.agent)||'Main';
   const missing=!LIVE.boxes[aid]||!LIVE.boxes[aid].isConnected;
-  if(CUR===LIVE.cur&&(dirty||missing))renderLive();
+  if(CUR===LIVE.cur&&(dirty||missing)){
+    // 结构性变化立刻画；只有文字在长就合并到 100ms 一帧（见 scheduleLiveRender）
+    if(dirty>=2||missing)renderLive();else if(dirty)scheduleLiveRender();
+  }
   tickStopBtn();
   if(d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
 }
@@ -1303,13 +1324,28 @@ function liveDoneHtml(aid,host){
   });
   return out.map(it=>itemHtml(it,LIVE.calls)).join('');
 }
+/* **流式渲染合并**（2026-09-13，为"流畅"）：文字分片一个接一个到达，如果每个分片都
+   立刻整段重渲染，成本是 **O(n²)**——`md()` 每次都要重新解析**整段**已收到的正文。
+   实测：300 字正文时每个分片平均要喂 251 字进 `md()`；一万字的回答、上千个分片就是
+   几百万字的解析量，而且这恰好是最长、最重要的那段输出（最终回答）。
+   故：纯文字分片最多 100ms 重绘一次；**结构性的变化**（事件/状态/换手）仍然立刻重绘
+   ——那些是"内容真的变了"，不允许延迟。运行时长由 `tickRunlineTime` 自己走字，
+   所以合并期间界面不会看起来卡住。 */
+let _liveT=0;
+function scheduleLiveRender(){
+  if(_liveT)return;
+  _liveT=setTimeout(()=>{_liveT=0;renderLive()},100);
+}
+function cancelLiveRender(){
+  if(_liveT){clearTimeout(_liveT);_liveT=0}
+}
+function renderLive(){
 
   // **没有直播作业就什么都不做**（2026-09-13 加）：收尾之后任何一次重绘/轮询再
   // 调到这儿，都会凭 `LIVE.seq` 重新造出一个直播节点（`liveGbox` 找不到正式块就
   // 造临时块）——那就是"轮都结束了，尾部还挂着一个直播块/一段旧正文"的来源。
   // 判据只能看**作业**：`closing` 只管"这一帧别回挂"，管不了"以后别再画"。
   if(!LIVE.job)return;
-function renderLive(){
   // **收尾后不再上屏**：`sseFinish` 置 closing 后就走"正式渲染接管"那条路，
   // 这时 drawConv 末尾仍会调到这里——不加这道闸，直播区会被重新挂回正式块里
   // （H 场景原本空跑掩盖了它：CONV 为空 → drawConv 提前 return，压根没走到）。
@@ -1347,14 +1383,24 @@ function renderLiveOne(aid,isActor){
   if(!host)return;
   const box=liveBox(aid,host);
   // ① 这个 agent 的步骤（**来自流式事件**）：内容变了才重绘
+  let rebuilt=false;
   const done=box.querySelector('.live-done');
   if(done){
     const sig=((LIVE.events[aid]||[]).length)+':'+aid+':'+Object.keys(LIVE.calls).length;
     if(sig!==LIVE.doneSig[aid]){
       done.innerHTML=liveDoneHtml(aid,host);
+      rebuilt=true;
       LIVE.doneSig[aid]=sig;
       highlightIn(done);
-    fillCallResults(done,LIVE.calls);   // 工具卡：结果/状态回填（与官方同一函数）
+    }
+    // **工具结果回填只在必要时做**（2026-09-13 修性能）：`fillCallResults` 是
+    // "每张卡查一次 + 每张卡两次子查询"，60 张卡 = 184 次 DOM 查询；而流式输出时
+    // **每个文字分片都会走一遍 renderLive**（一步几百个分片）→ 一轮上百事件就是
+    // 几十万次查询，页面肉眼可见地卡（实测：条目 120 时每次重绘 184 次查询）。
+    // 回填只需要在两种时刻做：完成区**刚重建**（新节点是空的）、或**结果刚到达**。
+    if(rebuilt || LIVE.filledSig[aid]!==LIVE.callsVer){
+      fillCallResults(done,LIVE.calls);
+      LIVE.filledSig[aid]=LIVE.callsVer;
     }
   }
   // ② **在飞内容**（还没落成事件的思考/正文）：接在完成区**最后**，与事件条目同一套
@@ -1636,6 +1682,7 @@ function drawConv(c,toBottom){
   restoreOpenBlocks(openKeys);          // **保住用户展开的块**：整段重绘会把
                                         // 展开态打回折叠（"一闪就折叠了"）
   // 回填结果与状态（与直播侧共用 `fillCallResults`）
+  highlightIn(c);
   fillCallResults(c, calls);
   // **正式渲染接管时，直播痕迹一律清掉**（机械保证，不靠"谁记得调 liveDetach"）。
   // 用户报（2026-09-13）："正文渲染到最后，卡着了…在尾部一直显示着之前渲染过的正文，
@@ -1648,7 +1695,6 @@ function drawConv(c,toBottom){
     c.querySelectorAll('.livebox').forEach(b=>b.remove());
     c.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
   }
-  highlightIn(c);
   if(toBottom){
     c.scrollTop=c.scrollHeight;
     requestAnimationFrame(()=>{c.scrollTop=c.scrollHeight;
@@ -2001,7 +2047,10 @@ function watchMaintenance(){
   if(!pend())return;
   let n=0;
   MAINT_WATCH=setInterval(async()=>{
-    if(++n>100||!CUR){clearInterval(MAINT_WATCH);MAINT_WATCH=0;return}
+    // 上限 200 × 3s = **10 分钟**（2026-09-13 从 100 提到 200）：整理是异步的，
+    // 实测一批 106s（整理 75s + 分裂 31s），大会话更久；原先 5 分钟的上限会让
+    // 观察器**静默放弃**，页面就停在"整理中"不再刷新（用户以为卡死）
+    if(++n>200||!CUR){clearInterval(MAINT_WATCH);MAINT_WATCH=0;return}
     let d=null;
     try{d=await api(`/api/sessions/${CUR}/plan`)}catch(e){return}
     if(!d)return;
@@ -2223,7 +2272,7 @@ function renderTodo(c){
     return `<div class="frow" style="cursor:default">
       <span class="fbadge ${m[1]}" style="flex-shrink:0">${m[0]}</span>
       <span class="fpath" style="flex:1;color:var(--tx2)">${esc(x.text||'（无描述）')}</span>
-      <span class="fmeta"><span class="fsz" style="min-width:0">R${x.seq} · ${esc(fmtClock(x.time))}</span></span></div>`;
+      <span class="fmeta"><span class="fsz" style="min-width:0">R${esc(x.seq??'—')} · ${esc(fmtClock(x.time))}</span></span></div>`;
   }).join('')+`</div>`:'<div class="empty" style="padding:14px 0">本会话尚未调用 todo</div>';
   c.innerHTML=html;
 }

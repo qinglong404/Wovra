@@ -120,6 +120,11 @@ function parseInto(root, html){
     if(!frames[i].el._parsed){ frames[i].el._html = s.slice(frames[i].start); frames[i].el._parsed = true; }
   }
 }
+// **DOM 查询计数**（性能体检用）：一次重绘查了多少次 DOM、扫到多少个节点。
+// "前端必须流畅"是硬指标，而前端卡顿的典型来源就是"每次重绘都全量扫一遍 DOM"——
+// 次数随**条目数**涨（O(n)），就会在长轮次里肉眼可见地卡。这里把它变成可断言的数。
+const DOMQ={n:0,nodes:0};
+function domqReset(){DOMQ.n=0;DOMQ.nodes=0}
 function mkEl(tag){
   const e = {
     tagName:String(tag||'div').toUpperCase(), id:'', className:'',
@@ -140,8 +145,9 @@ function mkEl(tag){
     closest(){ return null; },
     addEventListener(){}, removeEventListener(){}, setAttribute(){}, getAttribute(){return null},
     scrollIntoView(){}, focus(){}, click(){}, replaceChildren(){ this.children=[]; },
-    querySelector(sel){ const got=matchAll(this,sel); return got.length?got[0]:null; },
-    querySelectorAll(sel){ return matchAll(this,sel); },
+    querySelector(sel){ DOMQ.n++; const g=matchAll(this,sel); DOMQ.nodes+=g.length;
+                        return g.length?g[0]:null; },
+    querySelectorAll(sel){ DOMQ.n++; const g=matchAll(this,sel); DOMQ.nodes+=g.length; return g; },
   };
   e.classList = mkClassList(e);
   Object.defineProperty(e,'innerHTML',{
@@ -255,7 +261,7 @@ let _timerSeq = 0;
 const _timers = [];
 global.setInterval = (fn, ms)=>{ const id=++_timerSeq; _timers.push({id,fn,ms}); return id; };
 global.clearInterval = (id)=>{ const i=_timers.findIndex(t=>t.id===id); if(i>=0)_timers.splice(i,1); };
-global.setTimeout = ()=>0;
+global.setTimeout = (fn, ms)=>{ const id=++_timerSeq; _timers.push({id,fn,ms,once:true}); return id; };
 global.clearTimeout = ()=>{};
 global.fetch = ()=>Promise.reject(new Error('no net in check'));
 global.requestAnimationFrame = ()=>0;
@@ -432,6 +438,7 @@ function resetLive(){
   TAB = 'conv'; CUR = 's1';
   LIVE.job = 'j1'; LIVE.cur = 's1'; LIVE.seq = 7; LIVE.think=''; LIVE.ans='';
   LIVE.events = {}; LIVE.calls = {}; LIVE.doneSig = {}; LIVE.boxes = {}; LIVE.provs = {};
+  LIVE.seenEv = {}; LIVE.callsVer = 0; LIVE.filledSig = {};
   LIVE.keep = null; LIVE.agent = '';
   LIVE.closing = false; LIVE.startedAt = Date.now(); LIVE.status='';
 }
@@ -918,6 +925,210 @@ META.status = 'in_progress';
   console.log(`   T 残留直播节点=${stray} 临时块=${provs} 冻住的旧正文=${stale.length} 正式正文在=${/两行正文/.test(body)}`);
 }
 
+console.log('场景 V｜性能：流式重绘的 DOM 查询次数**不许随条目数线性涨**（"流畅"的硬指标）');
+resetLive();
+const V1 = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:200, steps_used:200}];
+META.status = 'in_progress';
+{
+  // 先落 **60 个工具事件**（长轮次的现实规模：实测 R7 一轮 43 步、多轮上百事件）
+  for (let i = 1; i <= 60; i++) {
+    applyChunk({k:'event', e:ev({id:'R7-E' + String(i).padStart(2, '0'),
+      type:'tool_call', agent:'Main', thinking:'第 ' + i + ' 步的思考',
+      tool_calls:[{id:'v' + i, function:{name:'read_file', arguments:'{}'}}]})});
+    applyChunk({k:'event', e:ev({id:'R7-R' + i, type:'tool_result', agent:'Main',
+      role:'tool', tool_call_id:'v' + i, content:'结果' + i})});
+  }
+  renderLive();
+  // 然后模拟"一步在流式输出"：200 个正文分片，期间**事件集合完全没变**
+  domqReset();
+  applyChunk({k:'think', s:'正在想'});
+  for (let i = 0; i < 200; i++) {
+    applyChunk({k:'ans', s:'字'});
+    renderLive();
+  }
+  const perRender = DOMQ.n / 200;
+  const perNodes = DOMQ.nodes / 200;
+  // 只更新尾部区块时，每次重绘不该去全量扫那 120 个条目
+  if (perRender > 12) {
+    problems.push(`V: 每次流式重绘查了 ${perRender.toFixed(1)} 次 DOM（条目 ${(LIVE.events.Main || []).length * 2} 个）→ 随条目数线性涨，长轮次会卡`);
+  }
+  if (perNodes > 60) {
+    problems.push(`V: 每次流式重绘扫到 ${perNodes.toFixed(0)} 个节点（应只碰尾部那几个）`);
+  }
+  console.log(`   V 条目=${(LIVE.events.Main || []).length}  每次重绘 DOM 查询=${perRender.toFixed(1)} 次 / 节点=${perNodes.toFixed(0)} 个`);
+
+  // ② md() 的成本：流式正文每个分片都重渲染一次整段 → 文本越长越贵（O(n²) 的形状）。
+  //    这里量"一个分片平均要喂给 md 多少字"，好判断要不要做合并渲染。
+  const realMd = md;
+  let mdChars = 0, mdCalls = 0;
+  md = (t) => { mdChars += String(t || '').length; mdCalls++; return realMd(t); };
+  domqReset();
+  mdChars = 0; mdCalls = 0;
+  for (let i = 0; i < 100; i++) { applyChunk({k:'ans', s:'字'}); renderLive(); }
+  const charsPerDelta = mdChars / 100;
+  md = realMd;
+  console.log(`   V md() 每分片均价 ${charsPerDelta.toFixed(0)} 字（分片数 ${mdCalls}；`
+    + `文本约 ${(LIVE.ans || '').length} 字）`);
+}
+
+console.log('场景 W｜六个页签都要画得出来、且不许出现 undefined/NaN（崩溃=黑屏）');
+resetLive();
+CONV = realConv();
+META.round_list = [{seq:7, active_view:'A', events:3, steps_used:2, org_state:'raw'}];
+META.status = 'done';
+META.todo = {items:[{text:'一件事', done:false}]};
+META.todo_log = [{seq:7, time:'2026-09-13T17:00:00', action:'add_item', text:'记一笔'}];
+{
+  const bad = [];
+  for (const [k, name] of [['conv','对话'],['timeline','时间线'],['ledger','账本'],
+                           ['todo','计划'],['project','项目'],['usage','用量']]) {
+    try {
+      setTab(k);
+      const html = String(DOM.content.innerHTML || '');
+      if (/undefined|NaN|\[object Object\]/.test(html)) {
+        const where = html.replace(/\s+/g, ' ')
+          .match(/.{0,60}(undefined|NaN|\[object Object\]).{0,40}/);
+        bad.push(`${name}(${k})：渲染里出现了 undefined/NaN → …${where ? where[0] : ''}…`);
+      }
+      if (!html.trim()) bad.push(`${name}(${k})：什么都没画出来`);
+    } catch (e) {
+      bad.push(`${name}(${k})：抛异常 ${e && e.message}`);
+    }
+  }
+  bad.forEach(b => problems.push('W: ' + b));
+  setTab('conv');
+  console.log(`   W 六页签=${bad.length === 0 ? '全部正常' : bad.length + ' 个有问题'}`);
+}
+
+console.log('场景 W2｜数据**字段稀疏**时也不许露出 undefined（后端改字段/老数据都不该让用户看见破绽）');
+resetLive();
+CONV = realConv();
+// 只给必需字段，可选字段全缺：六页签都得能画、且不许出现 undefined/NaN
+META = { id:'s1', status:'done', round_list:[{seq:7, active_view:'A', events:1}],
+         registry:[{id:'Main', name:'主agent'},{id:'A', name:'域甲'}],
+         todo:{items:[{}]}, todo_log:[{}], project:{}, usage:{} };
+{
+  const bad = [];
+  for (const [k, name] of [['conv','对话'],['timeline','时间线'],['ledger','账本'],
+                           ['todo','计划'],['project','项目'],['usage','用量']]) {
+    try {
+      setTab(k);
+      const html = String(DOM.content.innerHTML || '');
+      if (/undefined|NaN|\[object Object\]/.test(html)) {
+        const where = html.replace(/\s+/g, ' ')
+          .match(/.{0,50}(undefined|NaN|\[object Object\]).{0,30}/);
+        bad.push(`${name}(${k}) → …${where ? where[0] : ''}…`);
+      }
+    } catch (e) {
+      bad.push(`${name}(${k})：抛异常 ${e && e.message}`);
+    }
+  }
+  setTab('conv');
+  bad.forEach(b => problems.push('W2: 字段稀疏时露破绽：' + b));
+  console.log(`   W2 稀疏数据=${bad.length === 0 ? '六页签都干净' : bad.length + ' 处露破绽'}`);
+}
+
+console.log('场景 X｜刷新后接着看（catch-up）：不再从 0 重放，且内容与直播一致');
+resetLive();
+CONV = realConv();
+const X1 = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:3, steps_used:1}];
+META.status = 'in_progress';
+{
+  // 服务端这一轮已经推过的分片（刷新前推的）：思考增量 + 工具事件 + 结果
+  const chunks = [
+    {k:'status', s:'等待模型响应…', ag:'Main'},
+    {k:'think', s:'先读文件', ag:'Main'},
+    {k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+      thinking:'先读文件',
+      tool_calls:[{id:'x1', function:{name:'read_file', arguments:'{}'}}]}), ag:'Main'},
+    {k:'event', e:ev({id:'R7-E02', type:'tool_result', agent:'Main', role:'tool',
+      tool_call_id:'x1', content:'读到了'}), ag:'Main'},
+    {k:'status', s:'正在执行 read_file…', ag:'Main'},
+  ];
+  // 刷新后的重挂：一次性 catch-up（`liveAttach` 的那条路）
+  LIVE.job = 'j1'; LIVE.cur = 's1'; LIVE.next = 0; LIVE.sse = false;
+  let dirty = false;
+  for (const c of chunks) dirty = applyChunk(c) || dirty;
+  LIVE.next = chunks.length;
+  if (dirty) renderLive();
+  const box = X1.gbox.querySelector('.livebox');
+  const done = box && box.querySelector('.live-done');
+  const cards = done ? done.querySelectorAll('.tcard').length : 0;
+  const resTexts = done ? [...done.querySelectorAll('.t-result')]
+    .map(el => String(el.textContent || '')) : [];
+  if (cards !== 1) problems.push(`X: catch-up 后应有 1 张工具卡，实际 ${cards}`);
+  if (!resTexts.some(t => t === '读到了')) problems.push('X: catch-up 后工具结果没回填');
+  if (!/先读文件/.test(String((done && done.innerHTML) || '')))
+    problems.push('X: catch-up 后思考丢了');
+  // 再来一次同样的 catch-up（模拟重连重复拉）：不许出现两份
+  for (const c of chunks) applyChunk(c);
+  renderLive();
+  const cards2 = done ? done.querySelectorAll('.tcard').length : 0;
+  if (cards2 !== cards) problems.push(`X: 重连重放后又多画了（${cards}→${cards2}）`);
+  console.log(`   X 卡=${cards} 结果回填=${resTexts.some(t => t === '读到了')} 重放后仍=${cards2}`);
+}
+
+console.log('场景 Y｜作业没了（服务重启/清理）：要收尾，不许卡在"运行中"');
+resetLive();
+CONV = realConv();
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:1, steps_used:1}];
+{
+  LIVE.job = 'dead'; LIVE.cur = 's1'; LIVE.sse = true;
+  const btn = document.getElementById('send');
+  renderLive();
+  const titleRun = document.title;
+  // `pollLive` 的 SSE 分支：404 → `{gone:true}` → sseFinish()
+  // 这里直接驱动它关心的那一步（不引异步 fetch）
+  if (!(typeof jobStatus === 'function')) problems.push('Y: 没有 jobStatus');
+  if (typeof sseFinish !== 'function') problems.push('Y: 没有 sseFinish');
+  // `sseFinish` 是 **async**（要先让正式渲染落位再撤直播区）：同步只能断言
+  // "收尾已经开始"（`finishing` 置位 = 幂等闸生效）；它返回 promise，吞掉避免
+  // 未处理拒绝把整个核对脚本带崩
+  const p = sseFinish();
+  if (p && typeof p.then === 'function') p.catch(() => {});
+  if (!LIVE.finishing) problems.push('Y: 作业没了却没启动收尾（界面会一直"运行中"）');
+  console.log(`   Y 收尾已启动=${!!LIVE.finishing} 发送键禁用=${!!(btn && btn.disabled)}`);
+}
+
+console.log('场景 V2｜流式合并渲染：一批文字分片只画一次（md 的成本是 O(n²)，必须合并）');
+resetLive();
+const V2r = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:1, steps_used:1}];
+META.status = 'in_progress';
+{
+  const realRender = renderLive;
+  let renders = 0;
+  renderLive = (...a) => { renders++; return realRender(...a); };
+  let dirty = 0;
+  // 首片带着 `ag`（执行方第一次报上来）→ 那是**结构性**的一次，按真实流程先走掉
+  if (applyChunk({k:'ans', s:'首', ag:'Main'}) >= 2) renderLive();
+  renders = 0;                        // 从这里开始量"纯文字分片"的成本
+  for (let i = 0; i < 500; i++) {
+    dirty = Math.max(dirty, applyChunk({k:'ans', s:'字', ag:'Main'}) || 0);
+  }
+  if (dirty >= 2) renderLive(); else if (dirty) scheduleLiveRender();
+  const immediately = renders;
+  // 把到点的定时器跑掉（模拟 100ms 后那一帧）
+  const once = _timers.filter(t => t.once);
+  once.forEach(t => { clearInterval(t.id); t.fn(); });
+  const afterDrain = renders;
+  renderLive = realRender;
+  if (immediately !== 0)
+    problems.push(`V2: 500 个文字分片里有 ${immediately} 次是立刻渲染的（没合并 → 长回答会卡）`);
+  if (afterDrain !== 1)
+    problems.push(`V2: 合并后应只渲染 1 次，实际 ${afterDrain}`);
+  // 结构性变化（事件）必须**立刻**渲染，不许等
+  renders = 0;
+  let lv = applyChunk({k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+    tool_calls:[{id:'v2c', function:{name:'read_file', arguments:'{}'}}]})});
+  if (lv < 2) problems.push('V2: 事件分片没被标成"结构性变化"（会被合并延迟）');
+  console.log(`   V2 500 分片立刻渲染=${immediately} 次，合并后共=${afterDrain} 次；`
+    + `事件级别=${lv}`);
+}
+
 console.log('场景 R｜运行中按**时间顺序**画：思考 → 工具卡 → 思考 → 最终回答（用户报的核心）');
 resetLive();
 const R1 = mountRound(DOM.content, 7, false, 'Main');
@@ -992,7 +1203,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（16 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（26 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 
