@@ -876,7 +876,12 @@ function applyChunk(c){
   }
   return dirty;
 }
-async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用）
+async function sseFinish(){   // 终态收尾（SSE done / 轮询兜底 / 发送侧轮询共用）
+  // **幂等**：三条完成检测路径（SSE done、pollLive 的状态检查、sendTurn 的
+  // 1500ms 轮询）都会调到这里，重复执行会把界面刷两遍、也会在"正式渲染已接管"
+  // 之后又把直播区挂回去。
+  if(LIVE.finishing)return;
+  LIVE.finishing=true;
   const wasCur=CUR===LIVE.cur;
   if(!wasCur){liveDetach();return}
   // **先让正式渲染落位**（同位置、同款渲染器），再撤直播区——`closing` 让
@@ -888,9 +893,15 @@ async function sseFinish(){   // 终态收尾（SSE done 与轮询兜底共用�
   liveDetach();
 }
 async function liveAttach(jobId,resume){
+  // **先把上一轮可能残留的直播 DOM 清干净**（2026-09-13 用户报"一轮分成两个
+  // 消息块、思考都在下面"）：只要有任一条完成路径漏了 liveDetach，残留的临时块
+  // 就会一直挂在正式块下面，看起来就是同一轮被切成两块。这里做一次兜底清扫。
+  document.getElementById('livebox')?.remove();
+  document.querySelector('.crow.live-prov')?.remove();
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
                       status:'',mode:'',seq:0,startedAt:Date.now(),
                       events:[],doneSig:'',prov:null,keep:null,closing:false,
+                      finishing:false,
                       baseRounds:(META&&META.round_list||[]).length});
   // **刷新后的重新挂载**：先做一次单次 catch-up（一次请求拿全量分片、
   // **只重绘一次**），再让 SSE 从 next 接上——避免"从 0 重放几百个分片"
@@ -919,7 +930,8 @@ function liveDetach(){
   sseClose();clearPendingBar();
   document.getElementById('livebox')?.remove();
   document.querySelector('.crow.live-prov')?.remove();
-  LIVE.prov=null;LIVE.keep=null;LIVE.events=[];LIVE.doneSig='';LIVE.closing=false;
+  LIVE.prov=null;LIVE.keep=null;LIVE.events=[];LIVE.doneSig='';
+  LIVE.closing=false;LIVE.finishing=false;
   const st=document.getElementById('stop');if(st)st.style.display='none';
   const rb=document.getElementById('runbar');if(rb)rb.classList.remove('on');
   const rl=document.getElementById('runline');if(rl){rl.classList.remove('on');rl.innerHTML=''}
@@ -1008,6 +1020,10 @@ async function pollLive(){
   let d;
   try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}catch(e){return}
   if(d.pending)renderPendingBar(LIVE.job,d.pending);else clearPendingBar();
+  // **SSE 断了也要能收尾**（2026-09-13 修的 bug：这条分支原先只看分片、不看
+  // 状态，于是轮结束没人撤直播区——正式块在上面、直播临时块带着思考挂在下面，
+  // 看起来就是"一轮被切成两个消息块"）
+  if(d.status&&d.status!=='running'&&d.status!=='queued'){sseFinish();return}
   let dirty=false;
   for(const c of d.chunks||[])dirty=applyChunk(c)||dirty;
   LIVE.next=d.next||LIVE.next;
@@ -1115,8 +1131,20 @@ function liveHost(keep){
   return prov.querySelector('.gbox');
 }
 
+/* 这个元素在不在直播区里（**不能用 closest**：它得在真 DOM 与渲染核对仪的
+   迷你 DOM 里都成立）。 */
+function insideLive(el){
+  let p=el&&el.parentNode;
+  while(p){
+    if(p.id==='livebox')return true;
+    p=p.parentNode||p.parentElement;
+  }
+  return false;
+}
 /* 完成区的条目：与事件区同款渲染，但**扣掉正式渲染已经画过的部分**
-   （刷新后用 catch-up 重放了整条流，而事件区可能已经画过前几步——不扣会重复）。 */
+   （刷新后 catch-up 重放了整条流，而事件区可能已经画过前几步——不扣会重复）。
+   **必须把直播区自己排除在外**：`#live-think` 与完成区的思考块也是 `.think-box`，
+   一起数进去会越扣越多，最后连刚做完的思考都被吃掉（写这段时踩到）。 */
 function liveDoneHtml(){
   const seq=String(LIVE.seq||'');
   let covT=0,covX=0;
@@ -1125,8 +1153,8 @@ function liveDoneHtml(){
     const g=(row&&!row.classList.contains('live-prov'))
       ?row.querySelector('.gbox'):null;
     if(g){
-      covT=g.querySelectorAll('.think-box').length;
-      covX=g.querySelectorAll('.bub').length;
+      covT=[...g.querySelectorAll('.think-box')].filter(x=>!insideLive(x)).length;
+      covX=[...g.querySelectorAll('.bub')].filter(x=>!insideLive(x)).length;
     }
   }
   let t=0,x=0;
@@ -1138,6 +1166,10 @@ function liveDoneHtml(){
 }
 
 function renderLive(){
+  // **收尾后不再上屏**：`sseFinish` 置 closing 后就走"正式渲染接管"那条路，
+  // 这时 drawConv 末尾仍会调到这里——不加这道闸，直播区会被重新挂回正式块里
+  // （H 场景原本空跑掩盖了它：CONV 为空 → drawConv 提前 return，压根没走到）。
+  if(LIVE.closing)return;
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
   // 保活的节点优先复用（drawConv 重绘时把它摘下来交给这里接回去）
   const keep=LIVE.keep;LIVE.keep=null;
@@ -1701,7 +1733,10 @@ async function send(){
         clearInterval(iv);$('#send').disabled=false;
         if(jd.status==='error'){const pr=$('#pend-run');if(pr)pr.textContent='✗ '+jd.error;return}
         $('#pend-u')?.remove();$('#pend-run')?.remove();
-        await refreshAfterTurn();
+        // **必须走 sseFinish**（refreshAfterTurn + liveDetach 一条路）：原先这里
+        // 只 refreshAfterTurn()、不撤直播区 → 临时块带着思考留在正式块下面
+        //（用户 2026-09-13 报的"一轮分成两个消息块"）。sseFinish 幂等，重复调无害。
+        await sseFinish();
       }catch(e){clearInterval(iv);$('#send').disabled=false;
         const pr=$('#pend-run');if(pr)pr.textContent='✗ 轮询失败：'+e.message}
     },1500);

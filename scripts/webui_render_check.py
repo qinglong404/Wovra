@@ -398,31 +398,34 @@ renderLive();
   console.log(`   G 临时块=${!!prov} 挂在块内=${!!(prov&&prov.querySelector('.gbox #livebox'))}`);
 }
 
-console.log('场景 H｜直播区：交接（closing）时不再回挂，避免一帧两份正文');
-resetLive();
-const H = mountRound(DOM.content, 7, false);
-applyChunk({k:'ans', s:'正式版正文'});
-renderLive();
-LIVE.closing = true;
-drawConv(DOM.content, false);
-{
-  if (DOC_HAS_LIVEBOX()) problems.push('H: closing 之后直播节点又被挂回去了（正文会重复一帧）');
-  console.log(`   H closing 后直播节点在场=${DOC_HAS_LIVEBOX()}`);
+// 造一份"本轮已落账"的会话数据：用户消息 + 一步工具调用（带思考）+ 最终回答。
+// 场景 H/I/J 都要用它，否则 drawConv 会因为 CONV.seqs 为空**提前返回**——
+// 那样测的就是空气（H 第一版正是这么空跑通过的，掩盖了 closing 之后直播区
+// 仍被挂回的真问题）。
+function realConv(){
+  return { session:'s1', seqs:[7], cache:{7:{events:[
+    {id:'R7-E01', type:'user', role:'user', content:'干活', time:''},
+    {id:'R7-E02', type:'tool_call', role:'assistant', content:'',
+     thinking:'这一轮的思考', time:'',
+     tool_calls:[{id:'c1', function:{name:'read_file', arguments:'{}'}}]},
+    {id:'R7-E04', type:'tool_result', role:'tool', content:'文件内容',
+     tool_call_id:'c1', time:''},
+    {id:'R7-E05', type:'final_answer', role:'assistant', content:'这一轮的正文',
+     time:''}], blocks:[]}} };
 }
 
 console.log('场景 I｜直播区：跑轮中途整段重绘（切页/刷新）不许把直播区冲掉');
 resetLive();
 mountRound(DOM.content, 7, false);
+CONV = realConv();                              // 跑到一半时事件区已有部分内容
+META.round_list = [{seq:7, active_view:'A', events:2, steps_used:1}];
+META.status = 'in_progress';
 applyChunk({k:'think', s:'跑到一半的思考'});
 applyChunk({k:'ans', s:'**跑到一半**的正文'});
 renderLive();
 {
   const before = DOM.content.querySelector('#livebox');
-  // 跑轮中途来一次整段重绘（renderTab/刷新都会走这条）
-  CONV = { session:'s1', seqs:[7], cache:{7:{events:[], blocks:[]}} };
-  META.round_list = [{seq:7, active_view:'A', events:0, steps_used:1}];
-  META.status = 'in_progress';
-  drawConv(DOM.content, false);
+  drawConv(DOM.content, false);                 // 整段重绘（renderTab/轮询都会走）
   const after = DOM.content.querySelector('#livebox');
   if (!after) problems.push('I: 整段重绘把直播区冲掉了（会闪一下、甚至消失）');
   else if (before && after !== before) problems.push('I: 重绘换了新节点（展开状态/增量会丢）');
@@ -432,6 +435,66 @@ renderLive();
   if (liveboxDirectUnderContent()) problems.push('I: 重绘后直播节点跑到 #content 直下');
   console.log(`   I 重绘后节点在场=${!!after} 同一节点=${!!(before&&after===before)}`);
 }
+
+console.log('场景 H｜交接（closing）时不再回挂，避免一帧两份正文');
+resetLive();
+mountRound(DOM.content, 7, false);
+CONV = realConv();                              // **必须有真数据**（否则空跑）
+META.round_list = [{seq:7, active_view:'A', events:4, steps_used:2}];
+applyChunk({k:'ans', s:'正式版正文'});
+renderLive();
+LIVE.closing = true;
+drawConv(DOM.content, false);
+{
+  if (DOC_HAS_LIVEBOX()) problems.push('H: closing 之后直播节点又被挂回去了（正文会重复一帧）');
+  const rows = DOM.content.querySelectorAll('.crow.agent');
+  if (rows.length !== 1) problems.push(`H: 收尾后应有 1 个消息块，实际 ${rows.length}`);
+  console.log(`   H closing 后直播节点在场=${DOC_HAS_LIVEBOX()} 消息块=${rows.length}`);
+}
+
+console.log('场景 J｜收尾这一次重绘自己就该把直播区收干净（旧的 sendTurn 轮询路径）');
+resetLive();
+LIVE.seq = 0;                                   // 刚发出去：正式块还没渲染
+applyChunk({k:'think', s:'这一轮的思考'});
+renderLive();                                   // → 临时消息块（块内）
+LIVE.seq = 7;                                   // 服务端报回轮号
+mountRound(DOM.content, 7, false);              // 正式块出现了
+applyChunk({k:'ans', s:'这一轮的正文'});
+renderLive();
+LIVE.closing = true;                            // 收尾
+CONV = realConv();
+META.status = 'finished';
+drawConv(DOM.content, true);
+// **故意不调 liveDetach**：复现旧 sendTurn 轮询路径（它只 refresh、不撤直播区）。
+// 这一批的根因就在这——收尾重绘之后直播区还被挂回去，于是同一轮出现两个块。
+{
+  const rows = DOM.content.querySelectorAll('.crow.agent');
+  const provs = DOM.content.querySelectorAll('.crow.live-prov');
+  const boxes = DOM.content.querySelectorAll('#livebox');
+  if (provs.length) problems.push('J: 收尾后还留着临时消息块（那就是"第二个块"）');
+  if (boxes.length) problems.push('J: 收尾重绘后直播节点又被挂回去了');
+  if (rows.length !== 1) problems.push(`J: 收尾后本轮应有 1 个消息块，实际 ${rows.length}`);
+  console.log(`   J 消息块=${rows.length} 临时块=${provs.length} 直播节点=${boxes.length}`);
+}
+
+console.log('场景 K｜开新一轮先清残留 + sseFinish 幂等');
+resetLive();
+LIVE.seq = 0;
+applyChunk({k:'think', s:'上一轮漏撤的思考'});
+renderLive();                                   // 造出"残留的临时块 + 直播节点"
+{
+  const beforeP = DOM.content.querySelectorAll('.crow.live-prov').length;
+  liveAttach('jx');                             // 不 await：清扫发生在 await 之前
+  const p = DOM.content.querySelectorAll('.crow.live-prov').length;
+  const b = DOM.content.querySelectorAll('#livebox').length;
+  if (beforeP !== 1) problems.push('K: 前置条件没造出来（应有 1 个残留临时块）');
+  if (p || b) problems.push('K: 开新一轮没有清掉上一轮的残留直播 DOM');
+  const job1 = LIVE.job;
+  sseFinish();                                  // 幂等：连调两次不许出错
+  sseFinish();
+  if (job1 !== 'jx') problems.push('K: LIVE.job 不对');
+  console.log(`   K 残留临时块 ${beforeP}→${p} 直播节点=${b}`);
+}
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('#livebox'); }
 
 console.log('');
@@ -440,7 +503,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（9 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状全查）');
+console.log('渲染核对：通过（11 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 两处收尾不变量全查）');
 """
 
 
