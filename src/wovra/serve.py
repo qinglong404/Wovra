@@ -17,6 +17,7 @@ import itertools
 import json
 import os
 import re
+import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -847,6 +848,15 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
             "note": "在内存中模拟产物生效所得（不改动会话）；真实生效发生在轮闭合或开新轮时"}
 
 
+# 重组后视图体量的缓存：键 = task.json 的**完整路径**（不是 task_id——不同
+# TASKS_ROOT 下同名会话会撞），值 = ((mtime_ns, size), 投影)。
+# 为什么必须缓存：这个投影要真装配每个视图（实测 1.8–3.1s），而前端每切一次
+# 会话就会来拉一次。文件没变就该秒回——否则请求在算的时候被浏览器中止连接，
+# `_json` 写回时抛 `ConnectionAbortedError` 刷屏（2026-09-13 用户实测）。
+_VIEW_SIZES_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
+_VIEW_SIZES_LOCK = threading.Lock()
+
+
 def view_sizes(task_id: str) -> dict | None:
     """各 agent **重组后视图体量**（走 pending_views 的物化，剥掉消息正文）。
 
@@ -855,6 +865,11 @@ def view_sizes(task_id: str) -> dict | None:
     非得新消息干嘛？"）：视图字节本来就从 `rounds + registry` 确定性派生，
     这里在内存里把注册表每个条目装配一遍，数出来的就是"它现在会看到多少"。
 
+    **按 task.json 的 (mtime_ns, size) 缓存**：这个投影要真装配每个视图，
+    实测 1.8–3.1s（随 agent 数涨）。从前没有缓存，前端每切一次会话就重算一次，
+    算到一半被浏览器中止连接 → `_json` 写回时 `ConnectionAbortedError` 刷屏
+    （用户 2026-09-13 实测：几十段 traceback）。文件没变就不该重算。
+
     口径如实交代，不许含糊成实测：
     * `tokens` = 与运行时**同一把尺子**（`tokens.estimate`，装了 tiktoken 就是
       官方分词器），故与注册表里的 `ctx_cur`（实测观测）**可直接比较**；
@@ -862,24 +877,48 @@ def view_sizes(task_id: str) -> dict | None:
     * `window` = 该会话的模型上下文窗口（`WOVRA_CONTEXT_LIMIT`）——未运行过的
       条目注册表里 `window=0`（没有观测），但"占窗口多少"这个投影是要分母的。
     """
+    tf = task_module.TASKS_ROOT / str(task_id) / "task.json"
+    key = str(tf)
+    try:
+        st = tf.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    with _VIEW_SIZES_LOCK:
+        hit = _VIEW_SIZES_CACHE.get(key)
+    if hit is not None and hit[0] == sig:
+        return hit[1]
     got = pending_views(task_id)
     if got is None:
         return None
+    # 签名**算完之后**再取一次：`Task.load` 的块迁移可能把文件回写一遍
+    # （幂等的既有行为），拿算之前那次的签名去存，缓存会永远命中不了
+    # ——实测踩过（第二次调用照样重算）。
+    try:
+        st = tf.stat()
+        sig = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        sig = sig
     basis = tokens_module.caliber()
     try:
         from .agent.support import _DEFAULT_CONTEXT_LIMIT
         window = int(got.get("window") or _DEFAULT_CONTEXT_LIMIT)
     except Exception:  # noqa: BLE001——拿不到就留 0，前端按"无分母"渲染
         window = int(got.get("window") or 0)
-    return {"agents": [{k: a.get(k) for k in
-                        ("id", "name", "is_main", "count", "total_chars",
-                         "tokens", "alt_count", "alt_chars",
-                         "alt_tokens")}
-                       for a in got.get("agents") or []],
-            "window": window, "basis": basis,
-            "pending": True,
-            "note": "零 LLM 机械投影：在内存里按当前注册表 + 轮材料装配各视图"
-                    "所得（会话一个字节都不改）"}
+    out = {"agents": [{k: a.get(k) for k in
+                       ("id", "name", "is_main", "count", "total_chars",
+                        "tokens", "alt_count", "alt_chars",
+                        "alt_tokens")}
+                      for a in got.get("agents") or []],
+           "window": window, "basis": basis,
+           "pending": True,
+           "note": "零 LLM 机械投影：在内存里按当前注册表 + 轮材料装配各视图"
+                   "所得（会话一个字节都不改）"}
+    with _VIEW_SIZES_LOCK:
+        if len(_VIEW_SIZES_CACHE) > 16:      # 兜住条目数（会话数级别，不会涨）
+            _VIEW_SIZES_CACHE.clear()
+        _VIEW_SIZES_CACHE[key] = (sig, out)
+    return out
 
 
 def _event_agents(r: dict, main_id: str) -> list[str]:
@@ -1186,6 +1225,26 @@ def _warm(cache: SummaryCache, stop: threading.Event) -> None:
         stop.wait(3.0)
 
 
+# **客户端已走**这一族异常：浏览器刷新 / 切会话 / 关标签页时中止连接，
+# Windows 上表现为 `ConnectionAbortedError: [WinError 10053]`。它是**常态**，
+# 不是服务端故障——但 `BaseHTTPRequestHandler` 默认把它连 traceback 一起打到
+# stderr，实测刷了几十段，看着像服务崩了（用户 2026-09-13 贴了一大片来问）。
+# 凡是"对端没了"就闭嘴，真错误照旧打。
+_CLIENT_GONE = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
+
+
+class _Server(ThreadingHTTPServer):
+    """多线程 HTTP 服务 + **安静的客户端断开**（见 `_CLIENT_GONE`）。"""
+
+    daemon_threads = True
+
+    def handle_error(self, request, client_address) -> None:
+        error = sys.exc_info()[1]
+        if isinstance(error, _CLIENT_GONE):
+            return                      # 对端已走：不是错误，别刷屏
+        super().handle_error(request, client_address)
+
+
 class _Handler(BaseHTTPRequestHandler):
     cache: SummaryCache = None  # type: ignore[assignment]
     tasks_root: Path = None  # type: ignore[assignment]
@@ -1196,21 +1255,27 @@ class _Handler(BaseHTTPRequestHandler):
     # ---- 响应辅助 ----
     def _json(self, payload, code: int = 200) -> None:
         body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-        self.send_response(code)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except _CLIENT_GONE:
+            return                      # 客户端在装配/写回期间走了（刷新、切页）
 
     def _bytes(self, body: bytes, ctype: str) -> None:
         # no-store 一律带：前端热更新靠浏览器每次拿到最新 index.html
-        self.send_response(200)
-        self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(body)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            self.wfile.write(body)
+        except _CLIENT_GONE:
+            return
 
     def _html(self) -> None:
         try:
@@ -1669,7 +1734,7 @@ def cmd_serve(args: argparse.Namespace) -> None:
     _Handler.tasks_root = task_module.TASKS_ROOT
     stop = threading.Event()
     threading.Thread(target=_warm, args=(cache, stop), daemon=True).start()
-    server = ThreadingHTTPServer((args.host, args.port), _Handler)
+    server = _Server((args.host, args.port), _Handler)
     print(f"Wovra 可视化：http://{args.host}:{args.port}/"
           f"（只读投影；Ctrl+C 停止。数据目录：{task_module.TASKS_ROOT}）")
     try:

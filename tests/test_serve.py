@@ -224,6 +224,82 @@ def test_view_sizes_carries_window_and_caliber(tmp_path, monkeypatch):
     assert any(a["is_main"] for a in d["agents"])
 
 
+def test_view_sizes_cached_until_task_file_changes(tmp_path, monkeypatch):
+    """投影按 task.json 的 (mtime_ns, size) 缓存——**文件没变不许重算**。
+
+    为什么必须缓存（2026-09-13 实测）：这个投影要真装配每个视图（1.8–3.1s），
+    而前端每切一次会话就拉一次；请求在算的途中被浏览器中止连接，`_json` 写回
+    时抛 `ConnectionAbortedError`，几十段 traceback 刷屏、看着像服务崩了。
+    """
+    import json as _json
+    from dataclasses import asdict as _asdict
+    from wovra.task import Task
+    tasks = tmp_path / "tasks6"
+    (tasks / "s1").mkdir(parents=True)
+    task = Task(id="s1", goal="g", workspace=str(tmp_path))
+    task.rounds = [{"seq": 1, "user_input": {"original": "干活"}, "events": [],
+                    "end_state": "completed", "org_state": "done"}]
+    tf = tasks / "s1" / "task.json"
+    tf.write_text(_json.dumps(_asdict(task), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+
+    calls = {"n": 0}
+    real = serve.pending_views
+
+    def counting(tid, *a, **k):
+        calls["n"] += 1
+        return real(tid, *a, **k)
+
+    monkeypatch.setattr(serve, "pending_views", counting)
+    serve._VIEW_SIZES_CACHE.clear()
+    first = serve.view_sizes("s1")
+    assert serve.view_sizes("s1") == first
+    assert calls["n"] == 1                       # 第二次命中缓存，没重算
+
+    tf.write_text(tf.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    serve.view_sizes("s1")
+    assert calls["n"] == 2                       # 文件一变就重算
+    serve._VIEW_SIZES_CACHE.clear()
+
+
+def test_json_and_bytes_tolerate_client_abort(monkeypatch):
+    """客户端中止连接（刷新/切会话：Windows 上是 WinError 10053）**不是错误**。
+
+    实测用户贴了一大片 `ConnectionAbortedError` traceback 来问"这是怎么回事"：
+    `wfile.write` 时对端已经走了。HTTP 服务对此的常态做法是闭嘴收场——真错误
+    照旧打（`_Server.handle_error` 只放过"对端已走"这一族）。
+    """
+    class _Boom:
+        def write(self, _body):
+            raise ConnectionAbortedError(
+                10053, "你的主机中的软件中止了一个已建立的连接")
+
+    h = serve._Handler.__new__(serve._Handler)
+    h.wfile = _Boom()
+    h.send_response = lambda *a, **k: None
+    h.send_header = lambda *a, **k: None
+    h.end_headers = lambda: None
+    serve._Handler._json(h, {"ok": True})            # 不抛 = 通过
+    serve._Handler._bytes(h, b"x", "text/plain")     # 不抛 = 通过
+
+    # handle_error 只放过"对端已走"这一族；真错误必须照旧上报，不许吞
+    from http.server import ThreadingHTTPServer
+    passed: list = []
+    monkeypatch.setattr(ThreadingHTTPServer, "handle_error",
+                        lambda self, request, addr: passed.append(addr))
+    server = serve._Server.__new__(serve._Server)
+    try:
+        raise ConnectionAbortedError(10053, "gone")
+    except ConnectionAbortedError:
+        serve._Server.handle_error(server, None, ("127.0.0.1", 1))
+    assert passed == []                               # 对端已走：静默
+    try:
+        raise ValueError("真错误")
+    except ValueError:
+        serve._Server.handle_error(server, None, ("127.0.0.1", 1))
+    assert passed == [("127.0.0.1", 1)]               # 真错误：照旧上报
+
+
 def test_todo_log_derives_calls():
     """计划页流水：从轮事件抽 todo 调用（动作/文本/结果配对）。"""
     data = _fake_task()

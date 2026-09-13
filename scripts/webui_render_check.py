@@ -73,6 +73,16 @@ global.EventSource = function(){ return { close(){}, addEventListener(){} } };
 SCENARIOS = r"""
 // ================= 渲染核对场景 =================
 function cellCount(html){ return (html.match(/class="ctx-cell"/g) || []).length; }
+// 只留可见正文：把 title="..."（悬停才看的）剥掉。用户口径（2026-09-13）：
+// **页面上不留机制说明式的描述文字**——"不要留这段话，不要留这种描述的，
+// 当产品标准写"。故正文里出现这些词就是回归。
+const PROSE = ['机械投影','登记即可算','上次装配','零 LLM','一字不改',
+               'tiktoken','字符启发式','会被下一轮刷新','相加 ≠','各视图各自'];
+function bodyOf(html){ return html.replace(/title="[^"]*"/g, 'title=""'); }
+function proseIn(html){
+  const body = bodyOf(html);
+  return PROSE.filter(k => body.includes(k));
+}
 function scan(label, html){
   const bad = [];
   for (const k of ['undefined', 'NaN', '>[object Object]<']) {
@@ -88,6 +98,8 @@ function check(label, html, expectCells){
     problems.push(`${label}: 期望 ${expectCells} 个 agent 格，实际 ${cells}`);
   }
   for (const b of scan(label, html)) problems.push(`${label}: 出现 ${b}`);
+  const prose = proseIn(html);
+  if (prose.length) problems.push(`${label}: 正文里出现机制说明词 ${prose.join('、')}`);
 }
 
 console.log('场景 A｜已分裂 + 4 个域从未运行（投影可得，实测为 0）');
@@ -111,7 +123,10 @@ let html = byId('ctxbar').innerHTML;
 check('A 有投影', html, 5);
 if (!html.includes('≈')) problems.push('A: 没有出现 ≈ 前缀（投影没被当成主数）');
 if (!html.includes('实测')) problems.push('A: 有实测时没并列显示"实测"');
-if (!html.includes('tiktoken')) problems.push('A: 没交代估算尺子');
+// 尺子只在悬停里交代（正文不留说明文字）
+if (proseIn(html).length === 0 && !/title="[^"]*tiktoken/.test(html)) {
+  problems.push('A: 连悬停里都没交代估算口径');
+}
 if (process.env.WEBUI_RENDER_DUMP) console.log('\n[场景 A 的 HTML]\n' + html + '\n');
 
 console.log('场景 B｜产物尚未生效（域还没进注册表 → 也要列出来）');
@@ -124,7 +139,6 @@ VIEWSIZES = { sig:'y', window:1000000, basis:'heuristic', agents:[
 renderCtxbar();
 html = byId('ctxbar').innerHTML;
 check('B 含未登记域', html, 2);
-if (!html.includes('字符启发式')) problems.push('B: 尺子是字符启发式时没写明');
 
 console.log('场景 C｜单 agent 会话（没有投影，退回实测）');
 META = { id:'s2', registry:[{id:'Main', name:'主agent', status:'active',
