@@ -1068,20 +1068,45 @@ function renderLive(){
   const tsum=el.querySelector('#live-think-sum');
   if(tb&&tbody){
     const show=LIVE.think?LIVE.think.slice(-4000):'';
-    if(show||LIVE.mode==='think'||LIVE.mode==='ans'){
-      // 思考中（或刚开跑、正文还没来）：块**始终展开**，文本增量灌进去
+    if(show){
+      // 有文本：块**展开**并灌入（块先于文本存在，但**没有文本时不留空块**）
+      tb.style.display='';
       if(!tb.dataset.user&&!tb.open)tb.open=true;
-      if(show&&tbody.textContent!==show)tbody.textContent=show;
+      if(tbody.textContent!==show)tbody.textContent=show;
       if(tsum)tsum.textContent=LIVE.status?('💭 '+LIVE.status):'💭 思考中…';
     }else if(tbody.textContent){
-      // 这一段思考/回答结束：**折叠但不移除**（文本留着、位置不动）
+      // 这一段思考结束：**折叠但不移除**（文本留着、位置不动）
+      tb.style.display='';
       if(!tb.dataset.user&&tb.open)tb.open=false;
       if(tsum)tsum.textContent='💭 思考内容（已折叠，点开看）';
+    }else{
+      // 还没有任何思考文本：**整块藏起来**——否则页面末尾会挂一个"思考中…"的
+      // 空白块（用户报的 bug：老出现一个空白思考块；是我上一批放宽条件引入的）
+      tb.style.display='none';
     }
   }
   const ab=el.querySelector('#live-ans');
-  if(ab){ab.style.display=LIVE.ans?'':'none';
-    if(ab.textContent!==LIVE.ans)ab.textContent=LIVE.ans;}
+  if(ab){
+    // **官方渲染优先**：事件区已经出现这一轮的 `final_answer` → 直播区的原始
+    // 文本立刻退场，否则尾部会挂一段"没有 MD 渲染的原始回复"不动（用户报的 bug）
+    let official=false;
+    try{
+      const seq=String(LIVE.seq);
+      const cached=Object.entries(CONV.cache||{}).find(([s])=>String(s)===seq);
+      const evs=(cached&&cached[1]&&cached[1].events)||[];
+      official=evs.some(e=>e&&e.type==='final_answer');
+      if(!official){   // 兜底：轮里已有正式块且正文非空也算
+        const off=document.querySelector(`.crow.agent:not(.live-prov)[data-seq="${seq}"] .bub`);
+        official=!!(off&&String(off.textContent||'').trim().length>40);
+      }
+    }catch(e){}
+    if(official&&!LIVE.keepAns){
+      ab.style.display='none';ab.textContent='';
+    }else{
+      ab.style.display=LIVE.ans?'':'none';
+      if(ab.textContent!==LIVE.ans)ab.textContent=LIVE.ans;
+    }
+  }
   if(FOLLOW){
     // **只在用户本来就在底部附近时才自动跟随**：阈值取可视高度的 1/4（至少
     // 160px）——80px 太小，稍微往回滚一点就"不算在底部"，反而更容易被拽走
