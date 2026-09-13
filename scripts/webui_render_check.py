@@ -40,19 +40,53 @@ function mkClassList(e){
       const want=(v===undefined)?!has:!!v; want?this.add(c):this.remove(c); return want; },
   };
 }
+/* innerHTML → 子节点树（**带栈的真解析，还原嵌套**）。
+
+   2026-09-13 修：原实现用一条全局正则把所有开标签**扁平**挂到根下——后代选择器
+   （`card.querySelector('.t-result')`）永远找不到东西。这个假象已经骗过我**四次**
+   （场景 P 报"空档"、场景 L 的 textContent、工具结果回填…），每次都是我去改断言
+   绕开它，而不是修仪器。现在按栈还原层级：产品代码怎么查，仪器就怎么答。
+   只登记带 id/class 的元素（与本仪器一直以来的口径一致：影子节点不参与匹配），
+   但**层级按真实嵌套还原**——只有这样后代选择器才成立。 */
+const VOID_TAGS = new Set(['br','hr','img','input','meta','link','source']);
 function parseInto(root, html){
   root.children = [];
-  const re = /<(\w+)([^>]*)>/g;
+  const stack = [root];
+  const re = /<\/?(\w+)((?:"[^"]*"|'[^']*'|[^>])*)>/g;
   let m;
   while((m = re.exec(String(html||'')))){
+    const raw = m[0], tag = String(m[1]).toLowerCase();
+    if(raw.startsWith('</')){                       // 闭标签：退到匹配的那一层
+      for(let i=stack.length-1;i>0;i--){
+        if(stack[i].tagName===tag.toUpperCase()){ stack.length=i; break; }
+      }
+      continue;
+    }
     const attrs = m[2] || '';
     const idm = /\bid="([^"]*)"/.exec(attrs);
     const cm = /\bclass="([^"]*)"/.exec(attrs);
-    if(!idm && !cm) continue;              // 只登记带 id/class 的（骨架全带）
-    const c = mkEl(m[1]);
-    if(idm) c.id = idm[1];
-    if(cm) c.className = cm[1];
-    root.appendChild(c);
+    const selfClose = /\/\s*$/.test(attrs) || VOID_TAGS.has(tag);
+    if(idm || cm){                                  // 带身份的元素：登记并挂到当前层
+      const c = mkEl(tag);
+      if(idm) c.id = idm[1];
+      if(cm) c.className = cm[1];
+      const dm = /[^\s=]+="[^"]*"/g; let a;
+      // data-* 落进 dataset（camelCase），供 `[data-call="x"]` 这类选择器用
+      while((a = dm.exec(attrs))){
+        const eq=a[0].indexOf('='); const k=a[0].slice(0,eq); const v=a[0].slice(eq+1);
+        if(!k.startsWith('data-'))continue;
+        const cam=k.slice(5).replace(/-([a-z])/g,(_s,x)=>x.toUpperCase());
+        c.dataset[cam]=v.slice(1,-1);
+      }
+      stack[stack.length-1].appendChild(c);
+      if(!selfClose) stack.push(c);
+    }else if(!selfClose){
+      // 没身份的元素也要占一层，否则它的子元素会挂错层（层级照样要真）
+      const ghost = mkEl(tag);
+      stack[stack.length-1].appendChild(ghost);
+      ghost._ghost = true;
+      stack.push(ghost);
+    }
   }
 }
 function mkEl(tag){
@@ -343,10 +377,17 @@ function mountRound(content, seq, isProv, agent){
   content.appendChild(row);
   return {row, gbox:g};
 }
-// 当前 agent 的已完成条目（新结构按 agent 分：LIVE.steps[aid]）
+// 当前 agent 的**流式事件**（新结构：内容来自服务端推的事件，不再是合成的步骤条目）
 function stepsOf(aid){
   const a = aid || resolveAgentId(LIVE.agent) || 'Main';
-  return LIVE.steps[a] || [];
+  return LIVE.events[a] || [];
+}
+// 造一个与 `/rounds/{seq}` **同形状**的事件（服务端 `Agent._live_event` 的产物）
+function ev(o){
+  return Object.assign({id:'R7-E01', type:'tool_call', agent:'Main',
+                        time:'2026-09-13T17:00:00', thinking:'', status:'',
+                        role:'assistant', content:'', tool_calls:null,
+                        tool_call_id:null}, o||{});
 }
 function resetLive(){
   DOM = resetDom();
@@ -355,7 +396,7 @@ function resetLive(){
   REG = { Main:{id:'Main', name:'主agent'}, A:{id:'A', name:'域甲'} };
   TAB = 'conv'; CUR = 's1';
   LIVE.job = 'j1'; LIVE.cur = 's1'; LIVE.seq = 7; LIVE.think=''; LIVE.ans='';
-  LIVE.steps = {}; LIVE.doneSig = {}; LIVE.boxes = {}; LIVE.provs = {};
+  LIVE.events = {}; LIVE.calls = {}; LIVE.doneSig = {}; LIVE.boxes = {}; LIVE.provs = {};
   LIVE.keep = null; LIVE.agent = '';
   LIVE.closing = false; LIVE.startedAt = Date.now(); LIVE.status='';
 }
@@ -384,17 +425,23 @@ renderLive();
   if (head && !/点击展开/.test(head.textContent)) problems.push('F: 思考块头部没有"点击展开"提示');
   const body = box.querySelector('.live-think-body');
   if (body && body.textContent !== '再想第二段。') problems.push('F: 在飞思考文本不对');
-  // ② 一步结束的内容不许消失：应当留在已完成区
-  const kept = stepsOf().map(e=>e.text).join('|');
-  if (!kept.includes('先想第一段。')) problems.push('F: 一步结束后思考被清空（会"消失一下再出现"）');
-  if (!kept.includes('**加粗**的正文') && LIVE.ans!=='**加粗**的正文')
-    problems.push('F: 正文既不在已完成区也不在飞（丢了）');
+  // ② 一步结束后内容不许消失：现在由**服务端推的事件**接住（不再是前端合成条目）
+  applyChunk({k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+    thinking:'先想第一段。',
+    tool_calls:[{id:'c9', function:{name:'read_file', arguments:'{"path":"a.py"}'}}]})});
+  renderLive();
+  const doneEl = box.querySelector('.live-done');
+  const doneH = String((doneEl && doneEl.innerHTML) || '');
+  if (!/先想第一段。/.test(doneH))
+    problems.push('F: 一步结束后思考不见了（事件没接住内容 → "消失一下再出现"）');
+  if (doneEl && doneEl.querySelectorAll('.tcard').length !== 1)
+    problems.push('F: 事件里的工具卡没画出来');
   // ④ 正文必须走 md()，不是 textContent
   const ab = box.querySelector('.live-ans');
   if (!ab) problems.push('F: 没有正文节点');
   else if (!/<strong>加粗<\/strong>/.test(ab.innerHTML))
     problems.push('F: 正文没有实时渲染 MD（应出 <strong>）');
-  console.log(`  F 已完成条目=${stepsOf().length} 思考折叠=${tb?!tb.classList.contains('open'):'?'} 正文MD=${!!(ab&&/<strong>/.test(ab.innerHTML))}`);
+  console.log(`  F 事件条目=${stepsOf().length} 工具卡=${doneEl ? doneEl.querySelectorAll('.tcard').length : '?'} 思考折叠=${tb?!tb.classList.contains('open'):'?'} 正文MD=${!!(ab&&/<strong>/.test(ab.innerHTML))}`);
 }
 
 console.log('场景 G｜直播区：轮号未知时也要挂在**消息块**里（临时块），不再落到 #content');
@@ -542,8 +589,10 @@ META.round_list = [{seq:7, active_view:'A', events:2, steps_used:1}];
 META.status = 'in_progress';
 applyChunk({k:'ans', s:'**最终**回答'});
 renderLive();
-// serve 在整理/分裂开始前推的状态（2026-09-13 新增；此前这 100+ 秒一个分片都
-// 不推，界面停在"回答中…"不动 —— 用户报"卡到回答中了"）
+// 服务端在回答落成**事件**之后推的状态（2026-09-13 新增整理段；此前这 100+ 秒
+// 一个分片都不推，界面停在"回答中…"不动 —— 用户报"卡到回答中了"）
+applyChunk({k:'event', e:ev({id:'R7-E01', type:'final_answer', agent:'Main',
+  role:'assistant', content:'**最终**回答'})});
 applyChunk({k:'status', s:'回答已产出，正在整理上下文…'});
 renderLive();
 {
@@ -584,11 +633,18 @@ const O1 = mountRound(DOM.content, 7, false, 'Main');
 const O2 = mountRound(DOM.content, 7, false, 'A');
 META.round_list = [{seq:7, active_view:'A', events:2, steps_used:2}];
 META.status = 'in_progress';
-// 主 agent 先干一步（思考 + 路由前的过程发言），再交给 A
+// 主 agent 先干一步（思考 + 工具调用），事件落地后交给 A
 applyChunk({k:'think', s:'主 agent 的思考', ag:'Main'});
 renderLive();
-applyChunk({k:'status', s:'等待模型响应…', ag:'Main'});   // 收口 → 进 Main 的完成区
+applyChunk({k:'status', s:'等待模型响应…', ag:'Main'});
+applyChunk({k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+  thinking:'主 agent 的思考',
+  tool_calls:[{id:'o1', function:{name:'route_to', arguments:'{"agent":"A"}'}}]})});
+renderLive();
 applyChunk({k:'think', s:'A 的思考', ag:'A'});            // 换手：轮到 A
+applyChunk({k:'event', e:ev({id:'R7-E02', type:'tool_call', agent:'A',
+  thinking:'A 的思考',
+  tool_calls:[{id:'o2', function:{name:'read_file', arguments:'{}'}}]})});
 renderLive();
 {
   const boxMain = O1.gbox.querySelector('.livebox');
@@ -596,16 +652,21 @@ renderLive();
   if (!boxMain) problems.push('O: 主 agent 的块里没有它的直播节点');
   if (!boxA) problems.push('O: A 的块里没有它的直播节点（思考会被挂到主 agent 那块）');
   const mainDone = boxMain && boxMain.querySelector('.live-done');
-  const aBody = boxA && boxA.querySelector('.live-think-body');
+  const aDone = boxA && boxA.querySelector('.live-done');
   if (!mainDone || !/主 agent 的思考/.test(mainDone.innerHTML))
     problems.push('O: 主 agent 那一步的思考没留在主 agent 的块里');
-  if (!aBody || aBody.textContent !== 'A 的思考')
+  if (!aDone || !/A 的思考/.test(aDone.innerHTML))
     problems.push('O: A 的思考没进 A 的块（用户报的 bug 就是这个）');
   if (boxA && /主 agent 的思考/.test(boxA.innerHTML))
     problems.push('O: 主 agent 的思考串到了 A 的块里');
   if (boxMain && /A 的思考/.test(boxMain.innerHTML))
     problems.push('O: A 的思考串到了主 agent 的块里（正是用户报的现象）');
-  console.log(`   O 主块有内容=${!!mainDone} A块有内容=${!!aBody} 互不串=${!(boxA&&/主 agent 的思考/.test(boxA.innerHTML))}`);
+  // 各自的工具卡也要在各自的块里
+  const mCards = mainDone ? mainDone.querySelectorAll('.tcard').length : 0;
+  const aCards = aDone ? aDone.querySelectorAll('.tcard').length : 0;
+  if (mCards !== 1 || aCards !== 1)
+    problems.push(`O: 工具卡没各归各块（主 ${mCards} / A ${aCards}）`);
+  console.log(`   O 主块有内容=${!!mainDone} A块有内容=${!!aDone} 互不串=${!(boxA&&/主 agent 的思考/.test(boxA.innerHTML))} 卡=${mCards}/${aCards}`);
 }
 
 console.log('场景 P｜多步多 agent：干活那一方的那行**不许出现"什么都没有"的空档**');
@@ -686,6 +747,9 @@ META.status = 'in_progress';
   applyChunk({k:'think', s:'B 真正的新思考', ag:'B'});
   renderLive();
   applyChunk({k:'status', s:'正在执行 read_file…', ag:'B'});
+  applyChunk({k:'event', e:ev({id:'R7-E03', type:'tool_call', agent:'B',
+    thinking:'B 真正的新思考',
+    tool_calls:[{id:'q1', function:{name:'read_file', arguments:'{}'}}]})});
   renderLive();
   const box = Q2.gbox.querySelector('.livebox');
   const done = box && box.querySelector('.live-done');
@@ -694,6 +758,72 @@ META.status = 'in_progress';
     problems.push('Q: 事件区已画过别的内容时，直播这一步的思考被去重吃掉了（=一闪一闪）');
   }
   console.log(`   Q 新思考还在=${/B 真正的新思考/.test(txt)}`);
+}
+
+console.log('场景 R｜运行中按**时间顺序**画：思考 → 工具卡 → 思考 → 最终回答（用户报的核心）');
+resetLive();
+const R1 = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:4, steps_used:2}];
+{
+  // 服务端现在每落一个事件就推一份扁平副本（与 /rounds 同形状）
+  const seq = [
+    ev({id:'R7-E01', type:'tool_call', agent:'Main', thinking:'第一步：先看看文件',
+        tool_calls:[{id:'c1', function:{name:'read_file', arguments:'{"path":"a.py"}'}}]}),
+    ev({id:'R7-E02', type:'tool_result', agent:'Main', role:'tool',
+        tool_call_id:'c1', content:'文件内容'}),
+    ev({id:'R7-E03', type:'tool_call', agent:'Main', thinking:'第二步：改掉它',
+        tool_calls:[{id:'c2', function:{name:'edit_file', arguments:'{"path":"a.py"}'}}]}),
+    ev({id:'R7-E04', type:'final_answer', agent:'Main', role:'assistant',
+        content:'**改好了**'}),
+  ];
+  const order = [];
+  for (const e of seq) { applyChunk({k:'event', e}); renderLive(); }
+  const box = R1.gbox.querySelector('.livebox');
+  const done = box && box.querySelector('.live-done');
+  const html = done ? String(done.innerHTML) : '';
+  if (process.env.WEBUI_RENDER_DUMP) {
+    console.log('   [dbg R2]', JSON.stringify({
+      kids: done ? done.children.length : -1,
+      cls: done ? [...done.children].map(c => String(c.className || '')) : [],
+      res: done ? [...done.querySelectorAll('.t-result')].map(e => String(e.textContent || '')) : [],
+      calls: Object.keys(LIVE.calls).map(k => k + '=' + JSON.stringify(LIVE.calls[k].result)),
+    }));
+  }
+  if (!done) problems.push('R: 直播块没了');
+  // 工具卡必须在：而且是**两张**（两次调用）
+  const cards = done ? done.querySelectorAll('.tcard').length : 0;
+  if (cards !== 2) problems.push(`R: 运行中应有 2 张工具卡，实际 ${cards}（工具块没画出来）`);
+  // 顺序：思考1 → 卡1 → 思考2 → 卡2 → 正文
+  const marks = [];
+  if (done) {
+    const walk = (el) => {
+      for (const c of el.children) {
+        const cl = String(c.className || '');
+        if (cl.includes('think-box')) marks.push('think:' + c.textContent.slice(0, 3));
+        else if (cl.includes('tcard')) marks.push('tool');
+        else if (cl.includes('bub') && !cl.includes('live-ans')) marks.push('bub');
+        walk(c);
+      }
+    };
+    walk(done);
+  }
+  const want = ['think', 'tool', 'think', 'tool', 'bub'];
+  const got = marks.map(m => m.startsWith('think') ? 'think' : m);
+  if (got.join('>') !== want.join('>')) {
+    problems.push(`R: 顺序不对：期望 ${want.join('>')}，实际 ${got.join('>')}`);
+  }
+  // 工具结果要回填进调用卡（不是新开一行）——**查 textContent**：回填写的是
+  // textContent，迷你 DOM 的 innerHTML 不带它（这个假象踩过一次）；
+  // 又因为迷你 DOM 把 innerHTML 解析成**扁平**子节点，`[data-call] .t-result`
+  // 这种后代选择器不成立（第二次踩），故直接看所有 `.t-result`。
+  const resTexts = done ? [...done.querySelectorAll('.t-result')]
+    .map(el => String(el.textContent || '')) : [];
+  if (!resTexts.some(t => t === '文件内容'))
+    problems.push('R: 工具结果没有回填到调用卡里');
+  // 最终回答要走 MD 渲染
+  if (done && !/<strong>改好了<\/strong>/.test(String(done.innerHTML)))
+    problems.push('R: 最终回答没走 MD 渲染');
+  console.log(`   R 工具卡=${cards} 顺序=${got.join('>')} 结果已回填=${resTexts.some(t=>t==='文件内容')}`);
 }
 
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('.livebox'); }

@@ -514,6 +514,13 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                     job["live"].append(chunk)
 
                 job["live"] = []
+                # **事件级直播**（2026-09-13，worklog §92）：每落一个事件（工具调用/
+                # 工具结果/最终回答/运行时提示）就推一份扁平副本，形状与
+                # `/api/sessions/{id}/rounds/{seq}` 给前端的完全一致——前端因此能用
+                # **同一套"事件 → 条目"映射**按时间顺序画，工具卡不再缺席。
+                # 此前直播只推 think/ans/status 文本增量，运行中看不到工具调用，
+                # 表现就是"思考连一块、中间的工具块没有"。
+                agent.on_event = lambda e: _live({"k": "event", "e": e})
                 agent.on_progress = lambda s: _live({"k": "status", "s": s})
                 # ⏹ 终止（对齐 CLI Ctrl+C）：每步与流中分片间检查，触发处
                 # 抛 KeyboardInterrupt，由下方 except 收尾成开放轮
@@ -864,10 +871,10 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
         try:
             tok = int(agent._estimate_messages(got))   # 与运行时同口径（防单位混用）
         except Exception:  # noqa: BLE001
-            tok = sum(len(str(m.get("content") or "")) for m in got) // 3
+            tok = sum(len(_content_text(m.get("content"))) for m in got) // 3
         msgs, total, trunc = [], 0, 0
         for m in got:
-            raw = str(m.get("content") or "")
+            raw = _content_text(m.get("content"))
             total += len(raw)
             body = raw
             if len(raw) > _DUMP_CAP:
@@ -889,10 +896,10 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
     if out:
         # 主 agent 的"整理后、未按域重组"全文 = settle 之前的装配（见上）；
         full = _pre_settle if _pre_settle is not None else agent._assemble_messages()
-        alt_chars = sum(len(str(m.get("content") or "")) for m in full)
+        alt_chars = sum(len(_content_text(m.get("content"))) for m in full)
         alt_msgs, alt_trunc = [], 0
         for m in full:
-            raw = str(m.get("content") or "")
+            raw = _content_text(m.get("content"))
             body = raw
             if len(raw) > _DUMP_CAP:
                 body = raw[:_DUMP_CAP] + chr(10) + f"…（本条截断，原 {len(raw):,} 字符）"
@@ -912,7 +919,7 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
         # 无分裂产物（或视图降级）：至少给出"当前装配"一档，别让抽屉空着
         msgs, total, trunc = [], 0, 0
         for m in _pre_settle:
-            raw = str(m.get("content") or "")
+            raw = _content_text(m.get("content"))
             total += len(raw)
             body = raw
             if len(raw) > _DUMP_CAP:
@@ -1246,14 +1253,14 @@ def context_dump(task_id: str, mode: str = "view",
         note = "当前装配视图：整理/压缩/分档生效后，模型下一轮实际会看到的上下文"
     out, total, truncated = [], 0, 0
     for m in msgs:
-        body = str(m.get("content") or "")
+        body = _content_text(m.get("content"))
         total += len(body)
         if len(body) > _DUMP_CAP:
             body = (body[:_DUMP_CAP]
                     + chr(10) + f"…（本条截断，原 {len(body):,} 字符）")
             truncated += 1
         out.append({"role": m.get("role"), "content": body,
-                    "len": len(str(m.get("content") or "")),
+                    "len": len(body),
                     "tool_calls": len(m.get("tool_calls") or [])})
     return {"mode": mode, "view": view, "available": True, "messages": out,
             "count": len(out), "total_chars": total, "truncated": truncated,

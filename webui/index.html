@@ -821,13 +821,13 @@ function syncLiveSeq(round){
      * 条目一律走 `itemHtml()`（与事件区**逐字同款**：思考=一行折叠、正文=MD）；
      * 挂载点一律是**本轮的消息块**（正式块还没渲染就先造临时块，**不依赖
        seq**——seq 未知也照样挂在消息流里）；
-     * 一步结束只把内容**移进这个 agent 的已完成列表**（`LIVE.steps[aid]`）继续显示，
- * 绝不清空；
+     * 一步结束只清掉"在飞"缓冲（内容由紧随其后的**事件**接住，位置不变）；
      * 轮收尾时由正式渲染在**同一位置**接管同样的内容，所以交接没有空档。 */
 const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             seq:0,baseRounds:0,sse:false,
-            agent:'',        // 服务端报的"现在谁在干"（本轮 active_view）
-            steps:{},        // aid → 该 agent 已完成步骤的条目
+            agent:'',        // 当前在干活的视图（服务端报的）
+            events:{},       // aid → 该 agent 的**流式事件**（与 /rounds 同形状）
+            calls:{},        // tool_call_id → {name,args,result}（工具卡的回填状态）
             boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
             provs:{},        // aid → 该 agent 的临时消息块
             doneSig:{},      // aid → 完成区签名（变了才重绘）
@@ -867,38 +867,33 @@ function tickRunlineTime(){
   const st=rl.querySelector('.rl-st');
   if(st&&LIVE.status&&st.textContent!==LIVE.status)st.textContent=LIVE.status;
 }
-/* 一步收口：把这一步已产出的思考/正文**移进已完成列表**，不清空。
-   用户口径（2026-09-13）："其出现完，消失一下，才能出现"——旧实现在这里
-   `LIVE.think='';LIVE.ans=''`，内容当场从页面上消失，要等正式渲染才回来。
-   **按 agent 分开记**（`LIVE.steps[aid]`）：一轮里主 agent 干的那几步归主 agent
-   的块，接手方干的那几步归它的块——不许混到一块去。 */
-function flushLiveStep(aid){
-  const who=aid||resolveAgentId(LIVE.agent)||'Main';
-  const t=LIVE.think,a=LIVE.ans;
+/* 一步收口：清掉"在飞"缓冲（**不搬进完成区**——现在完成区的内容来自**真事件**，
+   服务端每落一个事件就推一份；再搬一次就是把同一段内容画两遍）。
+   用户口径（2026-09-13）："其出现完，消失一下，才能出现"——所以这里只清缓冲，
+   页面上那一段的内容由紧随其后的**事件**接住，位置不变。 */
+function flushLiveStep(){
+  const had=!!(LIVE.think||LIVE.ans);
   LIVE.think='';LIVE.ans='';LIVE.mode='';
-  if(!t&&!a)return false;
-  const list=(LIVE.steps[who]=LIVE.steps[who]||[]);
-  if(t)list.push({t:'think',text:t,k:who+':'+list.length+':think'});
-  if(a)list.push({t:'text',text:a,md:true,k:who+':'+list.length+':ans'});
-  return true;
-}
-/* 服务端报的"现在谁在干"（`chunk.ag` = 本轮 `active_view`）→ 注册表 id。
-   一轮里若有多名 agent，`drawConv` 给**每个发送者各建一个块**，所以必须按
-   agent 定位，不能只按轮号（用户 2026-09-13 报："下面 agent 的思考内容老是挂到
-   上面主 agent 中"——根因就是按轮号取到了第一个块 = 主 agent 那块）。 */
-function resolveAgentId(v){
-  const raw=String(v||'').trim();
-  if(!raw)return '';
-  const a=(typeof REG==='object'&&REG)?(REG[raw]||null):null;
-  return a?String(a.id||raw):raw;
+  return had;
 }
 function applyChunk(c){
   let dirty=false;
-  // agent 换手（route_to 之后）：先把上一个的"在飞"内容收进它自己的列表，
-  // 再切——不这么做，接手方的思考会顶掉前一位还没收口的那段
+  // agent 换手（route_to 之后）：先把上一个的"在飞"内容清掉再切
   if(c.ag&&c.ag!==LIVE.agent){
-    flushLiveStep(LIVE.agent);
+    flushLiveStep();
     LIVE.agent=c.ag;dirty=true;
+  // **事件分片**（2026-09-13 大改）：与 `/rounds/{seq}` 同一形状 → 走同一套
+  // "事件 → 条目"映射。工具调用/工具结果/最终回答都在这里按时间顺序落地，
+  // 于是运行中能看到工具块（此前只推文本增量，工具块在服务端就没推）。
+  if(c.k==='event'&&c.e){
+    const ev=c.e;
+    const who=resolveAgentId(ev.agent||c.ag)||'Main';
+    (LIVE.events[who]=LIVE.events[who]||[]).push(ev);
+    LIVE.think='';LIVE.ans='';LIVE.mode='';   // 事件覆盖了在飞文本
+    LIVE.agent=ev.agent||LIVE.agent;
+    LIVE.doneSig[who]='';
+    return true;
+  }
   }
   if(c.k==='think'){
     if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
@@ -910,11 +905,21 @@ function applyChunk(c){
   }
   else if(c.k==='status'){
     // "等待模型响应…"（每步开头）与"正在<动作>…"（工具执行前）都意味着
-    // **上一段内容已经产出完**——移进已完成列表继续显示，不清空（见上）
+    // **上一段内容已经产出完**——清掉在飞缓冲（内容由事件接住，见上）
     LIVE.mode='status';LIVE.status=c.s;dirty=true;
     if(flushLiveStep())dirty=true;
   }
   return dirty;
+/* 服务端报的"现在谁在干"（`chunk.ag` = 本轮 `active_view`）→ 注册表 id。
+   一轮里若有多名 agent，`drawConv` 给**每个发送者各建一个块**，所以必须按
+   agent 定位，不能只按轮号（用户 2026-09-13 报："下面 agent 的思考内容老是挂到
+   上面主 agent 中"——根因就是按轮号取到了第一个块 = 主 agent 那块）。 */
+function resolveAgentId(v){
+  const raw=String(v||'').trim();
+  if(!raw)return '';
+  const a=(typeof REG==='object'&&REG)?(REG[raw]||null):null;
+  return a?String(a.id||raw):raw;
+}
 }
 async function sseFinish(){   // 终态收尾（SSE done / 轮询兜底 / 发送侧轮询共用）
   // **幂等**：三条完成检测路径（SSE done、pollLive 的状态检查、sendTurn 的
@@ -939,7 +944,7 @@ async function liveAttach(jobId,resume){
   purgeLiveDom();
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
                       status:'',mode:'',seq:0,startedAt:Date.now(),agent:'',
-                      steps:{},boxes:{},provs:{},doneSig:{},keep:null,
+                      events:{},calls:{},boxes:{},provs:{},doneSig:{},keep:null,
                       closing:false,finishing:false,
                       baseRounds:(META&&META.round_list||[]).length});
   // **刷新后的重新挂载**：先做一次单次 catch-up（一次请求拿全量分片、
@@ -973,7 +978,7 @@ function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
   sseClose();clearPendingBar();
   purgeLiveDom();
-  LIVE.steps={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};
+  LIVE.events={};LIVE.calls={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};
   LIVE.keep=null;LIVE.agent='';
   LIVE.closing=false;LIVE.finishing=false;
   const st=document.getElementById('stop');if(st)st.style.display='none';
@@ -1232,16 +1237,32 @@ function insideLive(el){
   }
   return false;
 }
-/* 某个 agent 的"完成区"：与事件区同款渲染，但**扣掉正式渲染已经画过的部分**
-   （刷新/切页时事件区可能已经画过前几步——不扣会重复）。
-
-   去重按**内容**，不按条数（2026-09-13 修的 bug）：原先数"正式那边有几个
-   `.think-box`/`.bub`"就从我这边扣掉前几个——**数一错位就把直播内容整段藏掉**，
-   表现为"思考中那一行一闪一闪、一会有一会无"（用户报的），因为事件区里那个
-   "第 N 个"往往**不是**我这边第 N 条（比如事件区画的是转交那一步的思考）。
-   现在按文本/渲染结果精确比对：**内容真在屏幕上才不重复画**。 */
+/* 某个 agent 的"直播区"：**事件 → 条目走与官方渲染同一个映射**
+   （`eventItems` + `itemHtml`），所以思考、工具卡、正文按**时间顺序**排出来，
+   运行中就能看到工具块。扣掉官方已经画过的（同内容/同调用 id 不重复画）。 */
 function liveDoneHtml(aid,host){
-  let seen=null;
+  const evs=LIVE.events[aid]||[];
+  const T=evs.map(e=>Date.parse(e.time||''));
+  const whenOf=i=>{
+    const c=fmtClock(evs[i]&&evs[i].time);
+    if(isNaN(T[i]))return c;
+    if(i+1<evs.length&&!isNaN(T[i+1]))return c+' · '+(fmtDur((T[i+1]-T[i])/1000)||'');
+    if(META&&META.status==='in_progress'&&i===evs.length-1){
+      return c+' · '+(fmtDur((Date.now()-T[i])/1000)||'');
+    }
+    return c;
+  };
+  const items=[];
+  for(let i=0;i<evs.length;i++){
+    const e=evs[i];
+    const es=e.agent?senderForAgent(e.agent,null):null;
+    for(const it of eventItems(e,String(LIVE.seq||''),i,es,LIVE.calls,whenOf(i))){
+      // 直播块按 agent 分开，不需要组边界标记与用户行
+      if(it.t==='break'||it.t==='usertext')continue;
+      items.push(it);
+    }
+  }
+  let seen=null,seenCalls=null;
   if(host){
     seen=new Set();
     [...host.querySelectorAll('.think-body')].forEach(b=>{
@@ -1249,15 +1270,18 @@ function liveDoneHtml(aid,host){
     });
     [...host.querySelectorAll('.bub')].forEach(b=>{
       if(!insideLive(b))seen.add(String(b.innerHTML||''));
+    seenCalls=new Set([...host.querySelectorAll('.tcard[data-call]')]
+      .map(el=>String(el.getAttribute('data-call')||'')));
     });
   }
-  const items=(LIVE.steps[aid]||[]).filter(it=>{
+  const out=items.filter(it=>{
+    if(it.t==='tool')return !(seenCalls&&seenCalls.has(String(it.id)));
     if(!seen||!seen.size)return true;
     return it.t==='think'
       ? !seen.has(String(it.text||''))
       : !seen.has(md(it.text));
   });
-  return items.map(it=>itemHtml(it,{})).join('');
+  return out.map(it=>itemHtml(it,LIVE.calls)).join('');
 }
 
 function renderLive(){
@@ -1270,7 +1294,7 @@ function renderLive(){
   // **每个有内容的 agent 都要刷**，不只当前这个：换手那一刻上一位的最后一步
   // 刚被收进它的列表，如果不再渲染它那块，那一步就永远停在"没画出来"的状态
   // （写这段时踩到——场景 O 里主 agent 那步的思考在它自己块里是空的）。
-  const who=new Set([actor, ...Object.keys(LIVE.steps), ...Object.keys(LIVE.boxes)]);
+  const who=new Set([actor, ...Object.keys(LIVE.events), ...Object.keys(LIVE.boxes)]);
   who.forEach(aid=>renderLiveOne(aid, aid===actor));
   const rl=document.getElementById('runline');
   if(rl){
@@ -1297,14 +1321,15 @@ function renderLiveOne(aid,isActor){
   const host=liveGbox(String(LIVE.seq||''),aid);
   if(!host)return;
   const box=liveBox(aid,host);
-  // ① 这个 agent 的已完成步骤：内容不再变 → 签名变了才重绘
+  // ① 这个 agent 的步骤（**来自流式事件**）：内容变了才重绘
   const done=box.querySelector('.live-done');
   if(done){
-    const sig=((LIVE.steps[aid]||[]).length)+':'+aid;
+    const sig=((LIVE.events[aid]||[]).length)+':'+aid+':'+Object.keys(LIVE.calls).length;
     if(sig!==LIVE.doneSig[aid]){
       done.innerHTML=liveDoneHtml(aid,host);
       LIVE.doneSig[aid]=sig;
       highlightIn(done);
+    fillCallResults(done,LIVE.calls);   // 工具卡：结果/状态回填（与官方同一函数）
     }
   }
   // ② 在飞思考：**一行折叠**（和工具卡一样），要看得自己点开
@@ -1373,6 +1398,79 @@ async function loadEarlier(){
   drawConv($('#content'),false);
   sc.scrollTop+=sc.scrollHeight-prevH;   // 前插后钉住视口
 }
+/* ============ 事件 → 条目（**官方渲染与直播共用这一份**） ============
+   2026-09-13 大改（worklog §92）。用户报："思考连一块…中间调用工具的块没有渲染
+   出来…不能老老实实按时间顺序，出来一个事件渲染一个消息块吗？"
+
+   病根在信息通道，不在渲染：直播流原先只推 `think`/`ans`/`status` 三种**文本增量**
+   （见路由层/服务端的 `_live`），**根本不推事件**——工具调用只存在于轮事件里，而轮
+   事件要等轮结束那次 `/rounds/{seq}` 拉取才到前端。于是运行中你只能看到"思考、思考、
+   思考…"，中间的工具块在服务端就没推出来。
+
+   改法：服务端现在**每落一个事件就推一份扁平副本**（`k:'event'`，形状与
+   `/rounds` 完全一致），前端把"事件 → 条目"这段映射抽成 `eventItems()`，官方与
+   直播**共用**。所以：同一套规则、同一套 `itemHtml`、按时间顺序 → 思考、工具卡、
+   正文自然交替出现。 */
+function eventItems(e, seq, ei, sender, calls, when){
+  const out=[];
+  const role=e.role, content=e.content, tcs=e.tool_calls||[];
+  if(e.type==='runtime_note'||(role==='user'&&String(content||'').startsWith('<runtime-reminder>'))){
+    const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,160);
+    const bad=/异常终止|未产出任何正文|整理失败|错误/.test(inner);
+    out.push({t:'sys',text:(bad?'⚠ ':'⚙ ')+inner,title:String(content||''),tm:when,tmIndex:ei,bad});
+    return out;
+  }
+  if(e.type==='tool_call'){
+    if(e.thinking)out.push({t:'think',text:e.thinking,k:`${seq}:E${ei}:think`});
+    // 带工具调用的这步的正文是"过程发言"（边做边说），不是最终回答——视觉上弱化
+    if(String(content||'').trim())out.push({t:'text',text:content,tm:when,tmIndex:ei,interim:true});
+    for(const tc of tcs){
+      const name=tc.function?.name||'?';
+      calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
+      out.push({t:'tool',id:tc.id,name,args:tc.function?.arguments||'',seq,tm:when,tmIndex:ei});
+    }
+    return out;
+  }
+  if(role==='tool'){
+    const sub=consultSender(content);
+    // consult 回复换发送者（它替另一个 agent 说话）：`who` 让调用方临时换组
+    if(sub){out.push({t:'break'});out.push({t:'text',text:sub.body,note:'consult 回复',tm:when,tmIndex:ei,who:sub});return out}
+    const ci=calls[e.tool_call_id];
+    if(ci){ci.result=content||'';return out}      // 结果并入调用卡，不单独占一行
+    out.push({t:'break'});
+    out.push({t:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`,tm:when,tmIndex:ei});
+    return out;
+  }
+  if(role==='assistant'&&content){
+    if(e.thinking)out.push({t:'think',text:e.thinking,k:`${seq}:E${ei}:think`});
+    out.push({t:'text',text:content,md:e.type==='final_answer',tm:when,tmIndex:ei});
+    return out;
+  }
+  if(role==='user'){
+    out.push({t:'usertext',text:content,tm:when,tmIndex:ei});
+    return out;
+  }
+  return out;
+}
+
+/* 把工具结果回填进调用卡（官方与直播共用）：卡片先画出来、结果到了再填 */
+function fillCallResults(root, calls){
+  if(!root)return;
+  for(const [id,ci] of Object.entries(calls||{})){
+    const el=root.querySelector(`[data-call="${CSS.escape(id)}"]`);if(!el)continue;
+    const stEl=el.querySelector('.t-st'),resEl=el.querySelector('.t-result');
+    if(ci.result!=null){
+      if(resEl&&resEl.textContent!==ci.result)resEl.textContent=ci.result;
+      const [txt,cls]=resultStatus(ci.name,ci.result);
+      if(stEl){stEl.textContent=txt;stEl.className='t-st '+cls}
+    }else if(stEl){
+      const run=(META&&META.status==='in_progress');
+      const txt=run?'● 运行中…':'无结果',cls='t-st '+(run?'st-running':'st-run');
+      if(stEl.textContent!==txt){stEl.textContent=txt;stEl.className=cls}
+    }
+  }
+}
+
 
 function drawConv(c,toBottom){
   const openKeys=snapshotOpenBlocks();
@@ -1423,43 +1521,13 @@ function drawConv(c,toBottom){
     const sender=senderOf(m);
     for(let ei=0;ei<evs.length;ei++){
       const e=evs[ei];
-      const role=e.role,content=e.content,tcs=e.tool_calls||[];
       // 轮内可多名 agent：主 agent 路由 → 子 agent 接手（route_to 工具结果后换手）
       const es=e.agent?senderForAgent(e.agent,m):sender;
-      if(e.type==='runtime_note'||(role==='user'&&String(content||'').startsWith('<runtime-reminder>'))){
-        // 不 flush：提示行留在组框内，同一个块顺着往下走，不再拆成两块
-        const inner=String(content||'').replace(/<\/?runtime-reminder>/g,'').replace(/\s+/g,' ').trim().slice(0,160);
-        const bad=/异常终止|未产出任何正文|整理失败|错误/.test(inner);
-        feed(es,{t:'sys',text:(bad?'⚠ ':'⚙ ')+inner,title:String(content||''),tm:when(ei),bad});
-        continue;
-      }
-      if(e.type==='tool_call'){
-        if(e.thinking)feed(es,{t:'think',text:e.thinking,k:`${seq}:E${ei}:think`});
-        // 带工具调用的这步的正文是"过程发言"（边做边说），不是最终回答——
-        // 视觉上弱化，最终回答才醒目地收在最后
-        if(String(content||'').trim())feed(es,{t:'text',text:content,tm:when(ei),interim:true});
-        for(const tc of tcs){
-          const name=tc.function?.name||'?';
-          calls[tc.id]={name,args:tc.function?.arguments||'',result:null};
-          feed(es,{t:'tool',id:tc.id,name,args:tc.function?.arguments||'',seq,tm:when(ei)});
-        }
-        continue;
-      }
-      if(role==='tool'){
-        // consult 回复带身份归因；其余结果并入调用卡
-        const sub=consultSender(content);
-        if(sub){flush();feed(sub,{t:'text',text:sub.body,note:'consult 回复',tm:when(ei)});continue}
-        const ci=calls[e.tool_call_id];
-        if(ci){ci.result=content||'';continue}
-        flush();
-        push({kind:'sys',text:`（接上轮调用结果）${String(content||'').slice(0,100)}`,tm:when(ei)});continue;
-      }
-      if(role==='assistant'&&content){
-        if(e.thinking)feed(es,{t:'think',text:e.thinking,k:`${seq}:E${ei}:think`});
-        feed(es,{t:'text',text:content,md:e.type==='final_answer',tm:when(ei)});continue;
-      }
-      if(role==='user'){
-        flush();feed(YOU,{t:'text',text:content,user:true,tm:when(ei)});dropSep();continue;
+      // **事件 → 条目走共用映射**（`eventItems`，直播侧走同一个函数）
+      for(const it of eventItems(e,seq,ei,es,calls,when(ei))){
+        if(it.t==='break'){flush();continue}
+        if(it.t==='usertext'){flush();feed(YOU,{t:'text',text:it.text,user:true,tm:it.tm});dropSep();continue}
+        feed(it.who||es,it);
       }
     }
   }
@@ -1549,20 +1617,8 @@ function drawConv(c,toBottom){
   c.innerHTML=html;
   restoreOpenBlocks(openKeys);          // **保住用户展开的块**：整段重绘会把
                                         // 展开态打回折叠（"一闪就折叠了"）
-  // 回填结果与状态
-  for(const [id,ci] of Object.entries(calls)){
-    const el=c.querySelector(`[data-call="${CSS.escape(id)}"]`);if(!el)continue;
-    const stEl=el.querySelector('.t-st'),resEl=el.querySelector('.t-result');
-    if(ci.result!=null){
-      resEl.textContent=ci.result;
-      const [txt,cls]=resultStatus(ci.name,ci.result);
-      stEl.textContent=txt;stEl.className='t-st '+cls;
-    }else{
-      const run=(META&&META.status==='in_progress');
-      stEl.textContent=run?'● 运行中…':'无结果';
-      stEl.className='t-st '+(run?'st-running':'st-run');
-    }
-  }
+  // 回填结果与状态（与直播侧共用 `fillCallResults`）
+  fillCallResults(c, calls);
   highlightIn(c);
   if(toBottom){
     c.scrollTop=c.scrollHeight;

@@ -72,6 +72,10 @@ class _CoreMixin:
         self.max_turns = max_turns or _DEFAULT_MAX_TURNS
         # 同步实时进度回调（主线程执行）：等待模型、工具动作的即时提示
         self.on_progress = on_progress
+        # **事件级直播回调**（2026-09-13，worklog §92）：每落一个事件推一份直播副本。
+        # 与 `on_progress` 的区别：那个是"状态一句话"，这个是**事件本身**——前端
+        # 因此能在运行中按时间顺序画出思考/工具卡/正文，而不是只有一段段文本增量。
+        self.on_event: Optional[Callable[[dict], None]] = None
         self.task = task
         self.context_mode = context_mode
         self.context_limit = context_limit or _DEFAULT_CONTEXT_LIMIT
@@ -841,7 +845,14 @@ class _CoreMixin:
         return True
 
     def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
-        """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。"""
+        """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。
+
+        **同时也是直播的事件源**（2026-09-13 大改，worklog §92）：落盘事件后把它的
+        **直播副本**推给 `on_event`。此前直播流只推 `think`/`ans`/`status` 三种文本
+        增量、**根本不推事件**，于是运行中看不到工具调用（"思考连一块、中间的工具块
+        没有"就是这个）——因为**服务端就没推**。所有事件都从这里落账（唯一入口），
+        所以这里就是唯一该挂的点。
+        """
         if self.current_round is None:
             self.messages.append(message)
             return {"id": "", "message": message}
@@ -850,7 +861,39 @@ class _CoreMixin:
         event = truncate.make_event(event_id, type, message, tool_name=tool_name)
         self.current_round["events"].append(event)
         self.messages.append(event["message"])
+        if self.on_event is not None:
+            try:
+                self.on_event(self._live_event(event))
+            except Exception:  # noqa: BLE001——直播推不出去不该影响干活
+                pass
         return event
+
+    def _live_event(self, event: dict) -> dict:
+        """事件的**直播副本**（形状与 `/rounds/{seq}` 给前端的完全一致）。
+
+        为什么要抄一份而不是直接推事件本体：落盘那条含 `timestamp`/`thinking`/
+        `message` 嵌套，而前端官方渲染吃的是扁平形状（`serve.round_detail` 的产物）
+        ——两边同形状，前端才能**共用同一个"事件 → 条目"映射**，工具卡、思考、
+        正文才会按同一套规则、按时间顺序排出来。
+
+        长正文按 8000 字截断：工具结果可以几百 KB，而直播流是内存里的分片列表。
+        **截的是副本**——落盘那条是完整的，轮结束后正式渲染照旧给全文。
+        """
+        msg = event.get("message") or {}
+        content = str(msg.get("content") or "")
+        cap = 8000
+        if len(content) > cap:
+            content = content[:cap] + f"\n…（直播只显示前 {cap} 字；完整内容轮结束后可读）"
+        return {
+            "id": event.get("id"), "type": event.get("type"),
+            "agent": self._active_view(),
+            "time": event.get("timestamp", ""),
+            "thinking": event.get("thinking", ""),
+            "status": event.get("status", ""),
+            "role": msg.get("role"), "content": content,
+            "tool_calls": msg.get("tool_calls"),
+            "tool_call_id": msg.get("tool_call_id"),
+        }
 
     def _maint_snapshot(self) -> Optional[list[dict]]:
         """维护调用的输入快照；装配协议不完整时返回 None（不取快照）。
