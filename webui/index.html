@@ -167,12 +167,13 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .live-line{display:flex;align-items:center;gap:8px;color:var(--acc);font-size:12px;margin:10px 0;font-family:var(--mono)}
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:pulse 1.2s infinite;flex-shrink:0}
 /* 直播区（2026-09-13 大改）：条目走与事件区**同一个渲染器**（思考=.think-box
-   一行折叠、正文=.bub.md），所以这里只补布局，不再有自己的一套样式；
-   `.live-ans` 是 `.bub.md`，**不能** pre-wrap（那是纯文本时代的写法）。
-   一个 agent 一个 `.livebox`（一轮里多名 agent 时各挂各的消息块）。 */
+   一行折叠、正文=.bub.md），所以这里只补布局，不再有自己的一套样式。
+   一个 agent 一个 `.livebox`（一轮里多名 agent 时各挂各的消息块）；
+   `.live-tail` 是"在飞内容"的落点，排在该块的最后（缓冲区空就清空，不隐藏）。 */
 .livebox{margin:2px 0 0}
 .livebox .live-done:empty{display:none}
-.livebox .live-ans{margin-top:8px}
+.livebox .live-tail{margin-top:2px}
+.livebox .live-tail:empty{display:none}
 .think-box{background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin:3px 0;overflow:hidden}
 .think-head{padding:5px 11px;font-size:11px;color:var(--tx3);cursor:pointer;font-family:var(--mono);user-select:none}
 .think-head:hover{color:var(--tx2)}
@@ -881,6 +882,7 @@ function applyChunk(c){
   // agent 换手（route_to 之后）：先把上一个的"在飞"内容清掉再切
   if(c.ag&&c.ag!==LIVE.agent){
     flushLiveStep();
+  }
     LIVE.agent=c.ag;dirty=true;
   // **事件分片**（2026-09-13 大改）：与 `/rounds/{seq}` 同一形状 → 走同一套
   // "事件 → 条目"映射。工具调用/工具结果/最终回答都在这里按时间顺序落地，
@@ -893,7 +895,6 @@ function applyChunk(c){
     LIVE.agent=ev.agent||LIVE.agent;
     LIVE.doneSig[who]='';
     return true;
-  }
   }
   if(c.k==='think'){
     if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
@@ -909,6 +910,7 @@ function applyChunk(c){
     LIVE.mode='status';LIVE.status=c.s;dirty=true;
     if(flushLiveStep())dirty=true;
   }
+}
   return dirty;
 /* 服务端报的"现在谁在干"（`chunk.ag` = 本轮 `active_view`）→ 注册表 id。
    一轮里若有多名 agent，`drawConv` 给**每个发送者各建一个块**，所以必须按
@@ -919,7 +921,6 @@ function resolveAgentId(v){
   if(!raw)return '';
   const a=(typeof REG==='object'&&REG)?(REG[raw]||null):null;
   return a?String(a.id||raw):raw;
-}
 }
 async function sseFinish(){   // 终态收尾（SSE done / 轮询兜底 / 发送侧轮询共用）
   // **幂等**：三条完成检测路径（SSE done、pollLive 的状态检查、sendTurn 的
@@ -969,9 +970,23 @@ async function liveAttach(jobId,resume){
   document.title='● 运行中 · Wovra 现场';
   sseConnect(jobId,after);
 }
-/* 把直播区在页面上的痕迹全部抹掉（每个 agent 一个块 + 一个临时块） */
+/* 把直播区在页面上的痕迹全部抹掉。
+
+   **按记录抹，不只按文档查**（2026-09-13 修，用户报："正文渲染到最后，卡着了…
+   在尾部一直显示着之前渲染过的正文，两行"）：`drawConv` 重绘时会把直播节点**摘下来
+   保活**（`LIVE.keep`），摘下来的节点**不在文档里**，`document.querySelectorAll`
+   找不到它——收尾时若它又被挂回去（另一次 drawConv、切页、任何一次重绘），就没人再
+   管它了：**内容冻在那一刻**（在飞正文缓冲区里正好是最后那段回答的开头两行），
+   于是"卡住、一直显示"。所以这里把 `LIVE.boxes`/`LIVE.provs`/`LIVE.keep` 里
+   记着的节点**逐个**摘掉（无论它在不在文档里），再做一次文档清扫兜底。 */
+  const nodes=[];
+  Object.values(LIVE.boxes||{}).forEach(b=>b&&nodes.push(b));
+  Object.values(LIVE.provs||{}).forEach(p=>p&&nodes.push(p));
+  (LIVE.keep||[]).forEach(n=>n&&nodes.push(n));
+  nodes.forEach(n=>{ try{n.remove()}catch(e){} });
 function purgeLiveDom(){
   document.querySelectorAll('.livebox').forEach(b=>b.remove());
+  LIVE.boxes={};LIVE.provs={};LIVE.keep=null;
   document.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
 }
 function liveDetach(){
@@ -1158,13 +1173,18 @@ function restoreOpenBlocks(open){
   });
 }
 /* 直播区骨架：**与事件区同款**——思考走 `.think-box`（一行折叠、点击展开），
-   正文走 `.bub.md`（MD 渲染）。不是另画一套样式。 */
+   正文走 `.bub.md`（MD 渲染）。不是另画一套样式。
+
+   `.live-tail` 是**在飞内容**的落点，它**在完成区里面、排在最后**（2026-09-13 改）：
+   在飞内容（还没落成事件的思考/正文）从前是两个独立节点（`.live-think`/`.live-ans`），
+   靠"缓冲区空就隐藏"收口——用户报"正文渲染到最后，卡着了…在尾部一直显示着之前渲染过
+   的正文，两行"，就是这种"独立节点 + 靠隐藏收口"的缝：只要某一次渲染没走到它、或它
+   被搬动过，那个节点就冻在最后一次内容上。
+   现在改成**一个内容面**：事件条目画完，在飞内容接在最后；**缓冲区空了就 `innerHTML=''`
+   清空**（不是隐藏）——旧文本在结构上留不下来。 */
 const LIVE_SKELETON=
   `<div class="live-done"></div>`+
-  `<div class="think-box live-think" style="display:none" onclick="toggleThink(this)">`+
-    `<div class="think-head live-think-head"></div>`+
-    `<div class="think-body live-think-body"></div></div>`+
-  `<div class="bub md live-ans" style="display:none"></div>`;
+  `<div class="live-tail"></div>`;
 
 /* 某个 agent 的**消息块**的 gbox：正式块优先（按 agent 精确定位），
    还没有就先造/复用**这个 agent 自己的**临时块。
@@ -1269,10 +1289,10 @@ function liveDoneHtml(aid,host){
       if(!insideLive(b))seen.add(String(b.textContent||''));
     });
     [...host.querySelectorAll('.bub')].forEach(b=>{
+    });
       if(!insideLive(b))seen.add(String(b.innerHTML||''));
     seenCalls=new Set([...host.querySelectorAll('.tcard[data-call]')]
       .map(el=>String(el.getAttribute('data-call')||'')));
-    });
   }
   const out=items.filter(it=>{
     if(it.t==='tool')return !(seenCalls&&seenCalls.has(String(it.id)));
@@ -1284,6 +1304,11 @@ function liveDoneHtml(aid,host){
   return out.map(it=>itemHtml(it,LIVE.calls)).join('');
 }
 
+  // **没有直播作业就什么都不做**（2026-09-13 加）：收尾之后任何一次重绘/轮询再
+  // 调到这儿，都会凭 `LIVE.seq` 重新造出一个直播节点（`liveGbox` 找不到正式块就
+  // 造临时块）——那就是"轮都结束了，尾部还挂着一个直播块/一段旧正文"的来源。
+  // 判据只能看**作业**：`closing` 只管"这一帧别回挂"，管不了"以后别再画"。
+  if(!LIVE.job)return;
 function renderLive(){
   // **收尾后不再上屏**：`sseFinish` 置 closing 后就走"正式渲染接管"那条路，
   // 这时 drawConv 末尾仍会调到这里——不加这道闸，直播区会被重新挂回正式块里
@@ -1332,29 +1357,22 @@ function renderLiveOne(aid,isActor){
     fillCallResults(done,LIVE.calls);   // 工具卡：结果/状态回填（与官方同一函数）
     }
   }
-  // ② 在飞思考：**一行折叠**（和工具卡一样），要看得自己点开
-  const tb=box.querySelector('.live-think');
-  const tbody=box.querySelector('.live-think-body');
-  const thead=box.querySelector('.live-think-head');
-  if(tb&&tbody&&thead){
-    if(isActor&&LIVE.think){
-      tb.style.display='';
-      if(tbody.textContent!==LIVE.think)tbody.textContent=LIVE.think;
-      const head=`💭 ${LIVE.status||'思考中'} · ${fmtN(LIVE.think.length)} 字（点击展开）`;
-      if(thead.textContent!==head)thead.textContent=head;
+  // ② **在飞内容**（还没落成事件的思考/正文）：接在完成区**最后**，与事件条目同一套
+  //    渲染（`itemHtml`：思考一行折叠、正文走 `md`）。
+  //    **缓冲区空了就清空**（`innerHTML=''`，不是隐藏）——旧文本在结构上留不下来；
+  //    用户报的"尾部一直显示着之前渲染过的正文"就是靠隐藏收口留下的缝。
+  const tail=box.querySelector('.live-tail');
+  if(tail){
+    if(isActor&&(LIVE.think||LIVE.ans)){
+      const items=[];
+      if(LIVE.think)items.push({t:'think',text:LIVE.think,k:aid+':live:think'});
+      if(LIVE.ans)items.push({t:'text',text:LIVE.ans,md:true,k:aid+':live:ans'});
+      const html=items.map(it=>itemHtml(it,LIVE.calls)).join('');
+      if(tail._md!==html){tail.innerHTML=html;tail._md=html;highlightIn(tail)}
+      tail.style.display='';
     }else{
-      tb.style.display='none';          // 没有在飞思考就不留空块
-    }
-  }
-  // ③ 在飞正文：**实时 MD**（用户口径：不要等加载完才渲染）
-  const ab=box.querySelector('.live-ans');
-  if(ab){
-    if(isActor&&LIVE.ans){
-      ab.style.display='';
-      const html=md(LIVE.ans);
-      if(ab._md!==html){ab.innerHTML=html;ab._md=html;highlightIn(ab)}
-    }else{
-      ab.style.display='none';ab._md='';
+      if(tail._md!==''){tail.innerHTML='';tail._md=''}
+      tail.style.display='none';
     }
   }
 }
@@ -1397,6 +1415,7 @@ async function loadEarlier(){
   got.forEach(([s,d])=>{CONV.cache[s]=d;CONV.seqs.unshift(s)});
   drawConv($('#content'),false);
   sc.scrollTop+=sc.scrollHeight-prevH;   // 前插后钉住视口
+
 }
 /* ============ 事件 → 条目（**官方渲染与直播共用这一份**） ============
    2026-09-13 大改（worklog §92）。用户报："思考连一块…中间调用工具的块没有渲染
@@ -1470,7 +1489,6 @@ function fillCallResults(root, calls){
     }
   }
 }
-
 
 function drawConv(c,toBottom){
   const openKeys=snapshotOpenBlocks();
@@ -1619,6 +1637,17 @@ function drawConv(c,toBottom){
                                         // 展开态打回折叠（"一闪就折叠了"）
   // 回填结果与状态（与直播侧共用 `fillCallResults`）
   fillCallResults(c, calls);
+  // **正式渲染接管时，直播痕迹一律清掉**（机械保证，不靠"谁记得调 liveDetach"）。
+  // 用户报（2026-09-13）："正文渲染到最后，卡着了…在尾部一直显示着之前渲染过的正文，
+  // 两行"——成因就是收尾后还有一次重绘把保活的直播节点挂回去，而那一刻再没人渲染它，
+  // 节点冻在最后状态（在飞正文缓冲区里正好是最后那段回答的开头两行）。
+  // 判据简单：**不在直播中**（没有 job，或已 closing）→ 页面上不该有任何直播节点——
+  // 上面这次 innerHTML 已经把同样的内容按**事件**重画好了。
+  if(!LIVE.job||LIVE.closing){
+    purgeLiveDom();
+    c.querySelectorAll('.livebox').forEach(b=>b.remove());
+    c.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
+  }
   highlightIn(c);
   if(toBottom){
     c.scrollTop=c.scrollHeight;

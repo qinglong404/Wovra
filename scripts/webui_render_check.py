@@ -24,7 +24,7 @@ PREFIX = r"""
 // ---- 迷你 DOM：够跑直播路径（用户 2026-09-13 报的四个渲染 bug 都在这条路上）----
 // 支持：#id / .cls / tag / [attr="v"] / 空格后代 / :not(.x) / 逗号列表。
 // innerHTML 的 setter 做一件够用的事：把 HTML 里出现的 id 与 class 注册成子元素
-// （直播骨架是扁平的，所以这样 `box.querySelector('.live-think-body')` 找得到）。
+// （骨架的层级现在按真嵌套还原，后代选择器可用；见 `parseInto`）。
 const ALL = [];
 let SEQID = 0;
 function clsOf(e){
@@ -51,15 +51,38 @@ function mkClassList(e){
 const VOID_TAGS = new Set(['br','hr','img','input','meta','link','source']);
 function parseInto(root, html){
   root.children = [];
-  const stack = [root];
+  const s = String(html||'');
   const re = /<\/?(\w+)((?:"[^"]*"|'[^']*'|[^>])*)>/g;
-  let m;
-  while((m = re.exec(String(html||'')))){
-    const raw = m[0], tag = String(m[1]).toLowerCase();
-    if(raw.startsWith('</')){                       // 闭标签：退到匹配的那一层
-      for(let i=stack.length-1;i>0;i--){
-        if(stack[i].tagName===tag.toUpperCase()){ stack.length=i; break; }
+  // 栈里每层记住 `{el, start}`：元素闭合时用 `s.slice(start, 闭合位置)` 填 `_html`。
+  // **parsed 子元素的 innerHTML 也必须有值**（2026-09-13 修，第七个同类假象）：
+  // 原实现只有被赋值的那一层有 `_html`，于是 `ab.innerHTML`（查 MD 渲染结果）
+  // 恒为空 → 场景 F/I 假红。真 DOM 里查谁都有 innerHTML，仪器就得一样。
+  const frames = [{el:root, start:0}];
+  let m, last = 0;
+  // **标签之间的文本要落进 textContent**（第六个同类假象）：原实现只认标签，
+  // 解析出来的元素 `textContent` 恒为空串。真 DOM 的语义是**父含子孙文本**，
+  // 所以这里往整条栈上累加。
+  const eatText = upto => {
+    const text = s.slice(last, upto);
+    if(text) frames.forEach(f => { f.el.textContent += text; });
+    last = upto;
+  };
+  const closeFrame = (idx, upto) => {
+    for(let i=frames.length-1;i>0;i--){
+      if(frames[i].el.tagName===String(idx).toUpperCase()){
+        frames[i].el._html = s.slice(frames[i].start, upto);
+        frames[i].el._parsed = true;
+        frames.length=i;
+        return;
       }
+    }
+  };
+  while((m = re.exec(s))){
+    eatText(m.index);
+    const raw = m[0], tag = String(m[1]).toLowerCase();
+    if(raw.startsWith('</')){
+      closeFrame(tag, m.index);
+      last = re.lastIndex;
       continue;
     }
     const attrs = m[2] || '';
@@ -78,15 +101,23 @@ function parseInto(root, html){
         const cam=k.slice(5).replace(/-([a-z])/g,(_s,x)=>x.toUpperCase());
         c.dataset[cam]=v.slice(1,-1);
       }
-      stack[stack.length-1].appendChild(c);
-      if(!selfClose) stack.push(c);
+      frames[frames.length-1].el.appendChild(c);
+      c.textContent = ''; c._html = '';             // 由后面的文本/子标签累加填
+      if(selfClose){ c._parsed = true; }
+      else frames.push({el:c, start:re.lastIndex});
     }else if(!selfClose){
       // 没身份的元素也要占一层，否则它的子元素会挂错层（层级照样要真）
       const ghost = mkEl(tag);
-      stack[stack.length-1].appendChild(ghost);
-      ghost._ghost = true;
-      stack.push(ghost);
+      frames[frames.length-1].el.appendChild(ghost);
+      ghost._ghost = true; ghost.textContent = ''; ghost._html = '';
+      frames.push({el:ghost, start:re.lastIndex});
     }
+    last = re.lastIndex;
+  }
+  eatText(s.length);
+  // 没闭合的（截断的 HTML）也把剩下的原文给它
+  for(let i=frames.length-1;i>0;i--){
+    if(!frames[i].el._parsed){ frames[i].el._html = s.slice(frames[i].start); frames[i].el._parsed = true; }
   }
 }
 function mkEl(tag){
@@ -94,7 +125,11 @@ function mkEl(tag){
     tagName:String(tag||'div').toUpperCase(), id:'', className:'',
     textContent:'', value:'', dataset:{}, children:[],
     parentNode:null, parentElement:null, isConnected:true,
-    style:new Proxy({},{get:()=>'' ,set:()=>true}),
+    // **真存储**（2026-09-13 修）：原先是假 Proxy（get 恒 ''、set 丢弃），于是
+    // `display='none'` 存不下来 → **所有"隐藏/显示"断言都是假的**（场景 P 的
+    // "那一行有没有空档"、Q 的隐藏、R 的显隐全测不出来）。这类假象已经骗过
+    // 我五次；仪器得跟产品代码一个语义：写过就是写过。
+    style:{},
     _html:'',
     appendChild(c){ c.parentNode=this; c.parentElement=this; c.isConnected=true;
                     this.children.push(c); return c; },
@@ -418,13 +453,20 @@ renderLive();
     evLen:stepsOf().length, think:LIVE.think, ans:LIVE.ans }));
   if (!box) problems.push('F: 直播节点没挂在正式消息块里');
   if (liveboxDirectUnderContent()) problems.push('F: 直播节点挂到了 #content 直下（跑到块外面）');
-  const tb = box && box.querySelector('.live-think');
-  if (!tb) problems.push('F: 没有思考块');
+  const tailEl = box && box.querySelector('.live-tail');
+  const tb = tailEl && tailEl.querySelector('.think-box');
+  if (!tb) problems.push('F: 在飞思考没画在尾部区块里');
   else if (tb.classList.contains('open')) problems.push('F: 思考块默认是展开的（应像工具卡一样一行折叠）');
-  const head = box.querySelector('.live-think-head');
+  const head = tailEl && tailEl.querySelector('.think-head');
   if (head && !/点击展开/.test(head.textContent)) problems.push('F: 思考块头部没有"点击展开"提示');
-  const body = box.querySelector('.live-think-body');
+  const body = tailEl && tailEl.querySelector('.think-body');
   if (body && body.textContent !== '再想第二段。') problems.push('F: 在飞思考文本不对');
+  // ④ 在飞正文必须走 md()（不是 textContent）——**在事件到达之前**查（事件一到，
+  //    这段文本就由事件条目接管，在飞缓冲被清空，尾部区块清空是**正确**行为）
+  const ab = tailEl && tailEl.querySelector('.bub');
+  if (!ab) problems.push('F: 没有在飞正文节点');
+  else if (!/<strong>加粗<\/strong>/.test(ab.innerHTML))
+    problems.push('F: 在飞正文没有实时渲染 MD（应出 <strong>）');
   // ② 一步结束后内容不许消失：现在由**服务端推的事件**接住（不再是前端合成条目）
   applyChunk({k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
     thinking:'先想第一段。',
@@ -436,11 +478,10 @@ renderLive();
     problems.push('F: 一步结束后思考不见了（事件没接住内容 → "消失一下再出现"）');
   if (doneEl && doneEl.querySelectorAll('.tcard').length !== 1)
     problems.push('F: 事件里的工具卡没画出来');
-  // ④ 正文必须走 md()，不是 textContent
-  const ab = box.querySelector('.live-ans');
-  if (!ab) problems.push('F: 没有正文节点');
-  else if (!/<strong>加粗<\/strong>/.test(ab.innerHTML))
-    problems.push('F: 正文没有实时渲染 MD（应出 <strong>）');
+  // 事件接管之后：尾部区块必须是**空的**（不是隐藏着旧文本）
+  const tailNow = box.querySelector('.live-tail');
+  if (tailNow && String(tailNow.innerHTML || '').trim() !== '')
+    problems.push('F: 事件到达后尾部还留着旧内容（用户报的"卡住两行"）');
   console.log(`  F 事件条目=${stepsOf().length} 工具卡=${doneEl ? doneEl.querySelectorAll('.tcard').length : '?'} 思考折叠=${tb?!tb.classList.contains('open'):'?'} 正文MD=${!!(ab&&/<strong>/.test(ab.innerHTML))}`);
 }
 
@@ -490,7 +531,7 @@ renderLive();
   const after = DOM.content.querySelector('.livebox');
   if (!after) problems.push('I: 整段重绘把直播区冲掉了（会闪一下、甚至消失）');
   else if (before && after !== before) problems.push('I: 重绘换了新节点（展开状态/增量会丢）');
-  const ab = after && after.querySelector('.live-ans');
+  const ab = after && after.querySelector('.live-tail .bub');
   if (!ab || !/strong/.test(ab.innerHTML))
     problems.push('I: 重绘后正文的 MD 渲染丢了');
   if (liveboxDirectUnderContent()) problems.push('I: 重绘后直播节点跑到 #content 直下');
@@ -676,25 +717,36 @@ const P2 = mountRound(DOM.content, 7, false, 'B');
 META.round_list = [{seq:7, active_view:'B', events:4, steps_used:3}];
 META.status = 'in_progress';
 {
-  // 复现一次真实跑轮：主 agent 想一步 → 转交 → B 想两步（中间夹工具执行）
+  // 复现一次真实跑轮：主 agent 想一步 → 转交 → B 想两步（中间夹工具执行）。
+  // **每步的正文由紧随其后的事件接住**（§92：直播流推事件）——所以事件必须跟着
+  // 那一步的文本，否则 `status` 清了在飞缓冲之后就真的什么都不剩了（这不是空档
+  // bug，是测试没喂事件）。
   const chunks = [
     {k:'think', s:'主 agent 先看这活归谁', ag:'Main'},
-    {k:'status', s:'正在转交…', ag:'Main'},          // 收口 → Main 的完成区
+    {k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+      thinking:'主 agent 先看这活归谁',
+      tool_calls:[{id:'p1', function:{name:'route_to', arguments:'{"agent":"B"}'}}]})},
+    {k:'status', s:'正在转交…', ag:'Main'},
     {k:'think', s:'B 第一步的思考', ag:'B'},
-    {k:'status', s:'正在执行 read_file…', ag:'B'},   // 收口 → B 的完成区
+    {k:'event', e:ev({id:'R7-E02', type:'tool_call', agent:'B',
+      thinking:'B 第一步的思考',
+      tool_calls:[{id:'p2', function:{name:'read_file', arguments:'{}'}}]})},
+    {k:'status', s:'正在执行 read_file…', ag:'B'},
     {k:'think', s:'B 第二步的思考', ag:'B'},
-    {k:'ans', s:'**最终**答复', ag:'B'},
+    {k:'event', e:ev({id:'R7-E03', type:'final_answer', agent:'B',
+      role:'assistant', content:'**最终**答复'})},
   ];
   // 注意：迷你 DOM 把 innerHTML 解析成**扁平**子节点（不还原嵌套），所以查询一律
-  // **从 box 根出发**（产品代码也是这么查的）。从 `.live-think` 里再查它的子节点
+  // **从 box 根出发**（产品代码也是这么查的）。
   // 会永远找不到——这一条踩过一次，让场景 P 报了假空档。
   const visible = aid => {
     const row = (aid === 'Main' ? P1 : P2).gbox.querySelector('.livebox');
     if (!row) return false;
-    const th = row.querySelector('.live-think');
-    const head = row.querySelector('.live-think-head');
+    const tl = row.querySelector('.live-tail');
+    const th = tl && tl.querySelector('.think-box');
+    const head = tl && tl.querySelector('.think-head');
     const dn = row.querySelector('.live-done');
-    const an = row.querySelector('.live-ans');
+    const an = tl && tl.querySelector('.bub');
     const thinkOn = !!(th && th.style.display !== 'none' && head && head.textContent);
     const doneOn = !!(dn && String(dn.innerHTML).trim().length > 0);
     const ansOn = !!(an && an.style.display !== 'none'
@@ -708,18 +760,19 @@ META.status = 'in_progress';
     const row = (c.ag === 'Main' ? P1 : P2).gbox.querySelector('.livebox');
     if (process.env.WEBUI_RENDER_DUMP) {
       const th = row && row.querySelector('.live-think');
-      const hd = th && th.querySelector('.live-think-head');
+      const hd = row && row.querySelector('.live-think-head');
       console.log(`   [dbg ${c.k}/${c.ag}] row=${!!row} box=${!!LIVE.boxes[c.ag]}`
         + ` think=${JSON.stringify(LIVE.think).slice(0, 20)}`
         + ` thinkDisp=${th ? JSON.stringify(th.style.display) : 'n/a'}`
         + ` head=${hd ? JSON.stringify(hd.textContent).slice(0, 30) : 'n/a'}`
         + ` html=${row ? JSON.stringify(String(row.innerHTML).slice(0, 40)) : 'n/a'}`);
     }
-    trace.push(`${c.k}/${c.ag}:Main=${visible('Main') ? '有' : '空'}`
+    const who = String(c.ag || (c.e && c.e.agent) || '');
+    trace.push(`${c.k}/${who}:Main=${visible('Main') ? '有' : '空'}`
       + `,B=${visible('B') ? '有' : '空'}`);
   }
   // 前两条是"主 agent 在转交"，B 还没轮到，允许空；从 B 开始干活起不许空
-  const afterB = trace.slice(2);
+  const afterB = trace.slice(4);
   if (afterB.some(t => t.endsWith('B=空'))) {
     problems.push('P: B 干活期间那一行出现过"什么都没有"的空档（=用户看到的一闪一闪）');
   }
@@ -758,6 +811,111 @@ META.status = 'in_progress';
     problems.push('Q: 事件区已画过别的内容时，直播这一步的思考被去重吃掉了（=一闪一闪）');
   }
   console.log(`   Q 新思考还在=${/B 真正的新思考/.test(txt)}`);
+}
+
+console.log('场景 S｜过程发言之后继续调工具：尾部**不许留**着上一次的正文（用户报的"卡住两行"）');
+resetLive();
+const S1 = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:4, steps_used:2}];
+META.status = 'in_progress';
+{
+  // 用户描述的顺序：思考 → 给出回复（过程发言）→ 继续推进事件、调用工具
+  const seq = [
+    {k:'think', s:'先想一下'},
+    {k:'ans',   s:'两行正文。\n第二行。'},                  // 过程发言（边做边说）
+    {k:'status', s:'正在执行 read_file…'},                 // 工具执行前
+    {k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+        thinking:'先想一下', content:'两行正文。\n第二行。',
+        tool_calls:[{id:'s1', function:{name:'read_file', arguments:'{}'}}]})},
+    {k:'event', e:ev({id:'R7-E02', type:'tool_result', agent:'Main', role:'tool',
+        tool_call_id:'s1', content:'读到了'})},
+    {k:'think', s:'看完了，接着改'},
+    {k:'ans',   s:'改这里的第二段。'},                      // 第二步的过程发言
+    {k:'event', e:ev({id:'R7-E03', type:'tool_call', agent:'Main',
+        thinking:'看完了，接着改', content:'改这里的第二段。',
+        tool_calls:[{id:'s2', function:{name:'edit_file', arguments:'{}'}}]})},
+  ];
+  const boxOf = () => S1.gbox.querySelector('.livebox');   // 渲染之后才存在
+  const trace = [];
+  for (const c of seq) {
+    applyChunk(c);
+    renderLive();
+    const box = boxOf();
+    const ansEl = box && box.querySelector('.live-tail .bub');
+    const ansVisible = !!(ansEl && ansEl.style.display !== 'none'
+      && String(ansEl.innerHTML).trim());
+    const tailText = String((ansEl && ansEl.innerHTML) || '');
+    trace.push(`${c.k}:在飞正文=${ansVisible ? '**在**' : '无'}`);
+    // **不变量**：在飞正文缓冲区空了，那个节点就必须是隐藏的、且不许再带着旧文本
+    if (!LIVE.ans && ansVisible) {
+      problems.push(`S: ${c.k} 之后尾部还显示着旧正文（缓冲区已空但节点还可见）`);
+    }
+    if (!LIVE.ans && /第二行|改这里的第二段/.test(tailText) && ansEl.style.display !== 'none') {
+      problems.push(`S: ${c.k} 之后尾部留着上一次渲染过的正文（用户报的"卡住两行"）`);
+    }
+  }
+  // 收尾：全部事件落完之后，尾部必须是干净的（内容都在完成区里）
+  const box = boxOf();
+  const ansEl = box && box.querySelector('.live-ans');
+  const doneEl = box.querySelector('.live-done');
+  const doneCards = doneEl ? doneEl.querySelectorAll('.tcard').length : 0;
+  if (doneCards !== 2) problems.push(`S: 两张工具卡（实际 ${doneCards}）`);
+  console.log(`   S ${trace.join(' | ')} 尾部正文=${ansEl && ansEl.style.display !== 'none' ? '仍可见' : '已隐'} 卡=${doneCards}`);
+}
+
+console.log('场景 T｜收尾后重绘：直播节点不许**冻在尾部**显示旧正文（用户报的"卡着了"）');
+resetLive();
+CONV = realConv();
+const T1 = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:3, steps_used:2}];
+META.status = 'in_progress';
+{
+  // 跑一段：思考 → 过程发言（两行正文）→ 工具事件
+  applyChunk({k:'think', s:'先想一下'});
+  applyChunk({k:'ans', s:'两行正文。\n第二行。'});
+  renderLive();
+  applyChunk({k:'event', e:ev({id:'R7-E01', type:'tool_call', agent:'Main',
+    thinking:'先想一下', content:'两行正文。\n第二行。',
+    tool_calls:[{id:'t1', function:{name:'read_file', arguments:'{}'}}]})});
+  renderLive();
+  // 收尾：正式渲染接管（内容由事件重画），随后**再来一次重绘**——
+  // 真实世界里的成因就是这一次重绘（切页/刷新/任何一次 drawConv）
+  LIVE.closing = true;
+  CONV.cache[7] = {seq:7, user_input:'干活', events:[
+    {id:'R7-E01', type:'user', agent:'Main', time:'2026-09-13T17:00:00',
+     role:'user', content:'干活'},
+    {id:'R7-E02', type:'tool_call', agent:'Main', time:'2026-09-13T17:00:01',
+     role:'assistant', thinking:'先想一下', content:'两行正文。\n第二行。',
+     tool_calls:[{id:'t1', function:{name:'read_file', arguments:'{}'}}]},
+    {id:'R7-E03', type:'tool_result', agent:'Main', time:'2026-09-13T17:00:02',
+     role:'tool', tool_call_id:'t1', content:'读到了'},
+  ]};
+  CONV.seqs = [7];
+  drawConv(DOM.content, false);          // 收尾那一次（closing）
+  liveDetach();                          // 撤直播态
+  // **收官以后再画一次**（用户切页、刷新、任何一次重绘都可能）
+  drawConv(DOM.content, false);
+  // 而且任何一次重绘/轮询之后都可能再调到 `renderLive`——没有作业时它必须**什么都不做**
+  renderLive();
+  // 兜底那一层也测：**人为塞一个残留直播节点**（模拟"某条路径把它挂了回去"），
+  // 正式渲染必须自己把它清掉（不靠"谁记得调 liveDetach"）
+  const fake = mkEl('div'); fake.className = 'livebox';
+  const fakeAns = mkEl('div'); fakeAns.className = 'bub md';
+  fakeAns._html = '残留的旧正文'; fakeAns.textContent = '残留的旧正文';
+  fake.appendChild(fakeAns);
+  T1.gbox.appendChild(fake);
+  drawConv(DOM.content, false);
+  const stray = DOM.content.querySelectorAll('.livebox').length;
+  const provs = DOM.content.querySelectorAll('.crow.live-prov').length;
+  const stale = [];
+  DOM.content.querySelectorAll('.live-tail,.live-ans,.live-think').forEach(el=>{
+    if(el.style.display !== 'none' && String(el.innerHTML).trim()) stale.push(String(el.innerHTML).slice(0, 20));
+  });
+  if (stray || provs) problems.push(`T: 收尾后还留着直播节点/临时块（${stray}/${provs}）`);
+  if (stale.length) problems.push(`T: 尾部还显示着旧正文（${stale.join(' / ')}）`);
+  const body = String(DOM.content.innerHTML || '');
+  if (!/两行正文/.test(body)) problems.push('T: 正式渲染没把过程发言画出来（事件里是有的）');
+  console.log(`   T 残留直播节点=${stray} 临时块=${provs} 冻住的旧正文=${stale.length} 正式正文在=${/两行正文/.test(body)}`);
 }
 
 console.log('场景 R｜运行中按**时间顺序**画：思考 → 工具卡 → 思考 → 最终回答（用户报的核心）');
@@ -801,7 +959,7 @@ META.round_list = [{seq:7, active_view:'Main', events:4, steps_used:2}];
         const cl = String(c.className || '');
         if (cl.includes('think-box')) marks.push('think:' + c.textContent.slice(0, 3));
         else if (cl.includes('tcard')) marks.push('tool');
-        else if (cl.includes('bub') && !cl.includes('live-ans')) marks.push('bub');
+        else if (cl.includes('bub')) marks.push('bub');
         walk(c);
       }
     };
@@ -834,7 +992,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（15 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（16 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 
