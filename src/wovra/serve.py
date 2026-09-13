@@ -900,6 +900,9 @@ def _round_meta(r: dict, usage: dict | None = None,
         # 该轮是否已被整理压缩覆盖（只作整理状态的展示，不再决定轮账归属）
         "compressed": str(r.get("org_state") or "") == "done",
         "route_hops": r.get("route_hops", 0),   # 轮内转交次数（>0 = 主 agent 路由过）
+        # 会合：本轮的参与者队列（join_with 排的队）——多参与者轮要看得见
+        "participants": [str((p or {}).get("agent") or "")
+                         for p in (r.get("participants") or [])],
         "events": len(evs),
         "t0": (evs[0].get("timestamp") or "") if evs else "",
         "t1": (evs[-1].get("timestamp") or "") if evs else "",
@@ -914,6 +917,8 @@ def session_meta(task_id: str, data: dict) -> dict:
     meta = session_summary(task_id, data)
     meta["task_state"] = data.get("task_state") or {}
     meta["todo"] = data.get("todo") or {}
+    # 对齐/传话线程（像聊天软件）：谁交给谁、内容是什么（前端「线程」面板用）
+    meta["chat"] = data.get("chat") or []
     meta["registry"] = data.get("registry") or []
     # 窗口语义纠正（2026-09-12）：旧数据把整理水位 100K 存进了 registry
     # window——投影层按真实窗口展示；落盘值随下一轮活动由 core 自愈

@@ -594,6 +594,36 @@ class _CoreMixin:
         )
         self.task.save()
 
+    def _inject_file_map_if_changed(self) -> bool:
+        """**变了才注入**文件地图（2026-09-12 用户口径）。
+
+        用户的问法与要求：「是不是得有一个环境，整理、分裂写一个每个文件的一句
+        话简单描述？然后注入，我希望是通过代码判断其是否变化，如果变化了才注入。」
+        ——描述来自整理写的块摘要（不新造机制）；**注入口径**是：
+
+        * 每次轮开启算一遍签名（`views.file_map_lines`，零 LLM）；
+        * 与 `task.file_map_sig` 相同 → 什么都不做（不占位、不重复）；
+        * 不同 → 把新地图作为一条 `runtime_note` 事件**追加进轮**（= 进历史），
+          于是它此后是**前缀的一部分**（只付一次钱、且模型每轮都看得到；
+          若只塞进尾部信封，下一轮就没了——信封不进历史）。
+
+        只在轮开启时注入：轮进行中改装配会打断当前协议序列。
+        """
+        if self.task is None or self.current_round is None:
+            return False
+        lines, sig = views_module.file_map_lines(self.rounds, self.task.registry)
+        if not lines or not sig or sig == str(self.task.file_map_sig or ""):
+            return False
+        self.task.file_map_sig = sig
+        shown = lines[:120]
+        body = "[文件地图]（职责/文件有变化时才注入；每行 = 文件（状态｜归属域）：一句话描述）\n"
+        body += "\n".join(shown)
+        if len(lines) > len(shown):
+            body += f"\n…（共 {len(lines)} 个文件，只列前 {len(shown)} 行）"
+        self._record_event("runtime_note", _runtime_reminder(body))
+        self.task.record("maintenance", f"文件地图注入（签名 {sig}，{len(lines)} 个文件）")
+        return True
+
     def _relay_to_next_participant(self, answer: str) -> bool:
         """会合交棒：本轮还有排队的参与者就把接力棒交给下一个（返回 True）。
 
@@ -867,6 +897,9 @@ class _CoreMixin:
         if self.task is not None:
             self.task.record("user_input", user_input)
             self._deliver_user_input(user_input)
+            # **变了才注入**文件地图（用户口径）：在用户消息之后、干活之前，
+            # 追加一条 runtime_note 进历史；没变化就什么都不做。
+            self._inject_file_map_if_changed()
             self._persist_rounds()
         return self._work_loop(on_thinking, on_answer_delta)
 

@@ -517,6 +517,10 @@ class Task:
     # `{round, from, to, text, kind}`：接手方只看到"谁交来的 + 传话内容"，
     # 看不到对方的历史。`join_with`（会合）与通信工具都往里写。
     chat: list = field(default_factory=list)
+    # 文件地图注入签名（2026-09-12 用户口径：**代码判断有没有变化，变了才注入**）
+    # ——每次装配都算一遍签名，与它相等就不重复占位；变了才把新的地图作为一条
+    # `runtime_note` 事件**追加进历史**（于是它此后在前缀里，只付一次钱）。
+    file_map_sig: str = ""
     created_at: str = ""
     updated_at: str = ""
 

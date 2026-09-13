@@ -60,7 +60,13 @@ from typing import Iterable, Optional
 
 from . import blocks as blocks_module
 from . import tokens as tokens
-from .registry import MAIN_AGENT_ID, build_entries, latest_domains
+from .registry import (  # noqa: F401
+    MAIN_AGENT_ID,
+    build_entries,
+    entry_files,
+    entry_history,
+    latest_domains,
+)
 
 # 模型侧注入的账本分片口径（与 `task._MODEL_SIDE_SECTIONS` 对齐）：
 # 全局节每轮都进每个视图（目标/现状是"我在干什么"的最小上下文；
@@ -738,6 +744,48 @@ def round_account(
         "unassigned": int((ledger.get("__unassigned__") or {}).get("rounds") or 0),
         "balanced": counted == total,
     }
+
+
+def file_map_lines(
+    rounds: Iterable[dict] | None, registry: Iterable[dict] | None
+) -> tuple[list[str], str]:
+    """**文件地图**：每个文件一句话 + 签名（零 LLM）。
+
+    用户口径（2026-09-12）：「是不是得有一个环境，整理、分裂写一个每个文件的
+    一句话简单描述？然后注入，我希望是通过代码判断其是否变化，如果变化了才注入。」
+    ——描述**不用新造机制**：整理写的**块摘要**就是"一个文件（一个块）一句话"，
+    这里按文件聚合（同一文件取最新的那次描述）；状态与归属直接取注册表的
+    `files`（LIVE）与 `history_files`（历史）。
+
+    返回 `(lines, signature)`；签名相同 = 没变化 = 不必注入。
+    """
+    import hashlib
+
+    desc: dict[str, str] = {}
+    for r in rounds or []:
+        if not isinstance(r, dict):
+            continue
+        marks = r.get("block_summaries") or {}
+        for b in blocks_module.segment_round_by_file(r):
+            bid = str(b.get("id") or "")
+            file = str(b.get("file") or "")
+            if file and str(b.get("kind") or "") == "file" and marks.get(bid):
+                desc[file] = " ".join(str(marks[bid]).split())   # 后者覆盖前者
+    live: list[str] = []
+    hist: list[str] = []
+    for e in registry or []:
+        if not isinstance(e, dict) or not e.get("name"):
+            continue
+        label = f"{e.get('id')}（{e.get('name')}）"
+        for f in entry_files(e):
+            live.append(f"- {f}（LIVE｜{label}）：{desc.get(f) or '（暂无描述）'}")
+        for f in entry_history(e):
+            hist.append(f"- {f}（历史｜{label}）：{desc.get(f) or '（暂无描述）'}")
+    lines = live + hist
+    sig = ""
+    if lines:
+        sig = hashlib.sha1("\n".join(lines).encode("utf-8")).hexdigest()[:12]
+    return lines, sig
 
 
 def agent_ledger(

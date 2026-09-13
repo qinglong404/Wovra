@@ -106,6 +106,55 @@ def test_thread_is_delivered_once_into_assembled_envelope(tmp_path, monkeypatch)
     assert agent._take_thread_lines("前端") == []             # 不重复投递
 
 
+def test_file_map_injected_only_when_changed(tmp_path, monkeypatch):
+    """文件地图：**描述来自整理写的块摘要**，且**变了才注入**（用户口径）。
+
+    注入形态 = 追加一条 `runtime_note` 进轮（进历史 → 此后在前缀里，只付一次
+    钱、且每轮都看得到）。签名不变时再开一轮**不再注入**。
+    """
+    from wovra import views as views_module
+
+    task = _split_task(tmp_path, monkeypatch)
+    rounds = [{
+        "seq": 1,
+        "events": [
+            {"id": "R1-E02", "type": "tool_call",
+             "message": {"role": "assistant", "content": "", "tool_calls": [
+                 {"id": "c1", "function": {"name": "write_file",
+                                           "arguments": '{"path": "src/a.py"}'}}]}},
+            {"id": "R1-E03", "type": "tool_result",
+             "message": {"role": "tool", "tool_call_id": "c1", "content": "ok"}},
+        ],
+        "block_summaries": {},
+    }]
+    # 块 ID 由分块器现场生成，故摘要按真实 ID 挂上（写死 ID 会静默不匹配）
+    from wovra import blocks as blocks_module
+
+    bid = blocks_module.segment_round_by_file(rounds[0])[0]["id"]
+    rounds[0]["block_summaries"] = {bid: "把 a.py 的边界判定改了"}
+    task.rounds = rounds
+    lines, sig = views_module.file_map_lines(rounds, task.registry)
+    assert any("src/a.py" in ln and "把 a.py 的边界判定改了" in ln for ln in lines)
+    assert sig and sig == views_module.file_map_lines(rounds, task.registry)[1]
+
+    agent = _agent(task, "工具层")
+    agent.current_round = {"seq": 2, "events": [], "active_view": "工具层"}
+    assert agent._inject_file_map_if_changed() is True      # 首次 → 注入
+    assert task.file_map_sig == sig
+    assert any(e["type"] == "runtime_note"
+               and "[文件地图]" in str((e.get("message") or {}).get("content") or "")
+               for e in agent.current_round["events"])
+
+    agent.current_round = {"seq": 3, "events": [], "active_view": "工具层"}
+    assert agent._inject_file_map_if_changed() is False     # 没变 → 不注入
+    assert agent.current_round["events"] == []
+
+    # 文件清单变了（新建文件）→ 签名变 → 再注入一次
+    agent.update_responsibility(add_files="src/extra.py")
+    agent.current_round = {"seq": 4, "events": [], "active_view": "工具层"}
+    assert agent._inject_file_map_if_changed() is True
+
+
 def test_user_interjection_at_or_broadcast(tmp_path, monkeypatch):
     """⑤ 用户插话：`@X` 只给 X；没 @ 就广播给本轮参与者（当前接手方除外）。"""
     task = _split_task(tmp_path, monkeypatch)
