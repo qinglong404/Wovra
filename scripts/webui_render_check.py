@@ -177,6 +177,14 @@ try {
   problems.push('D: renderProject 抛错 —— ' + e.message);
 }
 
+// 护栏自检：永不报警的检查等于没有检查。钉住"正文里有→报、只在 title 里→不报"。
+if (proseIn('<div>机械投影</div>').length !== 1) {
+  problems.push('护栏自检: 正文里的机制说明词没被抓到');
+}
+if (proseIn('<div title="机械投影">ok</div>').length !== 0) {
+  problems.push('护栏自检: 悬停里的词被误报');
+}
+
 console.log('');
 if (problems.length) {
   console.log('渲染核对：失败 ' + problems.length + ' 项');
