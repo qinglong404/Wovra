@@ -432,7 +432,7 @@ class _LedgerMixin:
 
     def update_responsibility(self, description: str = "", goal: str = "",
                               add_files: str = "", remove_files: str = "",
-                              note: str = "") -> str:
+                              file_notes: str = "", note: str = "") -> str:
         """更新**自己**的职责与文件清单——**干完立马生效**（2026-09-12 用户口径）。
 
         为什么要它：分裂时写下的职责是**当时的现状**；活干着干着就长出新的文件
@@ -476,6 +476,24 @@ class _LedgerMixin:
                 files.remove(rel)
                 changed.append(f"-{rel}")
         entry["files"] = files
+        # **文件一句话描述**（≤30 字）：第一次由分裂产物自带，之后**每轮由干活的
+        # agent 自己改**（用户口径：不然职责/文件变化要等好几回合才同步，那是
+        # "省一点小 token、造成更大的祸患"）。硬截断 30 字——光写"请写短"没用。
+        notes = dict(entry.get("file_notes") or {})
+        for pair in str(file_notes or "").split(","):
+            if "=" not in pair:
+                continue
+            path, _, text = pair.partition("=")
+            path = path.strip().strip("/")
+            text = " ".join(str(text).split())
+            if not path or not text:
+                continue
+            notes[path] = text[:30]
+            if path not in files:
+                files.append(path)
+                changed.append(f"+{path}")
+            changed.append(f"✎{path}")
+        entry["file_notes"] = notes
         detail = "、".join(changed) or "（无变化）"
         tail = f"｜{str(note).strip()}" if str(note or "").strip() else ""
         self.task.record(

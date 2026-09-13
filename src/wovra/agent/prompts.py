@@ -404,6 +404,17 @@ _ORG_DOMAINS_SCHEMA: dict = {
                                     "的历史记录，放在最相关 LIVE 文件所属的域里"
                                 ),
                             },
+                            "file_notes": {
+                                "type": "object",
+                                "description": (
+                                    "**每个文件的一句话描述**（≤30 字，格式 "
+                                    "{\"路径\": \"描述\"}）——**第一次地图就靠它建立**："
+                                    "之后每轮由干活的 agent 自己改（它读写删了文件就"
+                                    "该顺手更新），不必等下一次整理。只写「这个文件是"
+                                    "干什么的、给谁用」，不写改动史、不写轮次。"
+                                    "每个 files/history_files 里的文件都应有一条"
+                                ),
+                            },
                             "constraints": {
                                 "type": "array",
                                 "items": {"type": "string"},
@@ -640,6 +651,15 @@ _RESPONSIBILITY_SCHEMA: dict = {
                 "remove_files": {
                     "type": "string",
                     "description": "要从自己清单移出的文件，逗号分隔（全路径）",
+                },
+                "file_notes": {
+                    "type": "string",
+                    "description": (
+                        "**文件的一句话描述**（≤30 字，格式：路径=描述，多组用逗号分隔，"
+                        "如 src/a.py=工具层边界判定）。你读/写/改了文件、或它的作用变了，"
+                        "就顺手更新——**每轮都能改**，改完下一轮即生效（不必等整理）。"
+                        "只写「这个文件是干什么的」，不写改动史、不写轮次"
+                    ),
                 },
                 "note": {"type": "string", "description": "变更原因（可选，会留痕）"},
             },

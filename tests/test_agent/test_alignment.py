@@ -155,6 +155,52 @@ def test_file_map_injected_only_when_changed(tmp_path, monkeypatch):
     assert agent._inject_file_map_if_changed() is True
 
 
+def test_file_notes_short_description_first_map_then_per_round(tmp_path, monkeypatch):
+    """文件的一句话描述（≤30 字）：**第一次由分裂产物自带，之后每轮 agent 自己改**。
+
+    用户口径：不能"等好几回合才同步"——所以地图不是只在整理时刷新，而是
+    干活的 agent 读/写/改文件时顺手把这句话改掉（`file_notes=路径=描述`），
+    改完即落盘，下一轮开轮签名变化就注入新地图。
+    """
+    from wovra import views as views_module
+
+    task = _split_task(tmp_path, monkeypatch)
+    # ① 第一次地图：分裂产物自带 file_notes
+    registry_module.merge_into(task.registry, [
+        {"name": "工具层", "files": ["src/a.py"],
+         "file_notes": {"src/a.py": "工具层的边界判定与守卫——这一句写得特别长" * 3}},
+    ], parent_id="", retire_id="")
+    entry = next(e for e in task.registry if e.get("name") == "工具层")
+    note = entry["file_notes"]["src/a.py"]
+    assert len(note) <= 30 and note.startswith("工具层的边界判定与守卫")   # 硬截断
+
+    lines, sig = views_module.file_map_lines([], task.registry)
+    assert any("工具层的边界判定与守卫" in ln for ln in lines)
+    assert all(len(ln.split("：", 1)[-1]) <= 30 for ln in lines)
+
+    # ② 之后每轮：agent 自己改（不必等整理）
+    agent = _agent(task, "工具层")
+    out = agent.update_responsibility(file_notes="src/a.py=守卫边界判定与审批通道")
+    assert "✎src/a.py" in out
+    entry = agent._registry_entry_for("工具层")
+    assert entry["file_notes"]["src/a.py"] == "守卫边界判定与审批通道"
+    new_lines, new_sig = views_module.file_map_lines([], task.registry)
+    assert new_sig != sig                                   # 签名变 → 会重新注入
+    assert any("守卫边界判定与审批通道" in ln for ln in new_lines)
+
+
+def test_new_file_gets_mechanical_placeholder_note(tmp_path, monkeypatch):
+    """新文件的兜底描述是**机械**的（零 LLM）：取首行标题/注释前 30 字。"""
+    task = _split_task(tmp_path, monkeypatch)
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "fresh.md").write_text(
+        "# 数据清洗脚本\n\n第一行标题就是它的一句话描述\n", encoding="utf-8")
+    agent = _agent(task, "工具层")
+    agent._claim_new_file("src/fresh.md")
+    entry = agent._registry_entry_for("工具层")
+    assert entry["file_notes"]["src/fresh.md"] == "数据清洗脚本"
+
+
 def test_user_interjection_at_or_broadcast(tmp_path, monkeypatch):
     """⑤ 用户插话：`@X` 只给 X；没 @ 就广播给本轮参与者（当前接手方除外）。"""
     task = _split_task(tmp_path, monkeypatch)

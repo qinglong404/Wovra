@@ -278,11 +278,12 @@ def build_entries(
                 break
             level = list(kids)
 
-    def subtree(node: dict) -> tuple[list[str], list[str], list[str]]:
-        """子树里的 (LIVE 文件, 历史文件, 约束)。"""
+    def subtree(node: dict) -> tuple[list[str], list[str], list[str], dict]:
+        """子树里的 (LIVE 文件, 历史文件, 约束, 文件描述)。"""
         files: list[str] = []
         hist: list[str] = []
         cons: list[str] = []
+        notes: dict[str, str] = {}
         seen: set[str] = set()
 
         def walk(n: dict) -> None:
@@ -293,6 +294,9 @@ def build_entries(
             files.extend(str(f) for f in (n.get("files") or []))
             hist.extend(str(f) for f in (n.get("history_files") or []))
             cons.extend(str(c) for c in (n.get("constraints") or []))
+            for k, v in (n.get("file_notes") or {}).items():
+                if str(k).strip() and str(v).strip():
+                    notes[str(k).strip()] = " ".join(str(v).split())[:30]
             for child in _children_of(name, domains):
                 walk(child)
 
@@ -306,11 +310,11 @@ def build_entries(
         for f in hist:
             if f and f not in uniq and f not in uniq_hist:
                 uniq_hist.append(f)
-        return uniq, uniq_hist, cons
+        return uniq, uniq_hist, cons, notes
 
     entries: list[dict] = []
     for i, node in enumerate(level, start=1):
-        files, hist, cons = subtree(node)
+        files, hist, cons, notes = subtree(node)
         path_id = f"{parent_id}-{i}" if parent_id else top_id(i)
         entries.append({
             "id": path_id,
@@ -323,6 +327,9 @@ def build_entries(
             "files": files,
             "file_domains": [str(f) for f in (node.get("file_domains") or [])],
             "history_files": hist,
+            # 文件的一句话描述（≤30 字）：**第一次地图由分裂产物自带**，之后每轮
+            # 由干活的 agent 自己改（`update_responsibility(file_notes=…)`）
+            "file_notes": notes,
             # 休眠是默认态（不对话即零成本），分裂产生的节点初始即休眠
             "status": "dormant",
             "inbox": [],
@@ -484,6 +491,13 @@ def merge_into(
             if existing.get(key) != entry[key]:
                 existing[key] = entry[key]
                 changed = True
+        # 文件描述**合并**而不是覆盖：产物带的是"第一次地图"，而 agent 每轮自己
+        # 改的那几条要活过下一次分裂（否则辛苦写的描述每次分裂都被抹掉）
+        notes = dict(existing.get("file_notes") or {})
+        notes.update(entry.get("file_notes") or {})
+        if existing.get("file_notes") != notes:
+            existing["file_notes"] = notes
+            changed = True
         if changed:
             updated.append(entry["id"])
     return added + retired, updated

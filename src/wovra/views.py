@@ -746,6 +746,17 @@ def round_account(
     }
 
 
+def _file_line(path: str, state: str, owner: str, note: str | None) -> str:
+    """文件地图的一行：路径（状态｜归属）：**≤30 字**的一句话。
+
+    描述优先取 agent 写下的 `file_notes`（用户口径：第一次由分裂产物自带，
+    之后每轮由干活的 agent 自己改）；没有就退回块摘要，**一律截到 30 字**
+    （地图是给人/模型速览的，长了就没人看）。
+    """
+    text = " ".join(str(note or "").split())[:30] or "（暂无描述）"
+    return f"- {path}（{state}｜{owner}）：{text}"
+
+
 def file_map_lines(
     rounds: Iterable[dict] | None, registry: Iterable[dict] | None
 ) -> tuple[list[str], str]:
@@ -762,6 +773,10 @@ def file_map_lines(
     import hashlib
 
     desc: dict[str, str] = {}
+    for e in registry or []:
+        if isinstance(e, dict):
+            desc.update({str(k): str(v) for k, v in (e.get("file_notes") or {}).items()})
+    # 兜底：没写过一句话描述的，退回该文件的**块摘要**（整理时写的那段）
     for r in rounds or []:
         if not isinstance(r, dict):
             continue
@@ -770,7 +785,8 @@ def file_map_lines(
             bid = str(b.get("id") or "")
             file = str(b.get("file") or "")
             if file and str(b.get("kind") or "") == "file" and marks.get(bid):
-                desc[file] = " ".join(str(marks[bid]).split())   # 后者覆盖前者
+                if file not in desc:
+                    desc[file] = " ".join(str(marks[bid]).split())
     live: list[str] = []
     hist: list[str] = []
     for e in registry or []:
@@ -778,9 +794,9 @@ def file_map_lines(
             continue
         label = f"{e.get('id')}（{e.get('name')}）"
         for f in entry_files(e):
-            live.append(f"- {f}（LIVE｜{label}）：{desc.get(f) or '（暂无描述）'}")
+            live.append(_file_line(f, "LIVE", label, desc.get(f)))
         for f in entry_history(e):
-            hist.append(f"- {f}（历史｜{label}）：{desc.get(f) or '（暂无描述）'}")
+            hist.append(_file_line(f, "历史", label, desc.get(f)))
     lines = live + hist
     sig = ""
     if lines:

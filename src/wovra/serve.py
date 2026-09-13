@@ -538,10 +538,12 @@ def project_tree(workspace: str, data: dict | None = None) -> dict:
                 continue
             rel = str(p.relative_to(root)).replace("\\", "/")
             owner = ""
+            owner_entry: dict = {}
             for e in registry:
                 if isinstance(e, dict) and e.get("name"):
                     if registry_module.file_owned_by(e, rel):
                         owner = str(e.get("name"))
+                        owner_entry = e
                         break
             files.append({
                 "p": rel,
@@ -549,7 +551,9 @@ def project_tree(workspace: str, data: dict | None = None) -> dict:
                 "owner": owner,                              # 文件标签（哪个域维护）
                 "tagged": bool(owner),
                 "state": states.get(rel, ""),                # live / dead / read_only
-                "desc": summaries.get(rel, ""),              # 块摘要优先
+                # 一句话描述（≤30 字，agent 写的优先）→ 退回块摘要
+                "desc": (str((owner_entry.get("file_notes") or {}).get(rel) or "")
+                         or summaries.get(rel, ""))[:30],
             })
             if len(files) >= _TREE_MAX:
                 truncated = True

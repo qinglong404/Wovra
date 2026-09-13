@@ -575,7 +575,12 @@ class _CoreMixin:
         )
 
     def _claim_new_file(self, path: str) -> None:
-        """F5：新文件归属创建者——立即写进它自己条目的文件清单并落盘。"""
+        """F5：新文件归属创建者——立即写进它自己条目的文件清单并落盘。
+
+        顺带机械生一条**占位的一句话描述**（零 LLM，取首行/标题前 30 字）：
+        用户口径要的是"文件描述永远新鲜"，而 agent 可能忘记写 → 先有占位，
+        它下一轮用 `update_responsibility(file_notes=…)` 换成正式描述。
+        """
         if self.task is None:
             return
         entry = self._registry_entry_for(self._active_view())
@@ -586,6 +591,9 @@ class _CoreMixin:
         if rel in files:
             return
         files.append(rel)
+        note = self._guess_file_note(rel)
+        if note:
+            entry.setdefault("file_notes", {})[rel] = note
         # 记账用独立的 kind：`file_change` 那条流水被 lifecycle/blocks 当状态信号读，
         # 归属变更不该混进去（它不改变文件状态，只改变"谁维护它"）。
         self.task.record(
@@ -593,6 +601,29 @@ class _CoreMixin:
             f"[归属] {rel} 由 {entry.get('name')} 新建 → 计入它的文件清单",
         )
         self.task.save()
+
+    @staticmethod
+    def _guess_file_note(rel: str) -> str:
+        """机械占位描述（零 LLM）：首行注释 / markdown 标题 / docstring 首句。"""
+        try:
+            target = tools_module.safety.PROJECT_ROOT / str(rel)
+            head = target.read_text(encoding="utf-8", errors="ignore")[:600]
+        except (OSError, ValueError):
+            return ""
+        for raw in head.splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                line = line.lstrip("#").strip()
+            elif line.startswith(('"""', "'''")):
+                line = line.strip("\"'").strip()
+            elif line.startswith(("//", "*", "--", ";")):
+                line = line.lstrip("/*-;").strip()
+            if not line:
+                continue
+            return line[:30]
+        return ""
 
     def _inject_file_map_if_changed(self) -> bool:
         """**变了才注入**文件地图（2026-09-12 用户口径）。
