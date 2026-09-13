@@ -1012,9 +1012,13 @@ function snapshotOpenBlocks(){
 function restoreOpenBlocks(open){
   if(!open||!open.size)return;
   document.querySelectorAll('#content details').forEach(d=>{
+    // **只补开、绝不强制折叠**（2026-09-13 回归修复）：原先这里还有一条
+    // `else if(!open.has(k)&&d.open) d.open=false`，它会把"刚建好、默认展开"
+    // 的直播思考块一起关掉（重绘后键对不上）——表现就是"思考默认折叠、要手动
+    // 展开"。而直播块本身不归这套快照管（它的开合由 renderLive 按思考状态控制）。
+    if(d.closest('#livebox'))return;
     const k=blockKey(d);
     if(open.has(k)&&!d.open)d.open=true;
-    else if(!open.has(k)&&d.open&&!d.dataset.user)d.open=false;
   });
 }
 function renderLive(){
@@ -1022,19 +1026,22 @@ function renderLive(){
   let el=document.getElementById('livebox');
   let g=LIVE.seq?document.querySelector(`.crow.agent[data-seq="${LIVE.seq}"] .gbox`):null;
   if(!g&&LIVE.seq){
-    // 本轮的消息块还没渲染出来（直播先于事件区）→ **就地造一个临时块**再挂进去。
-    // 不能退化成直接塞进 #content：那会让思考/回答跑到**消息块外面、页面最下面**
-    // （实测 bug）。等事件区追上后 renderConv 会把它换成正式块。
-    g=document.createElement('div');
-    g.className='crow agent live-prov';
-    g.dataset.seq=String(LIVE.seq);
-    const s=senderOf({active_view:(META&&META.round_list||[]).find(r=>String(r.seq)===String(LIVE.seq))?.active_view||''});
-    g.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
-      +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
-      +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`
-      +`<div class="gbox" style="border-color:${s.color}55"></div></div>`;
-    ($('#content')||document.body).appendChild(g);
-    g=g.querySelector('.gbox');
+    // 本轮的消息块还没渲染出来 → **就地造一个临时块**并挂进消息流。
+    // 复用已有的同名临时块（不重复造，否则看起来像"越堆越多、跑到块外面"）；
+    // drawConv 重绘会把它冲掉，故每次都检查、缺了就补。
+    let prov=document.querySelector(`.crow.live-prov[data-seq="${LIVE.seq}"]`);
+    if(!prov){
+      prov=document.createElement('div');
+      prov.className='crow agent live-prov';
+      prov.dataset.seq=String(LIVE.seq);
+      const s=senderOf({active_view:(META&&META.round_list||[]).find(r=>String(r.seq)===String(LIVE.seq))?.active_view||''});
+      prov.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
+        +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
+        +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`
+        +`<div class="gbox" style="border-color:${s.color}55"></div></div>`;
+      ($('#content')||document.body).appendChild(prov);
+    }
+    g=prov.querySelector('.gbox');
   }
   if(g){if(el&&el.parentNode!==g)g.appendChild(el)}
   if(!el){el=document.createElement('div');el.id='livebox';(g||$('#content')).appendChild(el)}
@@ -1061,15 +1068,14 @@ function renderLive(){
   const tsum=el.querySelector('#live-think-sum');
   if(tb&&tbody){
     const show=LIVE.think?LIVE.think.slice(-4000):'';
-    if(show){
-      // 思考中：块**展开**，文本增量灌进去（块先于文本存在）
-      if(!tb.open&&tb.dataset.user!=='1')tb.open=true;
-      if(tbody.textContent!==show)tbody.textContent=show;
-      if(tsum)tsum.textContent='💭 思考中…';
+    if(show||LIVE.mode==='think'||LIVE.mode==='ans'){
+      // 思考中（或刚开跑、正文还没来）：块**始终展开**，文本增量灌进去
+      if(!tb.dataset.user&&!tb.open)tb.open=true;
+      if(show&&tbody.textContent!==show)tbody.textContent=show;
+      if(tsum)tsum.textContent=LIVE.status?('💭 '+LIVE.status):'💭 思考中…';
     }else if(tbody.textContent){
-      // 这一段思考结束：**折叠但不移除**（文本留着、位置不动），
-      // 后续正文接在它下面——不再"消失一下再冒出来"
-      if(tb.open&&tb.dataset.user!=='1')tb.open=false;
+      // 这一段思考/回答结束：**折叠但不移除**（文本留着、位置不动）
+      if(!tb.dataset.user&&tb.open)tb.open=false;
       if(tsum)tsum.textContent='💭 思考内容（已折叠，点开看）';
     }
   }
