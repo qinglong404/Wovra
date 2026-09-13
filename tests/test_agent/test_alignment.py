@@ -135,6 +135,47 @@ def test_file_map_not_injected_before_any_split(tmp_path, monkeypatch):
     assert not task.file_map_sig, "没注入就不该盖章：分裂后第一张地图照样要进得来"
 
 
+def test_persist_rebases_when_another_writer_touched_the_file(tmp_path, monkeypatch):
+    """两个写者不许互相覆盖（worklog §86）。
+
+    整理改异步之后，后台维护线程（旧 agent）与下一轮的 agent 会**同时写同一份
+    task.json**，而两边写的都是整份文件——后写的会把先写的盖掉。最坏的一种：
+    维护刚 promote 出来的分裂产物被下一轮的保存静默抹掉。
+
+    口径：保存前用一次 stat 判"盘上是不是别人写过"，是就重读 + **并集合并**；
+    两边都这么做，于是谁最后写、写下去的都是双方的并集。
+    """
+    import json as _json
+    from wovra import task as task_module
+
+    task = _split_task(tmp_path, monkeypatch)          # 已分裂：Main/工具层/前端
+    agent = _agent(task, "工具层")
+    agent.rounds[0]["org_state"] = "pending"
+    agent._persist_rounds()
+    sig = task._saved_sig
+    assert sig, "保存后要记下『我写的是哪一版盘』"
+
+    # 模拟**另一方**（后台维护线程 / 另一个 agent）往同一个文件里写：
+    # 一轮新轮 + 一个全新的注册表条目
+    path = task_module.TASKS_ROOT / task.id / "task.json"
+    disk = _json.loads(path.read_text(encoding="utf-8"))
+    disk["rounds"].append({"seq": 99, "user_input": {"original": "下一句"},
+                           "events": [], "end_state": "completed"})
+    disk["registry"].append({"id": "Z", "name": "别人新开的域", "files": ["z.py"]})
+    path.write_text(_json.dumps(disk, ensure_ascii=False), encoding="utf-8")
+
+    # 我这边再保存一次（我手里那份**不含**别人的轮与条目）
+    agent.current_round["org_state"] = "done"
+    agent._persist_rounds()
+
+    after = _json.loads(path.read_text(encoding="utf-8"))
+    seqs = [r.get("seq") for r in after["rounds"]]
+    ids = [e.get("id") for e in after["registry"]]
+    assert 99 in seqs, "别人的轮被我的整份保存盖掉了"
+    assert "Z" in ids, "别人新增的注册表条目被我的整份保存盖掉了"
+    assert "A" in ids, "我自己原有的条目被并集合并弄丢了"
+
+
 def test_file_map_injected_only_when_changed(tmp_path, monkeypatch):
     """文件地图：**描述来自整理写的块摘要**，且**变了才注入**（用户口径）。
 

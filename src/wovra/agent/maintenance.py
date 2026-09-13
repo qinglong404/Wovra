@@ -331,7 +331,6 @@ class _MaintenanceMixin:
 
     def _settle_after_maintenance(self) -> None:
         """维护一跑完就让产物**立刻生效**（有开放轮时留给下一轮开场）。
-
         2026-09-12 用户口径：「把重组上下文、子 agent 都放到分裂后面、下一轮
         对话前面……下一轮对话开始，基本就只需要追求对话」。旧行为把 promote
         与渐近归属一律推到下一轮开场，于是会话里看得见"分裂完了但子 agent 还
@@ -354,6 +353,8 @@ class _MaintenanceMixin:
             with self._view_lock:
                 if self.current_round is not None:
                     return  # 轮进行中：本轮字节不许动，留给下一轮开场
+                # 落盘前会由 `_persist_rounds` 自动重读盘 + 并集合并（§86）：
+                # 异步维护与下一轮的 agent 会同时写 task.json，两边写的都是整份
                 self._promote_org_results()
                 self._settle_views()
         except Exception as error:  # noqa: BLE001——即时生效失败不该拖垮会话
@@ -1248,6 +1249,9 @@ class _MaintenanceMixin:
         thread = threading.Thread(
             target=run, name="wovra-maintenance", daemon=True
         )
+        # 落盘由 `_persist_rounds` 统一"先重读盘 + 并集合并"（§86）：整理改异步
+        # 之后，维护线程（旧 agent）与下一轮的 agent 会同时写 task.json，而两边写
+        # 的都是整份文件——不合并就会互相覆盖（最坏：刚算出来的分裂产物被抹掉）
         thread.start()
         thread.join(self._org_maint_timeout)
         timed_out = thread.is_alive()

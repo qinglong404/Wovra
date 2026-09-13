@@ -854,9 +854,83 @@ class _CoreMixin:
             out.append(self._status_feed.pop(0))
         return out
 
+    def _rebase_if_stale(self) -> bool:
+        """盘上被别人写过就先重读、**并集合并**，再落盘（worklog §86）。
+
+        **为什么需要**（用户 2026-09-13 质疑"整理、分裂不是异步吗？怎么会卡我"）：
+        serve 是**每轮新建一个 agent**（chat 是整会话一个 agent），所以
+        `async_organization=True` 之后，后台维护线程（旧 agent）与下一轮的 agent
+        会**同时写同一份 `task.json`**，而两边写的都是**整份文件**——后写的会把
+        先写的盖掉。最坏的一种：维护刚 promote 出来的分裂产物（`pending_org` +
+        注册表条目）被下一轮的保存静默抹掉，下次再花一遍整理论文的钱。
+
+        判据是**一次 stat**（`Task._saved_sig` 与盘上当前签名比）：只有真被
+        别人改过才重读整份文件——常规路径（自己保存自己）零额外成本。
+
+        合并口径：
+        * **轮**：按 `seq` 并集——盘上有、我没有的（下一轮刚开的）并进来，不丢别人的轮；
+          两边都有的取并集（我这边的新键覆盖，别人的新键保留）；
+        * **注册表**：按 `id` 并集——我没有的条目（别人新认领的文件/新域）并进来，
+          我有的以我为准（我这边的职责更新是刚写的）。
+
+        **这是"两边都重读再写"才能成立的口径**：谁最后写，谁写下去的都是双方数据的
+        并集，于是不存在"后写的把先写的盖掉"。
+        """
+        if self.task is None:
+            return False
+        from .. import task as task_module
+        path = task_module.TASKS_ROOT / str(self.task.id) / "task.json"
+        try:
+            st = path.stat()
+            now = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            return False
+        if now == getattr(self.task, "_saved_sig", None):
+            return False                     # 盘上还是我那一版：不用动
+        try:
+            fresh = task_module.Task.load(str(self.task.id))
+        except Exception:  # noqa: BLE001——重读失败就按自己那份写（不比原来更差）
+            return False
+        disk = {r.get("seq"): r for r in (fresh.rounds or [])
+                if isinstance(r, dict)}
+        mine = {r.get("seq"): r for r in self.rounds if isinstance(r, dict)}
+        for seq, r in disk.items():
+            if seq not in mine:
+                self.rounds.append(r)        # 别人的轮：并进来（不丢）
+        for _seq, r in mine.items():
+            d = disk.get(_seq)
+            if d is None or d is r:
+                continue
+            for key, value in d.items():
+                # **谁有取谁**：我这边空/缺的键，用别人的补上——维护产物
+                # （`pending_org` 等）就是这么活下来的；我这边有值的以我为准
+                if key not in r or r.get(key) in (None, "", [], {}):
+                    r[key] = value
+        try:
+            self.rounds.sort(key=lambda x: x.get("seq") or 0)
+        except Exception:  # noqa: BLE001
+            pass
+        ids = {str(e.get("id")) for e in (self.task.registry or [])
+               if isinstance(e, dict)}
+        for e in (fresh.registry or []):
+            if isinstance(e, dict) and str(e.get("id")) not in ids:
+                self.task.registry.append(e)     # 别人的新条目：并进来
+        if self.task is not None:
+            self.task.record(
+                "maintenance",
+                "盘上已被另一方写过 → 重读并集合并后再落盘（后台整理与下一轮"
+                "同时写 task.json，防互相覆盖）",
+            )
+        return True
+
     def _persist_rounds(self) -> None:
         if self.task is not None:
             with self._save_lock:
+                # 落盘前先看盘上有没有**别人写的**（一次 stat；真被改过才重读整份
+                # 并并集）。两个写者都得这么做才成立：后台维护线程与下一轮的 agent
+                # 同时写同一份 task.json，而最后写的通常是**下一轮**（它跑得久），
+                # 只让维护那边重读挡不住覆盖（§86）。
+                self._rebase_if_stale()
                 self.task.rounds = self.rounds
                 self.task.baseline_prompt_used = self._baseline_prompt_used
                 self.task.save()

@@ -690,6 +690,11 @@ class Task:
 
         path = TASKS_ROOT / task_id / "task.json"
         data = json.loads(path.read_text(encoding="utf-8"))
+        try:
+            st = path.stat()
+            loaded_sig = (st.st_mtime_ns, st.st_size)
+        except OSError:
+            loaded_sig = None
         # 已删字段的兼容过滤（2026-09-11 遗产整治）：`cls(**data)` 遇到未知键
         # **直接抛 TypeError**，而字段一旦从 dataclass 里删掉，历史 task.json 里
         # 的旧键就全成了未知键——实测 77/77 个会话都带 `acceptance_criteria`
@@ -701,6 +706,7 @@ class Task:
         for key in dropped:
             data.pop(key, None)
         task = cls(**data)
+        task._saved_sig = loaded_sig   # "我看到的是哪一版盘"（见 save() 里那段注释）
         if dropped:
             task.record(
                 "maintenance",
@@ -846,6 +852,16 @@ class Task:
         report = sanitize_surrogates(self._render_report())
         with _save_lock(self.id):
             _write_atomic(directory / "task.json", data)
+            # 记下"我写完之后盘上是什么样"（2026-09-13，worklog §86）：
+            # 后台维护线程与下一轮的 agent 会同时写这份文件，两边写的都是**整份**
+            # ——后写的会把先写的盖掉。有了这个签名，另一边就能用一次 stat 判断
+            # "盘上是不是别人写过"，只在真被改过时才重读 + 并集合并（`Agent.
+            # _rebase_if_stale`），既救得住产物，也不必每次保存都重解析整份文件。
+            try:
+                st = (directory / "task.json").stat()
+                self._saved_sig = (st.st_mtime_ns, st.st_size)
+            except OSError:
+                self._saved_sig = None
             try:
                 _write_atomic(directory / "report.md", report)
             except OSError as error:

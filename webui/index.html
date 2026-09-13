@@ -674,6 +674,7 @@ async function select(id){
     LIVE.seq=(META.round_list||[]).slice(-1)[0]?.seq||0;   // 直播中的轮已落 round_list
   }
   renderHeader();renderTab();
+  watchMaintenance();   // 打开一个"后台还在整理"的会话：界面要自己跟上（§86）
 }
 function renderHeader(){
   const u=META.usage||{};
@@ -1833,6 +1834,30 @@ async function refreshAfterTurn(){
   }
   drawConv($('#content'),true);
   loadSessions();
+  watchMaintenance();
+}
+
+/* 后台维护的收尾观察（2026-09-13，worklog §86）。
+   整理/分裂现在是**异步**的：轮已经闭合、用户可以去说下一句，而维护还在后台跑
+   （实测一批 106 秒，硬上限 900 秒）。它跑完会让产物落地（注册表长出子 agent、
+   历史轮归位），界面得自己跟上——否则轮头上一直挂着「整理中」，用户以为没生效。
+   有界轮询：每 3 秒一次、最多 100 次（5 分钟）就放弃；不再有 pending 轮时刷新
+   一次并停。幂等：已经在看就直接返回。 */
+let MAINT_WATCH=0;
+function watchMaintenance(){
+  if(MAINT_WATCH)return;
+  const pend=()=>((META&&META.round_list)||[]).some(r=>r.org_state==='pending');
+  if(!pend())return;
+  let n=0;
+  MAINT_WATCH=setInterval(async()=>{
+    if(++n>100||!CUR){clearInterval(MAINT_WATCH);MAINT_WATCH=0;return}
+    let d=null;
+    try{d=await api(`/api/sessions/${CUR}/plan`)}catch(e){return}
+    if(!d)return;
+    if((d.org_pending||[]).length)return;      // 还在整理：继续等
+    clearInterval(MAINT_WATCH);MAINT_WATCH=0;
+    try{await refreshAfterTurn()}catch(e){}
+  },3000);
 }
 function newSession(){
   const cur=(SESSIONS.find(x=>x.id===CUR)||SESSIONS[0]);

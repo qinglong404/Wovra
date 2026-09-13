@@ -361,6 +361,31 @@ def _round_seq_for(agent, content: str | None) -> int:
     return len(rounds) + 1
 
 
+def _build_turn_agent(task):
+    """这一轮用的 agent：**整理异步**（与 chat 同款，见 worklog §86）。
+
+    **为什么必须异步**（用户 2026-09-13 当场质疑："整理、分裂不是异步吗？怎么会
+    卡我和 AI 对话呢？"）：整理 + 分裂是真发两次 LLM 调用的（实测一批 org 75s +
+    split 31s = **106 秒**，硬上限 900s）。`close_round()` 里就会触发它：
+
+    * `async_organization=False`（原先 serve 就是这么配的）→ 在**这一轮的作业
+      线程里同步跑完**才返回。于是那 106 秒里：`job["status"]` 一直是 `running`
+      （前端停在"回答中…"、发送按钮按不动）、`_TURN_GATE` 一直握着（再发一条就
+      是 409「上一轮还在运行」）—— **整轮对话被维护挡住**；
+    * `async_organization=True` → 批次进 `_org_queue`，后台线程跑，`close_round`
+      立刻返回。维护跑完自己 `_settle_after_maintenance()` 让产物落地，而它与
+      `_open_or_reuse_round` 共用 `_view_lock`，**两者不会交错**（这是 chat 模式
+      一直在用的同一条路）。用户因此可以立刻说下一句。
+
+    同步模式仍然属于**一次性进程**（`wovra run`：退出前必须把账补齐，
+    `cli/main.py` 就是这么配的）——serve 是长驻进程，不该学它。
+    """
+    from .agent import MODE_MANAGED
+    from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
+    return _build_agent(task, mode=task.mode or MODE_MANAGED,
+                        async_organization=True)
+
+
 def _execute_turn(job_id: str, task_id: str, content: str) -> None:
     """轮执行线程：CLI 同款管线（会话锁 → agent → run → 补整理）。
 
@@ -448,8 +473,7 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
         with _TURN_GATE:
             _acquire_session_lock(task)  # 被占用时抛 SystemExit（CLI 语义）
             try:
-                agent = _build_agent(task, mode=task.mode or MODE_MANAGED,
-                                     async_organization=False)
+                agent = _build_turn_agent(task)
                 # **轮号立刻报出去**（2026-09-13 用户实测的 bug）：见 `_round_seq_for`
                 job["round"] = _round_seq_for(agent, content)
 
@@ -485,13 +509,9 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                     job["status"] = "cancelled"
                     job["answer"] = "已终止——轮保持开放，发 /c 可续跑"
                     return
-                # **整理也是这一轮的一部分，必须报状态**（2026-09-13 用户报
-                # "卡到回答中了"）：`organize_backlog()` 会真发整理 + 分裂两次
-                # LLM 调用（实测这批 106 秒：org 75s + split 31s），而这段时间
-                # **一个分片都不推** —— 界面就停在最后一段流留下的"回答中…"
-                # 不动，看起来像卡死。先推一条状态，让运行线说清楚在干什么
-                # （秒数由前端自己走字，不停）。
-                _live({"k": "status", "s": "回答已产出，正在整理上下文…"})
+                # **整理是后台的事**（§86）：`close_round()` 里已经把它排进
+                # `_org_queue` 并立刻返回，这里再调一次只是兜住"上一批被推迟"
+                # 的情形——异步模式下它同样**不阻塞**（排队即返回）。
                 agent.organize_backlog()
             finally:
                 _release_session_lock(task)
@@ -1416,9 +1436,15 @@ class _Handler(BaseHTTPRequestHandler):
             data = self._load_task(mplan.group(1))
             if data is None:
                 return self._json({"error": "session not found"}, 404)
+            rounds = data.get("rounds") or []
             return self._json({
                 "todo": data.get("todo") or {},
                 "todo_log": todo_log(data),
+                # **还在整理的轮**（2026-09-13）：整理/分裂改成异步之后（§86），
+                # 轮结束不代表维护结束——前端靠这个轻量字段知道"什么时候可以
+                # 刷新看新注册表"，不必反复拉整份 session_meta。
+                "org_pending": [r.get("seq") for r in rounds
+                                if str(r.get("org_state") or "") == "pending"],
             })
         mtree = re.fullmatch(r"/api/sessions/([^/]+)/tree", path)
         if mtree:

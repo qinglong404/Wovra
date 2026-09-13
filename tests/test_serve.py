@@ -543,6 +543,28 @@ def test_http_sessions_endpoint(server):
     assert code == 404  # 路径穿越不出去（id 白名单）
 
 
+def test_serve_builds_turn_agent_with_async_organization(tmp_path, monkeypatch):
+    """**serve 的整理必须异步**（与 chat 同款，§86）。
+
+    用户当场质疑："整理、分裂不是异步吗？怎么会卡我和 AI 对话呢？"——他问对了：
+    `async_organization=False`（serve 原先的配法）会让 `close_round()` 在**这一轮
+    的作业线程里同步跑完**整理 + 分裂两次 LLM 调用（实测 106 秒、硬上限 900 秒）。
+    后果是两道闸一起挡住下一句话：
+      * `job["status"]` 一直 `running` → 前端停在"回答中…"、发送按钮按不动；
+      * `_TURN_GATE` 一直握着 → 再发一条就是 409「上一轮还在运行」。
+
+    所以这条不许再退回同步（"一次性进程 `wovra run`"才需要同步：退出前必须补完账）。
+    """
+    from wovra.task import Task
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
+    (tmp_path / "tasks").mkdir(exist_ok=True)
+    task = Task.create(goal="异步整理")
+    agent = serve._build_turn_agent(task)
+    assert agent.async_organization is True, "serve 必须异步整理，否则整轮对话被维护挡住"
+    assert agent.context_mode  # managed：水位闸门仍然生效
+
+
 def test_http_turn_job_flow(server, monkeypatch):
     """C4 写通道：POST turn → 作业排队 → 执行线程 → done。
 

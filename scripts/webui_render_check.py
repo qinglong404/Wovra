@@ -180,8 +180,12 @@ global.document = {
 global.location = { hash:'', search:'', pathname:'/' };
 global.localStorage = { getItem:()=>null, setItem(){}, removeItem(){} };
 global.navigator = { clipboard:null };
-global.setInterval = ()=>0;
-global.clearInterval = ()=>{};
+// 定时器桩：**返回非 0 id 并记账**——`watchMaintenance()` 靠 `if(MAINT_WATCH)`
+// 判"已经在看了"，桩返回 0 会让它每次都重新武装，掩盖幂等性（踩过）。
+let _timerSeq = 0;
+const _timers = [];
+global.setInterval = (fn, ms)=>{ const id=++_timerSeq; _timers.push({id,fn,ms}); return id; };
+global.clearInterval = (id)=>{ const i=_timers.findIndex(t=>t.id===id); if(i>=0)_timers.splice(i,1); };
 global.setTimeout = ()=>0;
 global.clearTimeout = ()=>{};
 global.fetch = ()=>Promise.reject(new Error('no net in check'));
@@ -541,6 +545,26 @@ renderLive();
   if (!done || !/strong/.test(done.innerHTML))
     problems.push('M: 进整理后回答消失了（应留在完成区，等正式渲染接管）');
   console.log(`   M 运行线含整理=${!!has} 回答留在完成区=${!!(done&&/strong/.test(done.innerHTML))}`);
+}
+
+console.log('场景 N｜后台维护观察器：有 pending 轮才武装、且只武装一次');
+{
+  const before = _timers.length;
+  resetLive();
+  META.round_list = [{seq:7, active_view:'A', org_state:'done'}];
+  MAINT_WATCH = 0;
+  watchMaintenance();
+  if (_timers.length !== before) problems.push('N: 没有 pending 轮却武装了观察器');
+  META.round_list = [{seq:7, active_view:'A', org_state:'done'},
+                     {seq:8, active_view:'A', org_state:'pending'}];
+  watchMaintenance();
+  const armed = _timers.length - before;
+  if (armed !== 1) problems.push(`N: 有 pending 轮应武装 1 个观察器，实际 ${armed}`);
+  watchMaintenance();   // 幂等
+  if (_timers.length - before !== 1) problems.push('N: 重复调用又武装了一个（不幂等）');
+  _timers.slice(before).forEach(t=>clearInterval(t.id));
+  MAINT_WATCH = 0;
+  console.log(`   N 无 pending 不武装=true 有 pending 武装数=${armed} 幂等=${_timers.length===before}`);
 }
 
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('#livebox'); }
