@@ -430,11 +430,48 @@ function ev(o){
                         role:'assistant', content:'', tool_calls:null,
                         tool_call_id:null}, o||{});
 }
+
+// **清掉"官方已画过"的覆盖**：夹具 `realConv()` 自带 seq 7 的事件，而模拟的直播事件
+// 常用同一批 id（R7-E01…）——不清掉的话 `coveredEvIds()` 会认为"官方画过"从而跳过它们
+// （那是产品**正确**行为；这里是夹具冲突）。真实场景里官方只覆盖"刷新那一刻的前缀"。
+
+/* **把一棵子树里的文本都收出来**（含每个节点自己的 innerHTML 串）。
+   为什么不能直接读 `root.innerHTML`：`mkEl` 直接造出来的节点只有一个空 `_html`，
+   只有被 `innerHTML=` 赋过值的节点才有值——而直播内容正是在子节点的 `_html` 里。
+   不遍历就会"数出零个"，重复检查永远不触发（咬合空跑，踩过一次）。 */
+function domAllText(root){
+  const out=[];
+  const walk=el=>{
+    if(!el)return;
+    if(el._html)out.push(String(el._html));
+    if(!el.children||!el.children.length){
+      if(el.textContent&&!el._html)out.push(String(el.textContent));
+      return;
+    }
+    el.children.forEach(walk);
+  };
+  walk(root);
+  return out.join('\u0000');
+}
+
+function clearOfficial(seq){
+  // **改 id，不清内容**：官方那边照旧有东西可画（H/J 要断言正式块在场），但 id 与
+  // 模拟的直播事件不撞——真实情形就是"官方只覆盖前缀，直播重放同一批 id"。
+  const d = CONV && CONV.cache && CONV.cache[seq];
+  if (!d) return;
+  (d.events || []).forEach(e => {
+    if (e && e.id && !String(e.id).startsWith('O-')) e.id = 'O-' + e.id;
+  });
+  // 覆盖集合按"数组身份+长度"记忆化——这里**原地**改了 id，得让它重算
+  if (typeof _covArr !== 'undefined') { _covArr = null; _covLen = -1; _covSet = null; }
+}
+
 function resetLive(){
   DOM = resetDom();
   META = { id:'s1', status:'in_progress', round_list:[{seq:7, active_view:'A'}],
            registry:[{id:'Main', name:'主agent'},{id:'A', name:'域甲'}] };
   REG = { Main:{id:'Main', name:'主agent'}, A:{id:'A', name:'域甲'} };
+  clearOfficial(7);      // 上一个场景可能在 CONV.cache[7] 里留了东西
   TAB = 'conv'; CUR = 's1';
   LIVE.job = 'j1'; LIVE.cur = 's1'; LIVE.seq = 7; LIVE.think=''; LIVE.ans='';
   LIVE.events = {}; LIVE.calls = {}; LIVE.doneSig = {}; LIVE.boxes = {}; LIVE.provs = {};
@@ -526,7 +563,8 @@ function realConv(){
 console.log('场景 I｜直播区：跑轮中途整段重绘（切页/刷新）不许把直播区冲掉');
 resetLive();
 mountRound(DOM.content, 7, false);
-CONV = realConv();                              // 跑到一半时事件区已有部分内容
+CONV = realConv();
+clearOfficial(7);                              // 跑到一半时事件区已有部分内容
 META.round_list = [{seq:7, active_view:'A', events:2, steps_used:1}];
 META.status = 'in_progress';
 applyChunk({k:'think', s:'跑到一半的思考'});
@@ -548,7 +586,8 @@ renderLive();
 console.log('场景 H｜交接（closing）时不再回挂，避免一帧两份正文');
 resetLive();
 mountRound(DOM.content, 7, false);
-CONV = realConv();                              // **必须有真数据**（否则空跑）
+CONV = realConv();
+clearOfficial(7);                              // **必须有真数据**（否则空跑）
 META.round_list = [{seq:7, active_view:'A', events:4, steps_used:2}];
 applyChunk({k:'ans', s:'正式版正文'});
 renderLive();
@@ -572,6 +611,7 @@ applyChunk({k:'ans', s:'这一轮的正文'});
 renderLive();
 LIVE.closing = true;                            // 收尾
 CONV = realConv();
+clearOfficial(7);
 META.status = 'finished';
 drawConv(DOM.content, true);
 // **故意不调 liveDetach**：复现旧 sendTurn 轮询路径（它只 refresh、不撤直播区）。
@@ -633,6 +673,7 @@ console.log('场景 M｜回答产出后进"整理"：状态要更新、内容不
 resetLive();
 mountRound(DOM.content, 7, false);
 CONV = realConv();
+clearOfficial(7);
 META.round_list = [{seq:7, active_view:'A', events:2, steps_used:1}];
 META.status = 'in_progress';
 applyChunk({k:'ans', s:'**最终**回答'});
@@ -873,6 +914,7 @@ META.status = 'in_progress';
 console.log('场景 T｜收尾后重绘：直播节点不许**冻在尾部**显示旧正文（用户报的"卡着了"）');
 resetLive();
 CONV = realConv();
+clearOfficial(7);
 const T1 = mountRound(DOM.content, 7, false, 'Main');
 META.round_list = [{seq:7, active_view:'Main', events:3, steps_used:2}];
 META.status = 'in_progress';
@@ -920,7 +962,7 @@ META.status = 'in_progress';
   });
   if (stray || provs) problems.push(`T: 收尾后还留着直播节点/临时块（${stray}/${provs}）`);
   if (stale.length) problems.push(`T: 尾部还显示着旧正文（${stale.join(' / ')}）`);
-  const body = String(DOM.content.innerHTML || '');
+  const body = domAllText(DOM.content);
   if (!/两行正文/.test(body)) problems.push('T: 正式渲染没把过程发言画出来（事件里是有的）');
   console.log(`   T 残留直播节点=${stray} 临时块=${provs} 冻住的旧正文=${stale.length} 正式正文在=${/两行正文/.test(body)}`);
 }
@@ -975,6 +1017,7 @@ META.status = 'in_progress';
 console.log('场景 W｜六个页签都要画得出来、且不许出现 undefined/NaN（崩溃=黑屏）');
 resetLive();
 CONV = realConv();
+clearOfficial(7);
 META.round_list = [{seq:7, active_view:'A', events:3, steps_used:2, org_state:'raw'}];
 META.status = 'done';
 META.todo = {items:[{text:'一件事', done:false}]};
@@ -1004,6 +1047,7 @@ META.todo_log = [{seq:7, time:'2026-09-13T17:00:00', action:'add_item', text:'�
 console.log('场景 W2｜数据**字段稀疏**时也不许露出 undefined（后端改字段/老数据都不该让用户看见破绽）');
 resetLive();
 CONV = realConv();
+clearOfficial(7);
 // 只给必需字段，可选字段全缺：六页签都得能画、且不许出现 undefined/NaN
 META = { id:'s1', status:'done', round_list:[{seq:7, active_view:'A', events:1}],
          registry:[{id:'Main', name:'主agent'},{id:'A', name:'域甲'}],
@@ -1032,6 +1076,7 @@ META = { id:'s1', status:'done', round_list:[{seq:7, active_view:'A', events:1}]
 console.log('场景 X｜刷新后接着看（catch-up）：不再从 0 重放，且内容与直播一致');
 resetLive();
 CONV = realConv();
+clearOfficial(7);
 const X1 = mountRound(DOM.content, 7, false, 'Main');
 META.round_list = [{seq:7, active_view:'Main', events:3, steps_used:1}];
 META.status = 'in_progress';
@@ -1073,6 +1118,7 @@ META.status = 'in_progress';
 console.log('场景 Y｜作业没了（服务重启/清理）：要收尾，不许卡在"运行中"');
 resetLive();
 CONV = realConv();
+clearOfficial(7);
 mountRound(DOM.content, 7, false, 'Main');
 META.round_list = [{seq:7, active_view:'Main', events:1, steps_used:1}];
 {
@@ -1172,6 +1218,108 @@ META.status = 'in_progress';
   console.log(`   Z ${seen.join(' | ')} 最终尾部=${tailText().trim() === '' ? '空' : '非空'}`);
 }
 
+console.log('场景 AA｜多 agent 多步：块的**归属与顺序**必须与事件时间序一致、且不许重复');
+resetLive();
+CONV = realConv();
+clearOfficial(7);
+const AA1 = mountRound(DOM.content, 7, false, 'Main');
+const AA2 = mountRound(DOM.content, 7, false, 'A');
+META.round_list = [{seq:7, active_view:'Main', events:6, steps_used:3}];
+META.status = 'in_progress';
+{
+  // 真实形状：主 agent 干一步 → 转交 A → A 干一步 → 回主 agent 再干一步
+  const evs = [
+    {id:'R7-E01', type:'tool_call', agent:'Main', thinking:'主看活归谁',
+     content:'先看看这活归谁',
+     tool_calls:[{id:'a1', function:{name:'list_files', arguments:'{}'}}]},
+    {id:'R7-E02', type:'tool_result', agent:'Main', role:'tool', tool_call_id:'a1',
+     content:'列出来了'},
+    {id:'R7-E03', type:'tool_call', agent:'A', thinking:'A 动手',
+     content:'这活归我，我来',
+     tool_calls:[{id:'a2', function:{name:'read_file', arguments:'{}'}}]},
+    {id:'R7-E04', type:'tool_result', agent:'A', role:'tool', tool_call_id:'a2',
+     content:'读到了'},
+    {id:'R7-E05', type:'tool_call', agent:'Main', thinking:'主收尾',
+     content:'我来收尾',
+     tool_calls:[{id:'a3', function:{name:'run_command', arguments:'{}'}}]},
+    {id:'R7-E06', type:'tool_result', agent:'Main', role:'tool', tool_call_id:'a3',
+     content:'跑完了'},
+  ];
+  for (const e of evs) { applyChunk({k:'event', e, ag:e.agent, st:evs.indexOf(e) + 1}); renderLive(); }
+  // 直播内容在 `.live-done`/`.live-tail` 子节点里（box 自己的 innerHTML 是骨架串，
+  // 读它等于没读——这个坑踩过一次）
+  const boxOf = id => {
+    const row = (id === 'Main' ? AA1 : AA2).gbox.querySelector('.livebox');
+    return row ? String((row.querySelector('.live-done') || {}).innerHTML || '')
+               + String((row.querySelector('.live-tail') || {}).innerHTML || '') : '';
+  };
+  const main = boxOf('Main'), a = boxOf('A');
+  const all = main + '\u0000' + a;
+  const dup = ['先看看这活归谁', '这活归我，我来', '我来收尾']
+    .filter(t => (all.split(t).length - 1) !== 1);
+  if (dup.length) problems.push(`AA: 同一段内容画了不止一次（${dup.join(' / ')}）`);
+  if (/这活归我，我来/.test(main))
+    problems.push('AA: A 那一步的内容串进了主 agent 的块');
+  if (!main && !a) problems.push('AA: 直播区根本没挂上（两块都空）');
+  if (a && !/这活归我，我来/.test(a)) problems.push('AA: A 的内容没进 A 的块');
+  // A 的块是**第二块**（事件序里 A 在 Main 之后）——顺序不许反
+  const rows = [...DOM.content.querySelectorAll('.crow.agent[data-seq="7"]')];
+  const order = rows.map(r => (r.querySelector('.gbox') || {}).dataset?.agent || '?');
+  if (order.length && order.join('>') !== 'Main>A') {
+    problems.push(`AA: 块的顺序与事件序不一致（实际 ${order.join('>')}，应为 Main>A）`);
+  }
+  console.log(`   AA 块序=${order.join('>')} 主块=${main ? '有' : '空'} A块=${a ? '有' : '空'}`
+    + ` 重复=${dup.length === 0 ? '无' : dup.join('/')}`);
+  if (process.env.WEBUI_RENDER_DUMP) {
+    const rows = [...DOM.content.querySelectorAll('.crow.agent[data-seq="7"]')];
+    console.log('   [dbg AA]', JSON.stringify(rows.map(r => ({
+      agent: (r.querySelector('.gbox') || {}).dataset?.agent,
+      boxes: r.querySelectorAll('.livebox').length,
+      html: String((r.querySelector('.gbox') || {}).innerHTML || '').slice(0, 160),
+    })), null, 1));
+  }
+}
+
+console.log('场景 AB｜刷新后官方已画过一段：直播**不许把同一段再画一遍**（用户报的"方块重复、续到最下面"）');
+resetLive();
+CONV = realConv();
+clearOfficial(7);
+const AB1 = mountRound(DOM.content, 7, false, 'Main');
+const AB2 = mountRound(DOM.content, 7, false, 'A');   // 空的另一块：直播块会落到它这儿
+META.round_list = [{seq:7, active_view:'Main', events:4, steps_used:2}];
+META.status = 'in_progress';
+{
+  // ① 刷新时那一轮已经落到盘上（部分事件）→ 官方渲染把它画了一遍
+  const official = [
+    {id:'R7-E01', type:'tool_call', agent:'Main', time:'2026-09-13T17:00:00',
+     role:'assistant', thinking:'（官方那次的思考）', content:'先看看这活归谁',
+     tool_calls:[{id:'b1', function:{name:'list_files', arguments:'{}'}}]},
+  ];
+  CONV.cache[7] = {seq:7, user_input:'干活', events:official};
+  CONV.seqs = [7];
+  drawConv(DOM.content, false);
+  // ② 直播从头重放（catch-up 从 0 开始）：同一批分片再喂一遍
+  LIVE.job = 'j1'; LIVE.cur = 's1';
+  applyChunk({k:'event', e:{...official[0]}, ag:'Main', st:1});
+  applyChunk({k:'event', e:{id:'R7-E02', type:'final_answer', agent:'Main',
+    time:'2026-09-13T17:00:05', role:'assistant', content:'干完了'}, ag:'Main', st:2});
+  renderLive();
+  // ③ 整轮范围内的重复检查：同一段内容只许出现一次（跨块、跨官方/直播都要算）
+  const body = String(DOM.content.innerHTML || '');
+  const dup = ['先看看这活归谁', '干完了'].filter(t => (body.split(t).length - 1) > 1);
+  if (dup.length) problems.push(`AB: 同一段内容在整轮里画了不止一次（${dup.join(' / ')}）`);
+  // **按块**数一遍：同一段内容只许出现在一个块里（跨块重复才是用户看到的"方块重复"）
+  const perRow = [...DOM.content.querySelectorAll('.crow.agent[data-seq="7"]')]
+    .map(r => domAllText(r.querySelector('.gbox')));
+  const crossRowDup = perRow.filter(h => /先看看这活归谁/.test(h)).length;
+  if (crossRowDup > 1) {
+    problems.push(`AB: 同一段内容出现在 ${crossRowDup} 个块里（跨块重复）`);
+  }
+  const boxes = DOM.content.querySelectorAll('.livebox').length;
+  const provs = DOM.content.querySelectorAll('.crow.live-prov').length;
+  console.log(`   AB 重复=${dup.length === 0 ? '无' : dup.join('/')} 直播块=${boxes} 临时块=${provs}`);
+}
+
 console.log('场景 R｜运行中按**时间顺序**画：思考 → 工具卡 → 思考 → 最终回答（用户报的核心）');
 resetLive();
 const R1 = mountRound(DOM.content, 7, false, 'Main');
@@ -1246,7 +1394,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（27 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（29 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 

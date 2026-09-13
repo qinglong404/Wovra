@@ -830,10 +830,10 @@ const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             seq:0,baseRounds:0,sse:false,
             agent:'',        // 当前在干活的视图（服务端报的）
             events:{},       // aid → 该 agent 的**流式事件**（与 /rounds 同形状）
+            boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
             calls:{},        // tool_call_id → {name,args,result}（工具卡的回填状态）
             provs:{},        // aid → 该 agent 的临时消息块
             step:-1,         // 服务端报的步号（变了就说明上一步结束了）
-            boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
             seenEv:{},       // 事件 id 去重表（重连/刷新重叠投递时只收一次）
             callsVer:0,      // 工具结果版本号（变了才重新回填卡片）
             filledSig:{},    // aid → 已回填到哪个版本
@@ -888,6 +888,7 @@ function flushLiveStep(){
    `dirty=Math.max(dirty, applyChunk(c)||0)`，再按 `dirty>=2 ? renderLive() :
    (dirty ? scheduleLiveRender() : 0)` 决定。 */
 function applyChunk(c){
+  const bump=v=>{ if(v>level)level=v };
   let level=0;
   // **步的机械锚点**（2026-09-13 修，用户报"正文留在尾部、越堆越多"）：服务端每个
   // 分片带 `st`（已落事件数，一步之内不变）。步号一变 → 上一步**一定结束了** →
@@ -897,7 +898,6 @@ function applyChunk(c){
     flushLiveStep();
     LIVE.step=c.st;bump(2);
   }
-  const bump=v=>{ if(v>level)level=v };
   // agent 换手（route_to 之后）：先把上一个的"在飞"内容清掉再切
   if(c.ag&&c.ag!==LIVE.agent){
     LIVE.agent=c.ag;bump(2);
@@ -1225,18 +1225,18 @@ const LIVE_SKELETON=
 function liveGbox(seq,aid){
   if(seq){
     const rows=document.querySelectorAll(`.crow.agent[data-seq="${seq}"]`);
-    let unnamed=null,last=null;
+    let unnamed=null;
     for(const r of rows){
       const g=r.querySelector('.gbox');
       if(!g)continue;
       const gid=String(g.dataset.agent||'');
       if(gid===aid){removeProv(aid);return g}   // 精确命中：就是这个 agent 的块
       if(!gid)unnamed=unnamed||g;               // 老结构（没有身份标记）
-      last=g;                                   // 事件顺序上最后说话的才是现在干活的
     }
-    // 兜底（数据缺身份标记时）：只有一个块就是它；多块就取最后那个
-    const fb=(rows.length===1)?(unnamed||last):(unnamed||last);
-    if(fb){removeProv(aid);return fb}
+    // **只认精确命中**（2026-09-13 修）：以前"多块就取最后那个"——那会把 A 的内容
+    // 塞进别的 agent 的块里（用户报"方块对不上/重复"）。身份对不上就**不借用**：
+    // 要么用唯一那个没有身份标记的老块，要么走下面的临时块（另起一块，属于它自己）。
+    if(rows.length===1&&unnamed){removeProv(aid);return unnamed}
   }
   // **不能因为"没挂在 DOM 上"就丢掉**：`drawConv` 重绘前会把它们摘下来保活，
   // 再交给这里接回去（`if(box.parentNode!==host)`）。真正的清理走 liveDetach。
@@ -1288,12 +1288,39 @@ function insideLive(el){
     p=p.parentNode||p.parentElement;
   }
   return false;
+/* **官方已经画过哪些事件**（按轮，事件 id 集合）。
+
+   2026-09-13 修，用户报："现在还是时间顺序和渲染的方块对不上…前面又方块重复，续到
+   最下面了。"
+   成因：刷新/切页时**事件区已经画过这一轮的一部分**（`/rounds` 会返回开放轮的部分
+   事件），而直播的 catch-up 会**从 0 重放**——同一段内容就出现在**两处**：上面官方
+   那块、下面直播那块，看起来就是"方块重复、一直续到最下面"。之前的去重只在
+   **同一个 host**（同一个 gbox）里比内容，跨块/跨官方与直播之间完全看不见。
+   现在改成**全轮范围按事件 id 去重**：直播只画官方还没画到的部分；两边都不剩内容时
+   直播块直接隐藏（不再留一个空块挂在最下面）。
+   这个集合只在"官方事件数变了"时重算（零成本驻留）。 */
+let _covArr=null;_covLen=-1;_covSet=null;
+function coveredEvIds(){
+  const d=(CONV&&CONV.cache)?CONV.cache[LIVE.seq]:null;
+  const evs=(d&&d.events)||null;
+  const len=evs?evs.length:-1;
+  // 键必须含**数组身份**，不能只看条数：重新拉取那一轮会换掉数组（内容变了、条数
+  // 可能一样）——只按条数缓存就会命中过期集合，直播会**误跳过新事件**（实测：
+  // 一个场景里的 1 条官方事件把后面两条直播事件都吃掉了）。
+  if(evs===_covArr&&len===_covLen&&_covSet)return _covSet;
+  _covArr=evs;_covLen=len;
+  _covSet=new Set((evs||[]).map(e=>String((e&&e.id)||'')));
+  return _covSet;
+}
+
 }
 /* 某个 agent 的"直播区"：**事件 → 条目走与官方渲染同一个映射**
    （`eventItems` + `itemHtml`），所以思考、工具卡、正文按**时间顺序**排出来，
-   运行中就能看到工具块。扣掉官方已经画过的（同内容/同调用 id 不重复画）。 */
+   运行中就能看到工具块。只画**官方还没画过**的事件（见 `coveredEvIds`）。 */
 function liveDoneHtml(aid,host){
-  const evs=LIVE.events[aid]||[];
+  const cov=coveredEvIds();
+  const evs=(LIVE.events[aid]||[]).filter(e=>!cov.has(String((e&&e.id)||'')));
+  if(!evs.length)return '';
   const T=evs.map(e=>Date.parse(e.time||''));
   const whenOf=i=>{
     const c=fmtClock(evs[i]&&evs[i].time);
@@ -1431,6 +1458,17 @@ function renderLiveOne(aid,isActor){
       if(tail._md!==''){tail.innerHTML='';tail._md=''}
       tail.style.display='none';
     }
+  // ③ **两边都不剩内容就整块隐藏**（2026-09-13，用户报"方块重复、续到最下面"）：官方
+  //    已经画过这一轮的（部分）事件、直播也没在飞内容时，这个块是**纯重复**——收起来，
+  //    不要留一个空块挂在最下面。有新内容（或新的在飞文本）时自动再显示。
+  const emptyDone=!(done&&String(done.innerHTML||'').trim());
+  const emptyTail=!(tail&&tail.style.display!=='none'
+                    &&String(tail.innerHTML||'').trim());
+  const hide=emptyDone&&emptyTail;
+  box.style.display=hide?'none':'';
+  const prov=box.parentNode&&box.parentNode.closest
+    ? box.parentNode.closest('.crow.live-prov') : null;
+  if(prov)prov.style.display=hide?'none':'';
   }
 }
 
