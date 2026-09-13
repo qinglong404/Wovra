@@ -135,6 +135,17 @@ html = byId('ctxbar').innerHTML;
 check('C 实测回退', html, 1);
 if (!html.includes('41.8K')) problems.push('C: 实测值没显示出来');
 
+console.log('场景 E｜投影还没回来（多 agent，不许显示"无数据"）');
+META = { id:'s3', registry:[
+  {id:'Main', name:'主agent', status:'active', ctx_cur:0, ctx_peak:0, window:0},
+  {id:'A', name:'域甲', status:'dormant', ctx_cur:0, ctx_peak:0, window:0}], round_list:[] };
+VIEWSIZES = null;      // 拉取在途
+renderCtxbar();
+html = byId('ctxbar').innerHTML;
+check('E 在途', html, 2);
+if (!html.includes('投影计算中')) problems.push('E: 在途时没显示"投影计算中"');
+if (html.includes('无数据')) problems.push('E: 在途时显示了"无数据"（会被读成还是没有）');
+
 console.log('场景 D｜project 面板的注册表卡片');
 META = { id:'s1', registry:[
   {id:'Main', name:'主agent', status:'active', ctx_cur:235398, ctx_peak:235398, window:1000000, rounds:0, steps:208, files:[], history_files:[]},
@@ -158,7 +169,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（4 个场景，无 undefined/NaN，口径完整）');
+console.log('渲染核对：通过（5 个场景，无 undefined/NaN，口径完整）');
 """
 
 

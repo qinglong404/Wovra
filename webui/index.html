@@ -1423,6 +1423,9 @@ function renderCtxbar(){
   bar.classList.toggle('show',!!rows.length);
   if(!rows.length){bar.innerHTML='';return}
   const winDefault=(VIEWSIZES&&VIEWSIZES.window)||0;
+  /* 投影要真装配一遍各视图（实测 1.8–3.1s，随 agent 数涨），期间**别显示
+     "无数据"**——那会被读成"还是没有"（用户口径：不许乱写）。 */
+  const loading=!VIEWSIZES&&entries.length>1;
   const cells=rows.map(({e,pv})=>{
     const col=agentColor(e.id||e.name);
     const proj=pv?(pv.tokens||0):0;                 // 重组后视图（机械投影）
@@ -1432,7 +1435,8 @@ function renderCtxbar(){
     const pct=share>=10?share.toFixed(1):share.toFixed(2);
     const barHtml=win?`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`:'';
     const num=proj?`≈${fmtN(proj)}${win?`/${fmtN(win)}（${pct}%）`:''} tok`
-      :(obsWin?`${fmtN(cur)}/${fmtN(win)}（${pct}%） tok`:'无数据');
+      :(obsWin?`${fmtN(cur)}/${fmtN(win)}（${pct}%） tok`
+        :(loading?`<span style="color:var(--tx3)">重组后投影计算中…</span>`:'无数据'));
     // 实测只在**与投影并存**时并列显示：有投影时它是"上次"，容易被误当现状
     const obs=(proj&&obsWin)
       ?`<span class="mono" style="color:var(--tx3);font-size:10px"> · 实测 ${fmtN(cur)}</span>`:'';
