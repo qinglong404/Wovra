@@ -485,6 +485,15 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                     cur = getattr(agent, "current_round", None) or {}
                     if cur.get("seq"):
                         job["round"] = int(cur["seq"])
+                    # **现在是谁在干**（2026-09-13 用户报："下面 agent 的思考内容
+                    # 老是挂到上面主 agent 中"）：一轮里若有多名 agent（主 agent
+                    # 路由 → 子 agent 接手），事件区会给**每个 agent 各建一个消息
+                    # 块**，前端必须知道该把直播内容挂进哪一个。这里现取现报
+                    # （`route_to` 换手后 `active_view` 就变成接手方）。
+                    try:
+                        chunk["ag"] = str(agent._active_view() or "")
+                    except Exception:  # noqa: BLE001——报不出身份不该断直播
+                        pass
                     job["live"].append(chunk)
 
                 job["live"] = []

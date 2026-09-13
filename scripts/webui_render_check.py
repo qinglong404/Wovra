@@ -24,7 +24,7 @@ PREFIX = r"""
 // ---- 迷你 DOM：够跑直播路径（用户 2026-09-13 报的四个渲染 bug 都在这条路上）----
 // 支持：#id / .cls / tag / [attr="v"] / 空格后代 / :not(.x) / 逗号列表。
 // innerHTML 的 setter 做一件够用的事：把 HTML 里出现的 id 与 class 注册成子元素
-// （直播骨架是扁平的，所以这样 `box.querySelector('#live-think-body')` 找得到）。
+// （直播骨架是扁平的，所以这样 `box.querySelector('.live-think-body')` 找得到）。
 const ALL = [];
 let SEQID = 0;
 function clsOf(e){
@@ -323,21 +323,30 @@ if (proseIn('<div title="机械投影">ok</div>').length !== 0) {
 //   ① 思考跑到消息块外面 ② 出现完消失一下才出现
 //   ③ 思考不展开、要像工具一样一行折叠 ④ 正文要实时渲染 MD
 // ===========================================================================
-// "#livebox 挂在 #content 直下" = 没有消息块包着它（用户报的"跑到块外面"）。
+// ".livebox 挂在 #content 直下" = 没有消息块包着它（用户报的"跑到块外面"）。
 // 注意用**直接子节点**判断：querySelector 会连后代一起命中，那样连正确挂载
 // 都会被误判（我自己先踩了一次）。
 function liveboxDirectUnderContent(){
-  return [...DOM.content.children].some(c=>c.id==='livebox');
+  return [...DOM.content.children].some(c=>c.classList&&c.classList.contains('livebox'));
 }
-function mountRound(content, seq, isProv){
+function mountRound(content, seq, isProv, agent){
+  // 与真 `drawConv` 同款：`.crow.agent[data-seq]` 里放 `.gbox[data-agent]`——
+  // 一轮里**每个 agent 各一个块**，直播区靠这个身份找对自己的那一块（§87）
   const row = mkEl('div');
   row.className = 'crow agent' + (isProv ? ' live-prov' : '');
   row.dataset.seq = String(seq);
   const av = mkEl('div'); av.className = 'avatar'; row.appendChild(av);
   const col = mkEl('div'); col.className = 'ccol'; row.appendChild(col);
-  const g = mkEl('div'); g.className = 'gbox'; col.appendChild(g);
+  const g = mkEl('div'); g.className = 'gbox';
+  g.dataset.agent = String(agent || 'Main');
+  col.appendChild(g);
   content.appendChild(row);
   return {row, gbox:g};
+}
+// 当前 agent 的已完成条目（新结构按 agent 分：LIVE.steps[aid]）
+function stepsOf(aid){
+  const a = aid || resolveAgentId(LIVE.agent) || 'Main';
+  return LIVE.steps[a] || [];
 }
 function resetLive(){
   DOM = resetDom();
@@ -346,7 +355,8 @@ function resetLive(){
   REG = { Main:{id:'Main', name:'主agent'}, A:{id:'A', name:'域甲'} };
   TAB = 'conv'; CUR = 's1';
   LIVE.job = 'j1'; LIVE.cur = 's1'; LIVE.seq = 7; LIVE.think=''; LIVE.ans='';
-  LIVE.events = []; LIVE.doneSig=''; LIVE.prov = null; LIVE.keep = null;
+  LIVE.steps = {}; LIVE.doneSig = {}; LIVE.boxes = {}; LIVE.provs = {};
+  LIVE.keep = null; LIVE.agent = '';
   LIVE.closing = false; LIVE.startedAt = Date.now(); LIVE.status='';
 }
 
@@ -360,31 +370,31 @@ applyChunk({k:'think', s:'再想第二段。'});
 applyChunk({k:'ans', s:'**加粗**的正文'});
 renderLive();
 {
-  const box = F.gbox.querySelector('#livebox');
+  const box = F.gbox.querySelector('.livebox');
   if (process.env.WEBUI_RENDER_DUMP) console.log('   [dbg]', JSON.stringify({
     box:!!box, boxId:box&&box.id, kids:box&&box.children.length,
     html:box&&box._html.slice(0,60), TAB:TAB, CUR:CUR, liveCur:LIVE.cur,
-    evLen:LIVE.events.length, think:LIVE.think, ans:LIVE.ans }));
+    evLen:stepsOf().length, think:LIVE.think, ans:LIVE.ans }));
   if (!box) problems.push('F: 直播节点没挂在正式消息块里');
   if (liveboxDirectUnderContent()) problems.push('F: 直播节点挂到了 #content 直下（跑到块外面）');
-  const tb = box && box.querySelector('#live-think');
+  const tb = box && box.querySelector('.live-think');
   if (!tb) problems.push('F: 没有思考块');
   else if (tb.classList.contains('open')) problems.push('F: 思考块默认是展开的（应像工具卡一样一行折叠）');
-  const head = box.querySelector('#live-think-head');
+  const head = box.querySelector('.live-think-head');
   if (head && !/点击展开/.test(head.textContent)) problems.push('F: 思考块头部没有"点击展开"提示');
-  const body = box.querySelector('#live-think-body');
+  const body = box.querySelector('.live-think-body');
   if (body && body.textContent !== '再想第二段。') problems.push('F: 在飞思考文本不对');
   // ② 一步结束的内容不许消失：应当留在已完成区
-  const kept = LIVE.events.map(e=>e.text).join('|');
+  const kept = stepsOf().map(e=>e.text).join('|');
   if (!kept.includes('先想第一段。')) problems.push('F: 一步结束后思考被清空（会"消失一下再出现"）');
   if (!kept.includes('**加粗**的正文') && LIVE.ans!=='**加粗**的正文')
     problems.push('F: 正文既不在已完成区也不在飞（丢了）');
   // ④ 正文必须走 md()，不是 textContent
-  const ab = box.querySelector('#live-ans');
+  const ab = box.querySelector('.live-ans');
   if (!ab) problems.push('F: 没有正文节点');
   else if (!/<strong>加粗<\/strong>/.test(ab.innerHTML))
     problems.push('F: 正文没有实时渲染 MD（应出 <strong>）');
-  console.log(`  F 已完成条目=${LIVE.events.length} 思考折叠=${tb?!tb.classList.contains('open'):'?'} 正文MD=${!!(ab&&/<strong>/.test(ab.innerHTML))}`);
+  console.log(`  F 已完成条目=${stepsOf().length} 思考折叠=${tb?!tb.classList.contains('open'):'?'} 正文MD=${!!(ab&&/<strong>/.test(ab.innerHTML))}`);
 }
 
 console.log('场景 G｜直播区：轮号未知时也要挂在**消息块**里（临时块），不再落到 #content');
@@ -395,11 +405,11 @@ renderLive();
 {
   const prov = DOM.content.querySelector('.crow.live-prov');
   if (!prov) problems.push('G: 没有造出临时消息块');
-  if (!prov || !prov.querySelector('.gbox #livebox'))
+  if (!prov || !prov.querySelector('.gbox .livebox'))
     problems.push('G: 临时块里没有直播节点（会跑到块外面）');
   if (liveboxDirectUnderContent())
     problems.push('G: 直播节点挂到了 #content 直下（正是用户报的"思考在消息块外面"）');
-  console.log(`   G 临时块=${!!prov} 挂在块内=${!!(prov&&prov.querySelector('.gbox #livebox'))}`);
+  console.log(`   G 临时块=${!!prov} 挂在块内=${!!(prov&&prov.querySelector('.gbox .livebox'))}`);
 }
 
 // 造一份"本轮已落账"的会话数据：用户消息 + 一步工具调用（带思考）+ 最终回答。
@@ -428,12 +438,12 @@ applyChunk({k:'think', s:'跑到一半的思考'});
 applyChunk({k:'ans', s:'**跑到一半**的正文'});
 renderLive();
 {
-  const before = DOM.content.querySelector('#livebox');
+  const before = DOM.content.querySelector('.livebox');
   drawConv(DOM.content, false);                 // 整段重绘（renderTab/轮询都会走）
-  const after = DOM.content.querySelector('#livebox');
+  const after = DOM.content.querySelector('.livebox');
   if (!after) problems.push('I: 整段重绘把直播区冲掉了（会闪一下、甚至消失）');
   else if (before && after !== before) problems.push('I: 重绘换了新节点（展开状态/增量会丢）');
-  const ab = after && after.querySelector('#live-ans');
+  const ab = after && after.querySelector('.live-ans');
   if (!ab || !/strong/.test(ab.innerHTML))
     problems.push('I: 重绘后正文的 MD 渲染丢了');
   if (liveboxDirectUnderContent()) problems.push('I: 重绘后直播节点跑到 #content 直下');
@@ -474,7 +484,7 @@ drawConv(DOM.content, true);
 {
   const rows = DOM.content.querySelectorAll('.crow.agent');
   const provs = DOM.content.querySelectorAll('.crow.live-prov');
-  const boxes = DOM.content.querySelectorAll('#livebox');
+  const boxes = DOM.content.querySelectorAll('.livebox');
   if (provs.length) problems.push('J: 收尾后还留着临时消息块（那就是"第二个块"）');
   if (boxes.length) problems.push('J: 收尾重绘后直播节点又被挂回去了');
   if (rows.length !== 1) problems.push(`J: 收尾后本轮应有 1 个消息块，实际 ${rows.length}`);
@@ -490,7 +500,7 @@ renderLive();                                   // 造出"残留的临时块 + �
   const beforeP = DOM.content.querySelectorAll('.crow.live-prov').length;
   liveAttach('jx');                             // 不 await：清扫发生在 await 之前
   const p = DOM.content.querySelectorAll('.crow.live-prov').length;
-  const b = DOM.content.querySelectorAll('#livebox').length;
+  const b = DOM.content.querySelectorAll('.livebox').length;
   if (beforeP !== 1) problems.push('K: 前置条件没造出来（应有 1 个残留临时块）');
   if (p || b) problems.push('K: 开新一轮没有清掉上一轮的残留直播 DOM');
   const job1 = LIVE.job;
@@ -518,7 +528,7 @@ renderLive();
   const prov2 = DOM.content.querySelector('.crow.live-prov');
   const rows = DOM.content.querySelectorAll('.crow.agent');
   if (prov2) problems.push('L: 轮号到了还留着临时块（就是"思考被复制一份到下面"）');
-  if (!DOM.content.querySelector('.crow.agent[data-seq="7"] #livebox'))
+  if (!DOM.content.querySelector('.crow.agent[data-seq="7"] .livebox'))
     problems.push('L: 轮号到了却没并回正式消息块');
   if (rows.length !== 1) problems.push(`L: 应只剩 1 个消息块，实际 ${rows.length}`);
   console.log(`   L 临时块残留=${!!prov2} 消息块=${rows.length}`);
@@ -540,8 +550,8 @@ renderLive();
   const rl = document.getElementById('runline');
   const has = rl && /整理/.test(rl.innerHTML);
   if (!has) problems.push('M: 运行线没显示"正在整理"（用户会以为卡死）');
-  const box = DOM.content.querySelector('#livebox');
-  const done = box && box.querySelector('#live-done');
+  const box = DOM.content.querySelector('.livebox');
+  const done = box && box.querySelector('.live-done');
   if (!done || !/strong/.test(done.innerHTML))
     problems.push('M: 进整理后回答消失了（应留在完成区，等正式渲染接管）');
   console.log(`   M 运行线含整理=${!!has} 回答留在完成区=${!!(done&&/strong/.test(done.innerHTML))}`);
@@ -567,7 +577,38 @@ console.log('场景 N｜后台维护观察器：有 pending 轮才武装、且�
   console.log(`   N 无 pending 不武装=true 有 pending 武装数=${armed} 幂等=${_timers.length===before}`);
 }
 
-function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('#livebox'); }
+console.log('场景 O｜一轮里两名 agent：各自的思考必须各进各的消息块');
+resetLive();
+// 与真 drawConv 一样：主 agent 一块、接手方 A 一块，**同一个 data-seq**
+const O1 = mountRound(DOM.content, 7, false, 'Main');
+const O2 = mountRound(DOM.content, 7, false, 'A');
+META.round_list = [{seq:7, active_view:'A', events:2, steps_used:2}];
+META.status = 'in_progress';
+// 主 agent 先干一步（思考 + 路由前的过程发言），再交给 A
+applyChunk({k:'think', s:'主 agent 的思考', ag:'Main'});
+renderLive();
+applyChunk({k:'status', s:'等待模型响应…', ag:'Main'});   // 收口 → 进 Main 的完成区
+applyChunk({k:'think', s:'A 的思考', ag:'A'});            // 换手：轮到 A
+renderLive();
+{
+  const boxMain = O1.gbox.querySelector('.livebox');
+  const boxA = O2.gbox.querySelector('.livebox');
+  if (!boxMain) problems.push('O: 主 agent 的块里没有它的直播节点');
+  if (!boxA) problems.push('O: A 的块里没有它的直播节点（思考会被挂到主 agent 那块）');
+  const mainDone = boxMain && boxMain.querySelector('.live-done');
+  const aBody = boxA && boxA.querySelector('.live-think-body');
+  if (!mainDone || !/主 agent 的思考/.test(mainDone.innerHTML))
+    problems.push('O: 主 agent 那一步的思考没留在主 agent 的块里');
+  if (!aBody || aBody.textContent !== 'A 的思考')
+    problems.push('O: A 的思考没进 A 的块（用户报的 bug 就是这个）');
+  if (boxA && /主 agent 的思考/.test(boxA.innerHTML))
+    problems.push('O: 主 agent 的思考串到了 A 的块里');
+  if (boxMain && /A 的思考/.test(boxMain.innerHTML))
+    problems.push('O: A 的思考串到了主 agent 的块里（正是用户报的现象）');
+  console.log(`   O 主块有内容=${!!mainDone} A块有内容=${!!aBody} 互不串=${!(boxA&&/主 agent 的思考/.test(boxA.innerHTML))}`);
+}
+
+function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('.livebox'); }
 
 console.log('');
 if (problems.length) {
@@ -575,7 +616,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（13 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（15 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 

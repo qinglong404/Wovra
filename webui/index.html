@@ -168,10 +168,11 @@ pre{white-space:pre-wrap;word-break:break-word;font-family:inherit}
 .live-dot{width:8px;height:8px;border-radius:50%;background:var(--acc);animation:pulse 1.2s infinite;flex-shrink:0}
 /* 直播区（2026-09-13 大改）：条目走与事件区**同一个渲染器**（思考=.think-box
    一行折叠、正文=.bub.md），所以这里只补布局，不再有自己的一套样式；
-   `#live-ans` 是 `.bub.md`，**不能** pre-wrap（那是纯文本时代的写法）。 */
-#livebox{margin:2px 0 0}
-#livebox #live-done:empty{display:none}
-#livebox #live-ans{margin-top:8px}
+   `.live-ans` 是 `.bub.md`，**不能** pre-wrap（那是纯文本时代的写法）。
+   一个 agent 一个 `.livebox`（一轮里多名 agent 时各挂各的消息块）。 */
+.livebox{margin:2px 0 0}
+.livebox .live-done:empty{display:none}
+.livebox .live-ans{margin-top:8px}
 .think-box{background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin:3px 0;overflow:hidden}
 .think-head{padding:5px 11px;font-size:11px;color:var(--tx3);cursor:pointer;font-family:var(--mono);user-select:none}
 .think-head:hover{color:var(--tx2)}
@@ -800,7 +801,7 @@ function mainSenderFallback(){
 function syncLiveSeq(round){
   const n=Number(round||0);
   if(!n||n===LIVE.seq)return false;
-  LIVE.seq=n;LIVE.doneSig='';
+  LIVE.seq=n;LIVE.doneSig={};        // 换轮：完成区签名全部失效
   if(!LIVE.closing)renderLive();
   return true;
 }
@@ -820,14 +821,17 @@ function syncLiveSeq(round){
      * 条目一律走 `itemHtml()`（与事件区**逐字同款**：思考=一行折叠、正文=MD）；
      * 挂载点一律是**本轮的消息块**（正式块还没渲染就先造临时块，**不依赖
        seq**——seq 未知也照样挂在消息流里）；
-     * 一步结束只把内容**移进已完成列表**（`LIVE.events`）继续显示，绝不清空；
+     * 一步结束只把内容**移进这个 agent 的已完成列表**（`LIVE.steps[aid]`）继续显示，
+ * 绝不清空；
      * 轮收尾时由正式渲染在**同一位置**接管同样的内容，所以交接没有空档。 */
 const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             seq:0,baseRounds:0,sse:false,
-            events:[],       // 已完成步骤的条目（{t:'think'|'text'}），交接前一直显示
-            doneSig:'',      // 已完成列表签名（变了才重绘）
-            prov:null,       // 临时消息块（正式块出现后撤掉）
-            keep:null,       // drawConv 重绘时保活的直播节点（见 drawConv）
+            agent:'',        // 服务端报的"现在谁在干"（本轮 active_view）
+            steps:{},        // aid → 该 agent 已完成步骤的条目
+            boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
+            provs:{},        // aid → 该 agent 的临时消息块
+            doneSig:{},      // aid → 完成区签名（变了才重绘）
+            keep:null,       // drawConv 重绘时保活的节点（见 drawConv）
             closing:false};  // 轮已收尾：正式渲染接管，直播区不再回挂
 let SSE=null;
 function sseClose(){if(SSE){SSE.close();SSE=null}LIVE.sse=false}
@@ -865,19 +869,37 @@ function tickRunlineTime(){
 }
 /* 一步收口：把这一步已产出的思考/正文**移进已完成列表**，不清空。
    用户口径（2026-09-13）："其出现完，消失一下，才能出现"——旧实现在这里
-   `LIVE.think='';LIVE.ans=''`，内容当场从页面上消失，要等正式渲染才回来。 */
-function flushLiveStep(){
+   `LIVE.think='';LIVE.ans=''`，内容当场从页面上消失，要等正式渲染才回来。
+   **按 agent 分开记**（`LIVE.steps[aid]`）：一轮里主 agent 干的那几步归主 agent
+   的块，接手方干的那几步归它的块——不许混到一块去。 */
+function flushLiveStep(aid){
+  const who=aid||resolveAgentId(LIVE.agent)||'Main';
   const t=LIVE.think,a=LIVE.ans;
   LIVE.think='';LIVE.ans='';LIVE.mode='';
   if(!t&&!a)return false;
-  if(t)LIVE.events.push({t:'think',text:t,
-                         k:'live:'+LIVE.events.length+':think'});
-  if(a)LIVE.events.push({t:'text',text:a,md:true,
-                         k:'live:'+LIVE.events.length+':ans'});
+  const list=(LIVE.steps[who]=LIVE.steps[who]||[]);
+  if(t)list.push({t:'think',text:t,k:who+':'+list.length+':think'});
+  if(a)list.push({t:'text',text:a,md:true,k:who+':'+list.length+':ans'});
   return true;
+}
+/* 服务端报的"现在谁在干"（`chunk.ag` = 本轮 `active_view`）→ 注册表 id。
+   一轮里若有多名 agent，`drawConv` 给**每个发送者各建一个块**，所以必须按
+   agent 定位，不能只按轮号（用户 2026-09-13 报："下面 agent 的思考内容老是挂到
+   上面主 agent 中"——根因就是按轮号取到了第一个块 = 主 agent 那块）。 */
+function resolveAgentId(v){
+  const raw=String(v||'').trim();
+  if(!raw)return '';
+  const a=(typeof REG==='object'&&REG)?(REG[raw]||null):null;
+  return a?String(a.id||raw):raw;
 }
 function applyChunk(c){
   let dirty=false;
+  // agent 换手（route_to 之后）：先把上一个的"在飞"内容收进它自己的列表，
+  // 再切——不这么做，接手方的思考会顶掉前一位还没收口的那段
+  if(c.ag&&c.ag!==LIVE.agent){
+    flushLiveStep(LIVE.agent);
+    LIVE.agent=c.ag;dirty=true;
+  }
   if(c.k==='think'){
     if(LIVE.mode!=='think'){LIVE.mode='think';LIVE.status='思考中…';dirty=true}
     LIVE.think+=c.s;dirty=true;
@@ -914,12 +936,11 @@ async function liveAttach(jobId,resume){
   // **先把上一轮可能残留的直播 DOM 清干净**（2026-09-13 用户报"一轮分成两个
   // 消息块、思考都在下面"）：只要有任一条完成路径漏了 liveDetach，残留的临时块
   // 就会一直挂在正式块下面，看起来就是同一轮被切成两块。这里做一次兜底清扫。
-  document.getElementById('livebox')?.remove();
-  document.querySelector('.crow.live-prov')?.remove();
+  purgeLiveDom();
   Object.assign(LIVE,{job:jobId,cur:CUR,viaSend:false,next:0,think:'',ans:'',
-                      status:'',mode:'',seq:0,startedAt:Date.now(),
-                      events:[],doneSig:'',prov:null,keep:null,closing:false,
-                      finishing:false,
+                      status:'',mode:'',seq:0,startedAt:Date.now(),agent:'',
+                      steps:{},boxes:{},provs:{},doneSig:{},keep:null,
+                      closing:false,finishing:false,
                       baseRounds:(META&&META.round_list||[]).length});
   // **刷新后的重新挂载**：先做一次单次 catch-up（一次请求拿全量分片、
   // **只重绘一次**），再让 SSE 从 next 接上——避免"从 0 重放几百个分片"
@@ -943,12 +964,17 @@ async function liveAttach(jobId,resume){
   document.title='● 运行中 · Wovra 现场';
   sseConnect(jobId,after);
 }
+/* 把直播区在页面上的痕迹全部抹掉（每个 agent 一个块 + 一个临时块） */
+function purgeLiveDom(){
+  document.querySelectorAll('.livebox').forEach(b=>b.remove());
+  document.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
+}
 function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
   sseClose();clearPendingBar();
-  document.getElementById('livebox')?.remove();
-  document.querySelector('.crow.live-prov')?.remove();
-  LIVE.prov=null;LIVE.keep=null;LIVE.events=[];LIVE.doneSig='';
+  purgeLiveDom();
+  LIVE.steps={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};
+  LIVE.keep=null;LIVE.agent='';
   LIVE.closing=false;LIVE.finishing=false;
   const st=document.getElementById('stop');if(st)st.style.display='none';
   const rb=document.getElementById('runbar');if(rb)rb.classList.remove('on');
@@ -1061,7 +1087,10 @@ async function pollLive(){
   let dirty=false;
   for(const c of d.chunks||[])dirty=applyChunk(c)||dirty;
   LIVE.next=d.next||LIVE.next;
-  if(CUR===LIVE.cur&&(dirty||!document.getElementById('livebox')))renderLive();
+  // 这一轮有任何直播节点缺失（首次/被重绘冲掉）也要重绘一次把它挂回来
+  const aid=resolveAgentId(LIVE.agent)||'Main';
+  const missing=!LIVE.boxes[aid]||!LIVE.boxes[aid].isConnected;
+  if(CUR===LIVE.cur&&(dirty||missing))renderLive();
   tickStopBtn();
   if(d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
 }
@@ -1111,14 +1140,14 @@ function restoreOpenBlocks(open){
     // `else if(!open.has(k)&&d.open) d.open=false`，它会把"刚建好、默认展开"
     // 的直播思考块一起关掉（重绘后键对不上）——表现就是"思考默认折叠、要手动
     // 展开"。而直播块本身不归这套快照管（它的开合由 renderLive 按思考状态控制）。
-    if(d.closest('#livebox'))return;
+    if(insideLive(d))return;
     const k=blockKey(d);
     if(open.has(k)&&!d.open)d.open=true;
   });
   // 思考块/工具卡：**只补开**（同一条口径，绝不强制折叠——用户手动点开的
   // 东西不许被机制合上）
   document.querySelectorAll('#content .think-box,#content .tcard').forEach(d=>{
-    if(d.closest('#livebox'))return;
+    if(insideLive(d))return;
     const k=openKey(d);
     if(open.has(k))d.classList.add('open');
   });
@@ -1126,74 +1155,96 @@ function restoreOpenBlocks(open){
 /* 直播区骨架：**与事件区同款**——思考走 `.think-box`（一行折叠、点击展开），
    正文走 `.bub.md`（MD 渲染）。不是另画一套样式。 */
 const LIVE_SKELETON=
-  `<div id="live-done"></div>`+
-  `<div class="think-box" id="live-think" style="display:none" onclick="toggleThink(this)">`+
-    `<div class="think-head" id="live-think-head"></div>`+
-    `<div class="think-body" id="live-think-body"></div></div>`+
-  `<div class="bub md" id="live-ans" style="display:none"></div>`;
+  `<div class="live-done"></div>`+
+  `<div class="think-box live-think" style="display:none" onclick="toggleThink(this)">`+
+    `<div class="think-head live-think-head"></div>`+
+    `<div class="think-body live-think-body"></div></div>`+
+  `<div class="bub md live-ans" style="display:none"></div>`;
 
-/* 本轮**消息块**的 gbox：正式块优先；还没有就先造/复用临时块。
-   **不依赖 LIVE.seq**（用户报的"思考跑到消息块外面"就是这里：seq=0 时旧代码
-   直接挂 `#content` 底部，于是没有头像/没有边框、看着在块外）。 */
-function liveHost(keep){
-  const seq=String(LIVE.seq||'');
+/* 某个 agent 的**消息块**的 gbox：正式块优先（按 agent 精确定位），
+   还没有就先造/复用**这个 agent 自己的**临时块。
+   **不依赖 LIVE.seq**（seq=0 时旧代码直接挂 `#content` 底部，没有头像没有边框）。
+   多个 agent 各有一块：主 agent 的思考归主 agent，接手方的归接手方。 */
+function liveGbox(seq,aid){
   if(seq){
-    const g=document.querySelector(`.crow.agent[data-seq="${seq}"] .gbox`);
-    if(g){
-      document.querySelector('.crow.live-prov')?.remove();   // 别留一个空的 agent 行
-      LIVE.prov=null;
-      return g;
+    const rows=document.querySelectorAll(`.crow.agent[data-seq="${seq}"]`);
+    let unnamed=null,last=null;
+    for(const r of rows){
+      const g=r.querySelector('.gbox');
+      if(!g)continue;
+      const gid=String(g.dataset.agent||'');
+      if(gid===aid){removeProv(aid);return g}   // 精确命中：就是这个 agent 的块
+      if(!gid)unnamed=unnamed||g;               // 老结构（没有身份标记）
+      last=g;                                   // 事件顺序上最后说话的才是现在干活的
     }
+    // 兜底（数据缺身份标记时）：只有一个块就是它；多块就取最后那个
+    const fb=(rows.length===1)?(unnamed||last):(unnamed||last);
+    if(fb){removeProv(aid);return fb}
   }
-  let prov=(keep&&keep.prov)
-          ||((LIVE.prov&&LIVE.prov.isConnected)?LIVE.prov
-             :document.querySelector('.crow.live-prov'));
+  // **不能因为"没挂在 DOM 上"就丢掉**：`drawConv` 重绘前会把它们摘下来保活，
+  // 再交给这里接回去（`if(box.parentNode!==host)`）。真正的清理走 liveDetach。
+  let prov=LIVE.provs[aid];
   if(!prov){
     prov=document.createElement('div');
     prov.className='crow agent live-prov';
+    prov.dataset.agent=aid;
     if(seq)prov.dataset.seq=seq;
-    const meta=(META&&META.round_list||[]).find(r=>String(r.seq)===seq)||null;
-    let s=meta?senderOf(meta):null;
+    const meta=(META&&META.round_list||[]).find(r=>String(r.seq)===String(seq))||null;
+    let s=null;
+    try{s=senderForAgent(LIVE.agent||aid,meta)}catch(e){}
     if(!s||s.unassigned)s=mainSenderFallback();   // 活轮不用"无落点"那个标签
     prov.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
       +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
       +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`
-      +`<div class="gbox" style="border-color:${s.color}55"></div></div>`;
+      +`<div class="gbox" data-agent="${esc(aid)}" style="border-color:${s.color}55"></div></div>`;
+    LIVE.provs[aid]=prov;
   }
   const c=$('#content');
   if(c&&prov.parentNode!==c)c.appendChild(prov);   // 被 drawConv 摘下来的：接回去
-  LIVE.prov=prov;
   return prov.querySelector('.gbox');
 }
-
-/* 这个元素在不在直播区里（**不能用 closest**：它得在真 DOM 与渲染核对仪的
+function removeProv(aid){
+  const p=LIVE.provs[aid];
+  if(p){p.remove();delete LIVE.provs[aid]}
+}
+/* 某个 agent 的直播节点（一轮里每个 agent 各一个，内容不混） */
+function liveBox(aid,host){
+  // 同上：摘下来的节点要复用（同一个节点 → 展开状态与增量都不丢）
+  let box=LIVE.boxes[aid];
+  if(!box){
+    box=document.createElement('div');
+    box.className='livebox';
+    box.dataset.agent=aid;
+    LIVE.boxes[aid]=box;
+  }
+  // 缺骨架就补（**不能只按"节点在不在"判断**：保活/旧版残留都可能给出空盒子）
+  if(!box.querySelector('.live-done'))box.innerHTML=LIVE_SKELETON;
+  if(box.parentNode!==host)host.appendChild(box);
+  return box;
+}
+/* 这个元素在不在某个直播节点里（**不能用 closest**：它得在真 DOM 与渲染核对仪的
    迷你 DOM 里都成立）。 */
 function insideLive(el){
   let p=el&&el.parentNode;
   while(p){
-    if(p.id==='livebox')return true;
+    if(p.classList&&p.classList.contains('livebox'))return true;
     p=p.parentNode||p.parentElement;
   }
   return false;
 }
-/* 完成区的条目：与事件区同款渲染，但**扣掉正式渲染已经画过的部分**
+/* 某个 agent 的"完成区"：与事件区同款渲染，但**扣掉正式渲染已经画过的部分**
    （刷新后 catch-up 重放了整条流，而事件区可能已经画过前几步——不扣会重复）。
-   **必须把直播区自己排除在外**：`#live-think` 与完成区的思考块也是 `.think-box`，
+   **必须把直播区自己排除在外**：`.live-think` 与完成区的思考块也是 `.think-box`，
    一起数进去会越扣越多，最后连刚做完的思考都被吃掉（写这段时踩到）。 */
-function liveDoneHtml(){
-  const seq=String(LIVE.seq||'');
+function liveDoneHtml(aid,host){
   let covT=0,covX=0;
-  if(seq){
-    const row=document.querySelector(`.crow[data-seq="${seq}"]`);
-    const g=(row&&!row.classList.contains('live-prov'))
-      ?row.querySelector('.gbox'):null;
-    if(g){
-      covT=[...g.querySelectorAll('.think-box')].filter(x=>!insideLive(x)).length;
-      covX=[...g.querySelectorAll('.bub')].filter(x=>!insideLive(x)).length;
-    }
+  if(host){
+    covT=[...host.querySelectorAll('.think-box')].filter(x=>!insideLive(x)).length;
+    covX=[...host.querySelectorAll('.bub')].filter(x=>!insideLive(x)).length;
   }
+  const list=LIVE.steps[aid]||[];
   let t=0,x=0;
-  const items=LIVE.events.filter(it=>{
+  const items=list.filter(it=>{
     if(it.t==='think'){t++;return t>covT}
     x++;return x>covX;
   });
@@ -1206,54 +1257,12 @@ function renderLive(){
   // （H 场景原本空跑掩盖了它：CONV 为空 → drawConv 提前 return，压根没走到）。
   if(LIVE.closing)return;
   if(TAB!=='conv'||CUR!==LIVE.cur)return;
-  // 保活的节点优先复用（drawConv 重绘时把它摘下来交给这里接回去）
-  const keep=LIVE.keep;LIVE.keep=null;
-  const host=liveHost(keep);
-  if(!host)return;
-  let box=(keep&&keep.box)||document.getElementById('livebox');
-  if(!box){
-    box=document.createElement('div');
-    box.id='livebox';
-  }
-  // 缺骨架就补（**不能只按"节点在不在"判断**：保活/旧版残留都可能给出一个
-  // 空盒子，里面没有 #live-done/#live-think/#live-ans）
-  if(!box.querySelector('#live-done'))box.innerHTML=LIVE_SKELETON;
-  if(box.parentNode!==host)host.appendChild(box);
-  // ① 已完成步骤：内容不再变 → 签名变了才重绘
-  const done=box.querySelector('#live-done');
-  if(done){
-    const sig=LIVE.events.length+':'+LIVE.seq;
-    if(sig!==LIVE.doneSig){
-      done.innerHTML=liveDoneHtml();
-      LIVE.doneSig=sig;
-      highlightIn(done);
-    }
-  }
-  // ② 在飞思考：**一行折叠**（和工具卡一样），要看得自己点开
-  const tb=box.querySelector('#live-think');
-  const tbody=box.querySelector('#live-think-body');
-  const thead=box.querySelector('#live-think-head');
-  if(tb&&tbody&&thead){
-    if(LIVE.think){
-      tb.style.display='';
-      if(tbody.textContent!==LIVE.think)tbody.textContent=LIVE.think;
-      const head=`💭 ${LIVE.status||'思考中'} · ${fmtN(LIVE.think.length)} 字（点击展开）`;
-      if(thead.textContent!==head)thead.textContent=head;
-    }else{
-      tb.style.display='none';          // 没有在飞思考就不留空块
-    }
-  }
-  // ③ 在飞正文：**实时 MD**（用户口径：不要等加载完才渲染）
-  const ab=box.querySelector('#live-ans');
-  if(ab){
-    if(LIVE.ans){
-      ab.style.display='';
-      const html=md(LIVE.ans);
-      if(ab._md!==html){ab.innerHTML=html;ab._md=html;highlightIn(ab)}
-    }else{
-      ab.style.display='none';ab._md='';
-    }
-  }
+  const actor=resolveAgentId(LIVE.agent)||'Main';
+  // **每个有内容的 agent 都要刷**，不只当前这个：换手那一刻上一位的最后一步
+  // 刚被收进它的列表，如果不再渲染它那块，那一步就永远停在"没画出来"的状态
+  // （写这段时踩到——场景 O 里主 agent 那步的思考在它自己块里是空的）。
+  const who=new Set([actor, ...Object.keys(LIVE.steps), ...Object.keys(LIVE.boxes)]);
+  who.forEach(aid=>renderLiveOne(aid, aid===actor));
   const rl=document.getElementById('runline');
   if(rl){
     rl.classList.add('on');
@@ -1270,6 +1279,49 @@ function renderLive(){
     const near=(c.scrollHeight-c.scrollTop-c.clientHeight)<tol;
     if(near){c.scrollTop=c.scrollHeight;}
     else if(window._followNagged!==true){window._followNagged=true;renderFollowChip&&renderFollowChip();}
+  }
+}
+
+/* 刷**一个 agent** 的直播节点。`isActor=true` 才画"在飞"的思考/正文——
+   在飞的缓冲（LIVE.think/ans）永远属于当前在干活的那一个。 */
+function renderLiveOne(aid,isActor){
+  const host=liveGbox(String(LIVE.seq||''),aid);
+  if(!host)return;
+  const box=liveBox(aid,host);
+  // ① 这个 agent 的已完成步骤：内容不再变 → 签名变了才重绘
+  const done=box.querySelector('.live-done');
+  if(done){
+    const sig=((LIVE.steps[aid]||[]).length)+':'+aid;
+    if(sig!==LIVE.doneSig[aid]){
+      done.innerHTML=liveDoneHtml(aid,host);
+      LIVE.doneSig[aid]=sig;
+      highlightIn(done);
+    }
+  }
+  // ② 在飞思考：**一行折叠**（和工具卡一样），要看得自己点开
+  const tb=box.querySelector('.live-think');
+  const tbody=box.querySelector('.live-think-body');
+  const thead=box.querySelector('.live-think-head');
+  if(tb&&tbody&&thead){
+    if(isActor&&LIVE.think){
+      tb.style.display='';
+      if(tbody.textContent!==LIVE.think)tbody.textContent=LIVE.think;
+      const head=`💭 ${LIVE.status||'思考中'} · ${fmtN(LIVE.think.length)} 字（点击展开）`;
+      if(thead.textContent!==head)thead.textContent=head;
+    }else{
+      tb.style.display='none';          // 没有在飞思考就不留空块
+    }
+  }
+  // ③ 在飞正文：**实时 MD**（用户口径：不要等加载完才渲染）
+  const ab=box.querySelector('.live-ans');
+  if(ab){
+    if(isActor&&LIVE.ans){
+      ab.style.display='';
+      const html=md(LIVE.ans);
+      if(ab._md!==html){ab.innerHTML=html;ab._md=html;highlightIn(ab)}
+    }else{
+      ab.style.display='none';ab._md='';
+    }
   }
 }
 
@@ -1471,10 +1523,10 @@ function drawConv(c,toBottom){
   // （表现为思考/正文"闪一下"）。这里先把它摘下来，重绘后交给 renderLive 接回
   // 原位置——同一个节点、同一份内容，没有空档。
   if(LIVE.job&&CUR===LIVE.cur&&!LIVE.closing){
-    LIVE.keep={box:document.getElementById('livebox'),
-               prov:document.querySelector('.crow.live-prov')};
-    LIVE.keep.box?.remove();
-    LIVE.keep.prov?.remove();
+    // **所有 agent 的直播节点与临时块都要保活**（一轮里每个干活的 agent 各一个）
+    LIVE.keep={boxes:Object.values(LIVE.boxes),provs:Object.values(LIVE.provs)};
+    LIVE.keep.boxes.forEach(b=>b&&b.remove&&b.remove());
+    LIVE.keep.provs.forEach(p=>p&&p.remove&&p.remove());
   }else{
     LIVE.keep=null;
   }
