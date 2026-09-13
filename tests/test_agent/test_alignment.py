@@ -106,6 +106,35 @@ def test_thread_is_delivered_once_into_assembled_envelope(tmp_path, monkeypatch)
     assert agent._take_thread_lines("前端") == []             # 不重复投递
 
 
+def test_file_map_not_injected_before_any_split(tmp_path, monkeypatch):
+    """**还没分裂就不注入文件地图**（2026-09-13 用户口径）。
+
+    用户原话："现在还没有触发一次分裂，不需要路由，因此不需要这个东西。"
+    地图的用处是"谁维护哪些文件"（路由与权限的依据）；注册表里只有主 agent 时
+    没有归属歧义、没有路由可走，注入纯属噪声，还白占一段前缀。
+    """
+    from wovra import views as views_module
+
+    (tmp_path / "tasks").mkdir(exist_ok=True)
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setattr("wovra.tools.safety.PROJECT_ROOT", tmp_path)
+    (tmp_path / "output").mkdir(exist_ok=True)
+    (tmp_path / "output" / "tool_probe.txt").write_text(
+        "# Wovra 工具连通性探针\n", encoding="utf-8")
+    task = Task.create(goal="未分裂")
+    agent = _agent(task, registry_module.MAIN_AGENT_ID)
+    # 分裂前主 agent 建的文件也会进它自己的清单（F5 谁创建谁拥有）——
+    # 用户看到的那条地图行正是这么来的
+    agent._claim_new_file("output/tool_probe.txt")
+    lines, sig = views_module.file_map_lines(agent.rounds, task.registry)
+    assert lines and sig, "地图本身算得出来——问题不在算，而在还没分裂就注入"
+    assert any("tool_probe" in ln for ln in lines)
+
+    assert agent._inject_file_map_if_changed() is False
+    assert agent.current_round["events"] == []
+    assert not task.file_map_sig, "没注入就不该盖章：分裂后第一张地图照样要进得来"
+
+
 def test_file_map_injected_only_when_changed(tmp_path, monkeypatch):
     """文件地图：**描述来自整理写的块摘要**，且**变了才注入**（用户口径）。
 

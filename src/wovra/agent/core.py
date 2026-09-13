@@ -639,15 +639,26 @@ class _CoreMixin:
           若只塞进尾部信封，下一轮就没了——信封不进历史）。
 
         只在轮开启时注入：轮进行中改装配会打断当前协议序列。
+
+        **门：还没分裂就不注入**（2026-09-13 用户口径）——用户原话："现在还没有
+        触发一次分裂，不需要路由，因此不需要这个东西"。地图的用处是"谁维护哪些
+        文件"（路由与权限的依据）；注册表里只有主 agent 时没有归属歧义、没有
+        路由可走，注入纯属噪声（还会白占一段前缀）。分裂之后才注入。
         """
         if self.task is None or self.current_round is None:
+            return False
+        subs = [e for e in (self.task.registry or [])
+                if isinstance(e, dict) and e.get("name")
+                and str(e.get("id") or "") != registry_module.MAIN_AGENT_ID]
+        if not subs:
             return False
         lines, sig = views_module.file_map_lines(self.rounds, self.task.registry)
         if not lines or not sig or sig == str(self.task.file_map_sig or ""):
             return False
         self.task.file_map_sig = sig
         shown = lines[:120]
-        body = "[文件地图]（职责/文件有变化时才注入；每行 = 文件（状态｜归属域）：一句话描述）\n"
+        # 抬头只说格式，不解释机制（同 §80 的产品口径：机制说明不进产品文案）
+        body = "[文件地图]（每行 = 文件｜状态｜归属域｜一句话描述）\n"
         body += "\n".join(shown)
         if len(lines) > len(shown):
             body += f"\n…（共 {len(lines)} 个文件，只列前 {len(shown)} 行）"

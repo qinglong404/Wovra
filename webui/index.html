@@ -786,6 +786,23 @@ function consultSender(content){
   return null;
 }
 
+/* 正在跑的轮**不是**"机制生效前的老轮"——那是给历史闭合轮的标签。
+   轮号还没拿到时，兜底显示主 agent，绝不显示"无落点"（用户实测：直播块头部
+   写着"无落点（机制生效前） · 进行中"，那是拿历史标签套在活轮上）。 */
+function mainSenderFallback(){
+  const a=(typeof REG==='object'&&REG)?REG.Main:null;
+  const id=(a&&a.id)||'Main';
+  return {key:id,id,name:(a&&a.name)||'主agent',color:agentColor(id)};
+}
+/* 直播轮号从服务端同步（首个分片前后都可能变；每 300ms 的轮询顺手校一次，
+   免得整轮都挂在临时块上——那正是"思考被复制一份到下面"的成因）。 */
+function syncLiveSeq(round){
+  const n=Number(round||0);
+  if(!n||n===LIVE.seq)return false;
+  LIVE.seq=n;LIVE.doneSig='';
+  if(!LIVE.closing)renderLive();
+  return true;
+}
 /* ---- 轮直播（思考/回答流式 + 步骤状态）：serve 把 agent 流式回调写进 job.live ----
 
    2026-09-13 **大改**（用户口径："思考内容在消息块外面"、"出现完消失一下才能
@@ -910,9 +927,9 @@ async function liveAttach(jobId,resume){
   try{
     const d=await api(`/api/jobs/${jobId}/live?after=0`);
     let dirty=false;
-    // **轮号由服务端给**（job.round：开轮那一刻的 seq）。旧做法取
-    // `round_list` 末条的 seq——刚发出去那一瞬间 round_list 还没刷新，于是
-    // seq=0、直播内容挂到 `#content` 底部（"思考跑到消息块外面"的根因）。
+    // **轮号由服务端给**（job.round）：一眼就知道该挂进哪个消息块。服务端在
+    // 开轮那一刻就报了，所以这次 catch-up 通常已经拿得到；拿不到后面每次轮询
+    // 还会校（`syncLiveSeq`）。
     if(d&&d.round)LIVE.seq=Number(d.round)||0;
     for(const c of (d&&d.chunks)||[])dirty=applyChunk(c)||dirty;
     after=Number((d&&d.next)||0);
@@ -1012,6 +1029,7 @@ async function pollLive(){
   if(LIVE.sse){   // SSE 健康时零轮询；断开则 300ms 兜底
     const d=await api(`/api/jobs/${LIVE.job}`).catch(()=>null);
     if(d){
+      if(d.round)syncLiveSeq(d.round);
       if(d.pending)renderPendingBar(LIVE.job,d.pending);else clearPendingBar();
       if(d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
     }
@@ -1019,6 +1037,7 @@ async function pollLive(){
   }
   let d;
   try{d=await api(`/api/jobs/${LIVE.job}/live?after=${LIVE.next}`)}catch(e){return}
+  if(d.round)syncLiveSeq(d.round);
   if(d.pending)renderPendingBar(LIVE.job,d.pending);else clearPendingBar();
   // **SSE 断了也要能收尾**（2026-09-13 修的 bug：这条分支原先只看分片、不看
   // 状态，于是轮结束没人撤直播区——正式块在上面、直播临时块带着思考挂在下面，
@@ -1118,8 +1137,9 @@ function liveHost(keep){
     prov=document.createElement('div');
     prov.className='crow agent live-prov';
     if(seq)prov.dataset.seq=seq;
-    const meta=(META&&META.round_list||[]).find(r=>String(r.seq)===seq)||{};
-    const s=senderOf(meta);
+    const meta=(META&&META.round_list||[]).find(r=>String(r.seq)===seq)||null;
+    let s=meta?senderOf(meta):null;
+    if(!s||s.unassigned)s=mainSenderFallback();   // 活轮不用"无落点"那个标签
     prov.innerHTML=`<div class="avatar" style="background:linear-gradient(135deg,${s.color},${s.color}99)">${esc(avatarText(s.id))}</div>`
       +`<div class="ccol"><div class="cname" style="color:${s.color}">${esc(s.name)}`
       +`<span style="color:var(--tx3);font-weight:400"> · 进行中</span></div>`

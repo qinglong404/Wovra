@@ -495,6 +495,31 @@ renderLive();                                   // 造出"残留的临时块 + �
   if (job1 !== 'jx') problems.push('K: LIVE.job 不对');
   console.log(`   K 残留临时块 ${beforeP}→${p} 直播节点=${b}`);
 }
+console.log('场景 L｜活轮不许套"无落点（机制生效前）"，轮号一到就要并回正式块');
+resetLive();
+LIVE.seq = 0;                                   // 轮号还没到手（POST 刚返回）
+META.round_list = [{seq:7, active_view:'A', events:0, steps_used:1}];
+applyChunk({k:'think', s:'这一轮的思考'});
+renderLive();
+{
+  const prov = DOM.content.querySelector('.crow.live-prov');
+  if (!prov) problems.push('L: 没有造出临时块');
+  // 查 `innerHTML` 串而不是子节点的 textContent：桩的 innerHTML 解析不搬文本，
+  // 用 textContent 断言会**空跑**（写这条时踩到——它让旧的"无落点"行为也能过）。
+  if (prov && /无落点/.test(prov.innerHTML))
+    problems.push('L: 活轮的临时块套了历史标签"无落点（机制生效前）"');
+  // 轮号到了 + 正式块渲染出来 → 直播内容必须并回正式块，临时块撤掉
+  mountRound(DOM.content, 7, false);
+  syncLiveSeq(7);
+  const prov2 = DOM.content.querySelector('.crow.live-prov');
+  const rows = DOM.content.querySelectorAll('.crow.agent');
+  if (prov2) problems.push('L: 轮号到了还留着临时块（就是"思考被复制一份到下面"）');
+  if (!DOM.content.querySelector('.crow.agent[data-seq="7"] #livebox'))
+    problems.push('L: 轮号到了却没并回正式消息块');
+  if (rows.length !== 1) problems.push(`L: 应只剩 1 个消息块，实际 ${rows.length}`);
+  console.log(`   L 临时块残留=${!!prov2} 消息块=${rows.length}`);
+}
+
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('#livebox'); }
 
 console.log('');
@@ -503,7 +528,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（11 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 两处收尾不变量全查）');
+console.log('渲染核对：通过（12 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号不变量全查）');
 """
 
 

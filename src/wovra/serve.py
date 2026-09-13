@@ -335,6 +335,32 @@ _job_lock = threading.Lock()
 _ASK_TIMEOUT = int(os.environ.get("WOVRA_ASK_TIMEOUT", "1800"))
 
 
+def _round_seq_for(agent, content: str | None) -> int:
+    """**开轮之前**先把这一轮的 seq 估出来（0 = 估不出来，不编数）。
+
+    为什么要提前估（2026-09-13 用户实测的 bug）：前端一亮相就要把直播内容挂进
+    "本轮的消息块"，而它读轮号的时机是 POST 返回后**立刻**那次 catch-up——那时
+    一个分片都还没有。原先只在第一个分片到达时才报轮号，于是 round=0：前端整轮
+    都找不到本轮正式块，临时块一直挂在正式块下面，同一轮的思考被复制一份，
+    头部还显示成历史老轮的"无落点"。
+
+    公式与开轮处（`agent/core.py`：`seq = len(self.rounds) + 1`）一致；`/c`
+    续跑则取那个**开放轮**（没有开放轮就给 0，不瞎猜）。
+    """
+    try:
+        rounds = list(getattr(agent, "rounds", None) or [])
+    except TypeError:
+        return 0
+    if content is None:
+        last = rounds[-1] if rounds else {}
+        opened = str(last.get("end_state") or "") in ("", "open")
+        try:
+            return int(last.get("seq") or 0) if opened else 0
+        except (TypeError, ValueError):
+            return 0
+    return len(rounds) + 1
+
+
 def _execute_turn(job_id: str, task_id: str, content: str) -> None:
     """轮执行线程：CLI 同款管线（会话锁 → agent → run → 补整理）。
 
@@ -424,18 +450,17 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
             try:
                 agent = _build_agent(task, mode=task.mode or MODE_MANAGED,
                                      async_organization=False)
+                # **轮号立刻报出去**（2026-09-13 用户实测的 bug）：见 `_round_seq_for`
+                job["round"] = _round_seq_for(agent, content)
 
                 def _live(chunk: dict) -> None:
                     # 轮直播流（思考/回答增量、步骤状态）。单消费者轮询读，
                     # append 原子足够；量级 = 单轮流式分片，无需封顶。
-                    # **顺手把本轮的 seq 报出去**（2026-09-13）：前端要靠它把直播
-                    # 内容挂进"本轮的消息块"。旧做法让前端猜（取 round_list 末条），
-                    # 刚发出去那一瞬间 round_list 还没刷新 → seq=0 → 直播内容挂到
-                    # 页面底部、看着在消息块外面。轮号这里**现取现报**，最准。
-                    if not job.get("round"):
-                        cur = getattr(agent, "current_round", None) or {}
-                        if cur.get("seq"):
-                            job["round"] = int(cur["seq"])
+                    # 轮号以 agent 自己开的那个轮为准（上面那个是提前量的估计，
+                    # 这里用权威值覆盖；正常情况两者相同）。
+                    cur = getattr(agent, "current_round", None) or {}
+                    if cur.get("seq"):
+                        job["round"] = int(cur["seq"])
                     job["live"].append(chunk)
 
                 job["live"] = []

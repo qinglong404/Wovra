@@ -984,6 +984,32 @@ def test_http_shutdown(server):
         pass   # 连接拒绝/超时 = 监听已关闭（进程在真实部署随主线程退出）
 
 
+def test_round_seq_reported_before_first_chunk():
+    """开轮之前就要能报出轮号——前端靠它在"本轮消息块"里挂直播内容。
+
+    用户 2026-09-13 实测："思考内容消息块，都被复制一份放到了下面：无落点
+    （机制生效前） · 进行中"。根因：轮号原先只在**第一个分片到达时**才报，而
+    前端的首次 catch-up 在 POST 返回后立刻发生——那时 round=0，前端整轮都找不到
+    本轮正式块，临时块一直挂在下面（头部还套了历史老轮的"无落点"标签）。
+    """
+    class _A:
+        rounds: list = []
+
+    a = _A()
+    a.rounds = [{"seq": 1, "end_state": "completed"}]
+    assert serve._round_seq_for(a, "干活") == 2          # 新轮 = len(rounds)+1
+    a.rounds = [{"seq": 1, "end_state": "completed"},
+                {"seq": 2, "end_state": "open"}]
+    assert serve._round_seq_for(a, None) == 2            # /c 续跑：那个开放轮
+    a.rounds = [{"seq": 1, "end_state": "completed"}]
+    assert serve._round_seq_for(a, None) == 0            # 没有开放轮 → 不编数
+    a.rounds = []
+    assert serve._round_seq_for(a, "第一轮") == 1
+    # 没有 rounds 属性 → 按"空名下"处理（新轮 = 1），不炸也不编大数
+    assert serve._round_seq_for(object(), "干活") == 1
+    assert serve._round_seq_for(object(), None) == 0     # 续跑但找不到开放轮
+
+
 def test_http_live_stream_and_live_job(server):
     """轮直播：job.live 增量按 after 取；会话元数据带运行中作业 id。
 
