@@ -438,7 +438,7 @@ function resetLive(){
   TAB = 'conv'; CUR = 's1';
   LIVE.job = 'j1'; LIVE.cur = 's1'; LIVE.seq = 7; LIVE.think=''; LIVE.ans='';
   LIVE.events = {}; LIVE.calls = {}; LIVE.doneSig = {}; LIVE.boxes = {}; LIVE.provs = {};
-  LIVE.seenEv = {}; LIVE.callsVer = 0; LIVE.filledSig = {};
+  LIVE.seenEv = {}; LIVE.callsVer = 0; LIVE.filledSig = {}; LIVE.step = -1;
   LIVE.keep = null; LIVE.agent = '';
   LIVE.closing = false; LIVE.startedAt = Date.now(); LIVE.status='';
 }
@@ -1129,6 +1129,49 @@ META.status = 'in_progress';
     + `事件级别=${lv}`);
 }
 
+console.log('场景 Z｜事件**迟到/丢失**时，在飞正文也不许跨步堆积（用户报的"留在最后、越来越多"）');
+resetLive();
+const Z1 = mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:3, steps_used:3}];
+META.status = 'in_progress';
+{
+  // 真实形状（取自实测：一步 = 大段思考 + 小段过程发言；思考 1k~12k 字、正文 0~180 字）
+  const narr = ['先看一眼索引', '索引被清空了，查是谁动的', '跑一下编译闸门'];
+  const box = () => Z1.gbox.querySelector('.livebox');
+  const tailText = () => {
+    const tl = box() && box().querySelector('.live-tail');
+    return String((tl && tl.innerHTML) || '');
+  };
+  const seen = [];
+  for (let s = 0; s < 3; s++) {
+    // 每步：大段思考增量 → 小段正文增量，**都带步号**
+    for (let i = 0; i < 20; i++) {
+      applyChunk({k:'think', s:'想' + i, ag:'Main', st:s * 2});
+      renderLive();
+    }
+    applyChunk({k:'ans', s:narr[s], ag:'Main', st:s * 2});
+    renderLive();
+    seen.push(`第${s}步:${/先看一眼|索引被清空|编译闸门/.test(tailText()) ? '在飞有它' : '无'}`);
+    // 下一步开始（步号 +1）——**故意不推事件**，只推进步号
+    applyChunk({k:'think', s:'', ag:'Main', st:s * 2 + 1});
+    renderLive();
+    const leftover = tailText();
+    const stale = ['先看一眼索引', '索引被清空了，查是谁动的', '跑一下编译闸门']
+      .some(t => t !== narr[s] && leftover.includes(t));
+    if (stale) {
+      problems.push(`Z: 第${s}步之后的尾部还留着**更早那一步**的正文（越堆越多）`);
+    }
+    if (!LIVE.think && !LIVE.ans && leftover.trim() !== '') {
+      problems.push(`Z: 缓冲区已空但尾部还有内容（第${s}步）`);
+    }
+  }
+  // 最后：缓冲区空 → 尾部必须为空
+  applyChunk({k:'status', s:'等待模型响应…', ag:'Main', st:6});
+  renderLive();
+  if (tailText().trim() !== '') problems.push('Z: 收口之后尾部仍有内容');
+  console.log(`   Z ${seen.join(' | ')} 最终尾部=${tailText().trim() === '' ? '空' : '非空'}`);
+}
+
 console.log('场景 R｜运行中按**时间顺序**画：思考 → 工具卡 → 思考 → 最终回答（用户报的核心）');
 resetLive();
 const R1 = mountRound(DOM.content, 7, false, 'Main');
@@ -1203,7 +1246,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（26 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（27 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 

@@ -1039,18 +1039,30 @@ def test_http_live_stream_and_live_job(server):
     旧做法让前端猜（取 round_list 末条）——刚发出去那一瞬间 round_list 还没
     刷新，seq=0，直播内容就挂到页面底部、看着在消息块外面（用户 2026-09-13 报）。
     """
+    # `_live` 还会给每个分片补两个"只有服务端知道"的字段（2026-09-13）：
+    #   `ag` = 现在谁在干（一轮换手后内容该挂谁的块）；
+    #   `st` = **已落事件数**，一步之内不变——前端据此清掉上一步的在飞正文。
+    # 这里按同一段逻辑造一份分片（`_live` 是 `cmd_serve` 里的闭包，直接驱动不便），
+    # 验证它经 HTTP 原样到达前端。
+    from types import SimpleNamespace
+
+    fake_agent = SimpleNamespace(current_round={"seq": 7, "events": [1, 2, 3]},
+                                 _active_view=lambda: "域甲")
+    chunk = {"k": "ans", "s": "答", "ag": str(fake_agent._active_view() or ""),
+             "st": len((fake_agent.current_round or {}).get("events") or [])}
     serve._JOBS["jt"] = {"task_id": "s1", "status": "running", "round": 7,
                          "pending": {"type": "confirm", "question": "跑 git tag？"},
-                         "live": [{"k": "think", "s": "想"},
-                                  {"k": "ans", "s": "答"}]}
+                         "live": [{"k": "think", "s": "想"}, chunk]}
     try:
         code, body = _get(server + "/api/jobs/jt/live?after=0")
         assert code == 200 and body["status"] == "running"
         assert len(body["chunks"]) == 2 and body["next"] == 2
         assert body["round"] == 7                     # 本轮 seq 由服务端给
         assert body["pending"]["type"] == "confirm"   # 审批栏由轮询驱动
+        assert body["chunks"][1]["ag"] == "域甲"       # 执行方随分片到达
+        assert body["chunks"][1]["st"] == 3            # 步锚点随分片到达
         code, body = _get(server + "/api/jobs/jt/live?after=1")
-        assert body["chunks"] == [{"k": "ans", "s": "答"}] and body["next"] == 2
+        assert body["chunks"][0]["k"] == "ans" and body["next"] == 2
         code, body = _get(server + "/api/jobs/jt")
         assert body["round"] == 7                     # 单次快照也带
         code, body = _get(server + "/api/jobs/ghost/live")

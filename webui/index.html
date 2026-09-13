@@ -831,11 +831,12 @@ const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             agent:'',        // 当前在干活的视图（服务端报的）
             events:{},       // aid → 该 agent 的**流式事件**（与 /rounds 同形状）
             calls:{},        // tool_call_id → {name,args,result}（工具卡的回填状态）
+            provs:{},        // aid → 该 agent 的临时消息块
+            step:-1,         // 服务端报的步号（变了就说明上一步结束了）
             boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
             seenEv:{},       // 事件 id 去重表（重连/刷新重叠投递时只收一次）
             callsVer:0,      // 工具结果版本号（变了才重新回填卡片）
             filledSig:{},    // aid → 已回填到哪个版本
-            provs:{},        // aid → 该 agent 的临时消息块
             doneSig:{},      // aid → 完成区签名（变了才重绘）
             keep:null,       // drawConv 重绘时保活的节点（见 drawConv）
             closing:false};  // 轮已收尾：正式渲染接管，直播区不再回挂
@@ -880,24 +881,33 @@ function tickRunlineTime(){
 function flushLiveStep(){
   const had=!!(LIVE.think||LIVE.ans);
   LIVE.think='';LIVE.ans='';LIVE.mode='';
+}
   return had;
 /* 吃一个分片。返回**变化级别**：0=没变；1=只有文字在长（可合并渲染）；
    2=结构性变化（事件/状态/换手——必须立刻重绘）。调用方：
    `dirty=Math.max(dirty, applyChunk(c)||0)`，再按 `dirty>=2 ? renderLive() :
    (dirty ? scheduleLiveRender() : 0)` 决定。 */
-}
 function applyChunk(c){
   let level=0;
+  // **步的机械锚点**（2026-09-13 修，用户报"正文留在尾部、越堆越多"）：服务端每个
+  // 分片带 `st`（已落事件数，一步之内不变）。步号一变 → 上一步**一定结束了** →
+  // 立刻清在飞缓冲。收口从此**不依赖"事件是否按时到达"**：事件延迟/丢失/乱序都不会
+  // 再把上一段正文留在尾部堆着（此前正是靠"事件到达才清"）。
+  if(typeof c.st==='number'&&c.st!==LIVE.step){
+    flushLiveStep();
+    LIVE.step=c.st;bump(2);
+  }
   const bump=v=>{ if(v>level)level=v };
   // agent 换手（route_to 之后）：先把上一个的"在飞"内容清掉再切
   if(c.ag&&c.ag!==LIVE.agent){
-    LIVE.agent=c.ag;bump(2);LIVE.structural=2;
+    LIVE.agent=c.ag;bump(2);
     flushLiveStep();
   }
   // **事件分片**（2026-09-13 大改）：与 `/rounds/{seq}` 同一形状 → 走同一套
   // "事件 → 条目"映射。工具调用/工具结果/最终回答都在这里按时间顺序落地，
   // 于是运行中能看到工具块（此前只推文本增量，工具块在服务端就没推）。
   if(c.k==='event'&&c.e){
+    const who=resolveAgentId(ev.agent||c.ag)||'Main';
     const ev=c.e;
     // **同一个事件只收一次**（2026-09-13 修）：刷新后的 catch-up 与 SSE 首帧、
     // 或重连时重拉的区间可能**重叠**，同一批分片喂两遍就会把思考/工具卡画两遍
@@ -905,7 +915,6 @@ function applyChunk(c){
     const key=String(ev.id||'');
     if(key&&LIVE.seenEv[key])return 0;
     if(key)LIVE.seenEv[key]=1;
-    const who=resolveAgentId(ev.agent||c.ag)||'Main';
     (LIVE.events[who]=LIVE.events[who]||[]).push(ev);
     LIVE.think='';LIVE.ans='';LIVE.mode='';   // 事件覆盖了在飞文本
     LIVE.agent=ev.agent||LIVE.agent;
@@ -1012,7 +1021,7 @@ function liveDetach(){
   LIVE.job=null;LIVE.cur=null;
   sseClose();clearPendingBar();
   purgeLiveDom();
-  LIVE.callsVer=0;LIVE.filledSig={};LIVE.seenEv={};
+  LIVE.callsVer=0;LIVE.filledSig={};LIVE.seenEv={};LIVE.step=-1;
   LIVE.events={};LIVE.calls={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};
   LIVE.keep=null;LIVE.agent='';
   LIVE.closing=false;LIVE.finishing=false;
@@ -1325,6 +1334,7 @@ function liveDoneHtml(aid,host){
       : !seen.has(md(it.text));
   });
   return out.map(it=>itemHtml(it,LIVE.calls)).join('');
+
 }
 /* **流式渲染合并**（2026-09-13，为"流畅"）：文字分片一个接一个到达，如果每个分片都
    立刻整段重渲染，成本是 **O(n²)**——`md()` 每次都要重新解析**整段**已收到的正文。
@@ -1342,7 +1352,6 @@ function cancelLiveRender(){
   if(_liveT){clearTimeout(_liveT);_liveT=0}
 }
 function renderLive(){
-
   // **没有直播作业就什么都不做**（2026-09-13 加）：收尾之后任何一次重绘/轮询再
   // 调到这儿，都会凭 `LIVE.seq` 重新造出一个直播节点（`liveGbox` 找不到正式块就
   // 造临时块）——那就是"轮都结束了，尾部还挂着一个直播块/一段旧正文"的来源。

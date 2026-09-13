@@ -520,9 +520,20 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                     try:
                         chunk["ag"] = str(agent._active_view() or "")
                     except Exception:  # noqa: BLE001——报不出身份不该断直播
+                    # **步的机械锚点**（2026-09-13 修，用户报"正文留在尾部越堆越多"）：
+                    # 前端的"在飞正文/思考"缓冲原先靠"事件到达就清空"收口——那是把正确性
+                    # 押在**事件时序**上：事件若延迟/丢失/乱序，上一段就会留在尾部堆积。
+                    # 这里报"已落事件数"：一步之内不变，**落一个事件就 +1**，前端只认这个
+                    # 号——步号一变就清缓冲，不依赖任何事件是否到达。
+                    try:
+                        chunk["st"] = len((getattr(agent, "current_round", None) or {})
+                                          .get("events") or [])
+                    except Exception:  # noqa: BLE001
+                        pass
                         pass
                     job["live"].append(chunk)
 
+                agent.on_progress = lambda s: _live({"k": "status", "s": s})
                 job["live"] = []
                 # **事件级直播**（2026-09-13，worklog §92）：每落一个事件（工具调用/
                 # 工具结果/最终回答/运行时提示）就推一份扁平副本，形状与
@@ -531,7 +542,6 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                 # 此前直播只推 think/ans/status 文本增量，运行中看不到工具调用，
                 # 表现就是"思考连一块、中间的工具块没有"。
                 agent.on_event = lambda e: _live({"k": "event", "e": e})
-                agent.on_progress = lambda s: _live({"k": "status", "s": s})
                 # ⏹ 终止（对齐 CLI Ctrl+C）：每步与流中分片间检查，触发处
                 # 抛 KeyboardInterrupt，由下方 except 收尾成开放轮
                 agent.cancel_check = lambda: bool(job.get("cancel"))
