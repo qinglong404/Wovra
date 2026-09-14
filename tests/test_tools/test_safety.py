@@ -923,6 +923,28 @@ def test_text_with_slash_fragment_is_not_an_escape():
     assert abs_paths("find / -name x") == ["/"]
 
 
+def test_command_substitution_inside_text_command_is_still_checked():
+    """纯文本命令里的**命令替换**要照旧受检（2026-09-13 Linux 实测回归）。
+
+    §70.8 给 echo/printf 加了"参数是文本"的豁免，但反引号里的内容是
+    **要执行的命令**：``echo `cat /etc/passwd` `` 在 POSIX shell 下真的读出
+    内容（探针 `shell:反引号` 用例实测泄漏出金丝雀；Windows cmd 不解析
+    反引号，故那边"通过"是假通过）。修法：反引号也算段界，段首词取
+    反引号内的命令词。`$(…)` 侧因 `(` 本就是段界，一并锁进用例防回归。
+    """
+    from wovra import tools as tools_module
+
+    abs_paths = tools_module.safety._outside_absolute_paths
+    found = abs_paths("echo `cat /etc/passwd`")
+    assert found, "反引号命令替换里的界外路径必须照旧受检"
+    assert found[0].rstrip("`").startswith("/etc/passwd"), found
+    found = abs_paths("echo $(cat /etc/passwd)")
+    assert found, "$() 命令替换里的界外路径必须照旧受检"
+    # 纯回显文本照旧豁免（不因本次收口误伤 §70.8 的本意）
+    assert abs_paths("echo /tmp") == []
+    assert abs_paths("echo === NOW === /tc）===") == []
+
+
 def test_bare_dotdot_traversal_is_blocked(workspace):
     """纯 `..` / `../..` token 也是越界（worklog §49 ① 真洞）。
 

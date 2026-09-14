@@ -184,14 +184,17 @@ def test_run_command_decodes_native_output():
     """
     from wovra.tools import shell as shell_module
 
-    gbk = "不是内部或外部命令".encode("cp936")  # cmd 的真实字节
-    assert shell_module._decode_output(gbk) == "不是内部或外部命令"
     assert shell_module._decode_output("中文 utf-8".encode("utf-8")) == "中文 utf-8"
     assert shell_module._decode_output(b"") == ""
     assert shell_module._decode_output(b"\xff\xfe\x00bad") != ""  # 兜底不抛
 
     if _os.name != "nt":
+        # OEM 代码页只在 Windows 存在：Linux 侧 _oem_encoding() 就是 utf-8，
+        # cp936 字节按替换解码（乱码）是正确行为，不能拿 Windows 预期去测
+        # （2026-09-13 Linux 侧全量实测：断言放在 skip 之前 → 常年假红）。
         pytest.skip("OEM 代码页解码是 Windows 侧问题")
+    gbk = "不是内部或外部命令".encode("cp936")  # cmd 的真实字节
+    assert shell_module._decode_output(gbk) == "不是内部或外部命令"
     result = run_command("definitely-not-a-command-wovra-xyz")
     assert "不是内部或外部命令" in result, f"报错不可读：{result[:200]!r}"
 

@@ -143,10 +143,13 @@ def _file_domain_entries(domains: Iterable[dict]) -> list[tuple[str, str]]:
         if not isinstance(d, dict) or not d.get("name"):
             continue
         name = str(d["name"])
-        live = list(d.get("files") or []) + list(d.get("file_domains") or [])
+        leaf = [str(d["file"])] if d.get("file") else []   # 叶子节点：一个文件
+        live = leaf + list(d.get("files") or []) + list(d.get("file_domains") or [])
         hist = list(d.get("history_files") or [])
         for raw in live + hist:
-            path = str(raw).strip().strip("/")
+            # 只去尾部斜杠与空白：**保留前导 "/"**——绝对路径（/etc/hostname
+            # 这类被读过的文件）要能与块里的原样路径对上（2026-09-14）。
+            path = str(raw).strip().rstrip("/")
             if path:
                 out.append((path, name))
     out.sort(key=lambda x: len(x[0]), reverse=True)
@@ -154,9 +157,15 @@ def _file_domain_entries(domains: Iterable[dict]) -> list[tuple[str, str]]:
 
 
 def _match_domain(path: str, entries: list[tuple[str, str]]) -> Optional[str]:
-    """文件路径命中的域（精确文件或目录前缀，最长前缀优先）。"""
+    """文件路径命中的域（最长条目优先）。
+
+    匹配交给 `pathmatch` 的三档鲁棒规则（2026-09-14）：精确 → 路径边界后缀
+    （`agent-test/a.md` ↔ `a.md`）→ 唯一同名（歧义不认）；目录前缀形态按
+    前缀归属。此前是全等/前缀字符串比较，抄法一变就判漏项。
+    """
+    from . import pathmatch as pathmatch_module
     for prefix, name in entries:
-        if path == prefix or path.startswith(prefix + "/"):
+        if pathmatch_module.entry_matches(path, prefix):
             return name
     return None
 
@@ -217,16 +226,16 @@ def ownership(
         kind = str(block.get("kind") or "")
         if kind == "environment":
             out[bid] = MAIN_AGENT_ID
-        round_view = str((item.get("round") or {}).get("active_view") or "")
             continue
+        round_view = str((item.get("round") or {}).get("active_view") or "")
         path = str(block.get("file") or "")
         name = _match_domain(path, entries) if path else None
         if name:
             out[bid] = name
+            continue
         if kind == "file":
             # 文件没被任何域认领 → 跟本轮的归属走（轮早已判给谁，就归谁）
             out[bid] = round_view or MAIN_AGENT_ID
-            continue
             continue
         if kind == "fallback":
             out[bid] = round_view or MAIN_AGENT_ID

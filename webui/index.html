@@ -677,8 +677,8 @@ async function select(id){
   }
   renderHeader();renderTab();
   watchMaintenance();   // 打开一个"后台还在整理"的会话：界面要自己跟上（§86）
-function renderHeader(){
 }
+function renderHeader(){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
   // **没有会话元数据就什么都不做**（2026-09-13 修，用户报"页面一直加载中"）：
@@ -716,7 +716,15 @@ function renderHeader(){
   renderCtxbar();
   ensureViewSizes().then(()=>{if(META)renderCtxbar()});
 }
-function setTab(t){TAB=t;renderHeader();renderTab()}
+function setTab(t){
+  TAB=t;
+  // 切页签回到顶部（2026-09-14）：此前沿用上一个页签的滚动位置——从滚到
+  // 底部的对话切到项目页，看到的是两栏布局的**中段**，左树整块在视口上方，
+  // 看起来就是"没加载出来"（实测：`.proj-left` y=-638）。对话页不动：它有
+  // 自己的跟随尾部/保位逻辑，回到对话应保留阅读位置。
+  if(t!=='conv'){const c=$('#content');if(c)c.scrollTop=0;}
+  renderHeader();renderTab();
+}
 function copySid(el){
   const done=()=>{const t=el.textContent;el.textContent='✓ 已复制';
     setTimeout(()=>{el.textContent=t},1200)};
@@ -740,8 +748,8 @@ async function shutdownServer(el){   // 偏僻角落的 ⏻：终止服务进程
   $('#foot-ver').textContent='服务已停止——重启 wovra serve 后刷新此页';
 }
 
-function renderTab(){
 /* ---------- 视图 ---------- */
+function renderTab(){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
   const c=$('#content');
@@ -891,8 +899,8 @@ function tickRunlineTime(){
 function flushLiveStep(){
   const had=!!(LIVE.think||LIVE.ans);
   LIVE.think='';LIVE.ans='';LIVE.mode='';
-}
   return had;
+}
 /* 吃一个分片。返回**变化级别**：0=没变；1=只有文字在长（可合并渲染）；
    2=结构性变化（事件/状态/换手——必须立刻重绘）。调用方：
    `dirty=Math.max(dirty, applyChunk(c)||0)`，再按 `dirty>=2 ? renderLive() :
@@ -917,8 +925,8 @@ function applyChunk(c){
   // "事件 → 条目"映射。工具调用/工具结果/最终回答都在这里按时间顺序落地，
   // 于是运行中能看到工具块（此前只推文本增量，工具块在服务端就没推）。
   if(c.k==='event'&&c.e){
-    const who=resolveAgentId(ev.agent||c.ag)||'Main';
     const ev=c.e;
+    const who=resolveAgentId(ev.agent||c.ag)||'Main';
     // **同一个事件只收一次**（2026-09-13 修）：刷新后的 catch-up 与 SSE 首帧、
     // 或重连时重拉的区间可能**重叠**，同一批分片喂两遍就会把思考/工具卡画两遍
     // （实测：1 张卡变 2 张）。按事件 id 去重——事件 id 是服务端给的稳定标识。
@@ -946,8 +954,8 @@ function applyChunk(c){
     // **上一段内容已经产出完**——清掉在飞缓冲（内容由事件接住，见上）
     LIVE.mode='status';LIVE.status=c.s;bump(2);
     flushLiveStep();
-  return level;
   }
+  return level;
 }
 /* 服务端报的"现在谁在干"（`chunk.ag` = 本轮 `active_view`）→ 注册表 id。
    一轮里若有多名 agent，`drawConv` 给**每个发送者各建一个块**，所以必须按
@@ -1015,8 +1023,8 @@ async function liveAttach(jobId,resume){
    找不到它——收尾时若它又被挂回去（另一次 drawConv、切页、任何一次重绘），就没人再
    管它了：**内容冻在那一刻**（在飞正文缓冲区里正好是最后那段回答的开头两行），
    于是"卡住、一直显示"。所以这里把 `LIVE.boxes`/`LIVE.provs`/`LIVE.keep` 里
-function purgeLiveDom(){
    记着的节点**逐个**摘掉（无论它在不在文档里），再做一次文档清扫兜底。 */
+function purgeLiveDom(){
   const nodes=[];
   Object.values(LIVE.boxes||{}).forEach(b=>b&&nodes.push(b));
   Object.values(LIVE.provs||{}).forEach(p=>p&&nodes.push(p));
@@ -1297,8 +1305,8 @@ function insideLive(el){
     if(p.classList&&p.classList.contains('livebox'))return true;
     p=p.parentNode||p.parentElement;
   }
-}
   return false;
+}
 /* **官方已经画过哪些事件**（按轮，事件 id 集合）。
 
    2026-09-13 修，用户报："现在还是时间顺序和渲染的方块对不上…前面又方块重复，续到
@@ -1358,9 +1366,8 @@ function liveDoneHtml(aid,host){
       if(!insideLive(b))seen.add(String(b.textContent||''));
     });
     [...host.querySelectorAll('.bub')].forEach(b=>{
-    });
       if(!insideLive(b))seen.add(String(b.innerHTML||''));
-    seenCalls=new Set([...host.querySelectorAll('.tcard[data-call]')]
+    });    seenCalls=new Set([...host.querySelectorAll('.tcard[data-call]')]
       .map(el=>String(el.getAttribute('data-call')||'')));
   }
   const out=items.filter(it=>{
@@ -1842,8 +1849,8 @@ async function ensureViewSizes(force){
     VIEWSIZES={sig,agents:d.agents||[],window:d.window||0,basis:d.basis||''};
   }catch(e){VIEWSIZES=null}
   finally{VIEWSIZES_BUSY=false}
-function renderCtxbar(){
 }
+function renderCtxbar(){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
   const bar=document.getElementById('ctxbar');
@@ -2227,8 +2234,8 @@ function blockChip(b){
   const nOps=ops.length>1?`<span class="ops">×${ops.length}</span>`:'';
   return `<span class="blk" onclick="jumpToConv(${b.id.match(/^R(\d+)/)[1]},'${esc(b.id)}')" title="在对话流中查看 ${esc(b.id)}">
     <span class="f">${esc(b.file||b.id)}</span>${nOps}${tags}</span>`;
-function renderTimeline(c){
 }
+function renderTimeline(c){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
   const rl=META.round_list||[];
@@ -2504,33 +2511,58 @@ function ctxViz(){
       <span class="viz-bar"><i style="width:${pct.toFixed(1)}%;background:${col}"></i></span>
       <span class="mono" style="color:var(--tx3);font-size:10px;flex-shrink:0">${e.calls} 次 · ${fmtN(e.prompt)} tok · ${pct.toFixed(1)}%</span></div>`;
   }).join('')||'<div class="empty" style="padding:8px 0">无调用账</div>';
-  // ④ 分裂结果：评估结论 + 产出的域（含尚未落实进注册表的）
+  // ④ 分裂结构树（多层级：内部节点=语义层，叶子=活性文件；叶子下挂非 LIVE/保底块/用户块）
   const splitRounds=rl.filter(r=>r.split);
   const lastSplit=splitRounds.length?splitRounds[splitRounds.length-1].split:null;
   const regNames=new Set(reg.map(e=>e.name));
-  let splitHtml='<div class="empty" style="padding:8px 0">本会话尚无分裂分析</div>';
+  let splitHtml='<div class="empty" style="padding:8px 0">本会话尚无分裂分析产物</div>';
   if(lastSplit){
-    const a=lastSplit.assessment||{};
-    const ok=a.splittable===true;
-    const badge=ok?`<span class="fbadge t-create">可分裂</span>`
-                  :`<span class="fbadge t-read">不可分裂</span>`;
-    const pend='';   // 时序已改为轮闭合即生效：不再标"待生效/已落实"
-    splitHtml=`<div class="split-head">${badge}${pend}
+    const doms=(lastSplit.domains||[]).filter(d=>d&&d.name);
+    const un=(lastSplit.unassigned||[]), a=lastSplit.assessment||{};
+    // 机械核对（与 Runtime 同口径）：每个活性文件必须是一个叶子
+    const inTree=new Set();
+    doms.forEach(d=>{ if(d.file) inTree.add(d.file);
+                      (d.files||[]).forEach(f=>inTree.add(f));
+                      (d.file_domains||[]).forEach(f=>inTree.add(f)); });
+    const missing=(lastSplit.live_files||[]).filter(f=>!inTree.has(f));
+    const byParent=new Map(), names=new Set(doms.map(d=>d.name));
+    doms.forEach(d=>{ const p=String(d.parent||'').trim();
+                      const k=names.has(p)?p:'';
+                      if(!byParent.has(k))byParent.set(k,[]);
+                      byParent.get(k).push(d); });
+    const nodeHtml=(d,depth)=>{
+      const isLeaf=!!d.file;
+      const label=isLeaf?String(d.file).split('/').pop():d.name;
+      const merged=regNames.has(d.name)||regNames.has(d.file||'');
+      const att=[];
+      (d.files||[]).forEach(f=>att.push(`<span class="fd">${esc(f)}</span>`));
+      (d.file_domains||[]).forEach(f=>att.push(`<span class="fd">${esc(f)}</span>`));
+      (d.history_files||[]).forEach(f=>att.push(`<span class="fd" style="opacity:.6">↳ ${esc(f)}</span>`));
+      const ids=(arr,lab)=>{ if(!(arr||[]).length)return;
+        att.push(`<span class="mono" style="color:var(--tx3);font-size:10.5px">${lab} ${arr.length}：${esc(arr.slice(0,5).join('、'))}${arr.length>5?'…':''}</span>`); };
+      ids(d.chat_block_ids,'保底块'); ids(d.user_block_ids,'用户块');
+      const kids=(byParent.get(d.name)||[]).map(k=>nodeHtml(k,depth+1)).join('');
+      return `<div style="margin:3px 0 0 ${depth*16}px">
+        <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap${isLeaf?';min-width:0':''}">
+          <span style="color:var(--tx3)">${isLeaf?'📄':'▸'}</span><b style="font-size:11.5px;${isLeaf?'white-space:nowrap;overflow:hidden;text-overflow:ellipsis':''}">${esc(label)}</b>
+          ${merged?'<span class="fbadge t-create">已入注册表</span>':''}
+          ${(!isLeaf&&d.description)?`<span style="color:var(--tx3);font-size:10.5px">${esc(String(d.description).slice(0,120))}</span>`:''}
+        </div>
+        ${att.length?`<div style="margin:2px 0 3px 18px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${att.join('')}</div>`:''}
+        ${kids}</div>`;
+    };
+    const roots=(byParent.get('')||[]).map(d=>nodeHtml(d,0)).join('');
+    splitHtml=`<div class="split-head">
+      <span class="fbadge t-create">结构树</span>
       <span class="chip" style="cursor:pointer;margin-left:auto" title="分裂重组生效前的完整上下文（整理后全量装配）" onclick="openPendingView('__alt__')">重组前上下文</span>
       <span class="chip acc" style="cursor:pointer" title="重组后各 agent 各看到什么（主 agent / A / B）" onclick="openPendingView('Main')">重组后上下文</span>
-      <span class="mono" style="color:var(--tx3);font-size:10px">产出 ${lastSplit.domains.length} 域 · 未归属块 ${lastSplit.unassigned}</span></div>`+
-      `<div style="font-size:10.5px;color:var(--tx3);margin-top:5px;line-height:1.6">子 agent 与各自重组后上下文由本次分裂产物派生（点击域卡片可查看该域视图）。</div>`+
-      (a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">为什么这样判定</summary>
-        <div class="ev"><pre>${esc(a.reason)}</pre></div></details>`:'')+
-      lastSplit.domains.map(d=>{
-        const merged=regNames.has(d.name);
-        return `<div class="split-dom" style="border-left-color:${merged?'var(--teal)':'var(--gold)'}">
-          <b>${esc(d.name||'?')}</b>${merged?'<span class="fbadge t-create">已入注册表</span>':''}
-          <div style="color:var(--tx3);font-size:11px;margin-top:3px">${esc((d.description||'').slice(0,140))}</div>
-          ${fileChips(d)}
-          <div style="margin-top:6px"><span class="chip acc" style="cursor:pointer"
-            onclick="openPendingView('${esc(d.name||'')}')">查看上下文</span></div></div>`;
-      }).join('');
+      <span class="mono" style="color:var(--tx3);font-size:10px">${doms.length} 节点 · 活性文件 ${(lastSplit.live_files||[]).length} · 未归属块 ${un.length}</span></div>`
+      +(missing.length?`<div style="margin-top:6px;color:var(--red);font-size:11px">⚠ ${missing.length} 个活性文件没有作为叶子出现在树里（Runtime 会拒收整批）：${esc(missing.slice(0,8).join('、'))}${missing.length>8?'…':''}</div>`:'')
+      +`<div style="margin-top:6px;max-height:420px;overflow:auto">${roots||'<div class="empty" style="padding:6px 0">（树为空）</div>'}</div>`
+      +(un.length?`<div style="margin-top:6px"><b style="font-size:11.5px">▸ 主 agent（闲谈/未归属）</b>
+        <div style="margin:2px 0 0 18px;font-size:10.5px;color:var(--tx3)">${un.length} 块：${esc(un.slice(0,6).join('、'))}${un.length>6?'…':''}</div></div>`:'')
+      +(a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">说明</summary>
+        <div class="ev"><pre>${esc(a.reason)}</pre></div></details>`:'');
   }
   return `<h3 class="sec">上下文与整理可视化</h3>
     <div class="viz-card">
@@ -2538,15 +2570,15 @@ function ctxViz(){
       <div class="org-strip">${strip||'<span style="color:var(--tx3);font-size:11px">暂无轮</span>'}</div>
       <div class="viz-legend">${Object.entries(ORG_COLOR).filter(([k])=>k).map(([k,c])=>
         `<span class="lg"><i style="background:${c}"></i>${ORG_NAME[k]}</span>`).join('')}</div>
-      <div class="viz-lab" style="margin-top:14px">分裂结果 <span style="color:var(--tx3);font-weight:400">（评估结论 / 产出的域 / 是否已并入注册表）</span></div>
+      <div class="viz-lab" style="margin-top:14px">分裂结构树 <span style="color:var(--tx3);font-weight:400">（模型产出：活性文件 + 保底块归宿；是否分裂由代码按这棵树决定）</span></div>
       <div>${splitHtml}</div>
       <div class="viz-lab" style="margin-top:14px">重组上下文 · 子 agent 视图 <span style="color:var(--tx3);font-weight:400">（各 agent 装配视图体量 / 模型窗口；分裂后每个域一条）</span></div>
       <div>${bars||'<div class="empty" style="padding:8px 0">无注册表</div>'}</div>
       <div class="viz-lab" style="margin-top:14px">调用开销构成 <span style="color:var(--tx3);font-weight:400">（整轮对话 vs 维护开销：整理/压缩/分裂）</span></div>
       <div>${usage}</div>
     </div>`;
-function renderProject(c){
 }
+function renderProject(c){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
   const reg=META.registry||[];
@@ -2622,8 +2654,8 @@ function renderProject(c){
         ${ctxViz()}
       </div>
     </div>`;
-async function loadTree(force){
 }
+async function loadTree(force){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
   if(TREE.loading)return;

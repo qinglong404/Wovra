@@ -520,6 +520,7 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                     try:
                         chunk["ag"] = str(agent._active_view() or "")
                     except Exception:  # noqa: BLE001——报不出身份不该断直播
+                        pass
                     # **步的机械锚点**（2026-09-13 修，用户报"正文留在尾部越堆越多"）：
                     # 前端的"在飞正文/思考"缓冲原先靠"事件到达就清空"收口——那是把正确性
                     # 押在**事件时序**上：事件若延迟/丢失/乱序，上一段就会留在尾部堆积。
@@ -529,7 +530,6 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
                         chunk["st"] = len((getattr(agent, "current_round", None) or {})
                                           .get("events") or [])
                     except Exception:  # noqa: BLE001
-                        pass
                         pass
                     job["live"].append(chunk)
 
@@ -1048,11 +1048,31 @@ def _event_agents(r: dict, main_id: str) -> list[str]:
     return [main_id if o == views_module.MAIN_AGENT_ID else o for o in owners]
 
 
-def _split_meta(r: dict) -> dict | None:
+def _live_file_paths(rounds: list[dict]) -> list[str]:
+    """机械重算"被写过且还在"的文件（与维护侧 `_live_files` 同口径，零 LLM）。
+
+    前端用它给结构树标**漏项**：活性文件必须落在某个节点里；只读文件不在
+    此列（用户口径 2026-09-14：只读不是分裂对象，压缩后要用会重新读）。
+    """
+    from . import blocks as blocks_module
+    from . import lifecycle as lifecycle_module
+    ledger = lifecycle_module.FileLedger()
+    for r in rounds or []:
+        ledger.update(r, blocks=blocks_module.segment_round_by_file(r))
+    return sorted(
+        str(p) for p, e in ledger.entries().items()
+        if e.get("state") != lifecycle_module.STATE_DEAD
+        and int(e.get("write_count") or 0) > 0
+    )
+
+
+def _split_meta(r: dict, live_files: list[str] | None = None) -> dict | None:
     """分裂结果（已落实的轮字段 + 尚未落实的 pending_org）——机械透出。
 
-    split_assessment/domains 落盘在轮上；未落实时暂存 pending_org，
-    下一轮开启才并入注册表。"分裂成功没/为什么/结果如何"全在这里。
+    2026-09-14 口径：产物是**结构树**（节点 + files + 保底块归宿），
+    供前端渲染核对；模型侧不再有"可分裂/不可分裂"判定字段（老会话可能
+    仍带 split_assessment，原样透出）。`live_files` 是机械事实，前端拿它
+    对结构树标漏项。
     """
     po = r.get("pending_org") or {}
     sa = r.get("split_assessment") or po.get("split_assessment")
@@ -1060,20 +1080,35 @@ def _split_meta(r: dict) -> dict | None:
     un = r.get("unassigned") or po.get("unassigned")
     if not (sa or dm or un):
         return None
+    if isinstance(un, dict):
+        un_ids = [str(x) for x in (un.get("block_ids") or [])]
+    elif isinstance(un, (list, tuple)):
+        un_ids = [str(x) for x in un]      # 老形态：直接是块 ID 列表
+    else:
+        un_ids = []
     return {
         "assessment": sa if isinstance(sa, dict) else {},
-        "domains": [{"name": d.get("name"), "description": d.get("description") or "",
-                     "file_domains": d.get("file_domains") or [],
-                     "files": d.get("files") or [],
-                     "history_files": d.get("history_files") or []}
-                    for d in (dm or []) if isinstance(d, dict)],
-        "unassigned": len(un or []),
+        "domains": [{
+            "name": d.get("name"),
+            "description": d.get("description") or "",
+            "parent": d.get("parent") or "",
+            "file": d.get("file") or "",
+            "files": d.get("files") or [],
+            "file_domains": d.get("file_domains") or [],
+            "history_files": d.get("history_files") or [],
+            "chat_block_ids": d.get("chat_block_ids") or [],
+            "user_block_ids": d.get("user_block_ids") or [],
+            "goal": d.get("goal") or "",
+        } for d in (dm or []) if isinstance(d, dict)],
+        "unassigned": un_ids,
+        "live_files": list(live_files or []),
         "pending": bool(po.get("domains") or po.get("split_assessment")),
     }
 
 
 def _round_meta(r: dict, usage: dict | None = None,
-                plan: dict | None = None) -> dict:
+                plan: dict | None = None,
+                live_files: list[str] | None = None) -> dict:
     """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。
 
     `stage` = 该轮属于哪个阶段（0 = **分裂前**，i≥1 = 第 i 次分裂生效之后）——
@@ -1099,7 +1134,7 @@ def _round_meta(r: dict, usage: dict | None = None,
         "t0": (evs[0].get("timestamp") or "") if evs else "",
         "t1": (evs[-1].get("timestamp") or "") if evs else "",
         "usage": usage or {},
-        "split": _split_meta(r),
+        "split": _split_meta(r, live_files),
         "blocks": r.get("blocks") or [],
     }
 
@@ -1162,7 +1197,8 @@ def session_meta(task_id: str, data: dict) -> dict:
         e["share"] = rec["share"] if rec["window"] else 0.0
     usage = round_usage_map(data)
     plan = views_module.stage_plan(rounds)
-    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")), plan)
+    live_files = _live_file_paths(rounds)
+    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")), plan, live_files)
                           for r in rounds]
     meta["agent_stats"] = agent_stats(data)
     return meta

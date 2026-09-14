@@ -139,18 +139,36 @@ def test_http_context_dump(tmp_path, monkeypatch):
 def test_round_meta_exposes_split_result():
     """分裂结果透出：已落实字段 + 未落实 pending_org 都要能看见。"""
     data = _fake_task()
+    data["rounds"][0].pop("domains", None)     # 走"尚未落实的 pending_org"这条路
     data["rounds"][0]["pending_org"] = {
         "domains": [{"name": "工具层", "description": "守卫与审批",
-                     "file_domains": ["src/wovra/tools"]}],
-        "split_assessment": {"splittable": True, "reason": "两条独立工作线"},
-        "unassigned": ["R1-B9"],
+                     "files": ["src/wovra/tools/permissions.py"],
+                     "chat_block_ids": ["R1-B7"]}],
+        "unassigned": {"block_ids": ["R1-B9"], "reason": "纯聊天"},
     }
     meta = serve.session_meta("s1", data)
     sp = meta["round_list"][0]["split"]
-    assert sp["assessment"]["splittable"] is True
     assert sp["domains"][0]["name"] == "工具层"
-    assert sp["unassigned"] == 1 and sp["pending"] is True
+    assert sp["domains"][0]["files"] == ["src/wovra/tools/permissions.py"]
+    assert sp["domains"][0]["chat_block_ids"] == ["R1-B7"]
+    assert sp["unassigned"] == ["R1-B9"]      # 新口径：块 ID 列表（前端直接渲染）
+    assert sp["live_files"] == []             # 该夹具没有"写过的"文件块
+    assert sp["pending"] is True
     assert meta["round_list"][1]["split"] is None      # 无分裂数据的轮不编造
+
+
+def test_round_meta_tolerates_legacy_split_product():
+    """老会话兼容：unassigned 直接是列表、域只给 file_domains 也不许崩。"""
+    data = _fake_task()
+    data["rounds"][0]["split_assessment"] = {
+        "splittable": True, "reason": "两条独立工作线"}
+    data["rounds"][0]["domains"] = [
+        {"name": "工具层", "file_domains": ["src/wovra/tools"]}]
+    data["rounds"][0]["unassigned"] = ["R1-B9"]
+    sp = serve.session_meta("s1", data)["round_list"][0]["split"]
+    assert sp["assessment"]["splittable"] is True
+    assert sp["domains"][0]["file_domains"] == ["src/wovra/tools"]
+    assert sp["unassigned"] == ["R1-B9"]
 
 
 def test_pending_views_preview_is_readonly(tmp_path, monkeypatch):

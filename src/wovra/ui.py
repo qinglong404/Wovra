@@ -663,36 +663,71 @@ def maint_view(task) -> str:
             f"- 最近一次上下文体量 ≈ {ctx:,}（整理触发线 {_org_watermark():,}）"
         )
 
-    lines += ["", "## 分裂（split）"]
-    split_rounds = [r for r in rounds if r.get("split_assessment")]
-    if not split_rounds:
-        lines.append("-（尚无分裂分析产物——整理批次完成后会附带分裂判定）")
-    else:
-        for r in split_rounds:
-            sa = r["split_assessment"] or {}
-            splittable = sa.get("splittable")
-            if splittable is True:
-                mark = "可分裂"
-            elif splittable is False:
-                mark = "不可分裂"
-            else:
-                mark = "（无判定）"
-            lines.append(f"- R{r.get('seq')}：{mark}")
-            reason = " ".join(str(sa.get("reason") or "").split())
-            if reason:
-                cut = reason[:120]
-                lines.append(f"  原因：{cut}{'…' if len(reason) > 120 else ''}")
-            domains = r.get("domains") or []
-            if domains:
-                names = [
-                    str(d.get("name") or "?") for d in domains if isinstance(d, dict)
-                ]
-                shown = "、".join(names[:5]) + ("…" if len(names) > 5 else "")
-                lines.append(f"  域：{len(domains)} 个（{shown}）")
-            unassigned = r.get("unassigned") or {}
-            un_ids = unassigned.get("block_ids") or []
-            if un_ids:
-                lines.append(f"  未归属（归主 agent）：{len(un_ids)} 块")
+    lines += ["", "## 分裂（split）：结构树"]
+    # 2026-09-14 口径：分裂产物 = **结构树**（节点 + 文件 + 保底块归宿），
+    # 交付给代码去决定"分不分"；模型侧不再有"可分裂/不可分裂"的判定字段。
+    # 老的会话仍带 split_assessment（判定 + 域），这里兼容展示。
+    tree_rounds, fail_rounds = [], []
+    for r in rounds:
+        po = r.get("pending_org") or {}
+        if r.get("domains") or po.get("domains"):
+            tree_rounds.append((r, po))
+        elif r.get("split_assessment") or po.get("split_assessment"):
+            fail_rounds.append(r)
+    if not tree_rounds and not fail_rounds:
+        lines.append("-（尚无分裂分析产物——整理批次完成后会附带结构树）")
+    for r, po in tree_rounds:
+        doms = [d for d in (r.get("domains") or po.get("domains") or [])
+                if isinstance(d, dict)]
+        un = r.get("unassigned") or po.get("unassigned") or {}
+        pending_mark = "（待生效）" if po.get("domains") else ""
+        lines.append(f"- R{r.get('seq')}：结构树 {len(doms)} 节点{pending_mark}")
+        # 多层级树：parent 指向父节点名，递归展开（叶子 = 活性文件）
+        by_parent: dict[str, list[dict]] = {}
+        names = {str(d.get("name") or "") for d in doms}
+        for d in doms:
+            p = str(d.get("parent") or "").strip()
+            by_parent.setdefault(p if p in names else "", []).append(d)
+
+        def _emit(node: dict, depth: int) -> None:
+            name = str(node.get("name") or "?")
+            leaf = str(node.get("file") or "")
+            files = [str(x) for x in (node.get("files") or node.get("file_domains") or [])]
+            pad = "  " * (depth + 1)
+            label = leaf or name
+            mark = "📄 " if leaf else "▸ "
+            lines.append(f"{pad}{mark}{label}")
+            if leaf:
+                for f in files:
+                    lines.append(f"{pad}    文件（清单形态）：{f}")
+            if not leaf and files:
+                shown = "、".join(files[:6]) + ("…" if len(files) > 6 else "")
+                lines.append(f"{pad}    文件 {len(files)}：{shown}")
+            for f in (node.get("history_files") or []):
+                lines.append(f"{pad}    ↳ 历史文件：{f}")
+            chats = node.get("chat_block_ids") or []
+            if chats:
+                lines.append(f"{pad}    保底块 {len(chats)}：{'、'.join(chats[:6])}"
+                             + ("…" if len(chats) > 6 else ""))
+            users = node.get("user_block_ids") or []
+            if users:
+                lines.append(f"{pad}    用户块 {len(users)}：{'、'.join(users[:6])}"
+                             + ("…" if len(users) > 6 else ""))
+            for child in by_parent.get(name, []):
+                _emit(child, depth + 1)
+
+        for root in by_parent.get("", []):
+            _emit(root, 0)
+        un_ids = un.get("block_ids") or []
+        if un_ids:
+            lines.append(f"  ▸ 主 agent（闲谈/未归属）：{len(un_ids)} 块")
+    for r in fail_rounds:
+        sa = r.get("split_assessment") or {}
+        reason = " ".join(str(sa.get("reason") or "").split())
+        lines.append(
+            f"- R{r.get('seq')}：未产出结构树"
+            + (f"（{reason[:100]}{'…' if len(reason) > 100 else ''}）" if reason else "")
+        )
 
     lines += ["", "## Agent 注册表（分裂产物，机制三）"]
     acc_line = _round_account_line(task)

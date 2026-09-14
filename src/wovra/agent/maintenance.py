@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Optional
 from .. import blocks as blocks_module
+from .. import pathmatch as pathmatch_module
 from .. import economics as economics_module
 from .. import lifecycle as lifecycle_module
 from .. import registry as registry_module
@@ -819,7 +820,8 @@ class _MaintenanceMixin:
             )
 
         # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
-        hard_lines, n_live = self._split_hard_data(rounds)
+        live_ids, hist_ids = self._split_file_map()
+        hard_lines, n_live = self._split_hard_data(rounds, live_ids, hist_ids)
         round_blocks, map_lines, _merged = self._block_map_lines(rounds)
         # 主 agent 残留桶占比（零 LLM 体量事实）：纯对话块合计占本批内容
         # 多少——顶层节点计数的门槛由它定（判据见 _SPLIT_INSTRUCTIONS）。
@@ -830,23 +832,22 @@ class _MaintenanceMixin:
         # 文件为止」。判据归机制、语义归模型：Runtime 给体量事实，模型判断
         # 这一摊活是否真已分成互不相干的两条线。
         view_lines = self._split_view_watermarks()
-        # 覆盖缺口硬数据（零 LLM，2026-09-12）：未覆盖文件 + 多域共命轮——
-        # 前者是分域漏项、后者是父子域重叠，两者都是机械事实，喂给模型自纠。
-        coverage_lines = self._split_coverage_lines(rounds)
+        # 覆盖缺口硬数据（2026-09-12 加，2026-09-14 用户判定"多余且错误"后
+        # **不再注入**）：它是给模型自纠用的，现在模型的职责只剩"写树"，
+        # 漏项由 Runtime 机械校验并报错，不需要模型看这条。`views.coverage_gap`
+        # 与 `_split_coverage_lines` 保留——代码侧判定与仪器仍可用。
         all_ids = {
             b["id"] for blocks in round_blocks.values() for b in blocks
         }
         seq_list = "、R".join(str(r["seq"]) for r in rounds)
         instruction = (
-            "[分裂分析指令]\n"
+            "[分裂结构指令]\n"
             "以上是本会话的完整上下文（含刚完成的整理产物与分块地图）。"
-            f"请做**现状归属分析**（不是话题分类），对象为这些轮次：R{seq_list}。\n\n"
+            f"请把**现状**梳理成结构树（不是话题分类），对象为这些轮次：R{seq_list}。\n\n"
             "[硬数据]（Runtime 生成，零 LLM）\n"
             + "\n".join(hard_lines)
-            + f"\n- 活性文件数（分裂单元数上限）：{n_live}"
             + f"\n- 纯对话块（无文件交互，闲聊）内容占比：约 {chat_share * 100:.0f}%"
             + ("\n" + "\n".join(view_lines) if view_lines else "")
-            + ("\n" + "\n".join(coverage_lines) if coverage_lines else "")
             + "\n\n"
             "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
             + "\n".join(map_lines)
@@ -904,21 +905,19 @@ class _MaintenanceMixin:
                     )
         if product is None:
             # 仍无可用产物：不静默落空（2026-09-11 实测：submit_domains
-            # 参数截断/解析失败 → 分裂无任何痕迹）——落一个保守的"不可分"
-            # 判定并留痕，账本可查。失败现场一并记录（arguments 长度+头部 /
+            # 参数截断/解析失败 → 分裂无任何痕迹）——落一条**失败记录**
+            # 并留痕，账本可查。失败现场一并记录（arguments 长度+头部 /
             # 正文长度），下次直接能看出是截断还是空壳还是模型没走工具出口。
+            # 2026-09-14：**不再写"保守按不可分处理"这类判定**——分裂与否
+            # 由代码按结构树决定，模型侧没有判定字段；这里只记录"没拿到树"。
             if not evidence:
                 evidence = f"无 submit_domains 调用；正文 {len(content or '')} 字符"
             reason = (
-                "分裂分析无可用产物（" + evidence + "），"
-                "保守按不可分处理"
+                "分裂分析无可用产物（" + evidence + "），未产出结构树"
                 + ("，已带诊断重发一次仍失败" if retried else "，不重试")
             )
             pending = rounds[0].setdefault("pending_org", {})
-            pending["split_assessment"] = {
-                "splittable": False,
-                "reason": reason,
-            }
+            pending["split_assessment"] = {"reason": reason}
             if self.task is not None:
                 self.task.record(
                     "maintenance",
@@ -929,6 +928,48 @@ class _MaintenanceMixin:
             self._persist_rounds()
             return False
         domains, unassigned, split = product
+
+        # **文件编号解析**（2026-09-14 用户思路：路径名太麻烦，用编号）：
+        # 模型产物里只写 `L03`/`H07`，Runtime 当场翻回真路径。编号未知、
+        # 或用错节（H 当叶子 / L 当历史）→ 带诊断重发一次（与解析失败同款）；
+        # 仍坏则中止整批回入水位——宁可重做，不静默错挂。
+        def _abort_ids(reason: str) -> None:
+            pending = rounds[0].setdefault("pending_org", {})
+            pending["split_assessment"] = {"reason": reason}
+            if self.task is not None:
+                self.task.record("maintenance", f"split：**中止**——{reason}")
+            self._persist_rounds()
+            raise SplitCoverageError(reason)
+
+        for _attempt in (0, 1):
+            id_defects = (
+                self._resolve_file_refs(domains, unassigned, live_ids, hist_ids)
+                + self._validate_block_refs(domains, unassigned, all_ids)
+            )
+            if not id_defects:
+                break
+            id_evidence = "；".join(id_defects[:6])
+            if _attempt == 1:
+                _abort_ids(f"产物文件编号/块 ID 不可用（{id_evidence}）")
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：编号有误（文件编号或块 ID），带诊断重发一次"
+                    f"（{id_evidence}）",
+                )
+            repair = self._split_repair_messages(
+                messages, content, ordered, id_evidence
+            )
+            if repair is None:
+                _abort_ids(f"产物编号不可用且无法重发（{id_evidence}）")
+            content, ordered, _usage = self._stream_call(
+                repair, tools=split_tools, purpose="split",
+            )
+            reproduct = self._extract_domains(content, ordered)
+            if reproduct is None:
+                _abort_ids(f"产物编号不可用，重发后无产物（{id_evidence}）")
+            domains, unassigned, split = reproduct
+
         # 文件域自动归属（2026-09-11）：块的 file ∈ 某域 file_domains 时，
         # Runtime 机械归入该域——模型不必逐块列 block_ids（大幅缩小输出，
         # 防超长截断令分析作废）。模型显式声明的 block_ids 优先（跨域/
@@ -938,9 +979,12 @@ class _MaintenanceMixin:
         # 认领的块 = 独立思想/零散块 → Runtime 自动归 unassigned（主
         # agent 剩余集合）。模型忘了填 unassigned 也不丢块——语义上
         # "没有域认领"与"归主 agent"等价，不需要模型再声明一次。
+        # 2026-09-14：节点声明的**保底块/用户块归宿**（chat_block_ids /
+        # user_block_ids）也算认领。
         covered = {
             b for d in domains if isinstance(d, dict)
-            for b in (d.get("block_ids") or [])
+            for b in ((d.get("block_ids") or []) + (d.get("chat_block_ids") or [])
+                      + (d.get("user_block_ids") or []))
         }
         kept = [
             b for b in ((unassigned or {}).get("block_ids") or [])
@@ -953,12 +997,17 @@ class _MaintenanceMixin:
         # 认领时跟本轮的归属走"，这边若只认域的文件集合，就会对着已经归好域的轮报错。
         # 故：文件被某域文件集合命中 ✓ 或它所在轮已归某域（`active_view` 是域）✓
         # 都算认领；**两者都不成立**才是真漏认领 → 抛错中止。
+        # 2026-09-14：**只查活性文件**（被写过且现在还在）——只读文件的块
+        # 不是分裂对象（用户口径：压缩后要用时会重新读），它们的块按
+        # `views.ownership` 判据 3 跟所在轮走，不参与本校验。
         _entries = views_module._file_domain_entries(domains)
+        live = set(self._live_files())          # 已归一
         view_of = {r["seq"]: str(r.get("active_view") or "") for r in rounds}
         file_of = {
             b["id"]: (str(b.get("file") or ""), seq)
             for seq, blocks in round_blocks.items() for b in blocks
             if b.get("kind") == "file" and b.get("file")
+            and pathmatch_module.norm(str(b.get("file"))) in live
         }
 
         def _claimed(path: str, seq: int) -> bool:
@@ -982,6 +1031,34 @@ class _MaintenanceMixin:
                 f"分裂中止：这批 {len(unclaimed)} 个文件块没有域认领"
                 f"（{shown}）。文件必须有归属——请让分裂把它们认领进某个域，"
                 f"不允许留在主 agent（用户口径 2026-09-13）。"
+            )
+
+        # **非 LIVE 文件也必须挂满**（2026-09-14 用户口径："非 LIVE 文件也是
+        # 必须填满的"——磁盘上没了不等于没用：临时测试脚本验过什么、结果如何，
+        # 是后面装配上下文要用的结论）。判据与 `registry.split_defects` 的
+        # F3-历史检查同一套：每个非 LIVE 文件出现在某个节点的 history_files 里。
+        # 匹配走 pathmatch 三档鲁棒规则（2026-09-14）：模型抄的 `agent-test/x.md`、
+        # `/abs/path/x.md`、`./x.md` 都能对上 Runtime 侧的真路径；同名歧义不认。
+        claimed_hist = [
+            str(f) for d in domains if isinstance(d, dict)
+            for f in (d.get("history_files") or [])
+        ]
+        missing_hist = sorted(
+            p for p in set(self._non_live_files())
+            if not pathmatch_module.matches(p, claimed_hist)
+        )
+        if missing_hist:
+            shown = "、".join(missing_hist[:8]) + ("…" if len(missing_hist) > 8 else "")
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：**中止**——{len(missing_hist)} 个非 LIVE 文件没有归宿：{shown}",
+                )
+                self._persist_rounds()
+            raise SplitCoverageError(
+                f"分裂中止：这批 {len(missing_hist)} 个非 LIVE 文件没有挂到任何节点"
+                f"（{shown}）。它们承载早期工作的结论、后面要装配进上下文——"
+                f"必须挂到相关叶子下面（history_files），一个不漏。"
             )
 
         orphans = sorted(all_ids - covered - set(kept))
@@ -1023,11 +1100,14 @@ class _MaintenanceMixin:
     def _auto_assign_domains(
         self, domains: list[dict], round_blocks: dict[int, list[dict]]
     ) -> None:
-        """把文件块按文件归属机械归入对应域（零 LLM，原地修改 domains）。
+        """把文件块按文件归属机械归入对应节点（零 LLM，原地修改 domains）。
 
-        匹配规则：块的文件 == 域 file_domains 条目（精确文件），或在该
-        条目前缀下（目录形态 "js/" → 其下全部文件）。已显式出现在任何
-        域 block_ids 里的块不覆盖（尊重模型的跨域/例外声明）。
+        匹配规则与 `views.ownership` / 覆盖校验**同一套**：走
+        `views._file_domain_entries`（并集 = files 具体清单 + 旧 file_domains
+        前缀 + history_files），精确或目录前缀命中即归入。
+        （2026-09-14 修：此前只认 `file_domains` 旧字段，而新产物按指令只给
+        `files` —— 那条路下文件块一个都归不进去、全落进主 agent 兜底桶。）
+        已显式出现在任何节点 block_ids 里的块不覆盖（尊重模型的例外声明）。
         """
         if not domains:
             return
@@ -1042,25 +1122,22 @@ class _MaintenanceMixin:
             b for d in domains if isinstance(d, dict)
             for b in (d.get("block_ids") or [])
         }
-        file_domains: list[tuple[str, str]] = []
-        domain_by_name: dict[str, dict] = {}
-        for d in domains:
-            if not isinstance(d, dict) or not d.get("name"):
-                continue
-            domain_by_name[d["name"]] = d
-            for fd in d.get("file_domains") or []:
-                file_domains.append((str(fd).rstrip("/"), d["name"]))
-        if not file_domains:
+        entries = views_module._file_domain_entries(domains)
+        if not entries:
             return
+        domain_by_name: dict[str, dict] = {
+            d["name"]: d for d in domains
+            if isinstance(d, dict) and d.get("name")
+        }
         for bid, f in block_file.items():
             if bid in claimed:
                 continue
-            for prefix, name in file_domains:
-                if f == prefix or f.startswith(prefix + "/"):
-                    target = domain_by_name.get(name)
-                    if target is not None:
-                        target.setdefault("block_ids", []).append(bid)
-                    break
+            name = views_module._match_domain(str(f), entries)
+            if name is None:
+                continue
+            target = domain_by_name.get(name)
+            if target is not None:
+                target.setdefault("block_ids", []).append(bid)
 
     def _chat_block_share(
         self, rounds: list[dict], round_blocks: dict[int, list[dict]]
@@ -1087,6 +1164,143 @@ class _MaintenanceMixin:
                     chat += size
         return (chat / total) if total else 0.0
 
+    def _file_groups(self) -> dict[str, dict]:
+        """文件账本按**归一路径**聚合（零 LLM）。
+
+        同一个物理文件常以多种写法入账（`t1_hello.txt` / `./t1_hello.txt` /
+        `sub/../t1_hello.txt`——agent 当时就是这么访问的），不聚合会变成
+        "几个不同文件"且互相歧义（2026-09-14 实测：覆盖校验因此误判漏项）。
+        聚合后：
+        * `state`：live（有"写过且没被删"的记账）/ dead（只被删过）/ read_only；
+        * 写/读次数求和；块引用并集。
+        """
+        ledger = lifecycle_module.FileLedger()
+        for rr in self.rounds:
+            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
+        groups: dict[str, dict] = {}
+        for path, e in ledger.entries().items():
+            key = pathmatch_module.norm(str(path)) or str(path)
+            g = groups.setdefault(
+                key, {"state": "read_only", "write": 0, "read": 0, "refs": []}
+            )
+            state = str(e.get("state") or "")
+            write = int(e.get("write_count") or 0)
+            g["write"] += write
+            g["read"] += int(e.get("read_count") or 0)
+            g["refs"] += [str(x) for x in (e.get("block_refs") or [])]
+            if state == lifecycle_module.STATE_DEAD:
+                g["dead"] = True
+            elif write > 0:
+                g["live_seen"] = True
+        for key, g in groups.items():
+            if g.get("live_seen"):
+                g["state"] = "live"
+            elif g.get("dead"):
+                g["state"] = "dead"
+            else:
+                g["state"] = "read_only"
+        return groups
+
+    def _split_file_map(self) -> tuple[dict[str, str], dict[str, str]]:
+        """**文件编号表**（模型侧编码，2026-09-14 用户思路）。
+
+        用户提的问题："用路径名太麻烦，给每个文件按顺序起个简单编号"。
+        采纳方式：编号**只是模型侧的引用符**——硬数据里按 `L00 = 路径` /
+        `H07 = 路径` 列出，模型产物里只写编号；Runtime 在提取产物后**立刻
+        翻译回真路径**，下游（注册表/视图/前端）看到的仍是路径，零兼容负担。
+
+        * `L00…` = 活性文件（split 单元，只能出现在 file/files）
+        * `H00…` = 非 LIVE 文件（只能出现在 history_files）
+        前缀分节还能做**机械校验**：编号未知、或把 H 填进叶子 → 当场报错
+        （带诊断重发一次），不再依赖路径字符串比对。
+
+        排序保证确定性：同一批数据两次分析编号一致（重试/回放都可复现）。
+        """
+        groups = self._file_groups()
+        live = sorted(k for k, g in groups.items() if g["state"] == "live")
+        hist = sorted(k for k, g in groups.items() if g["state"] != "live")
+        return ({f"L{i:02d}": p for i, p in enumerate(live)},
+                {f"H{i:02d}": p for i, p in enumerate(hist)})
+
+    @staticmethod
+    def _resolve_file_refs(
+        domains: list, unassigned, live_ids: dict[str, str],
+        hist_ids: dict[str, str],
+    ) -> list[str]:
+        """把产物里的文件编号翻回真路径（原地修改）；返回缺陷清单。
+
+        * `file` / `files`：必须用 L 编号（或直接给路径，兼容手写/旧产物）；
+        * `history_files`：必须用 H 编号（或路径）；
+        * 编号未知 / 用错节（H 当叶子、L 当历史）→ 缺陷（调用方带诊断重发）。
+        """
+        import re as _re
+        id_re = _re.compile(r"^([LH])(\d+)$", _re.IGNORECASE)
+        defects: list[str] = []
+
+        def ref(v, where: str, ids: dict[str, str], other: dict[str, str],
+                label: str, wrong_label: str) -> str:
+            raw = str(v or "").strip()
+            m = id_re.match(raw)
+            if not m:
+                return raw                     # 路径形态：放行（pathmatch 兜底）
+            key = f"{m.group(1).upper()}{int(m.group(2)):02d}"
+            if key in ids:
+                return ids[key]
+            if key in other:
+                defects.append(f"{where} 用了{wrong_label}编号 {raw}（{label}应为 "
+                               f"{'L' if label == '活性文件' else 'H'} 编号）")
+                return raw
+            defects.append(f"{where} 引用了不存在的编号 {raw}")
+            return raw
+
+        for d in domains or []:
+            if not isinstance(d, dict):
+                continue
+            where = f"节点「{d.get('name') or '?'}」"
+            if d.get("file"):
+                d["file"] = ref(d["file"], f"{where}.file", live_ids, hist_ids,
+                                "活性文件", "非 LIVE 文件")
+            if d.get("files"):
+                d["files"] = [ref(f, f"{where}.files", live_ids, hist_ids,
+                                  "活性文件", "非 LIVE 文件")
+                              for f in d["files"]]
+            if d.get("history_files"):
+                d["history_files"] = [
+                    ref(f, f"{where}.history_files", hist_ids, live_ids,
+                        "非 LIVE 文件", "活性文件")
+                    for f in d["history_files"]
+                ]
+        return defects
+
+    @staticmethod
+    def _validate_block_refs(
+        domains: list, unassigned, all_ids: set
+    ) -> list[str]:
+        """产物引用的块 ID 必须真的在[分块地图]里（2026-09-14 用户口径）。
+
+        此前未知块 ID 是**静默**的：那块没被认领 → 兜底归主 agent，模型把
+        `R13-B1` 抄成 `R31-B1` 这类错误就藏过去了（块数对不上只能靠人看）。
+        现在判错 → 带诊断重发一次 → 仍错整批回入水位。
+        """
+        defects: list[str] = []
+
+        def _check(ids, where: str) -> None:
+            for b in ids or []:
+                raw = str(b or "").strip()
+                if raw and raw not in all_ids:
+                    defects.append(f"{where} 引用了不存在的块 ID {raw}")
+
+        for d in domains or []:
+            if not isinstance(d, dict):
+                continue
+            where = f"节点「{d.get('name') or '?'}」"
+            _check(d.get("block_ids"), f"{where}.block_ids")
+            _check(d.get("chat_block_ids"), f"{where}.chat_block_ids")
+            _check(d.get("user_block_ids"), f"{where}.user_block_ids")
+        if isinstance(unassigned, dict):
+            _check(unassigned.get("block_ids"), "unassigned.block_ids")
+        return defects
+
     def _live_files(self) -> list[str]:
         """**分裂单元** = 现有文件（Q1 口径：只读与已删的算历史，不做分裂单元）。
 
@@ -1094,66 +1308,76 @@ class _MaintenanceMixin:
         没被删/重构）；`read_only`（只读过）与 `dead`（被删/被取代）都挂到最
         相关 LIVE 块下面当历史，**不单独作为分裂单元**。
         """
-        ledger = lifecycle_module.FileLedger()
-        for rr in self.rounds:
-            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
-        out: list[str] = []
-        for path, e in ledger.entries().items():
-            if str(e.get("state")) == lifecycle_module.STATE_DEAD:
-                continue
-            if int(e.get("write_count") or 0) <= 0:
-                continue                      # 只读过的：历史，不是分裂单元
-            out.append(str(path))
-        return sorted(out)
+        return sorted(k for k, g in self._file_groups().items()
+                      if g["state"] == "live")
 
-    def _history_files(self) -> list[str]:
-        """**历史文件**（非 LIVE）：只读过的 + 被删/被取代的**且仍在盘上**的。
+    def _non_live_files(self) -> list[str]:
+        """**非 LIVE 文件**（只读过的 + 被删/被取代的）——全部，不看磁盘。
 
-        校验它们必须有落脚点（挂在某个域下当历史）。**仍在盘上**这个限制是
-        必要的：已被删掉的文件只存在于账里，要求模型逐个列举它们会变成
-        "每天都拒收"；而盘上还在的只读/历史文件是能被误当成分裂单元或漏掉
-        的东西，正是要防的。
+        用户口径（2026-09-14）：它们和活性文件一样**必须挂满**——虽然磁盘上
+        可能已经不存在了，但**早期工作的结论**（临时测试脚本验了什么、结果
+        如何）后面要装配进上下文，所以必须有落点（挂在相关叶子下面当
+        历史记录）。"还在盘上才列"的旧口径已废（那会让已删的临时脚本
+        从树里消失，后面装配时找不到它验过什么）。
         """
-        ledger = lifecycle_module.FileLedger()
-        for rr in self.rounds:
-            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
-        out: list[str] = []
-        for path, e in ledger.entries().items():
-            dead = str(e.get("state")) == lifecycle_module.STATE_DEAD
-            live = (not dead) and int(e.get("write_count") or 0) > 0
-            if live:
-                continue
-            try:
-                if not (safety_module.PROJECT_ROOT / str(path)).exists():
-                    continue                  # 已不在盘上：纯账目，不强制落点
-            except OSError:
-                continue
-            out.append(str(path))
-        return sorted(out)
+        return sorted(k for k, g in self._file_groups().items()
+                      if g["state"] != "live")
 
-    def _split_hard_data(self, rounds: list[dict]) -> tuple[list[str], int]:
-        """分裂硬数据（零 LLM）：活性文件清单 + 数量。
+    def _split_hard_data(
+        self, rounds: list[dict],
+        live_ids: dict[str, str] | None = None,
+        hist_ids: dict[str, str] | None = None,
+    ) -> tuple[list[str], int]:
+        """分裂硬数据（零 LLM）：活性文件清单 + 非 LIVE 文件清单 + 活性数。
 
-        新会话文件状态已变——必须现场重算 ledger（不信持久化状态）。
-        只列 live / read_only（磁盘上存在的），dead 不列（分裂对象是
-        现状，死文件不占域、不占上限）。
+        * **活性 = 被写过且现在还在**（只读不算活性：压缩后真正干活还需要
+          重新读；它们不占分裂单元、不计入上限）。
+        * **非 LIVE 文件也必须挂满**（2026-09-14 用户口径："非 LIVE 文件也是
+          必须填满的"——磁盘上没了不等于没用：临时测试脚本验过什么、结果如何，
+          是后面装配上下文要用的结论）。
+        * 路径按**归一形态**列出（消解 `./` 与 `..`）：同一文件多种写法只列
+          一行，模型逐字抄就不会撞歧义。
         """
-        ledger = lifecycle_module.FileLedger()
-        for rr in self.rounds:
-            ledger.update(rr, blocks=blocks_module.segment_round_by_file(rr))
-        lines = ["- 活性文件清单（状态 live/read_only，块引用供归属）："]
+        groups = self._file_groups()
+        if live_ids is None or hist_ids is None:
+            live_ids, hist_ids = self._split_file_map()
+        path_to_live = {p: i for i, p in live_ids.items()}
+        path_to_hist = {p: i for i, p in hist_ids.items()}
+        live_lines: list[str] = []
+        hist_lines: list[str] = []
         n = 0
-        for path, e in sorted(ledger.entries().items()):
-            if e["state"] == lifecycle_module.STATE_DEAD:
-                continue
-            n += 1
-            refs = " ".join(e.get("block_refs") or [])
-            lines.append(
-                f"  - {path}（{e['state']}；写 {e['write_count']}/"
-                f"读 {e['read_count']}；块: {refs or '无'}）"
-            )
-        if n == 0:
-            lines.append("  （无——当前无任何活性文件，无可分域）")
+        for path in sorted(groups):
+            g = groups[path]
+            refs = " ".join(g["refs"]) or "无"
+            if g["state"] == "live":
+                n += 1
+                live_lines.append(
+                    f"  - {path_to_live.get(path, 'L??')} = {path}"
+                    f"（live；写 {g['write']}/读 {g['read']}；块: {refs}）"
+                )
+            elif g["state"] == "dead":
+                hist_lines.append(
+                    f"  - {path_to_hist.get(path, 'H??')} = {path}"
+                    f"（已删/被取代；写 {g['write']}/读 {g['read']}；块: {refs}）"
+                )
+            else:
+                hist_lines.append(
+                    f"  - {path_to_hist.get(path, 'H??')} = {path}"
+                    f"（只读——被读过没写过；读 {g['read']} 次；块: {refs}）"
+                )
+        lines = [
+            "- 活性文件清单（`Lxx` = 活性文件编号，产物里**只写编号**；"
+            "LIVE=被写过且现在还在，只读/已删的不是分裂单元）："
+        ]
+        lines += live_lines or ["  （无——当前无任何活性文件）"]
+        lines.append(f"- 活性文件数：{n}（每个都必须是一个叶子节点）")
+        lines.append(
+            f"- 非 LIVE 文件清单（`Hxx` = 非 LIVE 编号；共 {len(hist_lines)} 个；"
+            "**不是分裂单元、不计入上限**，但**一个不漏**——磁盘上没了不等于没用："
+            "它们承载早期工作的结论，后面装配上下文要用——挂到相关叶子下面，"
+            "字段 history_files 里写编号）："
+        )
+        lines += hist_lines or ["  （无）"]
         return lines, n
 
     @staticmethod
@@ -1300,6 +1524,7 @@ class _MaintenanceMixin:
                 if self.task is not None:
                     self.task.record(
                         "maintenance", f"split 阶段失败：{str(error)[:150]}"
+                    )
                 # **漏认领是约束性失败**（2026-09-13 用户口径："直接给我报错，不要
                 # 往下进行了"）：此刻 org 那一路已经把本批标成 `done` 了，若只记一笔，
                 # 这些轮**永远不会再被分析**（批次选取排除 `done`）→ "主 agent 有文件"
@@ -1309,7 +1534,6 @@ class _MaintenanceMixin:
                         r.pop("pending_org", None)
                         r["org_state"] = "failed"
                     self._persist_rounds()
-                    )
 
         thread = threading.Thread(
             target=run, name="wovra-maintenance", daemon=True
@@ -1366,8 +1590,11 @@ class _MaintenanceMixin:
                 # 注册表、不写 `r["domains"]`、不留 `pending`，并落一条醒目错误。
                 # 为什么不静默兜底：用户原话"有些错误是根基，其错了，我下面
                 # 测试无意义"，静默吸进主 agent 桶正是把这类根基错误藏起来。
+                # 2026-09-14：活性文件必须 100% 分完；**非 LIVE 文件也必须
+                # 挂满**（用户口径：磁盘上没了不等于没用——早期结论后面要
+                # 装配进上下文），由 split_defects 的 F3-历史检查兜底。
                 defects = registry_module.split_defects(
-                    pending["domains"], self._live_files(), self._history_files()
+                    pending["domains"], self._live_files(), self._non_live_files()
                 )
                 if defects:
                     r.pop("domains", None)

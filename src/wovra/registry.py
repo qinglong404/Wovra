@@ -96,8 +96,14 @@ def _children_of(name: str, domains: list[dict]) -> list[dict]:
 
 
 def entry_files(entry: dict) -> list[str]:
-    """条目维护的**具体文件清单**（2026-09-12 新口径：归属按文件，不看路径）。"""
+    """条目维护的**具体文件清单**（2026-09-12 新口径：归属按文件，不看路径）。
+
+    2026-09-14：也认**叶子节点**的单文件字段（`file`——树里一个文件一个叶子）。
+    """
     out: list[str] = []
+    single = str(entry.get("file") or "").strip().strip("/")
+    if single:
+        out.append(single)
     for f in entry.get("files") or []:
         rel = str(f).strip().strip("/")
         if rel:
@@ -130,13 +136,20 @@ def entry_history(entry: dict) -> list[str]:
 
 
 def file_owned_by(entry: dict, rel: str) -> bool:
-    """这个文件是不是该条目维护的（精确清单优先，历史前缀兜底）。"""
-    want = str(rel or "").strip().strip("/")
+    """这个文件是不是该条目维护的（清单优先，历史前缀兜底）。
+
+    2026-09-14：路径匹配走 `pathmatch`（精确 → 路径边界后缀 → 唯一同名；
+    目录前缀按前缀归属）——模型抄的路径形态（带工作区前缀/绝对路径/./）
+    不影响归属判断。
+    """
+    want = str(rel or "").strip()
     if not want:
         return False
-    if want in entry_files(entry):
+    from . import pathmatch as pathmatch_module
+    if pathmatch_module.matches(want, entry_files(entry)):
         return True
-    return any(want == p or want.startswith(p + "/") for p in entry_prefixes(entry))
+    return any(pathmatch_module.entry_matches(want, p)
+               for p in entry_prefixes(entry))
 
 
 def owner_of_file(
@@ -216,7 +229,9 @@ def split_defects(
     hist_entries = [(e, f"{e.get('id')}（{e.get('name')}）") for e in entries]
 
     def _claims(entry: dict, path: str) -> bool:
-        return (file_owned_by(entry, path) or path in entry_history(entry))
+        from . import pathmatch as pathmatch_module
+        return (file_owned_by(entry, path)
+                or pathmatch_module.matches(path, entry_history(entry)))
 
     for path in [str(f).strip().strip("/")
                  for f in (history_files or []) if str(f).strip()]:
@@ -291,6 +306,8 @@ def build_entries(
             if not name or name in seen:
                 return                        # 环/重复名截断
             seen.add(name)
+            if n.get("file"):                 # 叶子：一个文件一个叶子（2026-09-14）
+                files.append(str(n["file"]))
             files.extend(str(f) for f in (n.get("files") or []))
             hist.extend(str(f) for f in (n.get("history_files") or []))
             cons.extend(str(c) for c in (n.get("constraints") or []))

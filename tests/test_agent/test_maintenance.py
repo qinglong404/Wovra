@@ -918,7 +918,7 @@ def test_split_degraded_fallback_when_product_unusable(monkeypatch, tmp_path):
     )
     agent._maybe_organize_batch()
     sa = task.rounds[0]["pending_org"]["split_assessment"]
-    assert sa["splittable"] is False
+    assert "splittable" not in sa            # 2026-09-14：模型侧无判定字段
     assert "无可用产物" in sa["reason"]
     assert "已带诊断重发一次仍失败" in sa["reason"]
     assert any(
@@ -1252,11 +1252,11 @@ def test_split_appends_to_org_conversation(monkeypatch, tmp_path):
     if appended[0].get("tool_calls"):
         assert appended[0]["tool_calls"][0]["function"]["name"] == "submit_organization"
         assert appended[1]["role"] == "tool"               # 提交结果
-        assert "[分裂分析指令]" in str(appended[2]["content"])  # 分裂指令
+        assert "[分裂结构指令]" in str(appended[2]["content"])  # 分裂指令
     else:
         # 正文 JSON fallback：assistant 原文 + 分裂指令
         assert appended[0]["role"] == "assistant"
-        assert "[分裂分析指令]" in str(appended[1]["content"])
+        assert "[分裂结构指令]" in str(appended[1]["content"])
     # 开思考（不传 thinking disabled）：语义判断需要推理（用户拍板）
     assert "extra_body" not in split_calls[0] or not split_calls[0].get("extra_body")
     # 产物：thoughts 与 domains 都落暂存
@@ -1442,10 +1442,12 @@ def test_split_instruction_carries_view_watermarks(monkeypatch, tmp_path):
     prompt = "\n".join(
         str(m.get("content") or "") for m in split_calls[0]["messages"]
     )
-    assert "各视图自身体量" in prompt            # 硬数据行
+    assert "各视图自身体量" in prompt            # 硬数据行（体量事实仍给）
     assert "工具层" in prompt
-    assert "考虑在其内部再裂一层" in prompt      # 到水位的提示语在判据里
-    assert "逐层分裂（正式机制" in prompt        # 判据第 4 条（不是可选项）
+    assert "考虑在其内部再裂一层" in prompt      # 到没到水位的机械结论仍给（体量事实）
+    assert "你的**唯一任务**" in prompt          # 2026-09-14：只写树，不做分裂判定
+    assert "叶子 = **一个活性文件**" in prompt     # 2026-09-14：叶子是活性文件
+    assert "挂到对应的节点上" in prompt          # 非 LIVE/保底块/用户块挂在节点下
 
 
 def test_split_view_watermarks_skips_main_agent_and_empty_domains(monkeypatch, tmp_path):
@@ -1487,14 +1489,104 @@ def test_promote_records_economics_and_lifecycle(monkeypatch, tmp_path):
 
 
 def test_split_hard_data_lists_live_files(monkeypatch, tmp_path):
-    """硬数据（零 LLM）：活性文件清单 + 数量；dead 文件不占上限。"""
+    """硬数据（零 LLM）：活性文件清单 + 数量；只读文件不算活性。"""
     agent = Agent(llm=_StubLLM(), tools=[])
     agent.rounds = [_mk_file_round(1, "写文件", ["a.txt", "b.txt"])]
     lines, n = agent._split_hard_data(agent.rounds)
     assert n == 2
     joined = "\n".join(lines)
     assert "a.txt" in joined and "b.txt" in joined
-    assert "活性文件数" not in joined  # 数量由调用方拼接
+    assert "活性文件数：2" in joined
+
+
+def test_split_hard_data_lists_non_live_files_as_history(monkeypatch, tmp_path):
+    """非 LIVE 文件单独列一段、**逐条列出且必须挂满**（2026-09-14 用户口径：
+    磁盘上没了不等于没用——它们的结论后面要装配进上下文）：
+    不占分裂单元、不计入上限。"""
+    agent = Agent(llm=_StubLLM(), tools=[])
+    agent.rounds = [
+        _mk_file_round(1, "写文件", ["a.txt"]),
+        _mk_read_round(2, "读一眼旧文件", ["old.txt"]),
+    ]
+    lines, n = agent._split_hard_data(agent.rounds)
+    joined = "\n".join(lines)
+    assert n == 1                                   # 只读的不算活性、不计上限
+    assert "非 LIVE 文件清单" in joined and "共 1 个" in joined
+    assert "H00 = old.txt" in joined and "L00 = a.txt" in joined
+    assert "一个不漏" in joined and "只写编号" in joined
+
+
+def test_split_aborts_when_non_live_file_has_no_home(monkeypatch, tmp_path):
+    """非 LIVE 文件没挂到任何节点 → 与漏认领同级的硬错误（中止整批）。
+
+    用户口径（2026-09-14）："非 LIVE 文件也是必须填满的"。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "后端", "file": "src/a.py",
+            "description": "服务端逻辑", "history_files": [],
+        }],
+        "unassigned": {"block_ids": [], "reason": ""},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    task = Task.create(goal="目标")
+    task.rounds = [
+        _mk_file_round(1, "写文件", ["src/a.py"]),
+        _mk_read_round(2, "读临时脚本", ["tmp_probe.py"]),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json() or ""))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+
+    joined = "\n".join(str(h.get("detail")) for h in task.history
+                        if h.get("kind") == "maintenance")
+    assert "非 LIVE 文件没有归宿" in joined and "tmp_probe.py" in joined
+    assert all(r.get("org_state") == "failed" for r in task.rounds)
+    assert not any(r.get("pending_org") for r in task.rounds)   # 产物不 promote
+
+
+def test_split_accepts_tree_with_history_attached(monkeypatch, tmp_path):
+    """正例：非 LIVE 文件挂到叶子的 history_files 下 → 通过并暂存。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "后端", "file": "src/a.py",
+            "description": "服务端逻辑", "history_files": ["tmp_probe.py"],
+        }],
+        "unassigned": {"block_ids": [], "reason": ""},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    task = Task.create(goal="目标")
+    task.rounds = [
+        _mk_file_round(1, "写文件", ["src/a.py"]),
+        _mk_read_round(2, "读临时脚本", ["tmp_probe.py"]),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json() or ""))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+    staged = [r for r in task.rounds if r.get("pending_org")]
+    assert staged, "产物应已暂存"
+    dom = (staged[0]["pending_org"].get("domains") or [])[0]
+    assert dom.get("history_files") == ["tmp_probe.py"]
 
 
 def test_dedupe_domains_cross_domain_blocks():
@@ -1871,3 +1963,139 @@ def test_split_coverage_lines_feed_gap_and_overlap(monkeypatch, tmp_path):
     joined = "\n".join(agent._split_coverage_lines(agent.rounds))
     assert "分裂覆盖缺口：1 个文件" in joined and "c.txt" in joined
     assert "多域共命轮：1 轮" in joined and "R1（2 域）" in joined
+
+
+def test_resolve_file_refs_translates_ids_and_reports_defects():
+    """编号是模型侧编码：L→活性路径、H→历史路径；未知编号/用错节报缺陷。"""
+    live = {"L00": "a.py", "L01": "b.py"}
+    hist = {"H00": "old.tmp"}
+    domains = [
+        {"name": "甲", "file": "L00", "history_files": ["H00"]},
+        {"name": "乙", "history_files": ["h00"]},      # 大小写不敏感：h00 → H00
+        {"name": "丙", "file": "H00"},                 # 错节：H 当叶子
+        {"name": "丁", "history_files": ["L01"]},      # 错节：L 当历史
+        {"name": "戊", "history_files": ["H99"]},      # 未知编号
+        {"name": "己", "file": "src/plain.py"},        # 手写路径：放行
+    ]
+    defects = Agent._resolve_file_refs(domains, None, live, hist)
+    assert domains[0]["file"] == "a.py" and domains[0]["history_files"] == ["old.tmp"]
+    assert domains[1]["history_files"] == ["old.tmp"]  # h00 → H00 → 路径
+    assert domains[5]["file"] == "src/plain.py"
+    assert any("H00" in d and "活性" in d for d in defects)      # 错节一
+    assert any("L01" in d and "非 LIVE" in d for d in defects)   # 错节二
+    assert any("H99" in d for d in defects)                      # 未知编号
+
+
+def test_split_product_with_file_ids_is_translated(monkeypatch, tmp_path):
+    """端到端：产物里只写编号 → 暂存里的 file/history_files 已是真路径。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains_args = json.dumps({
+        "domains": [{
+            "name": "后端", "file": "L00",
+            "description": "服务端逻辑", "history_files": ["H00"],
+        }],
+        "unassigned": {"block_ids": [], "reason": ""},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=domains_args),
+    ]))
+    task = Task.create(goal="目标")
+    task.rounds = [
+        _mk_file_round(1, "写文件", ["src/a.py"]),
+        _mk_read_round(2, "读临时脚本", ["tmp_probe.py"]),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json() or ""))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+    staged = [r for r in task.rounds if r.get("pending_org")]
+    assert staged, "产物应已暂存"
+    dom = (staged[0]["pending_org"].get("domains") or [])[0]
+    assert dom["file"] == "src/a.py"                   # 编号已翻回真路径
+    assert dom["history_files"] == ["tmp_probe.py"]
+
+
+def test_validate_block_refs_reports_unknown_ids():
+    """块 ID 校验：地图里没有的 ID 一律报缺陷（含 unassigned）。"""
+    all_ids = {"R1-B1", "R19-24-B1"}
+    domains = [
+        {"name": "甲", "block_ids": ["R1-B1"]},                       # 合法
+        {"name": "乙", "block_ids": ["R2-B1", "R19-24-B1"]},          # R2-B1 未知
+        {"name": "丙", "chat_block_ids": ["R99-B1"]},                 # 未知
+        {"name": "丁", "user_block_ids": ["R25-B1"]},                 # 未知
+    ]
+    unassigned = {"block_ids": ["R1-B1", "R77-B2"], "reason": ""}
+    defects = Agent._validate_block_refs(domains, unassigned, all_ids)
+    assert any("R2-B1" in d and "乙" in d for d in defects)
+    assert any("R99-B1" in d and "chat_block_ids" in d for d in defects)
+    assert any("R25-B1" in d and "user_block_ids" in d for d in defects)
+    assert any("R77-B2" in d and "unassigned" in d for d in defects)
+    assert not any("R1-B1" in d for d in defects)        # 合法 ID 不报
+    assert len(defects) == 4
+
+
+def _split_fixture_with_round(monkeypatch, tmp_path, split_pool):
+    """单轮文件轮 + 水位触发：用于块 ID 校验的重发/中止路。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="目标")
+    task.rounds = [_mk_file_round(1, "写文件", ["src/a.py"])]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json() or ""))]],
+                     split_responses=split_pool),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    return agent, task
+
+
+def _split_args(chat_ids):
+    return json.dumps({
+        "domains": [{"name": "后端", "file": "L00", "chat_block_ids": chat_ids}],
+        "unassigned": {"block_ids": [], "reason": ""},
+    }, ensure_ascii=False)
+
+
+def _split_chunk(args):
+    return _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=args),
+    ]))
+
+
+def test_split_repairs_unknown_block_id_once(monkeypatch, tmp_path):
+    """块 ID 抄错 → 带诊断重发一次 → 修好则继续（产物照常暂存）。"""
+    agent, task = _split_fixture_with_round(
+        monkeypatch, tmp_path,
+        split_pool=[[_split_chunk(_split_args(["R1-B9"]))],
+                    [_split_chunk(_split_args(["R1-B1"]))]],
+    )
+    agent._maybe_organize_batch()
+    staged = [r for r in task.rounds if r.get("pending_org")]
+    assert staged, "重发修好后应照常暂存"
+    dom = (staged[0]["pending_org"].get("domains") or [])[0]
+    assert dom["chat_block_ids"] == ["R1-B1"]
+    joined = "\n".join(str(h.get("detail")) for h in task.history)
+    assert "不存在的块 ID R1-B9" in joined          # 缺陷现场可查
+    assert "带诊断重发一次" in joined
+
+
+def test_split_aborts_when_block_id_stays_unknown(monkeypatch, tmp_path):
+    """两次都抄错 → 整批中止回入水位（与文件编号同一套硬闸门）。"""
+    agent, task = _split_fixture_with_round(
+        monkeypatch, tmp_path,
+        split_pool=[[_split_chunk(_split_args(["R1-B9"]))],
+                    [_split_chunk(_split_args(["R1-B9"]))]],
+    )
+    agent._maybe_organize_batch()
+    assert all(r.get("org_state") == "failed" for r in task.rounds)
+    assert not any(r.get("pending_org") for r in task.rounds)   # 不 promote
+    joined = "\n".join(str(h.get("detail")) for h in task.history)
+    assert "中止" in joined and "R1-B9" in joined

@@ -267,13 +267,18 @@ _KNOWN_UNIX_ROOT_DIRS = frozenset({
 
 
 def _segment_command_word(head: str) -> str:
-    """取 `head` 所在**段**（最后一个 `;`/`&`/`|`/`(` 之后）的首个词（小写）。
+    """取 `head` 所在**段**（最后一个 `;`/`&`/`|`/`(`/反引号之后）的首个词（小写）。
 
     `git log & dir /a /tc x` 的 `/tc` 属 `dir` 段 → "dir"；
     `cmd /c dir /tc` → "cmd"（包装器也算段首词，由调用方判）。
     去 `\\` 路径前缀与 `.exe/.cmd/.bat` 后缀，便于与词表比对。
+
+    反引号也算段界（2026-09-13，Linux 实测回归）：``echo `cat /界外文件` ``
+    在 POSIX shell 下**真的执行**反引号里的命令，段首词必须是 `cat` 而不是
+    `echo`——否则纯文本豁免会把界外路径当回显文本放行（探针 `shell:反引号`
+    用例实测泄漏出金丝雀）。`$(…)` 侧本就因 `(` 是段界而安全，两者取齐。
     """
-    seg = re.split(r"[;&|(]", head)[-1]
+    seg = re.split(r"[;&|(`]", head)[-1]
     m = re.search(r"[^\s'\"|;&<>=()$`]+", seg)
     if not m:
         return ""
@@ -541,7 +546,9 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
         if not token or token == "/":
             continue
         # 纯文本命令（echo/printf/rem…）的参数是文本：其中的 `/x` 片段不是
-        # 访问。**重定向目标除外**（`echo x > /etc/passwd` 是真写通道）。
+        # 访问。**重定向目标除外**（`echo x > /etc/passwd` 是真写通道）；
+        # **命令替换例外**（反引号已由 `_segment_command_word` 当段界——
+        # 那里面是要执行的命令，不是回显文本，见其 docstring）。
         if (
             _segment_command_word(head) in _TEXT_COMMANDS
             and not _follows_redirect(masked, m.start())

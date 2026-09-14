@@ -29,7 +29,7 @@ class _StubLLM:
 
     def chat(self, messages, tools=None, stream=False, **kwargs):
         texts = [str(m.get("content") or "") for m in messages]
-        if any("[分裂分析指令]" in t for t in texts):
+        if any("[分裂结构指令]" in t for t in texts):
             pool, lane = self.split_responses, "split"
         elif any("主对话正就以下问题" in t for t in texts):
             pool, lane = self.consult_responses, "consult"
@@ -132,6 +132,38 @@ def _make_open_round(agent: Agent, seq: int, user: str):
     agent.rounds.append(agent.current_round)
     agent.messages = []
     agent._record_event("user", {"role": "user", "content": user})
+def _mk_read_round(seq: int, user_text: str, paths: list[str]) -> dict:
+    """构造一轮：user + 每路径一个 read_file 调用/结果 + final（只读文件）。"""
+    events = [
+        {"id": f"R{seq}-E01", "type": "user",
+         "message": {"role": "user", "content": user_text}},
+    ]
+    eid = 2
+    for i, path in enumerate(paths):
+        events.append({
+            "id": f"R{seq}-E0{eid}", "type": "tool_call",
+            "message": {"role": "assistant", "content": "",
+                        "tool_calls": [{"id": f"r{seq}-{i}",
+                                        "function": {"name": "read_file",
+                                                     "arguments": json.dumps({"path": path})}}]},
+        })
+        eid += 1
+        events.append({
+            "id": f"R{seq}-E0{eid}", "type": "tool_result",
+            "message": {"role": "tool", "tool_call_id": f"r{seq}-{i}", "content": "内容"},
+        })
+        eid += 1
+    events.append({"id": f"R{seq}-E0{eid}", "type": "final_answer",
+                   "message": {"role": "assistant", "content": "done"}})
+    return {
+        "seq": seq,
+        "user_input": {"original": user_text, "normalized": ""},
+        "events": events,
+        "blocks": [],
+        "end_state": "completed", "org_state": "",
+    }
+
+
 def _mk_file_round(seq: int, user_text: str, paths: list[str]) -> dict:
     """构造一轮：user + 每路径一个 write_file 调用/结果 + final。"""
     events = [
@@ -210,6 +242,7 @@ __all__ = [
     "_round",
     "_make_open_round",
     "_mk_file_round",
+    "_mk_read_round",
     "_split_fixture",
     "_domains_chunk",
     "_org_json",

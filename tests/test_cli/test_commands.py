@@ -412,9 +412,9 @@ def test_maint_shows_split_product_and_batches(monkeypatch, tmp_path, capsys):
 
     cmd_maint(SimpleNamespace(task_id=task.id))
     out = capsys.readouterr().out
-    assert "可分裂" in out and "顶层有 2 个独立域" in out
-    assert "域：2 个" in out and "框架自改进域" in out
-    assert "未归属（归主 agent）：1 块" in out
+    assert "结构树 2 节点" in out
+    assert "框架自改进域" in out and "web 演示前端" in out
+    assert "主 agent（闲谈/未归属）：1 块" in out
     assert "批次 R1-R5" in out and "org=True split=True" in out
 
 

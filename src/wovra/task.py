@@ -40,8 +40,14 @@ from . import registry as registry_module
 from . import tools as tools_module
 from .tools import FAILURE_MARKERS
 
-# 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）
-TASKS_ROOT = Path(__file__).resolve().parent.parent.parent / "tasks"
+# 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）；
+# `WOVRA_TASKS_ROOT` 可指向另一份数据目录（演示/验收/只读回放都靠它——
+# 例如 `WOVRA_TASKS_ROOT=/tmp/demo wovra serve --port 8601` 起一个
+# 不碰真实会话的演示服务）。
+TASKS_ROOT = Path(
+    os.environ.get("WOVRA_TASKS_ROOT")
+    or Path(__file__).resolve().parent.parent.parent / "tasks"
+)
 
 # ---- 原子落盘（Windows 稳健性，2026-09-12）--------------------------------
 #
