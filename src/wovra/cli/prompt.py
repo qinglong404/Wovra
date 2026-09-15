@@ -17,6 +17,7 @@ from ..tools import (
     list_background,
     list_files,
     move_file,
+    page_text,
     read_file,
     replace_lines,
     restore_file,
@@ -67,7 +68,10 @@ def _system_prompt(mode: str) -> str:
         "完成任务：找内容用 search_files，按文件名找文件用 glob_files，"
         "读大文件用 read_file 的 start_line 分段；可以创建、修改项目内的"
         "文件，运行安全的 shell 命令。查技术资料用 web_search，抓取已知"
-        "网页用 web_fetch；需求或细节有分歧时用 ask_user 向用户确认。"
+        "网页用 web_fetch；看界面先用 page_text 读**渲染后的文字**（按钮名、"
+        "表格数据、JS 渲染内容都在这里，便宜又准），只有配色/重叠/对齐这类"
+        "文字量不出来的事才用 screenshot + view_image（视觉是多模态模型的"
+        "加分项，没有它也能干活）；需求或细节有分歧时用 ask_user 向用户确认。"
         "回答保持简洁。"
         "环境配置可直接用 uv / pip / conda 等命令（如 uv sync、pip install）；"
         "本项目的解释器由 uv 管理——跑项目自身的命令用 `uv run`（如 "
@@ -218,6 +222,9 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
             # 眼睛（2026-09-13）：放这里而不是紧挨 web 那一带——提交边界上要与
             # 并行会话的改动拉开行距，git 才会把它算成独立 hunk，从而能只提交
             # 自己这一份（`scripts/git_stage_hunks.py`）。
+            # page_text（2026-09-15）：读页面**文字**的无头路径，不依赖视觉通道
+            # ——"多模态是加分项，没有它也能干活"（用户口径）。
+            page_text,
             screenshot,
             view_image,
             write_file,

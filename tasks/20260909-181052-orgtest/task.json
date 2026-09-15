@@ -4229,6 +4229,11 @@
       "time": "2026-09-14T18:15:02",
       "kind": "maintenance",
       "detail": "state：Task.goal 与 TaskState.goal 分裂，已按后者回填（人视图此前显示“目标待明确”）"
+    },
+    {
+      "time": "2026-09-15T15:04:47",
+      "kind": "maintenance",
+      "detail": "registry：加载期回填分裂产物——更新 1（A）"
     }
   ],
   "rounds": [
@@ -13682,7 +13687,7 @@
     {
       "id": "A",
       "name": "agent-test 文档产出域（Wovra 工具层测试与评价）",
-      "description": "",
+      "description": "agent-test 文档产出域（Wovra 工具层测试与评价）（结构树节点）",
       "goal": "系统性测试 Wovra 工具层（找 bug + 顺手感 + 提建议）、评判系统提示词（位置与内容）、深读整理→分裂机制线并沉淀为文档，为后续多 agent 场景测试做准备",
       "constraints": [
         "只读/只在 agent-test 工作区内操作，不在仓库/工作区外干活",
@@ -13712,5 +13717,5 @@
   "chat": [],
   "file_map_sig": "",
   "created_at": "2026-09-09T18:10:52",
-  "updated_at": "2026-09-14T18:15:02"
+  "updated_at": "2026-09-15T15:04:47"
 }

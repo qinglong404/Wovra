@@ -101,4 +101,4 @@ from .interaction import (  # noqa: E402
 # 单独放在文件末尾（而不是紧挨 web 检索那两行）：提交边界上要与并行会话的
 # 改动拉开距离——git 会把相邻改动并成同一个 hunk，那样就没法只提交自己那份
 # （见 `scripts/git_stage_hunks.py`）。
-from .eyes import screenshot, view_image  # noqa: E402
+from .eyes import page_text, screenshot, view_image  # noqa: E402

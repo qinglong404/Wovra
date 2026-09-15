@@ -136,6 +136,71 @@ def find_browser() -> str | None:
     return None
 
 
+# ---- 页面文本（无视觉通道也能做的事） -----------------------------------------
+
+def _run_browser_dom(browser: str, url: str, wait_ms: int,
+                     timeout: int = 60) -> tuple[str, str]:
+    """无头浏览器 `--dump-dom` 取**渲染后**的 DOM，返回 (html, 诊断)。
+
+    为什么要有这条路（2026-09-15 用户口径："多模态是加分项，没有多模态也可以做"）：
+    此前"看页面"只有截图一条路，于是**大量本该读文本的活被当成 OCR 用**——
+    界面上有什么文字、按钮叫什么、控制台报什么错，全在拿一张位图去问模型。
+    这条路把"页面长什么样"与"页面上写了什么"分开：**文本永远读得到**（不依赖
+    视觉通道），**像素才需要眼睛**。JS 渲染的内容也在（`--dump-dom` 是执行完
+    脚本之后的 DOM），所以 SPA 页面同样读得出文字。
+    """
+    args = _browser_base_args(browser, wait_ms) + ["--dump-dom", url]
+    try:
+        proc = subprocess.run(args, capture_output=True, text=True,
+                              timeout=timeout, encoding="utf-8", errors="replace")
+    except subprocess.TimeoutExpired:
+        return "", f"读取页面超时（>{timeout}s）：页面可能一直不静止，可减少 wait_ms"
+    except OSError as error:
+        return "", f"启动浏览器失败: {error}"
+    html = proc.stdout or ""
+    if not html.strip():
+        return "", f"浏览器没有输出 DOM（exit={proc.returncode}）: " + \
+            " ".join((proc.stderr or "").split())[:200]
+    return html, ""
+
+
+def page_text(target: str, wait_ms: int = 0) -> str:
+    """读出页面上**真正渲染出来的文字**（DOM 文本），不需要图像/视觉通道。
+
+    看界面优先用这个：文字、按钮名、表格数据、JS 渲染后的内容都在这里，
+    又便宜又准。**只有"配色/重叠/对齐"这类文字量不出来的事才需要
+    screenshot + view_image**（视觉是多模态模型的加分项，不是必需项）。
+
+    target 传工作区内相对路径（如 webui/index.html）或 http(s) URL。
+    页面有 JS 渲染时传 wait_ms（毫秒）等它画完。
+    返回渲染后的正文文本（已去脚本/样式/标签）。
+    """
+    resolved, note = _resolve_target(target)
+    if resolved is None:
+        return f"读取失败：{note}"
+    try:
+        wait_ms = max(0, min(int(wait_ms), 30000))
+    except (TypeError, ValueError):
+        return "读取失败：wait_ms 需为整数"
+    browser = find_browser()
+    if browser is None:
+        return ("读取失败：本机找不到 Chrome/Edge。装一个浏览器，或用 "
+                "WOVRA_BROWSER 环境变量指向可执行文件；HTML 文件也可先用 "
+                "read_file/search_files 读源码（只是看不到 JS 渲染结果）")
+    html, diag = _run_browser_dom(browser, resolved, wait_ms)
+    if not html:
+        return f"读取失败：{diag}"
+    from . import limits
+    from .web import _html_to_text
+
+    text = _html_to_text(html.encode("utf-8"), "text/html")
+    if not text.strip():
+        return "页面上没有可见文本（可能是纯 canvas/图片页面：那种情况才需要 screenshot）"
+    safety._audit(f"[page_text] {target}（{len(text)} 字符，{note}）")
+    return (f"[{target}] 渲染后正文 {len(text)} 字符（{note}；DOM 文本，"
+            f"不需要视觉通道）\n\n{limits.clip(text, 'page_text')}")
+
+
 # ---- PNG 像素统计（纯 stdlib） -------------------------------------------------
 # 作用：截图这一步就给出"画面是否全黑/全白/崩版"的机器判据，不必等模型看图。
 # 这也是 AGENTS.md「界面必须实际渲染检查（含像素亮度/配色）」的最小实现。
@@ -314,22 +379,28 @@ def _resolve_target(target: str) -> tuple[str, str] | tuple[None, str]:
     return path.as_uri(), "本地文件"
 
 
-def _run_browser(browser: str, url: str, out: Path, width: int, height: int,
-                 wait_ms: int, timeout: int) -> tuple[bool, str]:
-    """跑一次无头截图；返回 (是否成功, 诊断文本)。"""
-    profile = Path(tempfile.gettempdir()) / "wovra-eye-profile"
+def _browser_base_args(browser: str, wait_ms: int = 0) -> list[str]:
+    """无头浏览器的公共参数（截图与 DOM 文本两条路共用）。"""
     args = [
         browser, "--headless=new", "--disable-gpu", "--hide-scrollbars",
         "--no-first-run", "--no-default-browser-check", "--disable-extensions",
-        f"--user-data-dir={profile}",
+        f"--user-data-dir={Path(tempfile.gettempdir()) / 'wovra-eye-profile'}",
+    ]
+    if wait_ms > 0:
+        # 让页面 JS（图表、动画、异步渲染）跑完再取；虚拟时间预算比 sleep 稳
+        args.append(f"--virtual-time-budget={wait_ms}")
+    return args
+
+
+def _run_browser(browser: str, url: str, out: Path, width: int, height: int,
+                 wait_ms: int, timeout: int) -> tuple[bool, str]:
+    """跑一次无头截图；返回 (是否成功, 诊断文本)。"""
+    args = _browser_base_args(browser, wait_ms) + [
         f"--window-size={width},{height}",
         "--force-device-scale-factor=1",
         f"--screenshot={out}",
+        url,
     ]
-    if wait_ms > 0:
-        # 让页面 JS（图表、动画、异步渲染）跑完再截；虚拟时间预算比 sleep 稳
-        args.append(f"--virtual-time-budget={wait_ms}")
-    args.append(url)
     for attempt in ("--headless=new", "--headless"):
         args[1] = attempt
         try:

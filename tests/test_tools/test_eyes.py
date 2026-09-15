@@ -345,6 +345,69 @@ def test_image_over_hard_limit_is_reported_as_undeliverable(eye_root, monkeypatc
     assert eyes.image_reject_reason("edge.png") == ""
 
 
+def test_page_text_reads_js_rendered_dom(eye_root, monkeypatch):
+    """page_text：读**渲染后**的 DOM 文字，全程不碰图像/视觉通道。
+
+    用户口径（2026-09-15）："多模态是加分项，没有多模态也可以做"。此前看页面
+    只有截图一条路，大量"读界面文字"的活被当成 OCR 用；这条路把文本与像素分开。
+    """
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(eyes, "find_browser", lambda: "fake-chrome")
+    monkeypatch.setattr(eyes, "_run_browser_dom", lambda b, u, w, timeout=60: (
+        '<html><body><div id="app"><h1>渲染标题</h1>'
+        "<table><tr><td>寄存器10</td><td>目标位置</td></tr></table></div>"
+        "<script>var x = 1;</script></body></html>", ""))
+    (eye_root / "a.html").write_text("<html></html>", encoding="utf-8")
+    out = tools_module.page_text("a.html", wait_ms=300)
+    assert "渲染标题" in out and "寄存器10" in out and "目标位置" in out
+    assert "<h1>" not in out and "var x" not in out        # 标签与脚本都去掉了
+    assert "不需要视觉通道" in out                          # 明确它不依赖多模态
+
+
+def test_page_text_degrades_without_browser(eye_root, monkeypatch):
+    """没有浏览器时给出文本路指路，不伪装成功。"""
+    from wovra.tools import page_text
+
+    monkeypatch.setattr(eyes, "find_browser", lambda: None)
+    (eye_root / "a.html").write_text("<html></html>", encoding="utf-8")
+    out = page_text("a.html")
+    assert "找不到 Chrome/Edge" in out and "read_file" in out
+
+
+def test_eye_image_message_degrades_when_model_has_no_vision(eye_root, monkeypatch):
+    """模型不支持视觉时不注入图片，只留一句说明——**没有多模态也能干活**。
+
+    触发路径：图像请求被端点拒（`_stream_request`）→ 记下 `_vision_ok=False`
+    → 之后装配层不再塞图，并指路文本通道（page_text / read_file）。
+
+    放在 test_eyes 是因为被验对象是**装配注入行为**（图片进不进上下文），
+    而它读的是 eyes 的标记与工作区。
+    """
+    from wovra.agent import Agent
+    from wovra.task import Task
+
+    (eye_root / "small.png").write_bytes(_png_solid(40, 8, (1, 2, 3)))
+    agent = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="g"))
+    agent.current_round = {"seq": 1, "events": [
+        {"type": "tool_result",
+         "message": {"role": "tool", "content": "【图片】path=small.png"}},
+    ]}
+    # 有视觉：正常注入
+    assert [p.get("type") for p in agent._eye_image_message()["content"]] \
+        == ["text", "image_url"]
+    # 端点拒过图之后：不再注入，只说清"看不到"+ 指路文本通道
+    agent._vision_ok = False
+    message = agent._eye_image_message()
+    kinds = [p.get("type") for p in message["content"]]
+    assert "image_url" not in kinds
+    text = message["content"][0]["text"] if isinstance(message["content"], list) \
+        else message["content"]
+    assert "不支持图像输入" in text and "不要描述" in text
+    assert "page_text" in text
+    assert agent.vlm_ready() is False
+
+
 def test_eye_image_message_annotates_skipped_image(eye_root, monkeypatch):
     """超上限的图**不注入**，但尾部消息必须写明"未注入"。
 

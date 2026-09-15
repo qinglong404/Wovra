@@ -31,7 +31,7 @@ _CACHE_MAX_ENTRIES = 500
 # 旧版把**截断后**的渲染结果写进缓存，且键里没有 max_chars/体量维度——
 # 于是"再抓一次试试"永远拿到同一份残缺内容，把真问题盖住了。现在改为
 # 缓存**完整正文**（meta + body 的 JSON），键加版本前缀，旧条目自然失效。
-_CACHE_VERSION = "v2"
+_CACHE_VERSION = "v3"
 
 
 def _cache_dir() -> Path:
@@ -310,14 +310,15 @@ def _block_text_density(block: str) -> float:
     密度要度量的是"这块像不像导航"，而导航的特征是**链接密集**，不是
     "标签多"。故分母改成可见文本长度，分子改成"非链接文本"。
 
-    短块衰减：几个字且无链接的碎片（"分享"、"© 2025"）不该与整段正文同
-    等待遇；阈值取 30 字符——表格行（"0 固件版本 只读"）必须过线。
+    短块衰减：只压掉 1–2 个字的碎片（"•"、"©"），**不再压掉短标题**——
+    page_text 场景下"渲染标题"这类 4–6 字的块正是要读的内容，衰减太重会把
+    它当噪声丢掉（实测：`min(1, len/30)` 会把 `<h1>渲染标题</h1>` 整块滤掉）。
     """
     text = _visible_text(block)
     if not text:
         return 0.0
     link_len = len(_link_text(block))
-    return (1.0 - link_len / len(text)) * min(1.0, len(text) / 30.0)
+    return (1.0 - link_len / len(text)) * min(1.0, len(text) / 6.0)
 
 
 def _html_to_text(raw: bytes, ctype: str = "") -> str:
@@ -508,9 +509,15 @@ def _render_fetch(url: str, meta: str, body: str, budget: int,
 
 # 停用词（判相关性时用，中英各一份）。只挡"这种词人人都命中"，不做词干化——
 # 无依赖、可解释，效果足够。
+# 短功能词必须在内（2026-09-15 实测）：查询 `how to parse PNG header in pure
+# python` 的广告条目靠 "python" + "in" 凑够 2 个命中就混过了闸——去掉这类词
+# 之后它只剩 1 个有效命中，被正确滤掉。
 _STOPWORDS = {
     "the", "and", "for", "with", "how", "what", "why", "you", "your", "from",
     "that", "this", "are", "was", "were", "into", "not", "but", "its", "it's",
+    "in", "to", "of", "on", "is", "as", "at", "by", "or", "an", "be", "we",
+    "no", "so", "if", "do", "up", "out", "off", "over", "use", "using", "via",
+    "per", "new", "can", "get", "all", "any", "may", "also", "than", "then",
     "官方", "文档", "说明", "教程", "怎么", "如何", "什么", "为什么", "以及",
 }
 _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
@@ -530,6 +537,21 @@ def _query_terms(query: str) -> tuple[set[str], set[str]]:
     return cjk, ascii_words
 
 
+# 广告/推广行的 host 特征（2026-09-15 实测）：DDG 的广告是
+# `duckduckgo.com/y.js?ad_domain=…`（点进去才跳外部站），Bing 是 `bing.com/aclick`。
+# 它们是**买来的位置**，不是检索结果——混在结果里比无关结果更坏（看起来最相关）。
+_AD_HOSTS = (
+    "duckduckgo.com/y.js", "bing.com/aclick", "bing.com/ck/a?!&&p=",
+    "googleadservices.com", "doubleclick.net",
+)
+
+
+def _is_ad(link: str) -> bool:
+    """结果链接是否是广告/推广（不是自然结果）。"""
+    low = (link or "").lower()
+    return any(marker in low for marker in _AD_HOSTS)
+
+
 def _relevant(query: str, title: str, snippet: str, url: str = "") -> bool:
     """结果与查询词是否有词面重叠（大小写不敏感；URL 也算证据）。
 
@@ -539,6 +561,8 @@ def _relevant(query: str, title: str, snippet: str, url: str = "") -> bool:
     模型会据此判定"网上没有资料"。这里做最后一道闸：不相关的条目**不呈现**。
     """
     haystack = f"{title} {snippet} {url}".lower()
+    if _is_ad(url):
+        return False
     cjk, ascii_words = _query_terms(query)
     hits = 0
     for run in cjk:

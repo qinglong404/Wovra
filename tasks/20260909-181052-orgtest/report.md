@@ -3,7 +3,7 @@
 - **目标**：测试Wovra工具层找bug与改进建议→当前主线：验证压缩/整理质量，推进多agent场景测试（需先触发分裂）
 - **状态**：in_progress
 - **创建时间**：2026-09-09T18:10:52
-- **更新时间**：2026-09-14T18:15:02
+- **更新时间**：2026-09-15T15:04:47
 
 ## 计划（阶段 / 工作项）
 
@@ -135,7 +135,7 @@ _尚无进展摘要。_
 - `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t1_hello.txt"})，返回 67 字（详见 task.json）
 - `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t1_hello.txt", "start_line": 2, "num_lines": 1})，返回 72 字（详见 task.json）
 - `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t1_hello.txt", "start_line": 0})，返回 67 字（详见 task.json）
-- `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t1_hello.txt", "start_line": 100})，结果：t1_hello.txt 共 3 行，start_line=100 超出范围
+- `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t1_hello.txt", "start_line": 100})，失败：t1_hello.txt 共 3 行，start_line=100 超出范围
 - `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t2_empty.txt"})，结果：t2_empty.txt 是空文件
 - `2026-09-09T18:24:01` **调用工具**：read_file({"path": "t3_unicode.txt"})，返回 82 字（详见 task.json）
 - `2026-09-09T18:24:07` **llm_call**：[working] prompt=27,533 cached=24,576 miss=2,957 completion=219 ttft=2.7s dur=5.3s finish=tool_calls
@@ -231,7 +231,7 @@ _尚无进展摘要。_
 - `2026-09-09T18:28:06` **调用工具**：move_file({"new_path": "testlab/renamed.txt", "path": "testlab/editme.txt"})，结果：已移动 testlab/editme.txt → testlab/renamed.txt
 - `2026-09-09T18:28:06` **文件变更**：[move_file] testlab/target.txt → testlab/overwrite.txt
 - `2026-09-09T18:28:06` **调用工具**：move_file({"new_path": "testlab/overwrite.txt", "path": "testlab/target.txt"})，结果：已移动 testlab/target.txt → testlab/overwrite.txt
-- `2026-09-09T18:28:06` **调用工具**：move_file({"new_path": "testlab/nosrc.txt", "path": "testlab/does-not-exist.txt"})，返回 102 字（详见 task.json）
+- `2026-09-09T18:28:06` **调用工具**：move_file({"new_path": "testlab/nosrc.txt", "path": "testlab/does-not-exist.txt"})，失败：文件不存在: testlab/does-not-exist.txt（解析为 /home/lkf/bc/python/Wovra/agent-test/testl…
 - `2026-09-09T18:28:06` **文件变更**：[run_command] ls testlab/
 - `2026-09-09T18:28:06` **调用工具**：run_command({"command": "ls testlab/"})，返回 84 字（详见 task.json）
 - `2026-09-09T18:28:11` **llm_call**：[working] prompt=35,530 cached=35,072 miss=458 completion=108 ttft=4.0s dur=4.8s finish=tool_calls
@@ -262,14 +262,14 @@ _尚无进展摘要。_
 - `2026-09-09T18:28:45` **llm_call**：[working] prompt=36,872 cached=34,816 miss=2,056 completion=48 ttft=2.1s dur=2.3s finish=tool_calls
 - `2026-09-09T18:28:45` **调用工具**：check_background({"task_id": "bg-3"})，结果：[bg-3] 运行中 long-start
 - `2026-09-09T18:28:48` **llm_call**：[working] prompt=36,942 cached=36,864 miss=78 completion=48 ttft=2.2s dur=2.5s finish=tool_calls
-- `2026-09-09T18:28:48` **调用工具**：stop_background({"task_id": "bg-3"})，结果：后台任务 bg-3 已停止（exit_code=-9）。
+- `2026-09-09T18:28:48` **调用工具**：stop_background({"task_id": "bg-3"})，失败：后台任务 bg-3 已停止（exit_code=-9）。
 - `2026-09-09T18:28:52` **llm_call**：[working] prompt=37,016 cached=36,864 miss=152 completion=87 ttft=3.1s dur=4.5s finish=tool_calls
 - `2026-09-09T18:28:52` **文件变更**：[run_background] python3 -m http.server 8765
 - `2026-09-09T18:28:52` **调用工具**：run_background({"command": "python3 -m http.server 8765"})，返回 131 字（详见 task.json）
 - `2026-09-09T18:28:55` **llm_call**：[working] prompt=37,168 cached=36,864 miss=304 completion=48 ttft=2.3s dur=2.5s finish=tool_calls
 - `2026-09-09T18:28:55` **调用工具**：check_background({"task_id": "bg-4"})，结果：[bg-4] 运行中 （无新输出）
 - `2026-09-09T18:28:57` **llm_call**：[working] prompt=37,241 cached=36,864 miss=377 completion=48 ttft=2.6s dur=2.8s finish=tool_calls
-- `2026-09-09T18:28:57` **调用工具**：stop_background({"task_id": "bg-4"})，结果：后台任务 bg-4 已停止（exit_code=-9）。
+- `2026-09-09T18:28:57` **调用工具**：stop_background({"task_id": "bg-4"})，失败：后台任务 bg-4 已停止（exit_code=-9）。
 - `2026-09-09T18:29:02` **llm_call**：[working] prompt=37,315 cached=36,864 miss=451 completion=125 ttft=3.2s dur=4.9s finish=tool_calls
 - `2026-09-09T18:29:02` **文件变更**：[web_fetch] https://example.com
 - `2026-09-09T18:29:05` **调用工具**：web_fetch({"url": "https://example.com"})，返回 206 字（详见 task.json）
@@ -279,23 +279,23 @@ _尚无进展摘要。_
 - `2026-09-09T18:29:13` **文件变更**：[web_fetch] http://127.0.0.1:8765/
 - `2026-09-09T18:29:13` **文件变更**：[web_fetch] http://192.168.1.1/
 - `2026-09-09T18:29:13` **文件变更**：[web_fetch] http://localhost:8080
-- `2026-09-09T18:29:13` **调用工具**：web_fetch({"url": "http://127.0.0.1:8765/"})，结果：拒绝访问内网/保留地址（127.0.0.1 → 127.0.0.1）。
-- `2026-09-09T18:29:13` **调用工具**：web_fetch({"url": "http://192.168.1.1/"})，结果：拒绝访问内网/保留地址（192.168.1.1 → 192.168.1.1）。
-- `2026-09-09T18:29:13` **调用工具**：web_fetch({"url": "http://localhost:8080"})，结果：拒绝访问内网/保留地址（localhost → 127.0.0.1）。
+- `2026-09-09T18:29:13` **调用工具**：web_fetch({"url": "http://127.0.0.1:8765/"})，失败：拒绝访问内网/保留地址（127.0.0.1 → 127.0.0.1）。
+- `2026-09-09T18:29:13` **调用工具**：web_fetch({"url": "http://192.168.1.1/"})，失败：拒绝访问内网/保留地址（192.168.1.1 → 192.168.1.1）。
+- `2026-09-09T18:29:13` **调用工具**：web_fetch({"url": "http://localhost:8080"})，失败：拒绝访问内网/保留地址（localhost → 127.0.0.1）。
 - `2026-09-09T18:29:19` **llm_call**：[working] prompt=37,796 cached=37,376 miss=420 completion=158 ttft=4.2s dur=5.5s finish=tool_calls
 - `2026-09-09T18:29:19` **文件变更**：[web_fetch] http://0.0.0.0:8765/
 - `2026-09-09T18:29:19` **文件变更**：[web_fetch] http://[::1]:8765/
 - `2026-09-09T18:29:19` **文件变更**：[web_fetch] http://spoofed.example.com/
-- `2026-09-09T18:29:19` **调用工具**：web_fetch({"url": "http://0.0.0.0:8765/"})，结果：拒绝访问内网/保留地址（0.0.0.0 → 0.0.0.0）。
-- `2026-09-09T18:29:19` **调用工具**：web_fetch({"url": "http://[::1]:8765/"})，结果：拒绝访问内网/保留地址（::1 → ::1）。
-- `2026-09-09T18:29:19` **调用工具**：web_fetch({"url": "http://spoofed.example.com/"})，返回 74 字（详见 task.json）
+- `2026-09-09T18:29:19` **调用工具**：web_fetch({"url": "http://0.0.0.0:8765/"})，失败：拒绝访问内网/保留地址（0.0.0.0 → 0.0.0.0）。
+- `2026-09-09T18:29:19` **调用工具**：web_fetch({"url": "http://[::1]:8765/"})，失败：拒绝访问内网/保留地址（::1 → ::1）。
+- `2026-09-09T18:29:19` **调用工具**：web_fetch({"url": "http://spoofed.example.com/"})，失败：无法解析主机 spoofed.example.com: [Errno -5] No address associated with hostname
 - `2026-09-09T18:29:25` **llm_call**：[working] prompt=38,043 cached=37,632 miss=411 completion=150 ttft=4.0s dur=5.4s finish=tool_calls
 - `2026-09-09T18:29:25` **文件变更**：[web_search] DeepSeek API pricing 2026
 - `2026-09-09T18:29:25` **文件变更**：[web_search] python uv package manager install
 - `2026-09-09T18:30:26` **调用工具**：web_search({"query": "DeepSeek API pricing 2026", "max_results": 3})，返回 500 字（详见 task.json）
 - `2026-09-09T18:30:26` **调用工具**：web_search({"query": "python uv package manager install", "max_results": 2})，返回 437 字（详见 task.json）
 - `2026-09-09T18:30:29` **llm_call**：[working] prompt=38,528 cached=34,816 miss=3,712 completion=165 ttft=1.8s dur=2.6s finish=tool_calls
-- `2026-09-09T18:30:29` **调用工具**：notify({"agent": "test-agent-b", "message": "hello from tool test"})，结果：未找到 agent：test-agent-b。现存：A(主agent)
+- `2026-09-09T18:30:29` **调用工具**：notify({"agent": "test-agent-b", "message": "hello from tool test"})，失败：未找到 agent：test-agent-b。现存：A(主agent)
 - `2026-09-09T18:30:29` **调用工具**：todo({"action": "show"})，结果：无开启中的大步。
 - `2026-09-09T18:30:29` **调用工具**：expand_history({"ids": "R1", "level": "summary"})，返回 169 字（详见 task.json）
 - `2026-09-09T18:30:36` **llm_call**：[working] prompt=38,833 cached=37,888 miss=945 completion=267 ttft=4.8s dur=6.6s finish=tool_calls
@@ -307,7 +307,7 @@ _尚无进展摘要。_
 - `2026-09-09T18:30:41` **调用工具**：todo({"action": "check_step", "text": "测试网络工具"})，结果：OK：check_step（测试工具层完整功能｜小步 2/2）
 - `2026-09-09T18:30:41` **调用工具**：todo({"action": "show"})，返回 103 字（详见 task.json）
 - `2026-09-09T18:30:49` **llm_call**：[working] prompt=39,426 cached=36,864 miss=2,562 completion=431 ttft=1.9s dur=8.2s finish=tool_calls
-- `2026-09-09T18:30:49` **调用工具**：consult({"agent": "test-agent-b", "question": "是否存在"})，结果：未找到 agent：test-agent-b。现存：A(主agent)
+- `2026-09-09T18:30:49` **调用工具**：consult({"agent": "test-agent-b", "question": "是否存在"})，失败：未找到 agent：test-agent-b。现存：A(主agent)
 - `2026-09-09T18:30:49` **调用工具**：submit_domains({"domains": [], "split_assessment": {"splittable": false, "reason": "测试调用"}})，返回 69 字（详见 task.json）
 - `2026-09-09T18:30:49` **调用工具**：expand_history({"ids": "R1-E01", "level": "full"})，结果：[R1-E01] user 你好,介绍一下你自己
 - `2026-09-09T18:32:26` **llm_call**：[working] prompt=39,715 cached=38,912 miss=803 completion=5,300 ttft=2.4s dur=96.7s finish=tool_calls
@@ -495,7 +495,7 @@ _尚无进展摘要。_
 - `2026-09-09T19:17:00` **调用工具**：run_command({"command": "cd /home/lkf/bc/python/Wovra && sed -n '523,680p' src/wovra/tools.py"})，返回 500 字（详见 task.json）
 - `2026-09-09T19:17:07` **llm_call**：[working] prompt=83,897 cached=82,944 miss=953 completion=222 ttft=4.9s dur=6.9s finish=tool_calls
 - `2026-09-09T19:17:07` **文件变更**：[run_command] cd /home/lkf/bc/python/Wovra && grep -n "def run_command\|def delete_file\|def run_background\|def edit_fi…
-- `2026-09-09T19:17:07` **调用工具**：run_command({"command": "cd /home/lkf/bc/python/Wovra && grep -n \"def run_command\\|def delete_file\\|def run_backgroun…，失败：exit_code=0（耗时 0.0s） stdout: 54: "已拒绝执行危险命令", 216:def glob_files(pattern: str, d…
+- `2026-09-09T19:17:07` **调用工具**：run_command({"command": "cd /home/lkf/bc/python/Wovra && grep -n \"def run_command\\|def delete_file\\|def run_backgroun…，返回 500 字（详见 task.json）
 - `2026-09-09T19:17:12` **用量**：[managed] steps=4 context=91,948 working=250,798 org=0 compaction=0 prompt=249,577 completion=1,221 total=250,798（思考 817…
 - `2026-09-09T19:18:25` **用户输入**：这样吧,其实我中断了刚刚的行为,我改变主意了,马上触发压缩了,我可能会让你体会体验前后的变化,然后来评价压缩质量,但是压缩后,你的上下文就变了,你有什么好的建议吗?
 - `2026-09-09T19:18:53` **llm_call**：[working] prompt=84,503 cached=77,824 miss=6,679 completion=3,392 ttft=2.5s dur=27.9s finish=tool_calls
@@ -637,5 +637,6 @@ _尚无进展摘要。_
 - `2026-09-14T18:15:02` **maintenance**：load：丢弃已删字段的遗留键（acceptance_criteria）——字段已从 Task 删除，加载期兼容过滤
 - `2026-09-14T18:15:02` **maintenance**：registry：加载期回填分裂产物——新增 1（A）
 - `2026-09-14T18:15:02` **maintenance**：state：Task.goal 与 TaskState.goal 分裂，已按后者回填（人视图此前显示“目标待明确”）
+- `2026-09-15T15:04:47` **maintenance**：registry：加载期回填分裂产物——更新 1（A）
 
 > 各事件为单行摘要；未截断的工具返回原文见同目录 task.json。

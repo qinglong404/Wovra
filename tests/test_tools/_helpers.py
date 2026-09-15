@@ -113,6 +113,9 @@ _TOOL_SURFACE_BASELINE = {
     "web_search": ["query", "max_results"],
     # 2026-09-13「眼睛」（用户拍板：将眼睛和 diff 都做了）：新增两工具，
     # 参数表已按约定在此显式确认——本次改动使前缀缓存全量失效一次。
+    # 2026-09-15：新增 page_text（读渲染后 DOM 文本，不依赖视觉通道）——
+    # "多模态是加分项，没有多模态也可以做"。**本次改动使前缀缓存全量失效一次。**
+    "page_text": ["target", "wait_ms"],
     "screenshot": ["target", "width", "height", "wait_ms", "out"],
     "view_image": ["path", "note"],
     "run_command": ["command", "timeout"],

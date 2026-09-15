@@ -136,6 +136,11 @@ class _CoreMixin:
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> None:
         self.llm = llm or LLM()
+        # 视觉是否可用（2026-09-15 用户口径"多模态是加分项，没有它也能干活"）：
+        # 初始 True，**第一次图像请求被端点拒**就翻成 False，之后不再往请求里
+        # 塞图（`_strip_images` 已经从"重发兜底"升级成"能力记忆"）。这样换到
+        # 不支持视觉的模型时，工具链照常工作，只是走 page_text / read_file 文本路。
+        self._vision_ok = True
         self.max_turns = max_turns or _DEFAULT_MAX_TURNS
         # 同步实时进度回调（主线程执行）：等待模型、工具动作的即时提示
         self.on_progress = on_progress
@@ -1625,11 +1630,16 @@ class _CoreMixin:
                         if self._is_image_rejection(error) else None)
             if stripped is None:
                 raise
-            self._emit_status("图片被服务端拒绝（超尺寸/格式）——已跳过该图继续本轮")
+            # 记成**能力事实**（2026-09-15 用户口径："我不能确保每个模型都支持
+            # 视觉"）：一次被拒就说明这个端点/模型不吃图。此后装配不再注入图片
+            # （`_eye_image_message` 查 `vlm_ready()`），也不必每步都白试一次
+            # 400 —— 多模态从"必经之路"降级为"有就用、没有就换文本路"。
+            self._vision_ok = False
+            self._emit_status("该模型不支持图像输入——已跳过图片继续本轮（改用文本路）")
             if self.task is not None:
                 self.task.record(
                     "image_skipped",
-                    f"服务端拒绝图片，已去图重发：{str(error)[:160]}",
+                    f"服务端拒绝图片，已去图重发并关闭本轮图像注入：{str(error)[:160]}",
                 )
             return self.llm.chat(stripped, tools=tools, stream=True)
 

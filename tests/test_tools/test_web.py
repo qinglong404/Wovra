@@ -118,6 +118,30 @@ def test_search_relevance_filter_drops_unrelated(monkeypatch):
     assert len(kept) == 1 and filtered == 1
 
 
+def test_search_ads_are_filtered_out(monkeypatch):
+    """广告行按 host 滤掉（2026-09-15 实测混入的那条）。
+
+    DDG 的广告是 `duckduckgo.com/y.js?ad_domain=…`，标题/摘要**与查询高度重合**
+    （买来的位置当然贴合关键词）——只靠词面重叠判不出来，故按 host 单独判。
+    它比无关结果更坏：看起来最相关。
+    """
+    from wovra import tools as tools_module
+
+    assert tools_module.web._is_ad("https://duckduckgo.com/y.js?ad_domain=udemy.com")
+    assert tools_module.web._is_ad("https://www.bing.com/aclick?ld=xyz")
+    assert not tools_module.web._is_ad("https://docs.python.org/3/library/zlib.html")
+
+    query = "how to parse PNG header in pure python"
+    ad = ("Udemy™ Official Site - Learn Python Online",
+          "Learn advanced python features, like the collections module",
+          "https://duckduckgo.com/y.js?ad_domain=udemy.com")
+    good = ("Pure Python PNG parsing — zlib and struct",
+            "https://example.org/png-header",
+            "Parse the PNG header with struct.unpack and decompress IDAT with zlib")
+    assert tools_module.web._relevant(query, *ad) is False     # 广告直接被判无关
+    assert tools_module.web._relevant(query, *good) is True
+
+
 def test_redirect_to_internal_is_blocked(monkeypatch):
     """重定向 SSRF：公网 URL 302 跳到内网必须被拦（不发第二跳请求）。"""
     import urllib.error

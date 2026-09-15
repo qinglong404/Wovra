@@ -730,6 +730,15 @@ class _AssemblyMixin:
                 )
         return total
 
+    def vlm_ready(self) -> bool:
+        """本模型是否**还接得住**图像（多模态是加分项，不是必需项）。
+
+        用户口径（2026-09-15）："多模态是加分项，没有多模态也可以做"。
+        所以这里**只报告状态、不改行为**：不支持视觉的模型下，装配不注入图片
+        （而不是先注入再让服务端拒），view_image 会改成指路 page_text。
+        """
+        return self._vision_ok
+
     def _eye_image_message(self) -> Optional[dict]:
         """当前轮 view_image 引用的图片 → 一条尾部 user 消息（parts 列表）。
 
@@ -747,6 +756,15 @@ class _AssemblyMixin:
         """
         if self.current_round is None:
             return None
+        if not self._vision_ok:
+            # 本模型不支持视觉：**别把图发出去**（发了也要被拒），改为一次说明，
+            # 让模型知道该走文本路（page_text / read_file）——见 vlm_ready。
+            # 形态与注入路径一致（content 是 parts 列表），下游不必分两套解析。
+            return {"role": "user", "content": [{"type": "text", "text": (
+                "（本轮调用了 view_image，但**当前模型不支持图像输入**，图没有"
+                "发过来——你看不到它，不要描述其内容。页面内容请用 page_text 读"
+                "渲染后的文字；只有配色/重叠这类必须看像素的事才需要换多模态模型。）"
+            )}]}
         parts: list[dict] = []
         skipped: list[str] = []
         seen: set[str] = set()
