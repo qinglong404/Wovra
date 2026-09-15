@@ -290,6 +290,15 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #pending-bar .pbtn.bad:hover{background:#3a1c26}
 #pending-bar .pbtn.always{color:var(--acc);border-color:#33488f;background:#16203a}
 #pending-bar .pbtn.always:hover{background:#1d2b4d}
+/* 开放轮条（2026-09-15，用户口径："开放轮，添加UI显示，同时增加续跑按钮"）：
+   上一轮没产出最终回答（中断/步数用尽）时，它一直开着——新输入会并入这一轮，
+   由当时的执行方继续处理。要让人**看见**这件事，并给一个显式的"续跑"。 */
+#openbar{display:none;align-items:center;gap:9px;padding:9px max(var(--pad-x),calc((100% - var(--read-max))/2));background:linear-gradient(180deg,#2a2417,#1c1912);border-top:1px solid #6b552a;font-size:12.5px;color:var(--tx)}
+#openbar.show{display:flex}
+#openbar .ob-tag{color:var(--gold);font-family:var(--mono);flex-shrink:0}
+#openbar .ob-sub{color:var(--tx3)}
+#openbar .ob-go{margin-left:auto;flex-shrink:0;font-size:13px;padding:6px 16px;border-radius:8px;cursor:pointer;border:1px solid #6b552a;background:#241f14;color:var(--gold);font-family:var(--mono)}
+#openbar .ob-go:hover{background:#332b1a}
 #composer{display:none;gap:10px;padding:10px max(var(--pad-x),calc((100% - var(--read-max))/2));border-top:1px solid var(--line);background:var(--bg1)}
 #composer.show{display:flex}
 #compose{flex:1;resize:none;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;color:var(--tx);font-family:var(--sans);font-size:13.5px;padding:10px 13px;outline:none;min-height:44px;max-height:160px;line-height:1.5}
@@ -427,9 +436,10 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div id="content"><div class="empty">等待选择会话…</div></div>
   <div id="runline"></div>
   <div id="pending-bar"></div>
+  <div id="openbar"></div>
   <div id="composer">
     <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 或 \c 续跑开放轮）"></textarea>
-    <button id="stop" onclick="stopTurn()" style="display:none;background:#5a2a33">⏹ 终止</button>
+    <button id="stop" onclick="stopTurn()" style="display:none;background:#5a2a33">⏹ 终止本轮</button>
     <button id="send" onclick="send()">发送</button>
   </div>
 </main>
@@ -502,6 +512,9 @@ const wsMid=w=>{   // 路径倒数两段（如 BC/Wovra）——比单叶子名�
 };
 
 let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true,REBUILDING=false;
+// 跟随尾部的判据用**时间戳**把『程序滚动』与『用户手势』分开（见 followScrollEvent）：
+// SCROLL_SELF_TS=我们主动写 scrollTop 的时刻；USER_TS=最近一次真实手势；LAST_TOP=上次读到的高度
+let SCROLL_SELF_TS=0,USER_TS=0,LAST_TOP=null;
 let CONV={session:null,seqs:[],cache:{}};
 let REG={};   // agent 身份表：id/name → registry 条目
 let AGENT_STATS=[];   // 按 agent 聚合（serve 端计算）
@@ -716,6 +729,7 @@ function renderHeader(){
     `<span class="chip ${META&&META.safety_mode==='auto'?'bad':'warn'}" style="cursor:pointer;align-self:center;margin-left:6px" onclick="toggleSafety()" title="点击切换：审批模式（敏感操作先问）/ 自主运行（确认闸门全部放行）">${META&&META.safety_mode==='auto'?'⚡ 自主运行':'⚿ 审批模式'}</span>`;
   renderFollowChip();
   renderCtxbar();
+  renderOpenBar();      // 上一轮开着没有（未闭合条 + 续跑按钮）随元数据一起更新
   ensureViewSizes().then(()=>{if(META)renderCtxbar()});
 }
 function setTab(t){
@@ -724,7 +738,7 @@ function setTab(t){
   // 底部的对话切到项目页，看到的是两栏布局的**中段**，左树整块在视口上方，
   // 看起来就是"没加载出来"（实测：`.proj-left` y=-638）。对话页不动：它有
   // 自己的跟随尾部/保位逻辑，回到对话应保留阅读位置。
-  if(t!=='conv'){const c=$('#content');if(c)c.scrollTop=0;}
+  if(t!=='conv'){setScrollTop($('#content'),0);}
   renderHeader();renderTab();
 }
 function copySid(el){
@@ -902,15 +916,24 @@ function resultStatus(name,content){
   if(s==='error')return['✗ 出错','st-bad'];
   return['✓ 成功','st-ok'];
 }
-/* consult 回复归因：内容形如 "{agent-id} 的回复：…" 且 id 在注册表中 */
+/* consult 回复归因：内容形如 "{agent 名或 id} 的回复：…"（`ledger` 里 `_consult`
+   的产物），前缀能解析到注册表就换成**那位 agent 说话**（`who` 让调用方换组）。
+
+   **名字是任意文本**——中文、括号、空格都合法（实测："CLI 核心线（数据层+命令+测试）
+   的回复：…"）。原正则只认 `[\w-]+`（ASCII），这类名字一律匹配不上：回复被当成
+   普通工具结果折进调用卡（默认折叠），界面上**看不到那位 agent 的消息块**
+   （用户 2026-09-15 报："我看 B 和 A 交流了，但是在 UI 渲染中看不到关于 A 的消息块"）。 */
 function consultSender(content){
-  const m=String(content||'').match(/^([\w-]+) 的回复：/);
-  if(m&&REG[m.group(1)]){
-    const a=REG[m.group(1)];
-    return{id:a.id,name:a.name||a.id,color:agentColor(a.id),
-           body:String(content).slice(m[0].length)};
-  }
-  return null;
+  const s=String(content||'');
+  const m=s.match(/^(.{1,60}?)\s*的回复：/);
+  if(!m)return null;
+  // 注意是 `m[1]`：JS 的 match 结果是数组，**没有 `.group()`**（那是 Python 的写法；
+  // 2026-09-12 的群聊改版就带着 `m.group(1)` 进来的——ASCII 名字一匹配上就抛
+  // TypeError，整次 drawConv 都画不出来；中文名字则因正则不认而静默漏掉。两个一起修。）
+  const a=REG[m[1].trim()];
+  if(!a)return null;    // 前缀不在名册里：不硬认（老会话/别的格式别误伤）
+  return{id:a.id,name:a.name||a.id,color:agentColor(a.id),
+         body:s.slice(m[0].length)};
 }
 
 /* 正在跑的轮**不是**"机制生效前的老轮"——那是给历史闭合轮的标签。
@@ -1134,6 +1157,7 @@ async function liveAttach(jobId,resume){
   const rb=document.getElementById('runbar');if(rb)rb.classList.add('on');
   const rl=document.getElementById('runline');if(rl)rl.classList.add('on');
   document.title='● 运行中 · Wovra 现场';
+  renderOpenBar();      // 跑起来了：轮本来就开着，未闭合条收起（runline 在说这事）
   sseConnect(jobId,after);
 }
 /* 把直播区在页面上的痕迹全部抹掉。
@@ -1168,6 +1192,7 @@ function liveDetach(){
   const rb=document.getElementById('runbar');if(rb)rb.classList.remove('on');
   const rl=document.getElementById('runline');if(rl){rl.classList.remove('on');rl.innerHTML=''}
   document.title='Wovra · 现场';
+  renderOpenBar();      // 收尾后：末轮仍未闭合（步数用尽/中断）→ 露出"未闭合 + 续跑"
 }
 async function stopTurn(){   // ⏹ 终止本轮（对齐 CLI Ctrl+C：轮保持开放）
   if(!LIVE.job)return;
@@ -1286,10 +1311,11 @@ async function pollLive(){
   if(d.status&&d.status!=='running'&&d.status!=='queued')sseFinish();
 }
 function tickStopBtn(){
+  // **时长不写进按钮**（用户口径 2026-09-15："将终止本轮按钮里面的时间记录去掉"）：
+  // 运行时长由顶部 runline 自己走字，按钮保持定宽，不再每 300ms 改一次文案。
   const st=document.getElementById('stop');
   if(!st||!LIVE.job)return;
-  const du=fmtDur((Date.now()-(LIVE.startedAt||Date.now()))/1000);
-  st.textContent='⏹ 终止本轮'+(du?' · '+du:'');
+  if(st.textContent!=='⏹ 终止本轮')st.textContent='⏹ 终止本轮';
 }
 setInterval(pollLive,300);   // 300ms：跟上模型输出速度，textContent 增量下无压力
 function blockKey(d){
@@ -1588,15 +1614,9 @@ function renderLive(){
       `<span class="rl-time">${esc(fmtDur((Date.now()-(LIVE.startedAt||Date.now()))/1000)||'<1s')}</span>`;
   }
   if(FOLLOW){
-    // **只在用户本来就在底部附近时才自动跟随**：阈值取可视高度的 1/4（至少
-    // 160px）——80px 太小，稍微往回滚一点就"不算在底部"，反而更容易被拽走
-    // （用户口径：80px 太小）。否则你在上面点开一个块看内容，每次流式重绘都
-    // 把你拽回底部，看起来就像"块被自己遮挡了"。
-    const c=$('#content');
-    const tol=Math.max(160,Math.round((c.clientHeight||600)*0.25));
-    const near=(c.scrollHeight-c.scrollTop-c.clientHeight)<tol;
-    if(near){c.scrollTop=c.scrollHeight;}
-    else if(window._followNagged!==true){window._followNagged=true;renderFollowChip&&renderFollowChip();}
+    // **跟随 = 用户意图**（2026-09-15 修，见 `followScrollEvent`）：FOLLOW 亮着就
+    // 钉到底，不再看"离底部多远"——那个门控正是"跟着跟着突然停住"的根因。
+    pinBottom($('#content'));
   }
 }
 
@@ -1709,6 +1729,63 @@ function renderLiveOne(aid,isActor){
     ? box.parentNode.closest('.crow.live-prov') : null;
   if(prov)prov.style.display=hide?'none':'';
 }
+/* ============ 对话缓存与磁盘的差集（2026-09-15 修） ============
+   用户报的两个症状（"正文加载完消失一会才出来"、"会话结束整块都没了只剩上面
+   那条 R7，刷新才出来"）同一个根因：**`CONV.cache` 是快照，而收尾路径信任它**。
+
+   开放轮只要被任何一次"取过"（首屏 5 轮、2.5s 轮询、时间线跳转）就会进缓存，
+   之后只靠 2.5s 轮询增量保鲜。收尾（`sseFinish`）、切回对话页（`setTab('conv')`）、
+   点 ↻ 这几条路一旦跑在轮询前头，正式渲染拿到的就是**落后的事件表**：
+   `sseFinish` 里直播区一撤、正式块上屏，最后那段回答（运气差时整轮——比如页面
+   在后台/别的页签时轮询根本不动，缓存停在 0 条）就整块消失；下一次轮询才补回来，
+   所以是"消失一会才出来"，而收尾后轮询若已停则要手动刷新。
+
+   服务端每轮都报事件数（`_round_meta` 的 `events`），照它算差集：
+   * `stale`：在缓存里、但事件数落后 → **增量**取（`?after=` 最后一条 id，只补尾巴）
+   * `fresh`：缓存窗口之后新冒出来的轮 → 整取（空缓存时只取最后 5 轮，同首屏口径） */
+function convSyncPlan(){
+  const out={stale:[],fresh:[]};
+  if(!META||!CUR||CONV.session!==CUR)return out;
+  const list=META.round_list||[];
+  if(!list.length)return out;
+  if(!CONV.seqs.length){out.fresh=list.slice(-5).map(m=>m.seq);return out}
+  for(const m of list){
+    const d=CONV.cache[m.seq];if(!d)continue;
+    const have=(d.events||[]).length,want=Number(m.events||0);
+    if(want>have)out.stale.push(m.seq);
+  }
+  const newest=CONV.seqs[CONV.seqs.length-1];
+  out.fresh=list.filter(m=>!CONV.cache[m.seq]&&m.seq>newest).map(m=>m.seq);
+  return out;
+}
+async function syncConvCache(plan){
+  plan=plan||convSyncPlan();
+  if(!plan.stale.length&&!plan.fresh.length)return false;
+  const sid=CUR;
+  await Promise.all(plan.stale.map(async seq=>{
+    const d=CONV.cache[seq];if(!d)return;
+    try{
+      const lastId=((d.events||[]).slice(-1)[0]||{}).id;
+      const inc=await api(`/api/sessions/${sid}/rounds/${seq}?after=${encodeURIComponent(lastId||'')}`);
+      if(CONV.session!==sid)return;             // 取数期间切了会话：画到别处去了，丢弃
+      // **用 concat 换新数组**：`coveredEvIds()` 按数组身份+长度记忆化，原地 push
+      // 只改长度也能让它重算，但换数组更直白（直播区让位判据立刻跟着走）
+      d.events=(d.events||[]).concat(inc.events||[]);
+      if(inc.blocks&&inc.blocks.length)d.blocks=inc.blocks;
+    }catch(e){/* 单轮取失败不拖垮整次同步：下一次轮询/刷新还会补 */}
+  }));
+  if(plan.fresh.length){
+    let got=null;
+    try{
+      got=await Promise.all(plan.fresh.map(async s=>[s,await api(`/api/sessions/${sid}/rounds/${s}`)]));
+    }catch(e){got=null}
+    if(got&&CONV.session===sid){
+      got.forEach(([s,d])=>{CONV.cache[s]=d;if(!CONV.seqs.includes(s))CONV.seqs.push(s)});
+      CONV.seqs.sort((a,b)=>a-b);
+    }
+  }
+  return true;
+}
 async function renderConv(c,fresh){
 
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
@@ -1720,7 +1797,13 @@ async function renderConv(c,fresh){
     c.innerHTML='<div class="empty">装载对话…</div>';
     const got=await Promise.all(batch.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
     got.forEach(([s,d])=>{CONV.cache[s]=d;CONV.seqs.push(s)});
+    drawConv(c,true);
+    return;
   }
+  // 切回对话页 / 点 ↻：**缓存落后就先补齐再画**（2026-09-15，同收尾口径）——
+  // 差集为空时一个字节都不等，直接同步画（老行为原样保留）
+  const plan=convSyncPlan();
+  if(plan.stale.length||plan.fresh.length){try{await syncConvCache(plan)}catch(e){}}
   drawConv(c,true);
 }
 function toggleThink(el){el.dataset.user='1';el.classList.toggle('open')}
@@ -1748,8 +1831,9 @@ async function loadEarlier(){
   const sc=$('#content');const prevH=sc.scrollHeight;
   const got=await Promise.all(before.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
   got.forEach(([s,d])=>{CONV.cache[s]=d;CONV.seqs.unshift(s)});
+  FOLLOW=false;renderFollowChip();       // 主动往前翻历史 = 不跟尾部了（本次及以后）
   drawConv($('#content'),false);
-  sc.scrollTop+=sc.scrollHeight-prevH;   // 前插后钉住视口
+  setScrollTop(sc,sc.scrollTop+(sc.scrollHeight-prevH));   // 前插后钉住视口
 
 }
 /* ============ 事件 → 条目（**官方渲染与直播共用这一份**） ============
@@ -1788,7 +1872,10 @@ function eventItems(e, seq, ei, sender, calls, when){
   if(role==='tool'){
     const sub=consultSender(content);
     // consult 回复换发送者（它替另一个 agent 说话）：`who` 让调用方临时换组
-    if(sub){out.push({t:'break'});out.push({t:'text',text:sub.body,note:'consult 回复',tm:when,tmIndex:ei,who:sub});return out}
+    // 另一位的回复是**一段话**（常带 markdown：清单/加粗/代码），要和正文一样走 MD 渲染
+    //（用户 2026-09-15 报："为什么 A 的回复没有 MD 渲染"——原条目没带 md 标记，
+    // 走的是 esc 纯文本，`- ` 列表和反引号原样显示）
+    if(sub){out.push({t:'break'});out.push({t:'text',text:sub.body,md:true,note:'💬 '+(sub.name||sub.id)+' 的回复',tm:when,tmIndex:ei,who:sub});return out}
     const ci=calls[e.tool_call_id];
     if(ci){ci.result=content||'';return out}      // 结果并入调用卡，不单独占一行
     out.push({t:'break'});
@@ -1831,6 +1918,9 @@ function drawConv(c,toBottom){
   if(!rl.length){c.innerHTML='<div class="empty">此会话还没有对话</div>';return}
   const metaBy={};(META.round_list||[]).forEach(r=>metaBy[r.seq]=r);
   const calls={};
+  // 只有**最后一轮**可能未闭合（新轮只在上一轮闭合后才开）；老数据缺 end_state 的
+  // 中间轮不许误标"未闭合"
+  const metaLast=((META.round_list||[]).slice(-1)[0]||{}).seq;
   const remain=convAllSeqs().filter(s=>s<rl[0]).length;
   const rows=[];   // {kind:'group',sender,items:[]} | {kind:'sys',text,title}
   let cur=null,curSeq=0;
@@ -1869,6 +1959,7 @@ function drawConv(c,toBottom){
                   unassigned:!(senderOf(m)||{}).id,stage:(m.stage==null?-1:m.stage),
                   sb:sb,
                   parts:(m.participants||[]),at:((String(m.user_input||'').match(/@[^\s，。]+/g)||[])),
+                  unclosed:(m.end_state==null||m.end_state===''||m.end_state==='open'),
                   hops:m.route_hops||0};
     let sepDone=false;
     const dropSep=()=>{if(!sepDone){flush();push(sepRow);sepDone=true}};
@@ -1919,6 +2010,12 @@ function drawConv(c,toBottom){
         (row.steps!=null&&row.steps!=='')?`<span class="seg">${row.steps} 步</span>`:'',
         `<span class="seg">${row.n} 事件</span>`,
         row.stage===0?`<span class="seg" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'',
+        // 未闭合（2026-09-15）：这一轮没有产出最终回答（中断/步数用尽）——新输入会
+        // 并入它、由当前执行方接手，不再重新判路由。跑着的时候不标（runline 在说）
+        // 收尾那次重绘里 `LIVE.job` 还没撤（closing 已置）——所以要认 closing，
+        // 否则"未闭合"要等下一次重绘才出现
+        (row.unclosed&&row.seq===metaLast&&(!LIVE.job||LIVE.closing)&&!(META&&META.live_job))
+          ?`<span class="seg" style="color:var(--gold)" title="这一轮还没有产出最终回答（中断或步数用尽）。新输入会并入本轮，由当前执行方接着处理；下方「▶ 续跑」可不注入新消息直接接着干">未闭合</span>`:'',
         // ④ 会合轮：本轮参与者（各自回答，不汇总）
         (row.parts&&row.parts.length)?`<span class="seg" title="会合：这些 agent 排在本轮的参与者队列里，各自干完自己的那份，全干完这一轮才闭合">参与者 ${row.parts.map(p=>esc(REG[p]?.name||p)).join('、')}</span>`:'',
         // ⑤ @ 定向插话：这条用户消息只投给了被 @ 的人
@@ -2003,16 +2100,16 @@ function drawConv(c,toBottom){
   }
   const anchorDone=()=>{ c.style.overflowAnchor=''; REBUILDING=false; };
   if(toBottom){
-    c.scrollTop=c.scrollHeight;
-    requestAnimationFrame(()=>{c.scrollTop=c.scrollHeight;
+    setScrollTop(c,c.scrollHeight);
+    requestAnimationFrame(()=>{setScrollTop(c,c.scrollHeight);
       requestAnimationFrame(anchorDone)});
   }else{
     // 锚点恢复：优先"同一条子块放回同一偏移"；索引越界（子块数变了）才退回高度差补偿
     const nk=c.children;
     if(anchorOff!==null&&anchorIdx>=0&&anchorIdx<nk.length&&nk[anchorIdx].offsetTop!==undefined){
-      c.scrollTop=Math.max(0,nk[anchorIdx].offsetTop-anchorOff);
+      setScrollTop(c,Math.max(0,nk[anchorIdx].offsetTop-anchorOff));
     }else{
-      c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
+      setScrollTop(c,Math.max(0,anchorTop+(c.scrollHeight-anchorH)));
     }
     requestAnimationFrame(anchorDone);
   }
@@ -2176,6 +2273,7 @@ async function ensureConvUpTo(seq){
 }
 function jumpToConv(seq,blockId){
   setTab('conv');
+  FOLLOW=false;renderFollowChip();   // 跳到某一轮 = 用户要看那里，别被尾部钉走
   ensureConvUpTo(seq).then(()=>{
     const sep=[...document.querySelectorAll('#content .rsep')]
       .find(x=>x.textContent.includes('R'+seq));
@@ -2183,19 +2281,56 @@ function jumpToConv(seq,blockId){
   });
 }
 
-/* ---- C3 实时跟随 ---- */
+/* ---- C3 实时跟随 ----
+   2026-09-15 修"跟随着跟随着突然停到某一位置不跟随了"（用户报）。两个叠加的毛病：
+
+   ① 自动 pin 有个"离底部 < tol（≥160px）"的门控。内容一次长高超过 tol
+      （一张工具卡、一段代码块、一次结果回填落地）时 `near` 就为假 → 不再 pin；
+      而**没有任何滚动事件**（用户没滚）→ FOLLOW 还挂着 ✓，画面却停在半路，
+      后面每帧都因为距离太远继续不 pin。跟随的判据应该是**用户意图**（FOLLOW
+      这个开关），不是每帧现量的距离。
+   ② 关掉跟随的条件是"任何一次滚动 + 离底部 >140px"。但内容长高/变矮会让浏览器
+      **自己**动 scrollTop（原生锚定、钳位），那不是用户滚的——原先也会把跟随
+      关掉（表现为"突然停了"，且不再回来）。所以要把程序滚动排除掉。
+
+   于是：程序写 scrollTop 一律走 `setScrollTop`（打时间戳），真实手势
+   （滚轮/触摸/按键）另打时间戳；只有"用户意图 + 明显上滚"才关跟随。 */
+function setScrollTop(c,v){
+  if(!c)return;
+  SCROLL_SELF_TS=Date.now();
+  c.scrollTop=v;
+}
+function pinBottom(c){          // 钉到底：本帧写一次，下一帧确认一次（布局可能把它挪回来）
+  if(!c)return;
+  setScrollTop(c,c.scrollHeight);
+  requestAnimationFrame(()=>{
+    if(!FOLLOW)return;          // 期间用户滚走了：不许把人拽回来
+    const gap=c.scrollHeight-c.scrollTop-c.clientHeight;
+    if(gap<80)setScrollTop(c,c.scrollHeight);
+  });
+}
+function followScrollEvent(c){
+  if(REBUILDING||!c)return;
+  const now=Date.now();
+  const top=c.scrollTop;
+  const dist=c.scrollHeight-top-c.clientHeight;
+  const prev=LAST_TOP;LAST_TOP=top;
+  if(now-(SCROLL_SELF_TS||0)<180)return;      // 我们自己刚写的（pin / 重建 / 锚定恢复）
+  const up=prev!=null&&top<prev-4;            // 明显往上滚
+  const user=now-(USER_TS||0)<1200;           // 1.2s 内有真实手势（滚轮/触摸/按键）
+  if(FOLLOW){
+    // 拖滚动条没有手势信号 → 用"滚了很远"兜底；内容自动长高的微调不再误关跟随
+    if(up&&dist>140&&(user||dist>320)){FOLLOW=false;renderFollowChip()}
+  }else if(dist<60){FOLLOW=true;renderFollowChip()}
+}
+['wheel','touchstart','touchmove','keydown'].forEach(ev=>
+  window.addEventListener(ev,()=>{USER_TS=Date.now()},{passive:true}));
 function renderFollowChip(){
   const el=$('#follow-chip');if(!el)return;
   el.textContent=FOLLOW?'跟随尾部 ✓':'跟随尾部 ✗';
   el.className='chip '+(FOLLOW?'ok':'');
 }
-$('#content').addEventListener('scroll',()=>{
-  if(REBUILDING)return;   // 重建引发的钳位滚动不算用户操作，不关跟随
-  const c=$('#content');
-  const dist=c.scrollHeight-c.scrollTop-c.clientHeight;
-  if(FOLLOW&&dist>140){FOLLOW=false;renderFollowChip()}
-  else if(!FOLLOW&&dist<60){FOLLOW=true;renderFollowChip()}
-});
+$('#content').addEventListener('scroll',()=>followScrollEvent($('#content')));
 setInterval(async()=>{
   if(TAB!=='conv'||!CUR||!META||META.status!=='in_progress'||document.hidden)return;
   try{
@@ -2253,43 +2388,19 @@ async function send(){
       const c=$('#content');
       c.insertAdjacentHTML('beforeend',
         `<div class="sysline">未知命令 ${esc(t[0])}${esc(cmd)} · 输入 /help 查看全部命令</div>`);
-      c.scrollTop=c.scrollHeight;return;
+      pinBottom(c);return;
     }
   }
   $('#send').disabled=true;
   const c=$('#content');
-  if(resume){
-    c.insertAdjacentHTML('beforeend','<div class="sysline" id="pend-run">⏳ 续跑开放轮…（完成后此屏自动更新）</div>');
-  }else{
+  if(!resume){
     c.insertAdjacentHTML('beforeend',
       `<div class="crow user" id="pend-u"><div class="avatar" style="background:linear-gradient(135deg,#5a6fd6,#3d4f8f)">你</div>
        <div class="ccol"><div class="cname">你</div><div class="bub">${esc(t)}</div></div></div>
        <div class="sysline" id="pend-run">⏳ 轮执行中…（完成后此屏自动更新）</div>`);
   }
-  c.scrollTop=c.scrollHeight;
-  try{
-    const r=await fetch(url,{
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(body)});
-    const j=await r.json();
-    if(r.status===409){$('#pend-run').textContent='⚠ '+j.error;return}
-    if(r.status!==202){$('#pend-run').textContent='⚠ '+(j.error||('HTTP '+r.status));return}
-    LIVE.viaSend=true;liveAttach(j.job_id,resume);
-    const iv=setInterval(async()=>{
-      try{
-        const jd=await api('/api/jobs/'+j.job_id);
-        if(jd.pending)return;   // 审批栏由 pollLive 渲染（常驻，抗重绘）
-        if(jd.status==='running'||jd.status==='queued')return;
-        clearInterval(iv);$('#send').disabled=false;
-        if(jd.status==='error'){const pr=$('#pend-run');if(pr)pr.textContent='✗ '+jd.error;return}
-        $('#pend-u')?.remove();$('#pend-run')?.remove();
-        // **必须走 sseFinish**（refreshAfterTurn + liveDetach 一条路）：原先这里
-        // 只 refreshAfterTurn()、不撤直播区 → 临时块带着思考留在正式块下面
-        //（用户 2026-09-13 报的"一轮分成两个消息块"）。sseFinish 幂等，重复调无害。
-        await sseFinish();      }catch(e){clearInterval(iv);$('#send').disabled=false;
-        const pr=$('#pend-run');if(pr)pr.textContent='✗ 轮询失败：'+e.message}
-    },1500);
-  }catch(e){$('#send').disabled=false;const pr=$('#pend-run');if(pr)pr.textContent='✗ '+e.message}
+  // 起轮与收尾走共用路径（startTurn）——续跑按钮（开放轮条）与 /c 完全同一条服务端接口
+  await startTurn(url,body,resume);
 }
 let PEND_SIG='';
 function renderPendingBar(jobId,p){
@@ -2332,6 +2443,87 @@ function clearPendingBar(){
   if(!bar)return;
   bar.classList.remove('show');bar.innerHTML='';PEND_SIG='';
 }
+
+/* ---- 开放轮条（2026-09-15，用户口径："开放轮，添加UI显示，同时增加续跑按钮"）----
+   轮的闭合规则是"只有 AI 产出最终回答才算一轮"（V2）：中断/步数用尽的轮会一直
+   开着，下一条输入**并入这一轮**（不会开新轮，也不会重新判路由）——由当时的
+   执行方接着处理。这条规则从界面上原先完全看不见，用户只会看到"新消息跑去了
+   一个子 agent"（2026-09-15 实测的困惑）。这里把它显式化：
+     * 显示：R{seq} 未闭合 + 执行方 + "新消息将并入本轮"；
+     * 动作：▶ 续跑 = 与 /c 同一条路（不注入新消息，直接接着干）。
+   只在"没有作业在跑"时出现——跑着的时候轮本来就开着，runline 已经说清了。 */
+let OPEN_SIG='';
+function renderOpenBar(){
+  const bar=document.getElementById('openbar');
+  if(!bar)return;
+  const rl=(META&&META.round_list)||[];
+  const last=rl[rl.length-1]||null;
+  const open=!!last&&(last.end_state==null||last.end_state===''||last.end_state==='open');
+  const running=!!(LIVE.job||(META&&META.live_job));
+  const show=!!(CUR&&META&&open&&!running&&TAB==='conv');
+  bar.classList.toggle('show',show);
+  if(!show){if(OPEN_SIG!==''){bar.innerHTML='';OPEN_SIG=''}return}
+  const who=senderOf(last)||{};
+  const hops=Number(last.route_hops||0);
+  const sig=[CUR,last.seq,last.steps_used,last.events,who.id||'',hops].join('|');
+  if(sig===OPEN_SIG)return;
+  OPEN_SIG=sig;
+  // "执行方"是**当前**那位——轮内可以转交（route_to），所以它可能不是最初接手的
+  // 那一位（实测困惑："我看执行方不是 B 吗？"——R4 在 11:02 被 B 转交给了 A，
+  // 执行方就是 A）。跳数写出来，别让人对不上。
+  const whoTxt=who.id?`${esc(who.id)}（${esc(who.name||'')}）`:'主 agent';
+  const hopNote=hops>0?`（本回合第 ${hops} 跳转交后接手）`:'';
+  const tip='上一轮还没有产出最终回答（中断或步数用尽），所以它还开着：\n'
+    +'• 直接发新消息 = 并入这一轮，由**当前执行方**接着处理（不新开一轮、不重新判路由）\n'
+    +'• 点「续跑」= 不注入新消息，直接接着干（与 /c 等价）\n'
+    +(hops>0?`• 本轮内已转交 ${hops} 次；当前执行方是最后一次接手的那位（轮头有"Main → X"）\n`:'');
+  bar.innerHTML=`<span class="ob-tag">⏸ R${esc(String(last.seq))} 未闭合</span>`+
+    `<span class="ob-sub">· 当前执行方 ${whoTxt}${hopNote} · 新消息将并入本轮</span>`+
+    `<span class="ob-go" id="ob-resume" title="${esc(tip)}" onclick="resumeOpenRound()">▶ 续跑</span>`;
+}
+async function resumeOpenRound(){
+  const bt=document.getElementById('ob-resume');
+  if(!CUR||LIVE.job){renderOpenBar();return}
+  if(bt)bt.textContent='续跑中…';
+  await startTurn(`/api/sessions/${CUR}/resume`,{},true);
+}
+
+/* 起一轮（发送 / 续跑共用）：禁发送键 → 落 pending 提示 → POST → 挂直播 →
+   1.5s 状态轮询兜底收尾。`resume=true` 时 POST 无 body、不插用户气泡
+   （与 /c 完全同一条服务端路径）。 */
+async function startTurn(url,body,resume){
+  $('#send').disabled=true;
+  const c=$('#content');
+  if(resume){
+    c.insertAdjacentHTML('beforeend','<div class="sysline" id="pend-run">⏳ 续跑开放轮…（完成后此屏自动更新）</div>');
+  }
+  if(FOLLOW)pinBottom(c);   // 正在跟尾部才钉底；在看历史就别把人拽走
+  try{
+    const r=await fetch(url,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify(body)});
+    const j=await r.json();
+    if(r.status===409){const pr=$('#pend-run');if(pr)pr.textContent='⚠ '+j.error;else alert('⚠ '+j.error);return}
+    if(r.status!==202){const pr=$('#pend-run');
+      if(pr)pr.textContent='⚠ '+(j.error||('HTTP '+r.status));else alert('⚠ '+(j.error||('HTTP '+r.status)));return}
+    LIVE.viaSend=true;liveAttach(j.job_id,resume);
+    const iv=setInterval(async()=>{
+      try{
+        const jd=await api('/api/jobs/'+j.job_id);
+        if(jd.pending)return;   // 审批栏由 pollLive 渲染（常驻，抗重绘）
+        if(jd.status==='running'||jd.status==='queued')return;
+        clearInterval(iv);$('#send').disabled=false;
+        if(jd.status==='error'){const pr=$('#pend-run');if(pr)pr.textContent='✗ '+jd.error;return}
+        $('#pend-u')?.remove();$('#pend-run')?.remove();
+        // **必须走 sseFinish**（refreshAfterTurn + liveDetach 一条路）：原先这里
+        // 只 refreshAfterTurn()、不撤直播区 → 临时块带着思考留在正式块下面
+        //（用户 2026-09-13 报的"一轮分成两个消息块"）。sseFinish 幂等，重复调无害。
+        await sseFinish();      }catch(e){clearInterval(iv);$('#send').disabled=false;
+        const pr=$('#pend-run');if(pr)pr.textContent='✗ 轮询失败：'+e.message}
+    },1500);
+  }catch(e){$('#send').disabled=false;
+    const pr=$('#pend-run');if(pr)pr.textContent='✗ '+e.message;else alert('✗ '+e.message)}
+}
 async function answerJob(jobId,ans){
   await fetch(`/api/jobs/${jobId}/answer`,{method:'POST',
     headers:{'Content-Type':'application/json'},body:JSON.stringify({answer:ans})});
@@ -2341,12 +2533,13 @@ async function answerJob(jobId,ans){
 async function refreshAfterTurn(){
   META=await api('/api/sessions/'+CUR);VIEWSIZES=null;buildReg();AGENT_STATS=META.agent_stats||[];renderHeader();
   if(META.live_job&&!LIVE.job)liveAttach(META.live_job);
-  const fresh=(META.round_list||[]).map(r=>r.seq).filter(x=>!CONV.seqs.includes(x));
-  if(fresh.length){
-    const got=await Promise.all(fresh.map(async s=>[s,await api(`/api/sessions/${CUR}/rounds/${s}`)]));
-    got.forEach(([s,d])=>{CONV.cache[s]=d;if(!CONV.seqs.includes(s))CONV.seqs.push(s)});
-    CONV.seqs.sort((a,b)=>a-b);
-  }
+  // **缓存先补齐、再画**（2026-09-15 修，用户报"正文加载完消失一会才出来"、"会话
+  // 结束整块都没了只剩 R 行"）：原先这里只补"还没进缓存的轮"，已经进缓存的轮
+  // （开放轮被 2.5s 轮询/首屏取过）**永不回补**——收尾这一刻正式渲染拿着落后
+  // （甚至空的）事件表上屏，而直播区紧接着被撤掉：最后那段回答/整轮从页面上
+  // 消失，等下一次轮询才补回来。这里按服务端事件数补齐，**只发落后的那几轮的
+  // 增量请求**（不落后时零请求）。
+  try{await syncConvCache()}catch(e){}
   drawConv($('#content'),true);
   loadSessions();
   watchMaintenance();
@@ -2401,6 +2594,7 @@ function closeWsModal(){$('#ws-modal').classList.remove('open');$('#mask').class
 const BS = String.fromCharCode(92);   // 反斜杠（源码里不写字面反斜杠）
 const trimSep = p => { let q = String(p); while (q.endsWith(BS) || q.endsWith('/')) q = q.slice(0, -1); return q; };
 let wsBrowsed = '';
+let wsSep = '/';    // 目录分隔符**由服务端报**（`/api/fs/ls` 的 `sep`）：Windows `\`、POSIX `/`
 async function toggleBrowser(){
   const b = document.getElementById('ws-browser');
   if (b.style.display === 'none') {
@@ -2411,21 +2605,29 @@ async function toggleBrowser(){
 async function browseTo(path){
   const d = await api('/api/fs/ls' + (path ? '?path=' + encodeURIComponent(path) : ''));
   if (d.error) { document.getElementById('ws-err').textContent = d.error; return; }
+  if (d.sep) wsSep = String(d.sep);
   wsBrowsed = d.path || '';
   document.getElementById('ws-cur').textContent = '当前：' + (wsBrowsed || '（选一个盘）');
   const box = document.getElementById('ws-dirs');
   box.innerHTML = '';
-  const join = (base, name) => trimSep(base) ? trimSep(base) + BS + name : name;
+  // **拼接必须用服务端给的分隔符**（2026-09-15 修，用户报："点文件夹时一直提示
+  // 目录不存在，无法选择工作路径"）：原先写死反斜杠，Linux 上点一个文件夹就把
+  // `/home/lkf` 拼成 `/home/lkf\foo` → 服务端判"目录不存在"。根（POSIX `/`）
+  // 单独处理：`trimSep('/')` 是空串，不能退化成裸名字（那就成了相对路径）。
+  const join = (base, name) => {
+    const b = trimSep(String(base || ''));
+    return b ? b + wsSep + name : wsSep + name;
+  };
   (d.roots || []).forEach(r => {
     const el = document.createElement('div');
     el.className = 'ws-dir'; el.textContent = '💾 ' + r;
-    el.addEventListener('click', () => browseTo(r));
+    el.dataset.p = r;                        // 路径走 dataset（列表底部的委托监听消费）
     box.appendChild(el);
   });
   (d.dirs || []).forEach(n => {
     const el = document.createElement('div');
     el.className = 'ws-dir'; el.textContent = '📁 ' + n;
-    el.addEventListener('click', () => browseTo(join(wsBrowsed, n)));
+    el.dataset.p = join(wsBrowsed, n);
     box.appendChild(el);
   });
   if (!(d.roots || []).length && !(d.dirs || []).length)
@@ -2444,9 +2646,12 @@ function useBrowsed(){
   document.getElementById('ws-browser').style.display = 'none';
 }
 
-// 事件委托：目录行点击进子目录（路径走 dataset，不进内联属性）
+// 事件委托：目录行点击进子目录（路径走 dataset，不进内联属性）。
+// **唯一一处接线**（2026-09-15 合并）：行上不再各自 addEventListener——两套并存时
+// 需要防双触发，而且 `data-p` 是死代码（没人写）时这个监听永远匹配不到。
+// 顺带：行有了稳定的 data-p，浏览器审计可以直接按路径定位。
 document.getElementById('ws-dirs').addEventListener('click', e => {
-  const el = e.target.closest('[data-p]');
+  const el = e.target && e.target.closest ? e.target.closest('[data-p]') : null;
   if (el) browseTo(el.dataset.p);
 });
 function batchSel(id,on){

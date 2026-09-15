@@ -692,6 +692,10 @@ def fs_list(path: str | None) -> dict:
     """目录浏览（新建会话选工作目录用）：只列子目录，只读。
 
     path 为空 → 列盘根（Windows）/文件系统根（POSIX）。
+
+    **`sep` 一并报出去**（2026-09-15 修）：前端要拿它拼子目录路径。原先前端写死
+    反斜杠，Linux 上点一个文件夹就请求 `/home/lkf\\foo` → 服务端判"目录不存在"
+    （用户报："点文件夹时一直提示目录不存在，无法选择工作路径"）。
     """
     if not path:
         if os.name == "nt":
@@ -699,11 +703,12 @@ def fs_list(path: str | None) -> dict:
             for L in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
                 if Path(f"{L}:\\").exists():
                     roots.append(f"{L}:\\")
-            return {"roots": roots, "dirs": [], "path": ""}
-        return {"roots": ["/"], "dirs": [], "path": ""}
+            return {"roots": roots, "dirs": [], "path": "", "sep": os.sep}
+        return {"roots": ["/"], "dirs": [], "path": "", "sep": os.sep}
     p = Path(path)
     if not p.is_absolute() or not p.is_dir():
-        return {"roots": [], "dirs": [], "path": str(p), "error": "目录不存在"}
+        return {"roots": [], "dirs": [], "path": str(p), "sep": os.sep,
+                "error": "目录不存在"}
     dirs = []
     try:
         for child in p.iterdir():
@@ -713,8 +718,10 @@ def fs_list(path: str | None) -> dict:
             except OSError:
                 continue
     except OSError as e:
-        return {"roots": [], "dirs": [], "path": str(p), "error": str(e)}
-    return {"roots": [], "dirs": sorted(dirs, key=str.lower), "path": str(p)}
+        return {"roots": [], "dirs": [], "path": str(p), "sep": os.sep,
+                "error": str(e)}
+    return {"roots": [], "dirs": sorted(dirs, key=str.lower),
+            "path": str(p), "sep": os.sep}
 
 
 def parse_llm_call(detail: str) -> dict | None:

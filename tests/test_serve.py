@@ -545,6 +545,32 @@ def _get(url, method="GET", body=None):
         return e.code, json.loads(e.read().decode("utf-8"))
 
 
+def test_fs_list_reports_sep_and_handles_roots(tmp_path):
+    """目录浏览要把分隔符报给前端（2026-09-15 修"点文件夹说目录不存在"）。
+
+    原先前端自己写死反斜杠拼子目录路径，Linux 上点一个文件夹就请求
+    `/home/lkf\foo` → 服务端判"目录不存在"，用户根本选不了工作目录。
+    前端现在用响应里的 `sep` 拼路径，所以这个字段是**契约**。
+    """
+    import os
+
+    root = serve.fs_list(None)
+    assert root["sep"] == os.sep
+    if os.name != "nt":
+        assert root["roots"] == ["/"] and root["path"] == "" and root["dirs"] == []
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "Sub2").mkdir()
+    d = serve.fs_list(str(tmp_path))
+    assert d["sep"] == os.sep
+    assert d["path"] == str(tmp_path)
+    assert d["dirs"] == ["sub", "Sub2"]      # 大小写不敏感排序
+    assert "error" not in d
+    bad = serve.fs_list(str(tmp_path / "nope"))
+    assert bad["error"] == "目录不存在" and bad["sep"] == os.sep
+    rel = serve.fs_list("relative/path")
+    assert rel["error"] == "目录不存在"
+
+
 def test_http_sessions_endpoint(server):
     code, body = _get(server + "/api/sessions")
     assert code == 200 and body["sessions"][0]["id"] == "s1"

@@ -295,13 +295,14 @@ class _AssemblyMixin:
         hits = views_module.view_blocks_by_round(past, domains, view_name, index, owners)
 
         msgs: list[dict] = []
-        resp = routing_module.responsibility_lines(self.task.registry)
-        head = self.system_prompt
-        if resp:
-            head = (head + "\n\n[全局职责表]（跨 agent 唯一公共信息；"
-                    "路由与转交都以此为依据）\n" + "\n".join(resp)).strip()
-        if head:
-            msgs.append({"role": "system", "content": head})
+        # **系统提示词只留公共人设**（2026-09-15 修）：职责表原先拼在这里，
+        # 而它渲染每个域的文件清单/计数/状态——agent 在轮内边干边认领文件
+        # （ownership 落地）就改一次 → 它**之后的一切**（历史 + 当前轮，占
+        # prompt 的 90%+）随之作废：实测会话 0d3875 R7 09:20:11 命中 7.1%、
+        # 单次浪费 112K tok。职责表已挪进尾部运行时信封（高频变化状态放尾部，
+        # §19 布局纪律；`cli/prompt.py` 里本来就写着"全局职责表在尾部"）。
+        if self.system_prompt:
+            msgs.append({"role": "system", "content": self.system_prompt})
 
         # [2] 本视图历史：命中轮才成段（轮头 + 用户块 → user；本域块 → assistant）
         # 分档基准取自**本视图命中轮**（不是全局最新代次）：别的域整理不会
@@ -340,6 +341,15 @@ class _AssemblyMixin:
 
         # [4] 运行时信封（绝对尾部）
         block: list[str] = []
+        # **全局职责表**（跨 agent 唯一公共信息；路由与转交都以此为依据）：
+        # 放信封里而不是系统提示词——它是**高频变化状态**（每个域的文件清单/
+        # 计数/状态随轮内文件认领与归属落地随时变），信封不在历史里，改它只
+        # 作废信封本身（~1-2K），不会连累历史与当前轮（见系统段处的注释）。
+        resp = routing_module.responsibility_lines(self.task.registry)
+        if resp:
+            block.append("[全局职责表]（跨 agent 唯一公共信息；"
+                         "路由与转交都以此为依据）")
+            block.extend(resp)
         if str(view_name) == views_module.MAIN_AGENT_ID:
             # 主 agent 起手：把规则层的起点建议摆给它（2026-09-12 用户口径：
             # 每轮都是"主 agent 先触发 → 路由原话 → 子 agent 回复"）。
@@ -377,7 +387,15 @@ class _AssemblyMixin:
                     f"{labels.get(field, field)}：" + "；".join(str(x) for x in items)
                 )
         if block:
-            msgs.append(_runtime_reminder("\n\n".join(block)))
+            # **内容先备好、末尾再挂**（2026-09-15 修）：信封内容里 todo/状态/
+            # 文件地图/职责表都是**高频变化状态**，而它原先挂在 `cur_msgs`
+            # **之前**（与全量路径"信封绝对尾部"不一致）——信封一变，它后面的
+            # **整个当前轮**（长轮能占 prompt 的大头）随之作废。实测会话
+            # d9fde7 R4（视图路径、当前轮 13 万字符）：一次文件认领作废
+            # 152K tok；挂到绝对尾部后同样一次认领只作废信封本身（~1-2K）。
+            envelope: Optional[dict] = _runtime_reminder("\n\n".join(block))
+        else:
+            envelope = None
         # 整条装配即将收尾、图片放最尾——视图路径的图片暂时不能放这里：
         # 下面还要补协议缝（prev_tail / cur_msgs），会把 user 图片挤到中间。
         # 故把图片留到 return 前追加（见本函数末尾）。
@@ -409,6 +427,10 @@ class _AssemblyMixin:
             msgs.append(
                 _runtime_reminder("\n".join(self._handoff_lines(view_name, handoff)))
             )
+        if envelope is not None:
+            # **绝对尾部**（与全量装配路径同口径）：信封是高频变化状态（todo/
+            # 本域账本/职责表每步都可能变），放最后 = 变一次只作废它自己。
+            msgs.append(envelope)
         # 图片注入：必须最后一条（协议缝与转交说明都已就位），见 `_eye_image_message`
         eye = self._eye_image_message()
         if eye is not None:

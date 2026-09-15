@@ -242,6 +242,46 @@ def test_view_assembly_history_is_frozen_when_other_domain_organized(monkeypatch
     )
 
 
+def test_view_envelope_is_absolute_tail_so_prefix_survives(monkeypatch):
+    """前缀纪律：轮内**信封级**变化（职责表/待办/状态）只许动尾部信封。
+
+    实测（2026-09-15，会话 d9fde7 R4，视图路径真数据）：一次文件认领让
+    `[全局职责表]`（渲染每个域的 files 清单/计数/状态）变化——它原先拼在
+    **系统提示词**里，于是它之后的一切（历史 + 当前轮，15.9 万 tok）作废；
+    信封原先也挂在当前轮**之前**，待办/状态一变同样作废整个当前轮。
+    两处都按 §19 布局纪律挪到绝对尾部后：同一次认领只在最后一条消息里体现。
+    """
+    monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
+    task = _task_with_domains([_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])])
+    agent = _agent(task)
+    agent.system_prompt = "你是 Wovra 的执行助手。"   # 生产路径恒有（见上一条测试）
+    _make_open_round(agent, 2, "继续")
+    agent.current_round["active_view"] = views_module.MAIN_AGENT_ID
+    before = agent._assemble_messages()
+
+    # 轮内发生的事：新建一个文件、归属落地 → 职责表变了（files +1、计数变）
+    entry = next(e for e in task.registry if e.get("name") == "工具层")
+    entry["files"] = ["src/wovra/tools/safety.py", "src/wovra/tools/new_tool.py"]
+    after = agent._assemble_messages()
+
+    # ① 系统段是**纯人设**：没有职责表，所以文件认领根本改不到它
+    sys_before = next(m for m in before if m.get("role") == "system")
+    assert "[全局职责表]" not in str(sys_before.get("content") or "")
+    assert "safety.py" not in str(sys_before.get("content") or "")
+
+    # ② 信封之前逐段逐字节不变（信封是最后一条：它变一次只作废它自己）
+    def envelope_index(msgs):
+        return next(i for i, m in enumerate(msgs)
+                    if "[全局职责表]" in str(m.get("content") or ""))
+    i_before, i_after = envelope_index(before), envelope_index(after)
+    assert i_before == i_after == len(before) - 1
+    assert before[:i_before] == after[:i_after]
+
+    # ③ 职责表没丢，只是搬进信封（语义不变）
+    tail = str(after[-1].get("content") or "")
+    assert "[全局职责表]" in tail and "new_tool.py" in tail
+
+
 def test_view_derivation_is_deterministic():
     """视图是可重建的派生物：同一份材料派生两次，字节完全相同。"""
     rounds = [_mk_file_round(1, "写工具", ["src/wovra/tools/safety.py"])]
@@ -272,6 +312,10 @@ def test_view_history_is_append_only_across_rounds(monkeypatch):
     monkeypatch.setenv(routing_module.ACTIVE_VIEW_ENV, "1")
     task = _task_with_domains([_mk_file_round(1, "写工具层", ["src/wovra/tools/safety.py"])])
     agent = _agent(task)
+    # **必须有系统提示词**（2026-09-15）：生产路径恒有（`cli.prompt._system_prompt`），
+    # 而本测试按"前 N 段"做位置切片——职责表搬进尾部信封后，空提示词的视图里
+    # 不再有 system 段，切片就会错位到历史里去（切的是位置，不是语义）。
+    agent.system_prompt = "你是 Wovra 的执行助手。"
     agent._open_or_reuse_round("继续改 src/wovra/tools/safety.py")
     agent.current_round["active_view"] = "工具层"
     first = agent._assemble_messages()[:3]  # system + 历史 + 身份（信封之前）

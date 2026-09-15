@@ -149,7 +149,9 @@ function mkEl(tag){
     // 产品代码里 `box.parentNode.closest('.crow.live-prov')`／`hit.closest('.crow')`
     // 这类判定在仪器里恒为空 → 场景空跑（AM/AG 都被它骗过）。
     closest(sel){ let p=this; while(p){ if(matchOne(p,sel))return p; p=p.parentNode; } return null; },
-    addEventListener(){}, removeEventListener(){}, setAttribute(){}, getAttribute(){return null},
+    addEventListener(t,f){ (this._h=this._h||{})[t]=f; }, removeEventListener(){},
+    fire(t,ev){ const f=this._h&&this._h[t]; if(f) f(ev||{}); },
+    setAttribute(){}, getAttribute(){return null},
     scrollIntoView(){}, focus(){}, click(){}, replaceChildren(){ this.children=[]; },
     querySelector(sel){ DOMQ.n++; const g=matchAll(this,sel); DOMQ.nodes+=g.length;
                         return g.length?g[0]:null; },
@@ -183,7 +185,9 @@ function matchOne(el, sel){
     if(t.startsWith('#')){ if(el.id !== t.slice(1)) return false; }
     else if(t.startsWith('.')){ if(!clsOf(el).includes(t.slice(1))) return false; }
     else{
-      const a = /^\[([\w-]+)="?([^"\]]*)"?\]$/.exec(t);
+      // `[k]`（只看存在）与 `[k="v"]`（值）两种都要支持（2026-09-15 加：工作目录
+      // 列表的委托判定是 `closest('[data-p]')`，只有后者会**静默匹配不到** → 空跑）
+      const a = /^\[([\w-]+)(?:=(?:"([^"]*)"|'([^']*)'|([^"\]]*)))?\]$/.exec(t);
       if(!a) return false;
       // `data-seq` → `dataset.seq`（真 DOM 就是这么映射的，桩要跟上，
       // 否则 `.crow[data-seq="7"]` 永远匹配不到——踩过）
@@ -192,7 +196,11 @@ function matchOne(el, sel){
         : a[1];
       const v = (key==='id') ? el.id
         : (el.dataset[key]!==undefined ? el.dataset[key] : el.getAttribute(a[1]));
-      if(String(v===undefined||v===null?'':v) !== a[2]) return false;
+      const hasVal = a[2] !== undefined || a[3] !== undefined || a[4] !== undefined;
+      if(hasVal){
+        const want = a[2]!==undefined ? a[2] : (a[3]!==undefined ? a[3] : a[4]);
+        if(String(v===undefined||v===null?'':v) !== want) return false;
+      }else if(v===undefined || v===null) return false;
     }
   }
   return true;
@@ -307,6 +315,10 @@ function scan(label, html){
   return bad;
 }
 const problems = [];
+// **异步场景的待办**（2026-09-15 加）：整段场景是同步块，`await` 的续体只在微任务里跑——
+// 所以需要"等待网络桩 + 断言画出来的 DOM"的场景把断言包成 promise 推到这里，
+// 收尾统一 `Promise.all` 后再出结论（node 退出前会先排空微任务队列）。
+const __deferred = [];
 function check(label, html, expectCells){
   const cells = cellCount(html);
   console.log(`  ${label}：cells=${cells} 长度=${html.length}`);
@@ -1775,13 +1787,326 @@ renderLive();                                   // 第 2 帧
   console.log(`   AD 两帧后 直播节点=${after?1:0} 临时块=${provs} 同一节点=${!!(AD_FIRST&&after===AD_FIRST)}`);
 }
 
-console.log('');
-if (problems.length) {
-  console.log('渲染核对：失败 ' + problems.length + ' 项');
-  problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
-  process.exit(1);
+console.log('场景 AT｜终止本轮按钮：文案不带时长（用户口径 2026-09-15）');
+// 原先把运行时长每 300ms 写进按钮（"⏹ 终止本轮 · 6m39s"）——按钮宽度来回抖，而且
+// 时长在顶部 runline 本来就一直走字。口径：按钮只留文案。
+resetLive();
+{
+  const stop = document.getElementById('stop');
+  if (!stop) problems.push('AT: 静态 id 里没有 #stop（夹具失效）');
+  else {
+    stop.style.display = '';
+    LIVE.job = 'j1'; LIVE.startedAt = Date.now() - 125000;   // 跑了 2 分钟多
+    tickStopBtn(); tickStopBtn();
+    const txt = String(stop.textContent || '');
+    if (/[0-9]/.test(txt)) problems.push(`AT: 终止按钮仍带数字（${JSON.stringify(txt)}）——时长只留给顶部 runline`);
+    if (!/终止本轮/.test(txt)) problems.push('AT: 终止按钮文案丢了');
+    console.log(`   AT 按钮=${JSON.stringify(txt)}`);
+  }
 }
-console.log('渲染核对：通过（41 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+
+console.log('场景 AU｜开放轮：界面上要看得见"未闭合"，并给一个「▶ 续跑」');
+// 用户口径（2026-09-15）："开放轮，添加UI显示，同时增加续跑按钮"。轮的闭合规则是
+// "只有 AI 产出最终回答才算一轮"——中断/步数用尽的轮一直开着，新输入会并入它。
+// 这件事原先在界面上完全看不见（用户看到的是"新消息跑去了一个子 agent"）。
+resetLive();
+{
+  const bar = document.getElementById('openbar');
+  if (!bar) problems.push('AU: 静态 id 里没有 #openbar（夹具失效）');
+  else {
+    META.round_list = [{seq:7, active_view:'A', steps_used:3, events:9, end_state:'open',
+                        route_hops:2}];
+    META.live_job = null; LIVE.job = null; TAB = 'conv'; CUR = 's1';
+    renderOpenBar();
+    const txt = String(bar.innerHTML || '');
+    if (!bar.classList.contains('show')) problems.push('AU: 末轮未闭合却没有显示未闭合条');
+    if (!/R7/.test(txt)) problems.push('AU: 未闭合条没写轮号');
+    if (!/续跑/.test(txt)) problems.push('AU: 未闭合条没有「续跑」按钮');
+    if (!/新消息将并入本轮/.test(txt)) problems.push('AU: 没说明"新输入并入本轮"（用户困惑的就是这个）');
+    // **只看可见文字**：`innerHTML` 里还带着 title 提示（提示里也有"当前执行方"，
+    // 拿它当判据就会假绿——写这条时踩到）
+    const visTxt = bodyOf(txt);
+    if (!/当前执行方/.test(visTxt)) problems.push('AU: 没写"当前执行方"（容易和最初接手的那位混淆）');
+    if (!/第 2 跳/.test(visTxt)) problems.push('AU: 有轮内转交时没写跳数（用户看到执行方变了会以为写错）');
+    // 作业在跑 → 收起（runline 在说这事，两条会打架）
+    LIVE.job = 'j1'; renderOpenBar();
+    const runningOn = bar.classList.contains('show');
+    if (runningOn) problems.push('AU: 作业在跑时未闭合条没收起');
+    LIVE.job = null;
+    // 轮已闭合 → 收起
+    META.round_list = [{seq:7, active_view:'A', end_state:'completed'}];
+    renderOpenBar();
+    const closedOn = bar.classList.contains('show');
+    if (closedOn) problems.push('AU: 轮已闭合还挂着未闭合条');
+    // 无转交时不该出现跳数话术
+    META.round_list = [{seq:7, active_view:'A', route_hops:0, end_state:'open'}];
+    renderOpenBar();
+    const noHop = !/跳/.test(bodyOf(String(bar.innerHTML || '')));
+    if (!noHop) problems.push('AU: 没有轮内转交却写了跳数');
+    console.log(`   AU 未闭合条=${!runningOn && !closedOn ? '开(合并)/跑收起/闭合收起' : '不对'} 轮号/续跑/说明=${/R7/.test(txt)&&/续跑/.test(txt)&&/新消息将并入本轮/.test(txt)} 当前执行方=${/当前执行方/.test(txt)} 跳数=${/第 2 跳/.test(txt)} 无跳不写=${noHop}`);
+  }
+}
+
+console.log('场景 AV｜跟随尾部：内容一次长高超过阈值，不许"跟着跟着突然停住"');
+// 用户报（2026-09-15）："跟随着跟随着突然停到某一位置不跟随了"。两个叠加的毛病：
+//   ① 自动 pin 有"离底部 < tol(≥160px)"门控——内容一次长高超过它，`near` 恒假、
+//      再也不 pin，而没有任何滚动事件来纠正（FOLLOW 还挂着 ✓）；
+//   ② 关跟随的条件是"任何滚动 + 离底 >140"——内容长高/原生锚定让浏览器自己调的
+//      scrollTop 也被算成"用户滚的"，一关就不回来。
+// 口径：FOLLOW 是**用户意图**（只由真实手势改），跟随亮着就钉到底。
+resetLive();
+{
+  const c = DOM.content;
+  // 元素监听没法在桩里跨 resetDom 存活（监听注册在旧节点上）——接线由 Python 侧
+  // 静态核对（main() 里查 `$('#content').addEventListener('scroll'`）；这里测语义。
+  META.round_list = [{seq:7, active_view:'A', events:1, steps_used:1}];
+  META.status = 'in_progress';
+  c.scrollHeight = 1000; c.clientHeight = 300; c.scrollTop = 0;   // 离底 700px
+  FOLLOW = true; LAST_TOP = null; SCROLL_SELF_TS = 0; USER_TS = 0;
+  REBUILDING = false;   // 桩里 rAF 是 no-op（真浏览器 anchorDone 会清），不手动清就会空跑
+  applyChunk({k:'ans', s:'正文在长'});
+  renderLive();
+  const pinned = c.scrollTop === 1000;
+  if (!pinned)
+    problems.push(`AV: FOLLOW 亮着却没钉到底（scrollTop=${c.scrollTop}）——"跟着跟着突然停住"`);
+  // ①' 不跟随时不许把人拽走
+  FOLLOW = false; c.scrollTop = 0; renderLive();
+  const stayed = c.scrollTop === 0;
+  if (!stayed) problems.push('AV: FOLLOW=false 时直播重绘把视口拽到底部了');
+  // ② 程序滚动（锚定/重建钳位，带 self 时间戳）不许关跟随
+  FOLLOW = true; SCROLL_SELF_TS = Date.now(); c.scrollTop = 200;
+  followScrollEvent(c);
+  const afterSelf = FOLLOW;
+  if (!afterSelf) problems.push('AV: 程序滚动把跟随关掉了');
+  // ②' 无手势的自动上跳（距离不大）也不许关：从"贴底"被挪上 100/300px
+  LAST_TOP = null; SCROLL_SELF_TS = 0; USER_TS = 0;
+  c.scrollTop = 700; followScrollEvent(c);   // 建立 LAST_TOP（贴底）
+  c.scrollTop = 600; followScrollEvent(c);   // 上跳 100 → 离底 100
+  const small = FOLLOW;
+  c.scrollTop = 400; followScrollEvent(c);   // 上跳 200 → 离底 300
+  const mid = FOLLOW;
+  if (!small || !mid) problems.push('AV: 内容自己长高导致的自动上跳把跟随关掉了');
+  // ③ 真实手势 + 明显上滚 → 关（这是用户"我要看上面"的表达）
+  USER_TS = Date.now(); c.scrollTop = 0; followScrollEvent(c);
+  const off = !FOLLOW;
+  if (!off) problems.push('AV: 用户滚轮上滚了，跟随没关');
+  // ④ 滚回底部 → 恢复
+  c.scrollTop = 700; followScrollEvent(c);
+  const back = FOLLOW;
+  if (!back) problems.push('AV: 滚回底部后跟随没恢复');
+  console.log(`   AV 钉底=${pinned}｜不拽=${stayed}｜程序滚动不关=${afterSelf}｜自动上跳不关=${small&&mid}｜手势关=${off}｜回底恢复=${back}`);
+}
+
+console.log('场景 AW｜consult（传话）回复要有那位 agent 的消息块——名字含中文/括号也要认');
+// 用户报（2026-09-15）："我看 B 和 A 交流了，但是在 UI 渲染中，看不到关于 A 的消息块。"
+// 根因：`consultSender` 的归因正则只认 `[\w-]+`（ASCII），而 ledger 的产物是
+// `{名字} 的回复：…`，名字可以是任意文本（实测 "CLI 核心线（数据层+命令+测试）"）——
+// 匹配不上 → 回复被当普通工具结果折进调用卡（默认折叠）→ 界面上没有 A 的块。
+resetLive();
+{
+  META.registry = [{id:'Main',name:'主agent'}, {id:'B',name:'Web 界面线'},
+                   {id:'A',name:'CLI 核心线（数据层+命令+测试）'}];
+  buildReg();   // 真实路径：登记册按 id 与 name 双索引（手搓 REG 会漏 name 键——踩过）
+  META.round_list = [{seq:7, active_view:'B', events:4, steps_used:2, end_state:'open'}];
+  META.live_job = null; LIVE.job = null; TAB = 'conv'; CUR = 's1';
+  CONV = {session:'s1', seqs:[7], cache:{7:{events:[
+    ev({id:'R7-E01', type:'user', role:'user', content:'干活'}),
+    ev({id:'R7-E02', type:'tool_call', agent:'B', role:'assistant', content:'',
+        tool_calls:[{id:'c1', function:{name:'consult',
+                     arguments:'{"agent":"A","question":"对齐一下"}'}}]}),
+    ev({id:'R7-E03', type:'tool_result', agent:'B', role:'tool', tool_call_id:'c1',
+        content:'CLI 核心线（数据层+命令+测试） 的回复：同意，**数据层我来改**。'}),
+    ev({id:'R7-E04', type:'tool_call', agent:'B', role:'assistant', content:'好的',
+        tool_calls:[{id:'c2', function:{name:'run_command', arguments:'{}'}}]}),
+  ], blocks:[]}}};
+  drawConv(DOM.content, false);
+  const rows = [...DOM.content.querySelectorAll('.crow.agent[data-seq="7"]')];
+  const senders = rows.map(r => (r.querySelector('.gbox') || {dataset:{}}).dataset.agent);
+  const aRow = rows.find(r => (r.querySelector('.gbox') || {dataset:{}}).dataset.agent === 'A');
+  const txt = aRow ? domAllText(aRow) : '';
+  if (!aRow) problems.push('AW: 传话回复没有生成回复方（A）的消息块——名字含中文/括号时归因失败');
+  else if (!/同意，/.test(txt)) problems.push('AW: A 的块里没有回复正文');
+  if (aRow && !/CLI 核心线/.test(txt)) problems.push('AW: 回复正文上方没有"谁回复的"标记');
+  // 回复正文要**走 MD**（用户 2026-09-15 报："为什么 A 的回复没有 MD 渲染"）
+  if (aRow && !/<strong>数据层我来改<\/strong>/.test(String(aRow.innerHTML || '')))
+    problems.push('AW: 回复正文没走 MD 渲染（加粗的 markdown 原样显示）');
+  if (consultSender('查无此人 的回复：x') !== null)
+    problems.push('AW: 名册外的前缀被硬认成 agent（会误伤普通结果）');
+  // ASCII 名字（老正则唯一能匹配的情形）也要能认——而且**不许抛**：2026-09-12 起的
+  // 那版 `m.group(1)` 是 Python 写法，JS 里一匹配上就 TypeError（整次 drawConv 画不出来）
+  REG['reader'] = {id:'reader', name:'reader'};
+  const ascii = consultSender('reader 的回复：好');
+  if (!ascii || ascii.id !== 'reader') problems.push('AW: ASCII 名字的传话回复认不出来（或抛错）');
+  console.log(`   AW 块序=${senders.join('>')} A块=${!!aRow} 正文=${/同意/.test(txt)} 名册外不认=${consultSender('查无此人 的回复：x')===null} ASCII=${!!consultSender('reader 的回复：好')}`);
+}
+
+console.log('场景 AX｜选工作目录：点文件夹要拼出**绝对路径**（分隔符由服务端报）');
+// 用户报（2026-09-15）："选择路径时可以返回上一级，不过我点文件夹时，会一直提示
+// 目录不存在，导致我无法选择想要的工作路径。" 根因：前端拼子目录路径写死反斜杠
+// （BS=92），Linux 上 `/home` + `\` + `lkf` → 服务端判"目录不存在"；另外 POSIX 根
+// （`/`）在 `trimSep` 后是空串，会退化成裸名字（相对路径）。
+// 现在拼路径用 `/api/fs/ls` 响应里的 `sep`，根单独处理。
+const AX_ASK = [];
+__deferred.push((async () => {
+  const flush = async (n) => { for (let i = 0; i < (n || 8); i++) await Promise.resolve(); };
+  const payload = {
+    '/home':       {path:'/home', sep:'/', dirs:['lkf']},
+    '/home/lkf':   {path:'/home/lkf', sep:'/', dirs:[]},
+    '/':           {path:'/', sep:'/', dirs:['home']},
+    'C:\\Users':   {path:'C:\\Users', sep:'\\', dirs:['me']},
+    'C:\\Users\\me':{path:'C:\\Users\\me', sep:'\\', dirs:[]},
+  };
+  // **只接自己的工作目录请求，其余转交上一个桩**（写时踩到：两个场景都写 global.fetch，
+  // 后安装的那个会把前一个盖掉，断言就对着别人的桩说话）
+  const axPrev = global.fetch;
+  global.fetch = (u) => {
+    const p = String(u);
+    if (!/\/api\/fs\/ls/.test(p)) return axPrev(u);
+    AX_ASK.push(p);
+    const q = /path=([^&]*)/.exec(p);
+    const key = q ? decodeURIComponent(q[1]) : '';
+    return Promise.resolve({ok:true, json:async () => (payload[key] || {path:key, sep:'/', dirs:[]})});
+  };
+  const errBox = () => String((document.getElementById('ws-err') || {}).textContent || '');
+  const rowsOf = () => [...document.getElementById('ws-dirs').children];
+  // ① Linux：/home 点 lkf → 必须是 /home/lkf（绝对、正斜杠）
+  await browseTo('/home'); await flush();
+  if (wsBrowsed !== '/home') problems.push(`AX: 进 /home 后路径不对（${wsBrowsed}）`);
+  const r1 = rowsOf().find(r => /lkf/.test(r.textContent || ''));
+  if (!r1) problems.push('AX: /home 下没列到 lkf（夹具失效）');
+  else if (r1.dataset.p !== '/home/lkf')
+    problems.push(`AX: 目录行的 data-p 不是绝对路径（${r1.dataset.p}）`);
+  else {
+    await browseTo(r1.dataset.p); await flush();
+    const asked = AX_ASK[AX_ASK.length - 1] || '';
+    if (wsBrowsed !== '/home/lkf')
+      problems.push(`AX: 点文件夹后路径成了 ${wsBrowsed}（应为 /home/lkf）——反斜杠/相对路径又回来了`);
+    if (!/path=%2Fhome%2Flkf/.test(asked))
+      problems.push(`AX: 请求的不是绝对路径（${asked}）`);
+    if (errBox()) problems.push(`AX: 点文件夹报错：${errBox()}`);
+  }
+  // ② POSIX 根：/ 点 home → 必须是 /home（不能退化成裸 "home"）
+  await browseTo('/'); await flush();
+  const r2 = rowsOf().find(r => /home/.test(r.textContent || ''));
+  if (!r2) problems.push('AX: / 下没列到 home（夹具失效）');
+  else {
+    await browseTo(r2.dataset.p); await flush();
+    if (wsBrowsed !== '/home')
+      problems.push(`AX: 从根进子目录成了 ${wsBrowsed}（应为 /home）——根被 trimSep 吃掉了`);
+  }
+  // ③ Windows：分隔符仍是反斜杠（不能为了修 Linux 把 Windows 弄坏）
+  await browseTo('C:\\Users'); await flush();
+  const r3 = rowsOf().find(r => /me/.test(r.textContent || ''));
+  if (!r3) problems.push('AX: C:\\Users 下没列到 me（夹具失效）');
+  else {
+    await browseTo(r3.dataset.p); await flush();
+    if (wsBrowsed !== 'C:\\Users\\me')
+      problems.push(`AX: Windows 拼接坏了（${wsBrowsed}）`);
+  }
+  console.log(`   AX /home→${'/home/lkf'}｜根→/home｜Windows→${'C:\\\\Users\\\\me'}｜报错=${errBox()||'无'}｜最后请求=${AX_ASK[AX_ASK.length-1]}`);
+})());
+
+console.log('场景 AS｜收尾交接：缓存落后/为空时必须"先补齐、再上屏"');
+// 用户报（2026-09-15）：①"正文加载完会消失一会才出来" ②"会话结束整个消息块都没了，
+// 只剩上面那条 R7 的信息，重新刷新之后才出来"。同一个根因：`CONV.cache` 是快照，
+// 收尾（refreshAfterTurn）只补"还没进缓存的轮"，**已经进缓存的轮永不回补**——
+// 而开放轮只要被 2.5s 轮询/首屏取过一次就在缓存里（可能只有 0～2 条事件）。
+// 于是收尾那一刻正式渲染拿着旧（甚至空）事件表上屏、直播区同时被撤：
+// 最后那段回答/整轮消失，等下一次轮询（或手动刷新）才回来。
+// 修法：`convSyncPlan` 算差集（落后=增量补、新轮=整取），收尾/切回对话页先补齐再画。
+resetLive();
+{
+  // ① 纯判定：落后的轮与新冒出来的轮必须分开算出来
+  META.round_list = [{seq:7, events:3, active_view:'Main'},
+                     {seq:8, events:1, active_view:'Main'}];
+  CONV = {session:'s1', seqs:[7], cache:{7:{events:[{id:'R7-E01'}]}}};
+  const plan = convSyncPlan();
+  if (!plan.stale.includes(7))
+    problems.push('AS: 事件数落后的轮没进 stale（收尾还会拿旧缓存上屏 → 正文消失一会）');
+  if (!plan.fresh.includes(8))
+    problems.push('AS: 新冒出来的轮没进 fresh（新轮画不出来）');
+  console.log(`   AS 差集 落后=[${plan.stale}] 新轮=[${plan.fresh}]`);
+}
+// ② 走一遍收尾：stub 服务端（只有 /rounds 真数据），断言"画出来的那一帧就是完整的"
+const AS_META = {id:'s1', status:'in_progress', workspace:'/tmp', usage:{},
+  registry:[{id:'Main', name:'主agent'},{id:'A', name:'域甲'}],
+  round_list:[{seq:7, events:3, steps_used:1, active_view:'Main'},
+              {seq:8, events:1, steps_used:1, active_view:'Main'}]};
+const AS_ROUND7 = [
+  ev({id:'R7-E01', type:'tool_call', agent:'Main', thinking:'整轮的思考',
+      tool_calls:[{id:'c1', function:{name:'read_file', arguments:'{}'}}]}),
+  ev({id:'R7-E02', type:'tool_result', agent:'Main', role:'tool',
+      tool_call_id:'c1', content:'文件内容'}),
+  ev({id:'R7-E03', type:'final_answer', agent:'Main', role:'assistant',
+      content:'最后那段回答'})];
+const AS_ASK = [];
+const asPrev = global.fetch;
+global.fetch = (u)=>{
+  const p = String(u); AS_ASK.push(p);
+  let body = {};
+  const mr = /\/rounds\/(\d+)/.exec(p);
+  if (mr) {
+    const seq = Number(mr[1]);
+    const all = seq === 7 ? AS_ROUND7
+      : [ev({id:'R8-E01', type:'final_answer', agent:'Main', role:'assistant',
+             content:'新一轮的正文'})];
+    const am = /after=([^&]*)/.exec(p);
+    const after = am ? decodeURIComponent(am[1]) : '';
+    const idx = all.findIndex(e=>e.id===after);
+    body = {seq, events: idx>=0?all.slice(idx+1):all, blocks:[]};
+  } else if (/\/api\/sessions\/s1$/.test(p)) body = AS_META;
+  else if (/\/api\/sessions$/.test(p)) body = {sessions:[]};
+  else return asPrev(p);        // 不是本场景关心的路径 → 交给上一个桩（别吞掉别人的请求）
+  return Promise.resolve({ok:true, json:async()=>body});
+};
+// ②a 缓存落后两条：收尾后正式块里必须**已经有**最后的正文（不许"先空、再补"）
+CONV = {session:'s1', seqs:[7], cache:{7:{events:[AS_ROUND7[0]]}}};
+__deferred.push(refreshAfterTurn().then(()=>{
+  const d = CONV.cache[7] || {events:[]};
+  const g = DOM.content.querySelector('.crow.agent[data-seq="7"] .gbox');
+  const txt = g ? domAllText(g) : '';
+  const incReq = AS_ASK.some(p=>/\/rounds\/7\?after=/.test(p));   // 只认走了增量，id 值不重要（夹具会改名）
+  if ((d.events||[]).length !== 3)
+    problems.push(`AS: 落后轮没补齐（缓存 ${(d.events||[]).length}/3）`);
+  if (!incReq)
+    problems.push('AS: 补齐没走增量（?after=）——整轮重放会白拉一大坨');
+  if (!/最后那段回答/.test(txt))
+    problems.push('AS: 收尾那一帧正式块里没有最后的正文（正文消失一会/整块只剩 R 行）');
+  if (!/R7/.test(domAllText(DOM.content)))
+    problems.push('AS: 轮头 R7 丢了');
+  console.log(`   AS 落后补齐 缓存=${(d.events||[]).length}/3 增量取=${incReq} 正式块含正文=${/最后那段回答/.test(txt)}`);
+  // ②b 缓存为空（轮询在轮刚开时取过、随后页面在后台没再动）：整块不许只剩 R 行
+  CONV = {session:'s1', seqs:[7], cache:{7:{events:[]}}};
+  return refreshAfterTurn().then(()=>{
+    const g2 = DOM.content.querySelector('.crow.agent[data-seq="7"] .gbox');
+    const txt2 = g2 ? domAllText(g2) : '';
+    if (!/最后那段回答/.test(txt2))
+      problems.push('AS: 空缓存收尾后正式块里没有正文（只剩 R 行，要手动刷新）');
+    if (!/整轮的思考/.test(txt2))
+      problems.push('AS: 空缓存收尾后思考也没补上（整轮丢了）');
+    console.log(`   AS 空缓存补齐 正式块含正文=${/最后那段回答/.test(txt2)} 含思考=${/整轮的思考/.test(txt2)}`);
+  // ②c 切回对话页 / 点 ↻（renderConv 非 fresh 路径）同样口径：落后就先补再画
+  CONV = {session:'s1', seqs:[7], cache:{7:{events:[AS_ROUND7[0]]}}};
+  return renderConv(DOM.content).then(()=>{
+    const g3 = DOM.content.querySelector('.crow.agent[data-seq="7"] .gbox');
+    const txt3 = g3 ? domAllText(g3) : '';
+    if (!/最后那段回答/.test(txt3))
+      problems.push('AS: 切回对话页/点 ↻ 时没先补缓存（页内刷新看不到最新正文，只能整页刷新）');
+    console.log(`   AS 页内刷新 正式块含正文=${/最后那段回答/.test(txt3)}`);
+  });
+  });
+}));
+
+console.log('');
+Promise.all(__deferred).then(()=>{
+  if (problems.length) {
+    console.log('渲染核对：失败 ' + problems.length + ' 项');
+    problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
+    process.exitCode = 1;
+    return;
+  }
+  console.log('渲染核对：通过（47 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/跟随尾部不变量全查）');
+});
 """
 
 
@@ -1798,6 +2123,20 @@ def _static_ids(html: str) -> list[str]:
 
 def main() -> int:
     html = pathlib.Path("webui/index.html").read_text(encoding="utf-8")
+    # 静态接线核对（渲染桩照不到的地方）：#content 的 scroll 监听必须真的挂着——
+    # "跟随尾部"整条逻辑都由它触发，线断了桩里测不出来（元素监听没法跨 resetDom 存活）。
+    for need, why in (
+        ("closest('[data-p]')", "工作目录列表的点击委托"),
+        ("el.dataset.p = join(", "目录行的 data-p（委托消费的路径）"),
+    ):
+        if need not in html:
+            print("渲染核对：失败 1 项")
+            print(f"  ✗ 接线：{why} 没接上（选工作目录时点文件夹不会进目录）")
+            return 1
+    if "$('#content').addEventListener('scroll'" not in html:
+        print("渲染核对：失败 1 项")
+        print("  ✗ 接线：#content 的 scroll 监听没挂上（跟随尾部永远不响应滚动）")
+        return 1
     blocks = re.findall(r"<script[^>]*>(.*?)</script>", html, re.S)
     if not blocks:
         sys.exit("没有找到 <script> 块")
