@@ -174,7 +174,7 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
     这种中间穿越）——绕路不产生歧义，直接拒掉。指向工作区之外的
     符号链接也读不到。
     """
-    target = safety._safe_write_path(path)  # 与写入类同一套判定：不接受 .. 与界外链接
+    target = safety._safe_read_path(path)  # 与写入类同一套边界判定：禁写区**读**得到
     # 参数误用预检（2026-09-13 摩擦修复）：把裸 OSError 转成可行动的提示。
     # 模型看到的是工具返回文本而不是异常栈——目标类型不对/不存在要一次说清怎么办。
     # 文案保留 "不存在"/"是目录" 子串：lifecycle/blocks 靠它们判断读是否真发生。
@@ -491,6 +491,10 @@ def delete_file(path: str) -> str:
     "路径越界"，用户只能绕 shell 的 unlink）。
     """
     target = safety._safe_path_lexical(path)
+    denied = safety.readonly_write_denial(target, shown=path)   # 禁写区：不可授权
+    if denied:
+        safety._audit(f"[delete_file][禁写区] {path}")
+        return denied
     denied = permissions.check("delete", path)
     if denied:
         safety._audit(f"[delete_file][权限拒绝] {path}")
@@ -531,6 +535,11 @@ def move_file(path: str, new_path: str) -> str:
     """
     src = safety._safe_path_lexical(path)
     dst = safety._safe_path_lexical(new_path)
+    for probe, label in ((src, path), (dst, new_path)):
+        denied_ro = safety.readonly_write_denial(probe, shown=label)  # 禁写区：源与目标都算
+        if denied_ro:
+            safety._audit(f"[move_file][禁写区] {label}")
+            return denied_ro
     denied = permissions.check("move", path)
     if denied:
         safety._audit(f"[move_file][权限拒绝] {path}")

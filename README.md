@@ -433,6 +433,15 @@ over direct `.venv/bin/...` calls. If you genuinely need to reach something
 outside the workspace, explain why and ask a human to do it — the sandbox
 will not do it for you.
 
+**`tasks/` is read-only (2026-09-15).** The workspace's `tasks/` directory is the
+source of truth for session records (rounds, blocks, registry, reports) and is
+written only by the Runtime. The tool layer refuses writes to it — file tools
+(write/edit/replace/restore/delete/move) and any `run_command` / `run_background`
+command that writes into it are rejected, and unlike out-of-workspace access this
+**cannot be authorized**. Reads are unrestricted: `read_file` / `search_files` /
+`glob_files` work as usual, so auditing session data needs no permission. Extra
+read-only directories can be added via `WOVRA_READONLY_DIRS` (`os.pathsep`-separated).
+
 The full file-map / security design lives in
 [docs/context-management-v3.md](docs/context-management-v3.md) and
 [agent-test/security-hardening-20260910.md](agent-test/security-hardening-20260910.md).

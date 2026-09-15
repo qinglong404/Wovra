@@ -757,6 +757,164 @@ def _audit(text: str) -> None:
 #    授权清单 .wovra/authorized-paths.json，重启仍在）。
 # 两层都是**拒绝而非归一化**：'随便绕、落地在界内就行' 守不住，简单规则才可审计。
 
+# ---- 禁写区（2026-09-15 用户拍板："tasks 这个文件夹不允许修改，只可以读"）------
+#
+# `tasks/` 是**会话记录的真相来源**（轮/块/注册表/报告）——只该由 Runtime 落盘
+# （`Task.save` / `_persist_rounds`，它们不走工具层）。agent 经工具改它，等于
+# 改自己与别人的账本：最坏毁掉整段会话历史，而且**不可回滚**（版本归档只覆盖
+# 工作区文件，task.json 不在其中）。所以工具层一律**拒写、放读**：
+#
+#   * 文件类工具：目标落在禁写区 → 拒绝（写/改/替换/恢复/删/移）
+#   * run_command / run_background：命令里"写到禁写区"的意图 → 拒绝
+#     （`readonly_command_denial`；与越界授权**不同**，禁写区不可授权）
+#
+# 读不受限：`read_file` / `search_files` / `glob_files` / `list_files` 照旧——
+# 复盘会话数据是正常需求（本项目自己的诊断脚本就在读 `tasks/`）。
+#
+# 默认禁写区 = 工作区下的 `tasks/` + 任务库根（`TASKS_ROOT`，随
+# `WOVRA_TASKS_ROOT` 与测试重定向）；`WOVRA_READONLY_DIRS`（os.pathsep 分隔）
+# 可再追加自定义只读目录。
+#
+# 已知边界（与 shell 越界检测同一性质，见本文件开头的 §5 注）：shell 通道是
+# 字符串级启发式——变量拼接、base64、自定义脚本文件里的写入绕得过，完整隔离
+# 需要容器/低权限用户。它挡的是**模型顺手去改会话记录**这一类真实动作。
+_READONLY_SUBDIR = "tasks"
+_READONLY_ENV = "WOVRA_READONLY_DIRS"
+
+# 变更类命令（**命令位置**锚定，避免把引号文本里的 `rm` 当命令；引号里的
+# 路径也不参与判定——见 `_readonly_tokens`）。
+_READONLY_MUTATE_VERBS = re.compile(
+    r"(?:^|[;&|(])\s*(?:sudo\s+)?(?:"
+    r"rm|rmdir|mv|cp|install|truncate|shred|touch|chmod|chown|ln|dd|rsync"
+    r"|unzip|tar|patch|sed\s+-i|perl\s+-[A-Za-z]*i"
+    r"|git\s+(?:checkout|restore|clean|rm|reset|stash|apply|revert|merge|switch)"
+    r")\b"
+)
+# 解释器内联脚本**且**出现写意图才算（`python3 -c` 读会话数据是正常操作）。
+_READONLY_SCRIPT = re.compile(r"\b(?:python3?|node|ruby|perl)\b[^\n]*?\s-(?:c|e)\b")
+_READONLY_SCRIPT_WRITE = re.compile(
+    r"open\s*\([^)]*['\"][wax]|\.write\s*\(|json\.dump|os\.remove|os\.unlink"
+    r"|shutil\.|os\.rename|\.unlink\s*\(|rmtree|truncate|writeFile|fs\.write"
+)
+# 重定向/tee 的**目标**（只认目标本身，避免"引号文本里提到 tasks/ + 别处 > 一个普通文件"误伤）。
+_READONLY_REDIRECT = re.compile(
+    r"(?:>>?|\btee\s+(?:-a\s+)?)\s*['\"]?([^\s'\"|;&<>=()$`]+)"
+)
+
+
+def _task_store_root() -> Path | None:
+    """任务库根（`task.py` 的 TASKS_ROOT）——懒导入，避免 safety↔task 循环依赖。"""
+    try:
+        from .. import task as task_module
+        return Path(task_module.TASKS_ROOT)
+    except Exception:  # noqa: BLE001——拿不到就只按工作区 tasks/ 判
+        return None
+
+
+def protected_readonly_roots() -> tuple[Path, ...]:
+    """禁写区根目录（解析后的绝对路径，去重）。"""
+    candidates = [workspace_root() / _READONLY_SUBDIR]
+    store = _task_store_root()
+    if store is not None:
+        candidates.append(store)
+    for raw in (os.environ.get(_READONLY_ENV) or "").split(os.pathsep):
+        if raw.strip():
+            candidates.append(Path(raw.strip()))
+    roots: list[Path] = []
+    seen: set[Path] = set()
+    ws = workspace_root()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        # 任务库若**包含工作区**（测试/演示里 TASKS_ROOT 常直接等于工作区本身），
+        # 保护它等于把整个工作区变成只读——那不是用户要的（"tasks 只读"针对的
+        # 是工作区里的会话记录目录）。故只保护不吞掉工作区的那些根；生产形态
+        # （`<repo>/tasks` 在工作区之下）照常命中。
+        if ws.is_relative_to(resolved):
+            continue
+        if resolved not in seen:
+            seen.add(resolved)
+            roots.append(resolved)
+    return tuple(roots)
+
+
+def readonly_hit(path) -> Path | None:
+    """path 是否落在禁写区（含根自身）→ 命中则返回那个根，否则 None。"""
+    try:
+        resolved = Path(path).resolve()
+    except OSError:
+        return None
+    for root in protected_readonly_roots():
+        if resolved == root or resolved.is_relative_to(root):
+            return root
+    return None
+
+
+def readonly_write_denial(target, *, shown: str = "") -> str | None:
+    """禁写区命中 → 返回给模型看的拒绝文本；否则 None。
+
+    两种接线方式共用一份文案：
+    * 抛异常的写类工具（write/edit/replace/restore 走 `_safe_write_path`）
+      → `deny_readonly_write`；
+    * 以字符串回报失败的写类工具（delete/move 的既有惯例）→ 直接返回。
+    """
+    root = readonly_hit(target)
+    if root is None:
+        return None
+    return (
+        f"禁写区：{shown or target} 在只读目录 {root} 下，工具层不允许修改"
+        f"（tasks/ 是会话记录的真相来源，只由 Runtime 落盘；**读取**不受限，"
+        f"这条规则不可授权放行）"
+    )
+
+
+def deny_readonly_write(target, *, shown: str = "") -> None:
+    """禁写区命中即抛 ValueError（写类工具统一调用；读类不调用、也不可授权）。"""
+    denial = readonly_write_denial(target, shown=shown)
+    if denial:
+        raise ValueError(denial)
+
+
+def _readonly_tokens(command: str) -> list[str]:
+    """命令里指向禁写区的路径 token（仅"有写意图"时才算，见两组 marker）。"""
+    pool: list[str] = []
+    has_intent = bool(_READONLY_MUTATE_VERBS.search(command)) or bool(
+        _READONLY_SCRIPT.search(command) and _READONLY_SCRIPT_WRITE.search(command)
+    )
+    if has_intent:
+        pool.extend(re.findall(r"[^\s'\"|;&<>=()$`]+", command))
+    pool.extend(_READONLY_REDIRECT.findall(command))
+    root = workspace_root()
+    hits: list[str] = []
+    for raw in pool:
+        token = raw.strip(",;:'\"")
+        if not token or token.startswith("-") or "://" in token:
+            continue
+        target = (Path(token) if token.startswith("/") or re.match(r"^[A-Za-z]:", token)
+                  else root / token)
+        if readonly_hit(target) is not None and token not in hits:
+            hits.append(token)
+    return hits
+
+
+def readonly_command_denial(command: str) -> str | None:
+    """命令"写到禁写区"→ 返回拒绝文案（**不可授权**）；否则 None。
+
+    与 `_command_escape_targets` 的分工：越界是"问用户一次能不能放行"，
+    禁写区是"无论如何不行"——故这条判定在 authorize 之前、且不进授权清单。
+    """
+    hits = _readonly_tokens(command)
+    if not hits:
+        return None
+    return (
+        f"已拒绝执行：命令会写入禁写区（{hits[0]}）——tasks/ 是会话记录的真相来源，"
+        f"工具层只读且**不可授权**。读取不受限：看会话数据用 read_file / "
+        f"search_files / glob_files；要改动会话记录请让用户在 Runtime 侧操作。"
+    )
+
+
 def _within_root(path: Path) -> bool:
     """path 解析后是否落在工作区内（不抛错，供遍历循环逐项过滤用）。
 
@@ -803,14 +961,18 @@ def _safe_path_lexical(relative: str) -> Path:
     return parent / cleaned[-1]
 
 
-def _safe_write_path(relative: str) -> Path:
-    """写入类工具的统一入口：词法拒绝 `..`，界外链接需用户授权。
+def _safe_write_path(relative: str, *, _allow_readonly: bool = False) -> Path:
+    """写入类工具的统一入口：词法拒绝 `..`，界外链接需用户授权，禁写区拒写。
 
     write/edit/replace/restore 都会**改动内容**，所以除了不接受
     中间穿越，也不能顺着一个指向界外的链接去写——那等于从工作区
     内部改写外部文件。读类工具同理（read_file 也走这套判定）。
     2026-09-11 起：指向界外的链接不再一律拒绝——经用户授权一次后
     放行（授权清单 .wovra/authorized-paths.json，重启仍在）。
+
+    2026-09-15 加**禁写区**（`deny_readonly_write`）：`tasks/` 是会话记录的
+    真相来源，只读——**不可授权**（越界授权是"用户点头放行"，禁写区没有
+    放行通道）。读类走 `_safe_read_path` 绕开这一层，边界判定完全相同。
     """
     target = _safe_path_lexical(relative)
     if not _within_root(target):
@@ -826,7 +988,18 @@ def _safe_write_path(relative: str) -> Path:
                 f"（该路径是指向工作区之外的符号链接；允许的根目录: {workspace_root()}。"
                 f"越界访问需用户授权一次，授权后自动放行）"
             )
+    if not _allow_readonly:
+        deny_readonly_write(target, shown=relative)
     return target
+
+
+def _safe_read_path(relative: str) -> Path:
+    """读类入口：边界判定与 `_safe_write_path` 完全一致，但**不禁禁写区**。
+
+    禁写区只挡改写（见 `deny_readonly_write`）——复盘会话记录是正常需求，
+    `read_file tasks/<id>/task.json` 必须照旧能读。
+    """
+    return _safe_write_path(relative, _allow_readonly=True)
 
 
 def _safe_directory(directory: str) -> Path:

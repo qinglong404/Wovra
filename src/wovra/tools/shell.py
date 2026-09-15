@@ -97,6 +97,11 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    # 禁写区（tasks/ 只读）：先于越界授权判定——它**不可授权**（2026-09-15 用户拍板）
+    readonly_denied = safety.readonly_command_denial(command)
+    if readonly_denied:
+        safety._audit(f"[run_command][禁写区拒绝] {command}")
+        return readonly_denied
     escape = safety._command_escape_targets(command)
     if escape:
         reason, targets = escape

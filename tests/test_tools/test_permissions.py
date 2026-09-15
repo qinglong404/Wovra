@@ -15,11 +15,26 @@ F5 新文件：谁创建谁拥有（创建成功即写进创建者的清单）
 
 import json
 
+import pytest
+
 from wovra import registry as registry_module
 from wovra import task as task_module
 from wovra.agent import Agent
 from wovra.task import Task
-from wovra.tools import delete_file, edit_file, read_file, write_file
+from wovra.tools import (
+    delete_file,
+    edit_file,
+    glob_files,
+    list_files,
+    move_file,
+    read_file,
+    replace_lines,
+    run_background,
+    run_command,
+    search_files,
+    write_file,
+)
+from wovra.tools import safety as safety_module
 
 from ._helpers import _StubLLM
 
@@ -137,3 +152,141 @@ def test_existing_unclaimed_file_is_refused_loudly(tmp_path, monkeypatch):
     assert "权限拒绝" in out and "没有任何域认领" in out
     assert "缺陷" in out and "用户" in out
     assert (tmp_path / "legacy.md").read_text(encoding="utf-8") == "谁都不认领\n"
+
+
+# ---- 禁写区：tasks/ 只读（2026-09-15 用户拍板："tasks 这个文件夹不允许修改，只可以读"）
+
+def _readonly_env(tmp_path, monkeypatch) -> Task:
+    """工作区根下带 tasks/（= 任务库）的环境：会话记录可读、不可写。"""
+    (tmp_path / "tasks" / "s1").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tasks" / "s1" / "task.json").write_text(
+        '{"id": "s1", "goal": "别动我"}', encoding="utf-8")
+    (tmp_path / "src").mkdir(exist_ok=True)
+    (tmp_path / "src" / "a.py").write_text("print(1)\n", encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(safety_module, "_audit", lambda detail: None)
+    monkeypatch.setattr(safety_module, "_ask_yes_no", lambda question: True)
+    return Task.create(goal="禁写区测试")
+
+
+def test_readonly_zone_covers_workspace_tasks_and_task_store(tmp_path, monkeypatch):
+    """禁写区 = 工作区下的 tasks/ + 任务库根；两者都按解析后的绝对路径判。"""
+    _readonly_env(tmp_path, monkeypatch)
+    roots = safety_module.protected_readonly_roots()
+    assert (tmp_path / "tasks").resolve() in roots
+    assert safety_module.readonly_hit(tmp_path / "tasks" / "s1" / "task.json")
+    assert safety_module.readonly_hit(tmp_path / "tasks" / "s1") is not None
+    # 反向对照：普通目录不在禁写区
+    assert safety_module.readonly_hit(tmp_path / "src" / "a.py") is None
+
+
+def _full_agent(task: Task) -> Agent:
+    """装齐写类工具的 agent（`_agent` 只注册四个，禁写区要逐条通道都试）。"""
+    agent = Agent(llm=_StubLLM(),
+                  tools=[write_file, edit_file, delete_file, read_file,
+                         replace_lines, move_file], task=task)
+    agent.current_round = {"seq": 1, "events": [],
+                           "active_view": registry_module.MAIN_AGENT_ID}
+    return agent
+
+
+def test_readonly_zone_refuses_every_file_write(tmp_path, monkeypatch):
+    """写/改/替换/删/移 —— 每条通道都拒，且会话记录**一个字节不变**。"""
+    task = _readonly_env(tmp_path, monkeypatch)
+    agent = _full_agent(task)
+    record = tmp_path / "tasks" / "s1" / "task.json"
+    before = record.read_text(encoding="utf-8")
+
+    for name, args in (
+        ("write_file", {"path": "tasks/s1/task.json", "content": "{}",
+                        "force": True}),
+        ("write_file", {"path": "tasks/s1/new.md", "content": "偷偷加个文件"}),
+        ("edit_file", {"path": "tasks/s1/task.json", "old_text": "别动我",
+                       "new_text": "动了"}),
+        ("replace_lines", {"path": "tasks/s1/task.json", "start_line": 1,
+                           "end_line": 1, "new_content": "{}"}),
+        ("delete_file", {"path": "tasks/s1/task.json"}),
+        ("move_file", {"path": "tasks/s1/task.json", "new_path": "out.json"}),
+        ("move_file", {"path": "src/a.py", "new_path": "tasks/a.py"}),
+    ):
+        out = _call(agent, name, args)
+        assert "禁写区" in out, (name, args, out)
+
+    assert record.read_text(encoding="utf-8") == before     # 内容未变
+    assert not (tmp_path / "tasks" / "s1" / "new.md").exists()
+    assert not (tmp_path / "out.json").exists()
+    assert not (tmp_path / "tasks" / "a.py").exists()
+    assert (tmp_path / "src" / "a.py").exists()
+
+
+def test_readonly_zone_still_allows_reading(tmp_path, monkeypatch):
+    """反向对照：禁写区**放读**——复盘会话数据是正常需求。"""
+    task = _readonly_env(tmp_path, monkeypatch)
+    agent = _agent(task, registry_module.MAIN_AGENT_ID)
+
+    assert "别动我" in read_file("tasks/s1/task.json")
+    assert "s1" in "".join(list_files("tasks"))
+    assert "task.json" in glob_files("*", directory="tasks/s1")
+    assert "别动我" in search_files("别动我", directory="tasks")
+
+
+def test_readonly_zone_shell_write_is_refused_but_read_allowed(tmp_path, monkeypatch):
+    """shell 通道：写意图 → 拒（且**不可授权**）；只读命令照放。"""
+    _readonly_env(tmp_path, monkeypatch)
+
+    for command in (
+        "echo x > tasks/s1/task.json",
+        "echo x >> tasks/s1/task.json",
+        "rm tasks/s1/task.json",
+        "cp src/a.py tasks/a.py",
+        "mv tasks/s1/task.json /tmp/x",
+        "sed -i s/别动我/动了/ tasks/s1/task.json",
+        "tee tasks/a.txt",
+        "git restore tasks/s1/task.json",
+        "git checkout -- tasks/",
+        'python3 -c "open(\'tasks/s1/task.json\',\'w\').write(\'{}\')"',
+    ):
+        out = run_command(command)
+        assert "禁写区" in out, (command, out)
+        # 后台通道同一条判定
+        assert "禁写区" in run_background(command), command
+
+    # 只读命令不受影响（含"读会话数据"的三种常见写法）
+    assert "禁写区" not in run_command("grep -rn 别动我 tasks/")
+    assert "禁写区" not in run_command("cat tasks/s1/task.json")
+    assert "禁写区" not in run_command("ls tasks")
+    assert "禁写区" not in run_command(
+        "python3 -c \"print(open('tasks/s1/task.json').read())\"")
+    # 引号文本里提到 tasks/ 不算写意图（commit message 里常有这种字样）
+    assert "禁写区" not in run_command('echo "别 rm tasks/x" > note.txt')
+
+
+def test_readonly_zone_cannot_be_authorized(tmp_path, monkeypatch):
+    """禁写区**没有**放行通道：越界授权对它无效（与越界访问刻意不同）。"""
+    _readonly_env(tmp_path, monkeypatch)
+    monkeypatch.setattr(safety_module, "_request_path_authorization",
+                        lambda *args, **kwargs: True)      # 一律"授权"
+    assert "禁写区" in run_command("echo x > tasks/s1/task.json")
+    out = _call(_agent(_readonly_env(tmp_path, monkeypatch),
+                       registry_module.MAIN_AGENT_ID),
+                "write_file",
+                {"path": "tasks/s1/task.json", "content": "{}", "force": True})
+    assert "禁写区" in out and "不可授权" in out
+
+
+def test_readonly_env_extra_dirs_from_env_var(tmp_path, monkeypatch):
+    """`WOVRA_READONLY_DIRS` 可追加自定义只读目录（os.pathsep 分隔）。"""
+    task = _readonly_env(tmp_path, monkeypatch)
+    extra = tmp_path / "secrets"
+    extra.mkdir()
+    monkeypatch.setenv("WOVRA_READONLY_DIRS", str(extra))
+
+    out = _call(_agent(task, registry_module.MAIN_AGENT_ID), "write_file",
+                {"path": "secrets/x.md", "content": "写不进去"})
+    assert "禁写区" in out and str(extra) in out
+    # 取消该变量后同一条写恢复（证明是环境变量在起作用，不是别的原因）
+    monkeypatch.delenv("WOVRA_READONLY_DIRS")
+    ok = _call(_agent(task, registry_module.MAIN_AGENT_ID), "write_file",
+               {"path": "secrets/x.md", "content": "这下能写"})
+    assert "禁写区" not in ok

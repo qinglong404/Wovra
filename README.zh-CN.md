@@ -418,6 +418,13 @@ uv run python -m wovra --help  # CLI 冒烟
 系统提示词也要求模型优先用 `uv run`，不要直接调 `.venv/bin/...`。
 如果确实需要访问工作区之外，请说明理由并请人代为操作——沙箱不会替你越界。
 
+**`tasks/` 只读（2026-09-15）。** 工作区里的 `tasks/` 是**会话记录的真相来源**
+（轮/块/注册表/报告），只由 Runtime 落盘。工具层对它**拒写、放读**：文件类工具的
+写/改/替换/恢复/删/移一律拒绝，`run_command` / `run_background` 里"写到 `tasks/`"
+的命令也拒绝（**不可授权**，与越界访问不同）；读取完全不受限——`read_file` /
+`search_files` / `glob_files` 照旧，复盘会话数据不需要额外许可。自定义只读目录用
+环境变量 `WOVRA_READONLY_DIRS`（`os.pathsep` 分隔）追加。
+
 完整的安全设计见
 [docs/context-management-v3.md](docs/context-management-v3.md) 与
 [agent-test/security-hardening-20260910.md](agent-test/security-hardening-20260910.md)。

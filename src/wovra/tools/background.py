@@ -67,6 +67,11 @@ def run_background(command: str, keep_alive: bool = False) -> str:
                 f"已拒绝执行危险命令：包含被禁止的模式 `{pattern}`。"
                 f"如需完成类似效果，请使用更安全的替代方案。"
             )
+    # 禁写区（tasks/ 只读，不可授权）——与 run_command 同一条判定（2026-09-15）
+    readonly_denied = safety.readonly_command_denial(command)
+    if readonly_denied:
+        safety._audit(f"[run_background][禁写区拒绝] {command}")
+        return readonly_denied
     escape = safety._command_escape_targets(command)
     if escape:
         reason, targets = escape
