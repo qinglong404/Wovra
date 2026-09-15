@@ -1098,3 +1098,64 @@ def test_http_live_stream_and_live_job(server):
         serve._JOBS.pop("jz", None)
     code, body = _get(server + "/api/sessions/s1")
     assert body["live_job"] is None
+
+
+def test_pending_views_alt_is_full_assembly_and_main_uses_id(tmp_path, monkeypatch):
+    """重组前面板 = **全量装配**（含分出去的轮）；主 agent 面板按 id 装配。
+
+    2026-09-14 用户实测三条报障：① "重组前（整理后全量）"少了 R7/R8
+    （其实取的是主 agent 视图）② 重组后·主 agent 空白（名字"主agent"
+    不是视图名）③ 于是 A 没有、主 agent 也没有的轮看起来"丢了"。
+    """
+    import json as _json
+    from dataclasses import asdict as _asdict
+    from wovra.task import Task
+    import wovra.task as task_module
+
+    tasks = tmp_path / "tasks_pv2"
+    (tasks / "p2").mkdir(parents=True)
+    task = Task(id="p2", goal="g", workspace=str(tmp_path))
+    chat = _round_like(1, "闲聊", "好") if False else None
+    task.rounds = [
+        {"seq": 1, "user_input": {"original": "闲聊"}, "end_state": "completed",
+         "org_state": "done",
+         "events": [{"id": "R1-E01", "type": "user", "truncated": "闲聊",
+                     "message": {"role": "user", "content": "闲聊"}},
+                    {"id": "R1-E02", "type": "final_answer", "truncated": "好",
+                     "message": {"role": "assistant", "content": "好"}}]},
+        {"seq": 2, "user_input": {"original": "写文件"}, "end_state": "completed",
+         "org_state": "done",
+         "events": [{"id": "R2-E01", "type": "user", "truncated": "写文件",
+                     "message": {"role": "user", "content": "写文件"}},
+                    {"id": "R2-E02", "type": "tool_call", "truncated": "调用 write_file",
+                     "message": {"role": "assistant", "content": "",
+                                 "tool_calls": [{"id": "c1", "function": {
+                                     "name": "write_file",
+                                     "arguments": _json.dumps({"path": "a.py"})}}]}},
+                    {"id": "R2-E03", "type": "tool_result", "truncated": "ok",
+                     "message": {"role": "tool", "tool_call_id": "c1", "content": "ok"}},
+                    {"id": "R2-E04", "type": "final_answer", "truncated": "done",
+                     "message": {"role": "assistant", "content": "done"}}]},
+    ]
+    task.rounds[0]["pending_org"] = {
+        "domains": [
+            {"name": "闲聊：吐槽", "main_agent": True,
+             "chat_block_ids": ["R1-B1"]},
+            {"name": "后端", "file": "a.py"},
+        ],
+    }
+    task.registry = [{"id": "Main", "name": "主agent",
+                      "description": "全局协调与未归属事务", "files": [],
+                      "file_domains": [], "status": "active", "inbox": []}]
+    (tasks / "p2" / "task.json").write_text(
+        _json.dumps(_asdict(task), ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+    d = serve.pending_views("p2")
+    assert d is not None and d["agents"], d
+    main = next(a for a in d["agents"] if a.get("is_main"))
+    # ① 重组前 = 全量装配：包含**分出去**的轮（R2 的文件轮），不止主 agent 那份
+    alt = "\n".join(str(m.get("content") or "") for m in main.get("alt_messages") or [])
+    assert "写文件" in alt
+    # ② 主 agent 视图按 id 装配：闲聊桶的块能看见，不再是空历史
+    body = "\n".join(str(m.get("content") or "") for m in main.get("messages") or [])
+    assert "本域尚无命中轮" not in body

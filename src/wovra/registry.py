@@ -29,6 +29,8 @@ Main                     主 agent（不再占字母）
 幂等：同一批分裂产物重复 promote（崩溃补做、重启重放）只更新既有
 条目，不重复追加——注册表是"现状的投影"，不是事件流水。
 """
+import hashlib
+import json
 from typing import Iterable, Optional
 
 MAIN_AGENT_ID = "Main"
@@ -201,6 +203,9 @@ def split_defects(
     defects: list[str] = []
     if not entries:
         return defects
+    # 主 agent 的闲聊桶节点不参与文件校验（它按定义没有文件）
+    domains = [d for d in (domains or [])
+               if isinstance(d, dict) and not d.get("main_agent")]
     all_files = [str(f).strip().strip("/") for f in (files or []) if str(f).strip()]
     for entry in entries:
         name = f"{entry.get('id')}（{entry.get('name')}）"
@@ -285,13 +290,21 @@ def build_entries(
         # 吞成空——"信息不切开、不丢块"比树形好看重要。
         roots = domains[:1]
     level = list(roots)
-    if parent_id or len(level) != 1:
-        # 子 agent 分裂：顶层单节点要下钻；主 agent 分裂：顶层单节点保留
-        while len(level) == 1:
-            kids = _children_of(str(level[0].get("name")), domains)
-            if not kids:
-                break
-            level = list(kids)
+    # **选层规则（2026-09-14 用户拍板，代码定分裂）**：
+    # 顶层 >1 → 就在顶层分裂；顶层 ==1 → 往下取第一个 >1 的层分裂；
+    # 最低到 LIVE 层（叶子 = 单个活性文件；链到底仍只有 1 个叶子就按它收口）。
+    # 注：主 agent 的"闲聊/未归属"桶由 Runtime 物化成顶层节点（`main_agent`
+    # 标记）——它让顶层计数 +1，但**不生成子 agent**（归主 agent 自己）。
+    seen_levels: set[str] = set()
+    while len(level) == 1:
+        name = str(level[0].get("name") or "")
+        if not name or name in seen_levels:
+            break                         # 环/重名：停在这里，别死转
+        seen_levels.add(name)
+        kids = _children_of(name, domains)
+        if not kids:
+            break
+        level = list(kids)
 
     def subtree(node: dict) -> tuple[list[str], list[str], list[str], dict]:
         """子树里的 (LIVE 文件, 历史文件, 约束, 文件描述)。"""
@@ -331,6 +344,8 @@ def build_entries(
 
     entries: list[dict] = []
     for i, node in enumerate(level, start=1):
+        if node.get("main_agent"):
+            continue                      # 闲聊/未归属桶：归主 agent，不建子 agent
         files, hist, cons, notes = subtree(node)
         path_id = f"{parent_id}-{i}" if parent_id else top_id(i)
         entries.append({
@@ -449,6 +464,21 @@ def latest_domains(rounds: Iterable[dict] | None) -> list[dict]:
         if isinstance(doms, list) and doms:
             chosen = doms          # 后出现的覆盖先出现的
     return chosen
+
+
+def domains_digest(domains: Iterable[dict] | None) -> str:
+    """域树产物的指纹（预备归属的"对得上哪一版产物"判据）。
+
+    用途：异步线程按**未生效**的产物预判归属（`pending_view` 预备区），
+    轮边界生效时用它核对"预备所依据的产物 == 现在落地的产物"——对不上
+    （产物被拒收、换了批次）就丢弃预备值，交给 `_settle_views` 重算。
+    空产物给空串（"没有产物"本身也是一个可比较的状态）。
+    """
+    payload = [d for d in (domains or []) if isinstance(d, dict)]
+    if not payload:
+        return ""
+    blob = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(blob.encode("utf-8")).hexdigest()[:16]
 
 
 def backfill(

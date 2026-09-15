@@ -348,8 +348,164 @@ class _MaintenanceMixin:
                 # ——子 agent 与其重组上下文在下一轮开场前就建好（§50）。
                 self._settle_after_maintenance()
 
+    def _open_round_on_disk(self) -> Optional[dict]:
+        """是否有开放轮——`current_round` 与**盘上**（跨实例）两处都算。
+
+        serve 是每轮新建 agent：后台维护线程（旧实例）看不见下一轮（新实例），
+        它的 `current_round` 恒为 None。只查它会让产物在别人的轮进行中落地——
+        那一轮下一次落盘（工具卡）会 rebase 合并产物，`latest_domains` 从空变
+        非空，装配在**轮中间**从全量切到视图路径（前缀断裂、前后步上下文不
+        一致）。故先按一次 stat 重读盘（`_rebase_if_stale`：只有真被改过才读整
+        份），以盘上最后一轮为准；`end_state ∈ {"", "open"}` 与
+        `_open_or_reuse_round` 的可续判据同一口径。
+        """
+        if self.current_round is not None:
+            return self.current_round
+        try:
+            self._rebase_if_stale()
+        except Exception:  # noqa: BLE001——重读失败按自己这份判（不比原来更差）
+            pass
+        last = self.rounds[-1] if self.rounds else None
+        if last is not None and str(last.get("end_state") or "") in ("", "open"):
+            return last
+        return None
+
+    def _round_is_open(self, r: dict) -> bool:
+        """这一轮是否还开着（`current_round`，或盘上最后一轮且未闭合）。"""
+        if r is self.current_round:
+            return True
+        if not self.rounds or r is not self.rounds[-1]:
+            return False
+        return str(r.get("end_state") or "") in ("", "open")
+
+    def _prepare_settle_views(self, open_round: dict) -> int:
+        """产物就绪但轮在进行中：**判定照做、先记预备区**，边界才生效。
+
+        用户口径（2026-09-14）：「分裂后重组上下文，接着干活，还是异步整理那个
+        线程，将现在已经闭合的轮路由判断到对应子 agent 中，只是先添加，等到对话
+        完才生效……其它环节很多都可以空闲直接做了，没必要等新轮生效，毕竟其又
+        不会影响执行任务」。故这里把 `_settle_views` 的判定在**维护线程**里先算
+        完，写进各轮的 `pending_view` 预备区：
+
+        * 只写预备区——轮进行中装配读不到它（生效面只有 `active_view`/
+          `domains`/注册表），"一轮内上下文不变"不受影响；
+        * 判据用**影子注册表**（`registry_module.project_merge` 纯投影）——产物
+          此刻还没落进注册表，而判定必须按落地后的形状做（域名/文件清单都在
+          产物里）；
+        * 只预备非主 agent 的判定（主 agent 是默认值，边界补判它近乎零成本），
+          也只在预备到东西或确有产物待落地时留一条痕——"分裂完了子 agent 还没
+          出现"要说得清是推迟，不是没跑。
+        """
+        from .. import routing as routing_module
+
+        if self.task is None:
+            return 0
+        products = [
+            r["pending_org"] for r in self.rounds
+            if isinstance(r.get("pending_org"), dict)
+            and r["pending_org"].get("domains")
+        ]
+        if not products:
+            return 0
+        domains = products[-1]["domains"]
+        parent = str(products[-1].get("split_parent") or "")
+        if not parent and self.rounds:
+            parent = str(self.rounds[-1].get("active_view") or "")
+        entry_id = ""
+        if parent and parent != registry_module.MAIN_AGENT_ID:
+            ent = next(
+                (e for e in (self.task.registry or [])
+                 if isinstance(e, dict)
+                 and parent in (str(e.get("id")), str(e.get("name")))),
+                None,
+            )
+            entry_id = str((ent or {}).get("id") or "")
+        projected, _, _, _ = registry_module.project_merge(
+            self.task.registry, domains, parent_id=entry_id, retire_id=entry_id
+        )
+        digest = registry_module.domains_digest(domains)
+        hints = views_module.files_by_domain(self.rounds, domains)
+        staged: list[str] = []
+        sticky = ""
+        for r in self.rounds:
+            if self._round_is_open(r):
+                continue                       # 开放轮不判：它闭合后走边界那套
+            live = str(r.get("active_view") or "")
+            if live not in ("", registry_module.MAIN_AGENT_ID):
+                sticky = live                   # 已归域：粘滞链的事实来源
+                continue
+            text = str((r.get("user_input") or {}).get("original") or "")
+            result = routing_module.route(
+                text, projected, sticky=sticky,
+                explicit=str(r.get("route_explicit") or ""), file_hints=hints,
+            )
+            view = str(result.get("view") or "")
+            sticky = view
+            if view and view != registry_module.MAIN_AGENT_ID:
+                r["pending_view"] = {
+                    "view": view,
+                    "reason": str(result.get("reason") or ""),
+                    "domains": digest,
+                }
+                staged.append(f"R{r.get('seq')}→{view}")
+            else:
+                r.pop("pending_view", None)     # 判定为主 agent：无需预备
+        if staged:
+            detail = (
+                f"归属预判（异步，未生效）：{'、'.join(staged[:10])}"
+                + ("…" if len(staged) > 10 else "")
+                + f"——R{open_round.get('seq')} 仍在进行中，轮边界落地"
+            )
+        else:
+            detail = (
+                f"产物已就绪：R{open_round.get('seq')} 仍在进行中，按「轮边界"
+                "生效」推迟——该轮闭合时立即落地（域树/子 agent/归属）"
+            )
+        if not any(
+            str(e.get("detail")) == detail for e in (self.task.history or [])[-6:]
+        ):
+            self.task.record("route", detail)
+            self._persist_rounds()
+        return len(staged)
+
+    def _apply_staged_views(self) -> int:
+        """轮边界：把 `pending_view` 预备区一次性生效（只写 `active_view`）。
+
+        预备值只在**所依据的产物正好是现在落地的那一版**时採用（
+        `domains_digest` 核对）——产物被拒收/换了批次就丢弃，交给
+        `_settle_views` 按现行材料重算。预备是省时间的加速器，不是新的
+        真相来源，故任何对不上都以重算为准。
+        """
+        staged = [
+            r for r in self.rounds if isinstance(r.get("pending_view"), dict)
+        ]
+        if not staged:
+            return 0
+        live = registry_module.domains_digest(
+            registry_module.latest_domains(self.rounds)
+        )
+        applied = 0
+        for r in staged:
+            st = r.pop("pending_view", None) or {}
+            if str(st.get("domains") or "") != live:
+                continue
+            view = str(st.get("view") or "")
+            if not view or view == registry_module.MAIN_AGENT_ID:
+                continue
+            if str(r.get("active_view") or "") not in (
+                "", registry_module.MAIN_AGENT_ID
+            ):
+                continue
+            r["active_view"] = view
+            applied += 1
+        if applied and self.task is not None:
+            self.task.record(
+                "route", f"预备归属生效：{applied} 轮（异步已判好，轮边界落地）"
+            )
+        return applied
+
     def _settle_after_maintenance(self) -> None:
-        """维护一跑完就让产物**立刻生效**（有开放轮时留给下一轮开场）。
+        """维护一跑完就让产物**立刻生效**（有开放轮时留给轮边界）。
         2026-09-12 用户口径：「把重组上下文、子 agent 都放到分裂后面、下一轮
         对话前面……下一轮对话开始，基本就只需要追求对话」。旧行为把 promote
         与渐近归属一律推到下一轮开场，于是会话里看得见"分裂完了但子 agent 还
@@ -358,20 +514,29 @@ class _MaintenanceMixin:
         安全性（缓存前缀纪律，AGENTS.md §2：**只有整理生效才允许破坏前缀，
         且不许在轮次中部改写历史字节**）：
 
-        * 同步维护（`run` / `serve` 每轮）：`close_round` 已把
-          `current_round` 置空 → 恒满足"无开放轮"；
+        * 开放轮判据按 **`_open_round_on_disk`**（`current_round` + 盘上最后
+          一轮）——serve 每轮新建 agent，维护线程看不见"下一轮"，只查自己的
+          `current_round` 会让产物在别人的轮进行中泄漏落地（见该函数注释）；
         * 异步维护（chat 后台线程）：与 `_open_or_reuse_round` 共用
           `_view_lock`，两者不会交错——用户没在轮里就立刻生效，已经开始下一轮
-          则照旧留给下一轮开场。
+          则照旧留给轮边界。
 
         生效内容是"完整的开场状态"：产物落实（精修索引/状态补丁/**域树 →
         注册表条目**）+ 渐近归属补判（各轮归到对应域，子 agent 的重组上下文
         随之可派生）。两步都是零 LLM 纯函数。
+
+        有开放轮时**不是白等**（2026-09-14 用户口径：「其它环节很多都可以空闲
+        直接做了」）：判定照做、先记预备区（`_prepare_settle_views`），轮边界
+        只做一次性生效（`_apply_staged_views`）。
         """
         try:
             with self._view_lock:
-                if self.current_round is not None:
-                    return  # 轮进行中：本轮字节不许动，留给下一轮开场
+                open_round = self._open_round_on_disk()
+                if open_round is not None:
+                    # 轮进行中：装配字节不许动（"一轮内上下文不变"），但归属
+                    # 判定可以现在就做完、记进预备区
+                    self._prepare_settle_views(open_round)
+                    return
                 # 落盘前会由 `_persist_rounds` 自动重读盘 + 并集合并（§86）：
                 # 异步维护与下一轮的 agent 会同时写 task.json，两边写的都是整份
                 self._promote_org_results()
@@ -1067,12 +1232,38 @@ class _MaintenanceMixin:
                 "block_ids": kept + orphans,
                 "reason": (unassigned or {}).get("reason")
                 or "未被任何文件域认领（独立思想/零散块），归主 agent",
+                **({"topic": unassigned["topic"]} if isinstance(unassigned, dict)
+                   and unassigned.get("topic") else {}),
             }
             if self.task is not None:
                 self.task.record(
                     "maintenance",
                     f"split：{len(orphans)} 块未被域认领，已自动归主 agent "
                     f"{orphans[:8]}" + ("…" if len(orphans) > 8 else ""),
+                )
+
+        # **主 agent 桶物化成顶层节点**（2026-09-14 用户口径：树里
+        # "主 agent（闲谈/未归属）"改名成闲聊的主题，参与顶层计数、但
+        # 归属仍是主 agent）。这样"顶层 >1 就分裂"的规则能把它算进去，
+        # 同时又不会给它生成子 agent（registry 侧按 `main_agent` 跳过）。
+        if unassigned and (unassigned.get("block_ids")):
+            topic = " ".join(str(unassigned.get("topic") or "").split())[:24]
+            bucket = {
+                "name": topic or "闲聊（未归属）",
+                "description": " ".join(
+                    str(unassigned.get("reason") or "闲聊/未归属的工作线")
+                    .split()
+                )[:120],
+                "main_agent": True,
+                "chat_block_ids": list(unassigned.get("block_ids") or []),
+            }
+            domains.append(bucket)
+            unassigned = None          # 已并入桶节点，不再重复暂存
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：闲聊/未归属 {len(bucket['chat_block_ids'])} 块"
+                    f"物化为顶层节点「{bucket['name']}」（归主 agent，不生成子 agent）",
                 )
         # 暂存到批首轮（与 state_patch 同通道），下一轮开启随 promote 生效
         pending = rounds[0].setdefault("pending_org", {})
@@ -1689,7 +1880,8 @@ class _MaintenanceMixin:
             if patch and self.task is not None:
                 report = self.task.apply_state_patch(patch)
                 self._record_close_report(report)
-        if changed:
+        applied = self._apply_staged_views()
+        if changed or applied:
             self._persist_rounds()
 
     def _split_coverage_lines(self, rounds: list[dict]) -> list[str]:

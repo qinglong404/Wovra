@@ -312,6 +312,11 @@ class _AssemblyMixin:
         for seq in sorted(hits):
             rec = hits[seq]
             r = rec["round"]
+            if r.get("merged_skip"):
+                # 合并组成员：组首（anchor）已把组内用户原文合并显示，
+                # 成员轮不再单独成段（2026-09-14 修：此前 [R1-2] 后面又跟
+                # 一个 [R2]，看起来既重复又乱）
+                continue
             msgs.append({
                 "role": "user",
                 "content": "\n".join(self._view_round_head(r, rec, index)),
@@ -475,6 +480,17 @@ class _AssemblyMixin:
         lines.append(f"[{anchor}]" if anchor else f"[R{r.get('seq')}]")
         if ui.get("original"):
             lines.append(f"👤 用户: \"{ui['original']}\"")
+        if anchor:
+            # 合并组：**组内每一轮的用户原话都保留**（与紧凑视图同口径，
+            # 2026-09-14 修：视图路径此前只渲染组首那条，组内其余用户原文丢）
+            members = sorted(
+                (m for m in self.rounds if m.get("merged_skip") == anchor),
+                key=lambda m: int(m.get("seq") or 0),
+            )
+            for m in members:
+                text = str((m.get("user_input") or {}).get("original") or "")
+                if text:
+                    lines.append(f"👤 用户: \"{text}\"")
         if ui.get("normalized"):
             lines.append(f"🎯 意图: {ui['normalized']}")
         if ui.get("key_constraints"):
@@ -503,6 +519,15 @@ class _AssemblyMixin:
         summaries = r.get("block_summaries") or {}
         if views_module.is_folded(r, keep_min):
             return views_module.folded_block_lines(r, rec, index)
+        # 合并组组首：组的块描述键是 "R1-2-B1" 这种**组 ID**，不在块索引里——
+        # 直接按组前缀取（2026-09-14 修：此前只按 own_ids 找，组的合并描述
+        # 永远渲染不出来，只剩每轮各自的 digest 兜底行）
+        if r.get("merged_anchor"):
+            grp = str(r["merged_anchor"])
+            group_lines = [f"▸ {bid}: {txt}" for bid, txt in summaries.items()
+                           if str(bid).startswith(grp + "-") and txt]
+            if group_lines:
+                return group_lines
         lines: list[str] = []
         for bid in rec.get("own_ids") or []:
             item = index.get(bid)

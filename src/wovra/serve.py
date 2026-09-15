@@ -858,16 +858,24 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
     except (OSError, ValueError, json.JSONDecodeError):
         return None
     agent._persist_rounds = lambda: None       # 预览：绝不落盘
-    # 重组前全文必须在 settle **之前**取：settle 会应用本次产物并触发分档折叠，
-    # 之后再装配拿到的是"已重组口径"（实测 5 条 vs 重组前 27 条）
+    # **"重组前（整理后全量）" = 全量材料装配**（`_assemble_full_messages`）：
+    # 它不看视图/归属，含**所有**轮（包括分给子 agent 的那些），这才是"重组前"
+    # 的正确口径。此前取的是 `_assemble_messages()`——§41 之后主 agent 也走
+    # **视图装配**，于是面板里只剩主 agent 那份料：分出去的轮（如 R7、R8）
+    # 看起来"丢了"（2026-09-14 用户实测报障）。
     try:
-        _pre_settle = agent._assemble_messages()
+        _pre_settle = agent._assemble_full_messages()
     except Exception:  # noqa: BLE001
         _pre_settle = None
     try:
         # 完整开场状态（promote + 渐近归属 _settle_views）——只 promote 不够：
-        # 视图装配依赖各轮/块的域归属判定（505a101 起归属在 settle 里做）
-        agent._settle_after_maintenance()
+        # 视图装配依赖各轮/块的域归属判定（505a101 起归属在 settle 里做）。
+        # 不走 `_settle_after_maintenance`：那套受"有开放轮就推迟"的轮边界纪律
+        # 约束（保护运行中轮的字节），而预览是**只读派生**（本函数已把
+        # `_persist_rounds` 换成 no-op，连盘都不碰）——用户就是想看"若现在生效
+        # 会是什么样"，故这里直接预演。
+        agent._promote_org_results()
+        agent._settle_views()
     except Exception:  # noqa: BLE001——预览失败不该影响任何东西
         pass
     out = []
@@ -882,7 +890,12 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
         got = None
         # 必须用 agent.rounds：settle 的产物写进 agent 自己的那份列表，
         # task.rounds 是加载时的另一份副本（否则域信息看不见 → 装配降级 None）
-        for key in (e.get("name"), e.get("id")):
+        # 主 agent 先按 **id**（`Main` 才是视图名；显示名"主agent"对不上
+        # 任何归属名，会装配出"空视图"——2026-09-14 用户实测报障）
+        keys = ((str(e.get("id") or ""), str(e.get("name") or ""))
+                if str(e.get("id")) == "Main"
+                else (str(e.get("name") or ""), str(e.get("id") or "")))
+        for key in keys:
             got = agent._assemble_view_messages(str(key or ""), agent.rounds or [])
             if got is not None:
                 break
@@ -915,7 +928,8 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
                     "total_chars": total, "tokens": tok, "truncated": trunc})
     if out:
         # 主 agent 的"整理后、未按域重组"全文 = settle 之前的装配（见上）；
-        full = _pre_settle if _pre_settle is not None else agent._assemble_messages()
+        full = (_pre_settle if _pre_settle is not None
+                else agent._assemble_full_messages())
         alt_chars = sum(len(_content_text(m.get("content"))) for m in full)
         alt_msgs, alt_trunc = [], 0
         for m in full:
@@ -1092,6 +1106,7 @@ def _split_meta(r: dict, live_files: list[str] | None = None) -> dict | None:
             "name": d.get("name"),
             "description": d.get("description") or "",
             "parent": d.get("parent") or "",
+            "main_agent": bool(d.get("main_agent")),
             "file": d.get("file") or "",
             "files": d.get("files") or [],
             "file_domains": d.get("file_domains") or [],
@@ -1256,6 +1271,15 @@ def view_messages(task_id: str, view: str) -> dict | None:
         task = task_module.Task.load(task_id)
     except (OSError, ValueError, json.JSONDecodeError):
         return None
+    # view 先按域名、再按注册表 id 解析（2026-09-14：此前传 id 会静默
+    # 装配出"空视图"——名字对不上节点名，看起来像"这个 agent 没材料"）
+    names = {str(d.get("name") or "")
+             for d in views_module.latest_domains(task.rounds or [])}
+    if view not in names:
+        for entry in (task.registry or []):
+            if str(entry.get("id") or "") == view and entry.get("name") in names:
+                view = str(entry["name"])
+                break
     agent = _build_agent(task, mode=task.mode or MODE_MANAGED)
     agent.current_round = None
     msgs = agent._assemble_view_messages(view, task.rounds or [])

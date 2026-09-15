@@ -641,3 +641,31 @@ def test_checkpoint_split_at_current_round_boundary():
     msgs = agent._assemble_messages()
 
     _assert_no_dangling_tool(msgs)
+
+
+def test_view_assembly_merges_chat_groups_once():
+    """合并组在视图里只出现一次：组首显示组描述与全部用户原文，成员轮不单独成段。
+
+    2026-09-14 用户实测报障：面板里同时出现 `[R1-2]` 和 `[R2]`（重复），
+    且组的合并描述渲染不出来（只剩各轮 digest 兜底行）。
+    """
+    task = Task.create(goal="x")
+    r1 = _round(1, "闲聊一", "好")
+    r2 = _round(2, "闲聊二", "嗯")
+    r1["merged_anchor"] = "R1-2"
+    r1["block_summaries"] = {"R1-2-B1": "两轮闲聊合并描述：工具吐槽与前端灵感"}
+    r2["merged_skip"] = "R1-2"
+    task.rounds = [r1, r2]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    # 主 agent 的闲聊桶：把两轮挂上去（视图装配需要 domains 非空）
+    agent.rounds[0]["domains"] = [
+        {"name": "闲聊：工具吐槽", "main_agent": True,
+         "chat_block_ids": ["R1-B1", "R2-B1"]},
+    ]
+    msgs = agent._assemble_view_messages("Main", agent.rounds)
+    assert msgs is not None
+    text = "\n".join(str(m.get("content") or "") for m in msgs)
+    assert "[R1-2]" in text and text.count("[R1-2]") == 1
+    assert "[R2]" not in text                       # 成员轮不单独成段
+    assert "两轮闲聊合并描述" in text                # 组的合并描述被渲染
+    assert "闲聊二" in text                          # 组内用户原文不丢（R2 的原话在组头里）

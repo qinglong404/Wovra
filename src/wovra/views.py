@@ -192,12 +192,71 @@ def block_index(rounds: Iterable[dict]) -> dict[str, dict]:
     return index
 
 
+def _tree_block_owners(domains: Iterable[dict]) -> dict[str, str]:
+    """树里**显式挂载的块** → 归属视图名（零 LLM）。
+
+    2026-09-14 用户口径："模型只负责把不相关的隔开、相关的归成一条线；
+    决定归宿由代码"。模型在树上表达的是**关系**（这块讲哪条线），
+    代码把它翻译成**归宿**：
+
+    * 挂在某节点（block_ids / chat_block_ids / user_block_ids）→ 该节点
+      （它没有自己的 agent 时，由上层 agent 的子树聚合拿到的仍是同一份材料）；
+    * 挂在**主 agent 桶**（`main_agent` 节点）→ 主 agent。
+    """
+    out: dict[str, str] = {}
+    for d in domains or []:
+        if not isinstance(d, dict) or not d.get("name"):
+            continue
+        target = MAIN_AGENT_ID if d.get("main_agent") else str(d["name"])
+        for key in ("block_ids", "chat_block_ids", "user_block_ids"):
+            for b in d.get(key) or []:
+                bid = str(b).strip()
+                if bid:
+                    out[bid] = target
+    return out
+
+
+def _descendants_of(domains: Iterable[dict]) -> dict[str, set[str]]:
+    """节点名 → 它的**全部后代**节点名（零 LLM，环/重名安全）。
+
+    2026-09-14 用户口径："归宿由代码算"——注册的 agent 是树上某个节点，
+    它的材料 = **子树**里的全部块。子节点归属的块必须折进祖先 agent 的
+    视图，否则叶子层挂的块谁（agent）都看不到。
+    """
+    kids: dict[str, list[str]] = {}
+    for d in domains or []:
+        if not isinstance(d, dict) or not d.get("name"):
+            continue
+        parent = str(d.get("parent") or "").strip()
+        kids.setdefault(parent, []).append(str(d["name"]))
+    out: dict[str, set[str]] = {}
+
+    def walk(name: str, acc: set[str], seen: set[str]) -> None:
+        for child in kids.get(name, []):
+            if child in seen:
+                continue                      # 环保护
+            seen.add(child)
+            acc.add(child)
+            walk(child, acc, seen)
+
+    for d in domains or []:
+        if isinstance(d, dict) and d.get("name"):
+            acc: set[str] = set()
+            walk(str(d["name"]), acc, {str(d["name"])})
+            out[str(d["name"])] = acc
+    return out
+
+
 def ownership(
     domains: Iterable[dict] | None, index: dict[str, dict]
 ) -> dict[str, str]:
     """块 → 域名 的归属映射（机械、确定性；每个块恰有一个归宿）。
 
-    判据四条（按序）：
+    判据（按序）：
+    0. **树里显式挂载的块 → 树说的那个节点**（2026-09-14 用户口径：
+       "模型只负责把不相关的隔开、相关的归成一条线；决定归宿由代码"——
+       模型给关系，代码翻译成归宿；主 agent 桶节点 → 主 agent）。
+       树没覆盖的新块才继续往下判（渐近归属：等下一次分裂入树）；
     1. **环境块 → 主 agent**（用户口径：环境准备不是任何域的活）；
     2. **文件块**：`file` 落在某域文件集合里即归它（最长匹配优先；三个来源：
        活文件 `files` / 老目录前缀 `file_domains` / 历史 `history_files`）；
@@ -220,10 +279,16 @@ def ownership(
     """
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     entries = _file_domain_entries(domains)
+    tree = _tree_block_owners(domains)      # 判据 0（2026-09-14）
     out: dict[str, str] = {}
     for bid, item in index.items():
         block = item["block"]
         kind = str(block.get("kind") or "")
+        if bid in tree:
+            # **树覆盖的块按树归**（模型给关系、代码给归宿）；树没覆盖的新块
+            # 才落到下面的"跟轮走"（渐近归属——等下一次分裂再入树）。
+            out[bid] = tree[bid]
+            continue
         if kind == "environment":
             out[bid] = MAIN_AGENT_ID
             continue
@@ -466,10 +531,18 @@ def view_blocks_by_round(
     index = index if index is not None else block_index(rounds)
     owners = owners if owners is not None else ownership(domains, index)
     main = str(view_name) == MAIN_AGENT_ID
+    # 祖先视图 = 子树材料（2026-09-14）：注册的 agent 是树上某节点，叶子层
+    # 挂的块要折进它的视图；主 agent 不参与（它的桶就是补集本身）。
+    subs = set() if main else _descendants_of(domains).get(str(view_name), set())
     out: dict[int, dict] = {}
     for bid, owner in owners.items():
         item = index.get(bid)
-        if item is None or owner != view_name:
+        if item is None:
+            continue
+        if main:
+            if owner != MAIN_AGENT_ID:
+                continue
+        elif owner != view_name and owner not in subs:
             continue
         # 用户块一律走下面第二遍（渲染时挂在轮头，与用户原文同位置）；
         # 若在这里也收进 own_ids，主 agent 视图会把同一块渲染两遍。
@@ -1092,7 +1165,11 @@ def view_for_domain(
     else:
         card.append("职责：全局协调与未归属事务（环境准备、独立思想、零散块）")
 
-    # 逐轮归堆：本域块（hit）与该轮的用户块（users，随命中轮一起进）。
+    # 逐轮归堆：本域块（hit，含**子树**归属的块）与该轮的用户块（users，
+    # 随命中轮一起进）。子树聚合见 `_descendants_of`（2026-09-14）。
+    subs: set[str] = set()
+    if name != MAIN_AGENT_ID:
+        subs = _descendants_of(domains).get(str(name), set())
     per_seq: dict[int, dict] = {}
     for bid, owner in owners.items():
         item = index.get(bid)
@@ -1106,7 +1183,7 @@ def view_for_domain(
         rec["round"] = item["round"]
         if str(item["block"].get("kind") or "") == "user":
             rec["users"].append((str(bid), item))
-        elif owner == name:
+        elif owner == name or owner in subs:
             rec["hit"].append((str(bid), item))
 
     history: list[str] = []

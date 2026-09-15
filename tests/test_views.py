@@ -121,11 +121,14 @@ def test_history_files_still_belong_to_their_domain():
     assert owners[bid] == "甲"
 
 
-def test_block_ids_no_longer_decide_ownership():
-    """产物里的 block_ids 不参与归属（判据只有文件集合本身）。
+def test_tree_block_grouping_decides_ownership():
+    """树里显式挂载的块按树归（2026-09-14 用户口径）。
 
-    2026-09-12 用户口径：分裂写下的 file_domains 是筛子、只用一次；
-    v2 的"每块恰一个属主域 / 外域块留指针"是命名式指派，已作废。
+    "模型只负责把不相关的隔开、相关的归成一条线；决定归宿由代码"——
+    模型写的 `block_ids` 是**关系**（这块讲哪条线），代码把它翻译成
+    归属；主 agent 桶（main_agent 节点）→ 主 agent。
+    （此前 2026-09-12 的口径是"block_ids 不参与判据"——那条已被本轮
+    原则取代；文件块没有显式挂载时仍按文件集合归属。）
     """
     rounds = [_block_round(1, ["shared.py"])]
     index = views_module.block_index(rounds)
@@ -135,7 +138,14 @@ def test_block_ids_no_longer_decide_ownership():
         {"name": "乙", "file_domains": [], "block_ids": [bid]},
     ]
     owners = views_module.ownership(domains, index)
-    assert owners[bid] == "甲"            # 文件在甲的域里，乙的声明无效
+    assert owners[bid] == "乙"            # 显式挂载优先于文件匹配
+    # 主 agent 桶：挂在它下面的块归主 agent
+    domains2 = [
+        {"name": "甲", "file_domains": ["shared.py"]},
+        {"name": "闲聊：脚手架吐槽", "main_agent": True, "chat_block_ids": [bid]},
+    ]
+    owners2 = views_module.ownership(domains2, index)
+    assert owners2[bid] == views_module.MAIN_AGENT_ID
 
 
 def test_blocks_without_file_always_go_to_main_agent():
@@ -588,25 +598,28 @@ def test_subdomain_gets_its_own_view_and_watermark():
     ]
     marks = views_module.view_watermarks(rounds, TaskState(), domains=domains)
     assert set(marks) >= {"工具层", "检测加固"}
-    # 归属是**最长前缀优先**：子域声明的 detect/ 更具体，那个块归子域；
-    # 父域只拿剩下的（R1 的 safety.py）。故父子各一轮，互不重叠。
+    # 归属是**最长前缀优先**：子域声明的 detect/ 更具体，那个块归子域。
+    # 父视图 = **子树材料**（2026-09-14："归宿由代码算"——注册的 agent 是树上
+    # 某节点，叶子/子节点挂的块要折进它的视图），故父域拿 2 块（自己的
+    # safety.py + 子域的 canary.py）；子视图只拿自己那 1 块。
     assert marks["检测加固"]["rounds"] == 1
-    assert marks["工具层"]["rounds"] == 1
+    assert marks["工具层"]["rounds"] == 2
     assert marks["检测加固"]["blocks"] == 1
-    assert marks["工具层"]["blocks"] == 1
+    assert marks["工具层"]["blocks"] == 2
 
-    # 两级：主 agent 分裂只登记**顶层**（A）；子域要成为独立 agent 得靠
-    # 它自己分裂（届时产物是 A-1、A-2…，取代 A）——见 worklog §63
+    # **选层规则（2026-09-14 用户拍板：分裂由代码定）**：顶层 >1 就在顶层
+    # 分裂；顶层 ==1 就往下取第一个 >1 的层，最低到 LIVE 层。这里顶层只有
+    # "工具层" 一个节点、它只有一个子节点 "检测加固" → 一直下钻到"检测加固"
+    # 收口（它就是那个 agent）。子 agent 再分裂同理（parent_id="A" → A-1）。
     from wovra import registry as registry_module
     ids = {e["name"]: e["id"] for e in registry_module.build_entries(domains)}
-    assert ids == {"工具层": "A"}
+    assert ids == {"检测加固": "A"}
     sub_ids = {e["name"]: e["id"]
                for e in registry_module.build_entries(domains, parent_id="A")}
     assert sub_ids == {"检测加固": "A-1"}
     built = views_module.build_views(rounds, TaskState(), domains=domains)
-    # 子域还没有自己的 ID（它**不是**注册表里的 agent——两级模型里，它要成为
-    # agent 得靠它自己分裂，届时才拿到 A-1），故视图 path_id 退化成域名
-    assert built["views"]["检测加固"]["path_id"] == "检测加固"
+    # 视图的 path_id 跟着注册表走：现在"检测加固"就是那个 agent → path_id = A
+    assert built["views"]["检测加固"]["path_id"] == "A"
     # 隔离不因层级而破例：子域视图里不含父域那一轮的内容
     child_text = built["views"]["检测加固"]["text"]
     assert "canary.py" in child_text

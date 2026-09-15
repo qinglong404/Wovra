@@ -213,9 +213,12 @@ def test_backfill_materializes_history_once():
                  "file_domains": [], "status": "active", "inbox": []}]
 
     added, updated = registry_module.backfill(registry, rounds)
-    assert added == ["A"] and updated == []       # **只登记分裂层**（顶层 1 个）
+    # **选层规则（2026-09-14 用户拍板：分裂由代码定）**：顶层 >1 在顶层分裂；
+    # 顶层 1 个就下钻到第一个 >1 的层，最低到 LIVE 层——这里"工具层→探针"
+    # 是单链，故登记到最深节点「探针」
+    assert added == ["A"] and updated == []
     assert "旧域" not in [e["name"] for e in registry]   # 旧批次被取代
-    assert registry[-1]["name"] == "工具层"
+    assert registry[-1]["name"] == "探针"
 
     # 幂等：再回填一次不动
     assert registry_module.backfill(registry, rounds) == ([], [])
@@ -384,3 +387,28 @@ def test_registry_defects_ignores_legacy_prefixes():
         {"id": "Main", "name": "主", "file_domains": ["output/"]},
         {"id": "A", "name": "甲", "files": ["output/_p1.py"]},
     ]) == []
+
+
+def test_split_level_rule_prefers_top_and_descends_when_single():
+    """选层规则（2026-09-14 用户拍板）：顶层 >1 在顶层分裂；顶层 ==1 就
+    下钻到第一个 >1 的层，最低到 LIVE 层（链到底只有 1 个就按它收口）。"""
+    two_roots = [{"name": "甲"}, {"name": "乙"}]
+    assert {e["name"] for e in registry_module.build_entries(two_roots)} == {"甲", "乙"}
+    chain = [{"name": "根"}, {"name": "中间", "parent": "根"},
+             {"name": "叶A", "parent": "中间"}, {"name": "叶B", "parent": "中间"}]
+    assert {e["name"] for e in registry_module.build_entries(chain)} == {"叶A", "叶B"}
+    single = [{"name": "根"}, {"name": "唯一", "parent": "根"}]
+    assert {e["name"] for e in registry_module.build_entries(single)} == {"唯一"}
+
+
+def test_chat_bucket_counts_as_top_level_but_stays_with_main():
+    """主 agent 的闲聊桶物化成顶层节点：参与顶层计数（让 >1 成立→分裂），
+    但不生成子 agent、也不被文件校验当"空域"。"""
+    domains = [
+        {"name": "工作区", "file": "a.py"},
+        {"name": "闲聊：工具吐槽与前端灵感", "main_agent": True,
+         "chat_block_ids": ["R1-B9"]},
+    ]
+    entries = registry_module.build_entries(domains)
+    assert [e["name"] for e in entries] == ["工作区"]        # 桶不建 agent
+    assert registry_module.split_defects(domains, ["a.py"]) == []

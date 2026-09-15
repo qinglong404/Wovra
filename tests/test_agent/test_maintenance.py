@@ -1054,7 +1054,8 @@ def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):
     doms = task.rounds[0]["pending_org"]["domains"]
     assert file_bid in doms[0]["block_ids"]       # 文件块自动归域
     assert chat_bid not in doms[0]["block_ids"]   # 纯聊天块不自动归域
-    assert chat_bid in task.rounds[0]["pending_org"]["unassigned"]["block_ids"]
+    bucket = [d for d in doms if d.get("main_agent")]
+    assert bucket and chat_bid in bucket[0]["chat_block_ids"]  # 闲聊→主 agent 桶节点
 
 
 def test_split_aborts_when_a_file_block_has_no_domain(monkeypatch, tmp_path):
@@ -1288,7 +1289,9 @@ def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
     assert entry["name"] == "web 演示"
     assert entry["description"] == "纯 HTML 演示页，产出可视化灵感"
     assert entry["file_domains"] == ["index.html"]
-    assert entry["status"] == "dormant"                 # 休眠是默认态
+    # 2026-09-14：树里挂在该节点下的块算"命中"（模型给关系、代码算归宿），
+    # 故这里不再是 dormant，而是有材料的 active
+    assert entry["status"] == "active"
     # 留痕：注册表变更进 maintenance 账本，可查
     assert any(
         "registry：分裂产物落实为注册表条目" in str(h.get("detail"))
@@ -2099,3 +2102,41 @@ def test_split_aborts_when_block_id_stays_unknown(monkeypatch, tmp_path):
     assert not any(r.get("pending_org") for r in task.rounds)   # 不 promote
     joined = "\n".join(str(h.get("detail")) for h in task.history)
     assert "中止" in joined and "R1-B9" in joined
+
+
+def test_chat_bucket_is_materialized_as_top_level_node(monkeypatch, tmp_path):
+    """闲聊/未归属物化成顶层节点（用户口径：改名成闲聊的主题，归主 agent）。"""
+    from wovra import blocks as blocks_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task0 = Task.create(goal="目标")          # 先造轮拿到聊天块 ID
+    task0.rounds = [_round(1, "闲聊", "好"), _mk_file_round(2, "写文件", ["src/a.py"])]
+    chat_bid = blocks_module.segment_round_by_file(task0.rounds[0])[0]["id"]
+    args = json.dumps({
+        "domains": [{"name": "后端", "file": "L00"}],
+        "unassigned": {"block_ids": [chat_bid], "topic": "工具吐槽与前端灵感",
+                       "reason": "闲聊"},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=args),
+    ]))
+    task = Task.create(goal="目标")
+    task.rounds = [_round(1, "闲聊", "好"), _mk_file_round(2, "写文件", ["src/a.py"])]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(
+        llm=_StubLLM([[_chunk(_delta(content=_org_json() or ""))]],
+                     split_responses=[[chunk]]),
+        tools=[], task=task, org_watermark=0, org_grace_rounds=0,
+        org_cooldown_rounds=0,
+    )
+    agent.last_context_estimate = 5000
+    agent._maybe_organize_batch()
+    staged = [r for r in task.rounds if r.get("pending_org")]
+    assert staged
+    doms = staged[0]["pending_org"]["domains"]
+    bucket = [d for d in doms if d.get("main_agent")]
+    assert len(bucket) == 1
+    assert bucket[0]["name"] == "工具吐槽与前端灵感"
+    assert bucket[0]["chat_block_ids"] == [chat_bid]
+    assert "unassigned" not in staged[0]["pending_org"]     # 已并入桶节点

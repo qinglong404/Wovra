@@ -1,8 +1,7 @@
 {
   "id": "20260909-181052-orgtest",
-  "goal": "",
+  "goal": "测试Wovra工具层找bug与改进建议→当前主线：验证压缩/整理质量，推进多agent场景测试（需先触发分裂）",
   "requirements": [],
-  "acceptance_criteria": [],
   "status": "in_progress",
   "summary": "",
   "history": [
@@ -4215,6 +4214,21 @@
       "time": "2026-09-11T21:22:54",
       "kind": "maintenance",
       "detail": "历史块结构迁移：35 轮由 v1 粗分块重算为 v3 按文件聚合（R1、R2、R3、R4、R5、R6、R7、R8、R9、R10、R11、R12…）"
+    },
+    {
+      "time": "2026-09-14T18:15:02",
+      "kind": "maintenance",
+      "detail": "load：丢弃已删字段的遗留键（acceptance_criteria）——字段已从 Task 删除，加载期兼容过滤"
+    },
+    {
+      "time": "2026-09-14T18:15:02",
+      "kind": "maintenance",
+      "detail": "registry：加载期回填分裂产物——新增 1（A）"
+    },
+    {
+      "time": "2026-09-14T18:15:02",
+      "kind": "maintenance",
+      "detail": "state：Task.goal 与 TaskState.goal 分裂，已按后者回填（人视图此前显示“目标待明确”）"
     }
   ],
   "rounds": [
@@ -13638,6 +13652,8 @@
   "baseline_prompt_used": 0,
   "baseline_summary": "",
   "workspace": "/home/lkf/bc/python/Wovra/agent-test",
+  "safety_mode": "approve",
+  "approved_tags": [],
   "mode": "managed",
   "parent_id": "",
   "org_context": "",
@@ -13662,9 +13678,39 @@
       "file_domains": [],
       "status": "active",
       "inbox": []
+    },
+    {
+      "id": "A",
+      "name": "agent-test 文档产出域（Wovra 工具层测试与评价）",
+      "description": "",
+      "goal": "系统性测试 Wovra 工具层（找 bug + 顺手感 + 提建议）、评判系统提示词（位置与内容）、深读整理→分裂机制线并沉淀为文档，为后续多 agent 场景测试做准备",
+      "constraints": [
+        "只读/只在 agent-test 工作区内操作，不在仓库/工作区外干活",
+        "工具层回归测试代码由用户自己写（用户选 C）",
+        "工具层安全加固实施文档（方案 2）进行中待续",
+        "模型已换正式版，不再担心 .env 到期问题"
+      ],
+      "files": [],
+      "file_domains": [
+        "agent-test/tool-layer-audit-20260909.md",
+        "agent-test/system-prompt-cache-position-notes-20260909.md",
+        "agent-test/system-prompt-content-review-20260909.md",
+        "agent-test/organization-split-mechanism-notes-20260909.md",
+        "agent-test/pre-compaction-snapshot-20260909.md"
+      ],
+      "history_files": [],
+      "file_notes": {},
+      "status": "dormant",
+      "inbox": [],
+      "ctx_cur": 0,
+      "ctx_peak": 0,
+      "window": 0
     }
   ],
+  "agent_id_scheme": 2,
+  "pending_view": "",
+  "chat": [],
+  "file_map_sig": "",
   "created_at": "2026-09-09T18:10:52",
-  "updated_at": "2026-09-11T21:22:54",
-  "agent_id_scheme": 2
+  "updated_at": "2026-09-14T18:15:02"
 }
