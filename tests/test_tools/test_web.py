@@ -144,10 +144,13 @@ def test_bing_redirect_shell_is_unwrapped(monkeypatch):
 
 
 def test_web_search_falls_back_to_second_engine(monkeypatch):
-    """DDG 失败自动换 Bing；全失败时回传各引擎原因。"""
+    """DDG 失败自动换 Bing；全失败时回传各引擎原因（禁用缓存，聚焦回退）。"""
     from wovra import tools as tools_module
 
     monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    # 缓存是新关注点，本测试禁用以免命中绕过引擎回退
+    monkeypatch.setattr(tools_module.web, "_cache_get", lambda k, t: None)
+    monkeypatch.setattr(tools_module.web, "_cache_put", lambda k, t, v: None)
     monkeypatch.setattr(tools_module.web, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
     monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "搜索 'q' 的结果：\n1. 命中")
     assert "命中" in tools_module.web_search("q")
@@ -155,3 +158,58 @@ def test_web_search_falls_back_to_second_engine(monkeypatch):
     monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "bing 失败: 限流")
     result = tools_module.web_search("q")
     assert "所有搜索通道都失败了" in result and "bing 失败" in result
+
+
+def test_web_fetch_cache_hit_skips_network(monkeypatch, tmp_path):
+    """同一 URL 短时间重复抓命中缓存，不再走网络。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    calls = {"n": 0}
+    # 测试域名不真实解析，跳过 SSRF 校验（校验逻辑另有专项测试）
+    monkeypatch.setattr(tools_module.web, "_assert_public_url", lambda url: None)
+
+    def fake_fetch(url, timeout=30):
+        calls["n"] += 1
+        raise AssertionError("缓存命中后不应再发真实请求")
+
+    monkeypatch.setattr(tools_module.web, "_open_url", fake_fetch)
+    # 先直接写缓存（模拟第一次抓取已落盘）
+    tools_module.web._cache_put("fetch", "https://cached.example.com/doc",
+                                "[https://cached.example.com/doc] 正文内容")
+    result = tools_module.web.web_fetch("https://cached.example.com/doc")
+    assert "[缓存命中" in result and "正文内容" in result
+    assert calls["n"] == 0
+
+
+def test_html_to_text_density_filters_nav(monkeypatch):
+    """密度打分：导航/链接密集段被过滤，正文保留。"""
+    from wovra import tools as tools_module
+
+    html = ("<html><body>"
+            "<nav><a href='/a'>首页</a><a href='/b'>关于</a><a href='/c'>联系</a></nav>"
+            "<article><p>这是正文第一段，包含足够多的有效文字内容。</p>"
+            "<p>这是正文第二段，继续提供有信息量的文本。</p></article>"
+            "<footer><a href='/x'>版权</a><a href='/y'>条款</a></footer>"
+            "</body></html>")
+    text = tools_module.web._html_to_text(html.encode(), "text/html")
+    assert "这是正文第一段" in text and "这是正文第二段" in text
+    assert "首页" not in text and "版权" not in text  # 导航/页脚被滤掉
+
+
+def test_content_negotiation_markdown_and_llms_txt(monkeypatch, tmp_path):
+    """内容协商：站点返回 Markdown 或 /llms.txt 时直接用干净文本。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    # 测试域名不真实解析，跳过 SSRF 校验（校验逻辑另有专项测试）
+    monkeypatch.setattr(tools_module.web, "_assert_public_url", lambda url: None)
+    monkeypatch.setattr(tools_module.web, "_fetch_with_accept", lambda u, timeout=30: (
+        "# Site Docs\n\n这是 llms.txt 提供的干净文档。", "text/markdown"))
+    result = tools_module.web.web_fetch("https://docs.example.com/")
+    assert "llms.txt" in result and "干净文档" in result
+    # 非根 URL 不探 llms.txt（_llms_txt_url 返回 None），走 HTML
+    assert tools_module.web._llms_txt_url("https://docs.example.com/a/b") is None
+    assert tools_module.web._llms_txt_url("https://docs.example.com/") is not None

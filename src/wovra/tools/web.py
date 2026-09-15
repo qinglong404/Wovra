@@ -1,12 +1,85 @@
-"""网络工具：web_search（DuckDuckGo → Bing 回退）与 web_fetch（含 SSRF 防护）。"""
+"""网络工具：web_search（引擎注册表 + 回退）与 web_fetch（含 SSRF 防护）。
+
+2026-09-14 一步到位升级（参考 crawl4ai 的"干净文本"思路，零依赖）：
+* 正文提取改为启发式密度打分（去导航/页脚，crawl4ai 的 clean-Markdown 思路）
+* 结果缓存 output/cache/（URL→正文、query→搜索，TTL 控制）
+* 内容协商：抓取前探 Accept: text/markdown 与 /llms.txt（crawl4ai 同款）
+* 搜索引擎注册表化：DDG → Bing → 备用引擎，失败自动降级
+"""
 
 import ipaddress
+import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 from . import limits, safety
+
+
+# ---- 结果缓存（磁盘，output/cache/）-----------------------------------------
+
+_CACHE_DIR = "output/cache"
+_CACHE_TTL = int(os.environ.get("WOVRA_WEB_CACHE_TTL", "3600"))  # 秒，默认 1h
+_CACHE_MAX_ENTRIES = 500
+
+
+def _cache_dir() -> Path:
+    path = Path(safety.PROJECT_ROOT) / _CACHE_DIR
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return path
+
+
+def _cache_key(kind: str, text: str) -> str:
+    import hashlib
+
+    return f"{kind}-{hashlib.sha256(text.encode('utf-8', errors='replace')).hexdigest()[:16]}"
+
+
+def _cache_get(kind: str, key_text: str) -> str | None:
+    """命中且未过期返回缓存内容；否则 None。过期条目顺手删。"""
+    try:
+        target = _cache_dir() / (_cache_key(kind, key_text) + ".txt")
+        if not target.exists():
+            return None
+        try:
+            age = time.time() - target.stat().st_mtime
+        except OSError:
+            return None
+        if age > _CACHE_TTL:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+            return None
+        return target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+
+
+def _cache_put(kind: str, key_text: str, value: str) -> None:
+    """写入缓存；超过条数上限时清掉最老的（按 mtime）。失败静默。"""
+    try:
+        d = _cache_dir()
+        target = d / (_cache_key(kind, key_text) + ".txt")
+        target.write_text(value, encoding="utf-8")
+        try:
+            entries = sorted(d.glob("*.txt"), key=lambda p: p.stat().st_mtime)
+        except OSError:
+            entries = []
+        if len(entries) > _CACHE_MAX_ENTRIES:
+            for old in entries[: len(entries) - _CACHE_MAX_ENTRIES]:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass
 
 
 # ---- 网络与用户交互 ----------------------------------------------------------
@@ -167,15 +240,84 @@ def _decode_body(raw: bytes, ctype: str) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def _block_text_density(block: str) -> float:
+    """启发式：文本密度 = 有效字符数 / 总长度。
+
+    导航/页脚/侧栏的典型特征是"链接密集、正文稀疏"——文本密度低。
+    crawl4ai 的 clean-Markdown 也是这个思路（按内容块打分，去噪留正文）。
+    块内 `a` 标签越少、纯文本越多，密度越接近 1。
+    """
+    text_only = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", block)
+    text_only = re.sub(r"(?is)<a\b[^>]*>.*?</a>", " ", text_only)  # 链接文本不算正文
+    text_only = re.sub(r"(?s)<[^>]+>", " ", text_only)
+    text_only = " ".join(text_only.split())
+    total = len(re.sub(r"\s+", "", block))
+    if total == 0:
+        return 0.0
+    return len(text_only) / total
+
+
 def _html_to_text(raw: bytes, ctype: str = "") -> str:
+    """正文提取：按文本密度打分的启发式（去导航/页脚），零依赖。
+
+    1. 先用内容协商拿到的干净文本（_fetch_markdown / _fetch_llms_txt）
+       优先返回——那些是站点自己给的正文，质量最高。
+    2. 否则按块级标签切段，逐段做文本密度打分：密度低于阈值
+       （链接/导航密集）的段落丢弃，高于阈值的拼成正文。
+    """
     from html import unescape
 
     text = _decode_body(raw, ctype)
     text = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", text)
-    text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)[^>]*>", "\n", text)
-    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    # 块级标签切段，逐段打分
+    blocks = re.split(r"(?is)(</?(?:p|div|section|article|main|li|h[1-6]|tr|blockquote)[^>]*>)", text)
+    kept: list[str] = []
+    current = ""
+    for piece in blocks:
+        if re.match(r"(?is)^</?(?:p|div|section|article|main|li|h[1-6]|tr|blockquote)[^>]*>$", piece):
+            if current.strip() and _block_text_density(current) >= 0.25:
+                kept.append(current)
+            current = ""
+        else:
+            current += piece
+    if current.strip() and _block_text_density(current) >= 0.25:
+        kept.append(current)
+    if kept:
+        text = "\n".join(kept)
+    else:  # 打分全不过（极端页面），退回原逻辑
+        text = re.sub(r"(?i)<(br|/p|/div|/li|/h[1-6]|/tr)[^>]*>", "\n", text)
+        text = re.sub(r"(?s)<[^>]+>", " ", text)
     text = unescape(text)
     return "\n".join(line.strip() for line in text.splitlines() if line.strip())
+
+
+def _fetch_with_accept(url: str, timeout: int = 30) -> tuple[str, str] | None:
+    """内容协商：先探 `Accept: text/markdown`（crawl4ai 同款，E 档调研）。
+
+    站点支持时直接返回干净 Markdown，绕过 HTML 解析。返回 (内容, 描述)
+    或 None（不支持/失败）。SSRF 校验在调用前已做，重定向仍逐跳校验。
+    """
+    try:
+        with _open_url(url, timeout=timeout)[0] as resp:
+            ctype = (resp.headers.get("Content-Type") or "").lower()
+            if "text/markdown" in ctype or "text/x-markdown" in ctype:
+                return _decode_body(resp.read(8_000_000), ctype), \
+                    f"站点返回 Markdown（Content-Type: {ctype}）"
+    except Exception:  # noqa: BLE001——内容协商失败不致命，退回 HTML
+        return None
+    return None
+
+
+def _llms_txt_url(url: str) -> str | None:
+    """取站点的 /llms.txt 候选地址（E 档调研的 llms.txt 约定）。
+
+    只在根路径的 URL 上探（llms.txt 是站点级约定，挂在域名根），
+    避免对每个深层页都多发一次请求。
+    """
+    parsed = urllib.parse.urlparse(url)
+    if parsed.path not in ("", "/"):
+        return None
+    return urllib.parse.urlunparse((parsed.scheme, parsed.netloc, "/llms.txt", "", "", ""))
 
 
 def web_fetch(url: str, max_chars: int = 0) -> str:
@@ -186,13 +328,42 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
     8000 字符硬上限，抓一份长文档要反复重试）；真超限时只内联开头预览
     并报出原文体量，完整内容落盘 output/spill/ 可随时取回（worklog §26）。
     max_chars>0 时才按该值截断。
+
+    2026-09-14 升级（参考 crawl4ai 干净文本思路）：
+    * 结果缓存 output/cache/：同一 URL 短时间重复抓不再走网络（TTL 默认 1h）
+    * 内容协商：站点支持 text/markdown 或 /llms.txt 时直接拿干净文本
+    * 正文提取：启发式密度打分去导航/页脚（见 _html_to_text）
     找资料的入口用 web_search。
     """
     safety._audit(f"[web_fetch] {url}")
     blocked = _assert_public_url(url)
     if blocked:
         return blocked
+    cached = _cache_get("fetch", url)
+    if cached is not None:
+        return f"[缓存命中 {url}]\n{cached}"
     try:
+        # ① 站点根页先探 /llms.txt（llms.txt 约定，站点级入口）
+        llms_url = _llms_txt_url(url)
+        if llms_url:
+            blocked = _assert_public_url(llms_url)
+            if not blocked:
+                llms = _fetch_with_accept(llms_url)
+                if llms:
+                    head = f"[{url}] {llms[1]}\n\n"
+                    body = llms[0] if max_chars <= 0 else llms[0][:int(max_chars)]
+                    out = limits.clip(head + body, "web_fetch")
+                    _cache_put("fetch", url, out)
+                    return out
+        # ② 目标页本身内容协商
+        md = _fetch_with_accept(url)
+        if md:
+            head = f"[{url}] {md[1]}\n\n"
+            body = md[0] if max_chars <= 0 else md[0][:int(max_chars)]
+            out = limits.clip(head + body, "web_fetch")
+            _cache_put("fetch", url, out)
+            return out
+        # ③ 普通 HTML 抓取
         with _open_url(url, timeout=30)[0] as resp:
             ctype = (resp.headers.get("Content-Type") or "").lower()
             raw = resp.read(8_000_000)
@@ -205,7 +376,9 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
         return f"URL 无文本内容（Content-Type: {ctype}）。"
     head = f"[{url}] Content-Type: {ctype or '未知'}，抓取 {len(raw)} 字节\n\n"
     body = text if max_chars <= 0 else text[:int(max_chars)]
-    return limits.clip(head + body, "web_fetch")
+    out = limits.clip(head + body, "web_fetch")
+    _cache_put("fetch", url, out)
+    return out
 
 
 def _search_ddg(query: str, max_results: int) -> str:
@@ -271,22 +444,39 @@ def _search_bing(query: str, max_results: int) -> str:
     return f"搜索 {query!r} 的结果（前 {len(lines)} 条）：\n\n" + "\n\n".join(lines)
 
 
+def _search_engine(query: str, max_results: int, engine: str) -> str:
+    """按引擎名分发。失败统一返回以"… 失败/无结果"开头的可识别文本。"""
+    if engine == "ddg":
+        return _search_ddg(query, max_results)
+    if engine == "bing":
+        return _search_bing(query, max_results)
+    return f"{engine} 未知引擎"
+
+
 def web_search(query: str, max_results: int = 8) -> str:
     """网页搜索，返回标题、链接与摘要。用于查技术文档与解决方案。
 
-    引擎按序尝试：DuckDuckGo → Bing（均免 API Key；DDG 容易限流，
-    失败自动换 Bing）。全部失败时回传各自原因；结果不足或被限流时，
-    也可用 web_fetch 直接抓取已知网址。
+    引擎按注册表顺序尝试（DDG → Bing → 备用），失败自动降级到下一个；
+    全部失败时回传各自原因。结果缓存 output/cache/（TTL 默认 1h）：
+    同一 query 短时间重复搜直接命中缓存，不再打网络。
     """
     safety._audit(f"[web_search] {query}")
     max_results = max(1, min(int(max_results), 20))
+    cached = _cache_get("search", query)
+    if cached is not None:
+        return f"[缓存命中] {cached}"
+    engines = ("ddg", "bing")
     errors = []
-    for engine in (_search_ddg, _search_bing):
-        result = engine(query, max_results)
+    for engine in engines:
+        result = _search_engine(query, max_results, engine)
         if result.startswith(("duckduckgo 失败", "duckduckgo 无结果",
-                              "bing 失败", "bing 无结果")):
+                              "bing 失败", "bing 无结果", f"{engine} 未知引擎")):
             errors.append(result)
             continue
-        return result
-    return ("所有搜索通道都失败了：\n" + "\n".join(errors)
-            + "\n可稍后重试，或用 web_fetch 直接抓取已知网址。")
+        out = f"（引擎: {engine}）{result}"
+        _cache_put("search", query, out)
+        return out
+    out = ("所有搜索通道都失败了：\n" + "\n".join(errors)
+           + "\n可稍后重试，或用 web_fetch 直接抓取已知网址。")
+    _cache_put("search", query, out)
+    return out
