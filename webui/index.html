@@ -91,7 +91,7 @@ body.dragging *{user-select:none!important}
 .tab{padding:9px 16px;font-size:13px;color:var(--tx2);cursor:pointer;border-bottom:2px solid transparent;user-select:none}
 .tab:hover{color:var(--tx)}
 .tab.on{color:var(--acc);border-bottom-color:var(--acc)}
-#content{flex:1;overflow-y:auto;padding:18px max(var(--pad-x),calc((100% - var(--read-max))/2)) 30px;overflow-anchor:none}
+#content{flex:1;overflow-y:auto;padding:18px max(var(--pad-x),calc((100% - var(--read-max))/2)) 30px}
 
 /* ---------- 通用 ---------- */
 .card{background:var(--bg2);border:1px solid var(--line);border-radius:var(--r);margin-bottom:10px}
@@ -378,6 +378,8 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .frow .fname{color:var(--tx2);flex-shrink:0;max-width:40%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .frow .fpath2{flex:1;min-width:0;color:var(--tx3);font-size:10.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;opacity:.85}
 .frow:hover .fname{color:var(--tx)}
+.frow .fdesc{flex:1 1 auto;min-width:0;max-width:42%;color:var(--tx3);font-size:10.5px;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 .ctx-stat{font-family:var(--mono);font-size:11px;color:var(--tx2);padding:6px 12px;background:var(--bg2);border:1px solid var(--line);border-radius:8px;margin-bottom:8px}
 .ctx-note{font-size:11.5px;color:var(--tx3);padding:0 4px 10px;line-height:1.7}
@@ -851,6 +853,7 @@ const LIVE={job:null,cur:null,viaSend:false,next:0,think:'',ans:'',status:'',
             boxes:{},        // aid → 该 agent 的直播节点（一轮里每人一个）
             calls:{},        // tool_call_id → {name,args,result}（工具卡的回填状态）
             provs:{},        // aid → 该 agent 的临时消息块
+            provSeq:0,       // 临时块创建序（挂回时按它排，见 liveGbox）
             step:-1,         // 服务端报的步号（变了就说明上一步结束了）
             seenEv:{},       // 事件 id 去重表（重连/刷新重叠投递时只收一次）
             callsVer:0,      // 工具结果版本号（变了才重新回填卡片）
@@ -867,7 +870,14 @@ function sseConnect(jobId,after){   // SSE：分片到达即推（替代高频�
     SSE=new EventSource(`/api/jobs/${jobId}/stream?after=${from}`);
     SSE.onopen=()=>{LIVE.sse=true};
     SSE.onmessage=e=>{try{
-      if(applyChunk(JSON.parse(e.data)))scheduleLive();   // 节流重绘，别每个分片都刷 DOM
+      // **结构性变化立刻画、文本增长才节流**（2026-09-14 修，真浏览器审计抓到
+      // "尾部滞留"）：事件/换步/换手到达时在飞缓冲已经被清空（`applyChunk` 里
+      // `flushLiveStep`），若这一帧还走 120ms 节流，DOM 里的旧尾巴就要多留
+      // 最多 120ms 才消失——用户看到的是"内容残留一下再消失"。轮询路径
+      // （`pollLive`）本来就是 dirty>=2 立刻 `renderLive()`，两条路要同口径；
+      // 纯文字增长（level 1，每秒几十条分片）仍合并到 120ms，别逐条刷 DOM。
+      const level=applyChunk(JSON.parse(e.data));
+      if(level>=2)renderLive();else if(level)scheduleLive();
     }catch(err){}};
     SSE.addEventListener('done',()=>{sseFinish()});
     SSE.onerror=()=>{sseClose()};   // 断开不自动重连（重连会从头重放）——pollLive 兜底
@@ -897,8 +907,8 @@ function tickRunlineTime(){
    用户口径（2026-09-13）："其出现完，消失一下，才能出现"——所以这里只清缓冲，
    页面上那一段的内容由紧随其后的**事件**接住，位置不变。 */
 function flushLiveStep(){
-  const had=!!(LIVE.think||LIVE.ans);
-  LIVE.think='';LIVE.ans='';LIVE.mode='';
+  const had=!!(LIVE.think||LIVE.ans||LIVE.act);
+  LIVE.think='';LIVE.ans='';LIVE.mode='';LIVE.act='';
   return had;
 }
 /* 吃一个分片。返回**变化级别**：0=没变；1=只有文字在长（可合并渲染）；
@@ -934,7 +944,7 @@ function applyChunk(c){
     if(key&&LIVE.seenEv[key])return 0;
     if(key)LIVE.seenEv[key]=1;
     (LIVE.events[who]=LIVE.events[who]||[]).push(ev);
-    LIVE.think='';LIVE.ans='';LIVE.mode='';   // 事件覆盖了在飞文本
+    LIVE.think='';LIVE.ans='';LIVE.mode='';LIVE.act='';   // 事件覆盖了在飞文本/临时状态行
     LIVE.agent=ev.agent||LIVE.agent;
     LIVE.doneSig[who]='';
     // 工具结果到达 → 让回填跑一次（版本号一变，`renderLiveOne` 才会去碰 DOM）
@@ -950,10 +960,19 @@ function applyChunk(c){
     LIVE.ans+=c.s;bump(1);
   }
   else if(c.k==='status'){
-    // "等待模型响应…"（每步开头）与"正在<动作>…"（工具执行前）都意味着
-    // **上一段内容已经产出完**——清掉在飞缓冲（内容由事件接住，见上）
+    // **状态到达不清在飞缓冲**（2026-09-14 修，用户报"思考完/输出完会消失一下，然后重新
+    // MD 渲染"）：状态是"工具名一分片到达"就发的（core.py `_stream_call`），而承载这段
+    // 思考/正文的**事件要等参数全部流完才落**（大文件参数能流几秒）——在这里清缓冲，
+    // 内容就先从屏幕上消失、等事件落地才重新画出来（折叠思考行 / MD 正文）。
+    // 正确的清空点是**事件到达**（下面 event 分支自己会清，且与重新渲染同帧，
+    // 换手/换步都不留空档）；`st` 变化那处同理只做兜底。
     LIVE.mode='status';LIVE.status=c.s;bump(2);
-    flushLiveStep();
+    // **工具动作状态先画一条临时行**（2026-09-14 修，用户报"下面状态老是先于消息块，
+    // 例如'修改文件中…/写入中…'，块要等几秒才出现"）：这个状态是服务端**工具名一分片
+    // 到达就报**的（core.py `_stream_call`），而工具卡要等**参数全部流完**才落成事件
+    // ——大文件的参数能流好几秒，那段空窗里块内什么都没有。这里把它画成一条浅色行，
+    // 下一个事件（工具卡）落地时自动被顶掉。
+    LIVE.act=/^正在[^…]{1,14}…$/.test(String(c.s||''))?String(c.s):'';
   }
   return level;
 }
@@ -1031,7 +1050,7 @@ function purgeLiveDom(){
   (LIVE.keep||[]).forEach(n=>n&&nodes.push(n));
   nodes.forEach(n=>{ try{n.remove()}catch(e){} });
   document.querySelectorAll('.livebox').forEach(b=>b.remove());
-  LIVE.boxes={};LIVE.provs={};LIVE.keep=null;
+  LIVE.boxes={};LIVE.provs={};LIVE.keep=null;LIVE.provSeq=0;
   document.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
 }
 function liveDetach(){
@@ -1040,7 +1059,7 @@ function liveDetach(){
   sseClose();clearPendingBar();
   purgeLiveDom();
   LIVE.callsVer=0;LIVE.filledSig={};LIVE.seenEv={};LIVE.step=-1;
-  LIVE.events={};LIVE.calls={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};
+  LIVE.events={};LIVE.calls={};LIVE.boxes={};LIVE.provs={};LIVE.doneSig={};LIVE.provSeq=0;
   LIVE.keep=null;LIVE.agent='';
   LIVE.closing=false;LIVE.finishing=false;
   const st=document.getElementById('stop');if(st)st.style.display='none';
@@ -1242,19 +1261,50 @@ const LIVE_SKELETON=
    多个 agent 各有一块：主 agent 的思考归主 agent，接手方的归接手方。 */
 function liveGbox(seq,aid){
   if(seq){
-    const rows=document.querySelectorAll(`.crow.agent[data-seq="${seq}"]`);
-    let unnamed=null;
+    // **自己的临时块不算"正式块"**（2026-09-14 修，用户报"R3 的消息块一会出现、
+    // 一会消失"）：临时块为了挂进消息流也带 `data-seq` 与 `.gbox[data-agent]`，
+    // 于是这里的查询会**匹配到它自己** → 走"精确命中"分支把它摘掉
+    // （`removeProv`），而直播盒子还留在那个被摘除的节点里（`box.parentNode===host`
+    // 成立，不会重挂）→ 整块从页面上消失，直到下一次 renderLive 重建临时块才回来。
+    // 实测节奏：每 ~150ms 闪一次（浏览器逐帧记录 + 调用追踪定位）。
+    // 只有**正式块**才允许 removeProv；临时块必须走下面的回落分支复用（同一个节点，
+    // 展开状态与增量都不丢）。
+    const rows=[...document.querySelectorAll(`.crow.agent[data-seq="${seq}"]`)]
+      .filter(r=>!r.classList.contains('live-prov'));
+    let unnamed=null,hit=null;
     for(const r of rows){
       const g=r.querySelector('.gbox');
       if(!g)continue;
       const gid=String(g.dataset.agent||'');
-      if(gid===aid){removeProv(aid);return g}   // 精确命中：就是这个 agent 的块
+      if(gid===aid)hit=g;                       // 精确命中：**取最后一个**（见下）
       if(!gid)unnamed=unnamed||g;               // 老结构（没有身份标记）
     }
+    // **必须并进"本轮最后一段"**（2026-09-14 修，用户报"我消息在最下面、消息块在上面
+    // 加载"）：续轮（用户消息落进同一个开放轮）时，同一个 agent 会有多个块——被用户消息
+    // 切成几段。旧代码取**第一个**匹配行 → 直播内容挂到了那条用户消息**上面**。
+    // 现在：取最后一个匹配行，且**只有当它后面没有本轮的"用户行"时**才并进去；后面还有
+    // 用户消息（说明本轮内容在它之后继续）就走临时块——临时块追加在列表末尾，即用户
+    // 消息之下，时间顺序才对。判定用父容器的子序列（仪器与真 DOM 都支持）。
+    const userRowAfter=(row)=>{
+      const p=row&&row.parentNode;
+      if(!p||!p.children)return false;
+      const idx=[...p.children].indexOf(row);
+      for(let i=idx+1;i<p.children.length;i++){
+        const el=p.children[i];
+        const cl=el&&el.classList;
+        if(!cl)continue;
+        if(cl.contains('crow')&&cl.contains('user'))return true;   // 本轮的后续用户消息
+        if(cl.contains('rsep'))break;                              // 已经到下一轮
+      }
+      return false;
+    };
+    let host=null;
+    if(hit&&!userRowAfter(hit.closest?hit.closest('.crow'):null))host=hit;
+    else if(rows.length===1&&unnamed&&!userRowAfter(unnamed.closest?unnamed.closest('.crow'):null))host=unnamed;
+    if(host){removeProv(aid);return host}
     // **只认精确命中**（2026-09-13 修）：以前"多块就取最后那个"——那会把 A 的内容
     // 塞进别的 agent 的块里（用户报"方块对不上/重复"）。身份对不上就**不借用**：
     // 要么用唯一那个没有身份标记的老块，要么走下面的临时块（另起一块，属于它自己）。
-    if(rows.length===1&&unnamed){removeProv(aid);return unnamed}
   }
   // **不能因为"没挂在 DOM 上"就丢掉**：`drawConv` 重绘前会把它们摘下来保活，
   // 再交给这里接回去（`if(box.parentNode!==host)`）。真正的清理走 liveDetach。
@@ -1264,6 +1314,7 @@ function liveGbox(seq,aid){
     prov.className='crow agent live-prov';
     prov.dataset.agent=aid;
     if(seq)prov.dataset.seq=seq;
+    prov.dataset.ord=String(++LIVE.provSeq);   // 创建序：挂回时按它排（见下）
     const meta=(META&&META.round_list||[]).find(r=>String(r.seq)===String(seq))||null;
     let s=null;
     try{s=senderForAgent(LIVE.agent||aid,meta)}catch(e){}
@@ -1275,7 +1326,23 @@ function liveGbox(seq,aid){
     LIVE.provs[aid]=prov;
   }
   const c=$('#content');
-  if(c&&prov.parentNode!==c)c.appendChild(prov);   // 被 drawConv 摘下来的：接回去
+  if(c&&prov.parentNode!==c){
+    // **按创建序挂回**（2026-09-14 修，用户报"分裂后运行中，下面的消息块老是跑到上面
+    // Main 中"）：`drawConv` 保活会把临时块摘下来，重挂时 `renderLive` 按 `who` 集合
+    // 的顺序（**当前 actor 排第一**）逐个 append——接手方（B）的块就排到了主 agent
+    // （Main）块的**后面/上面**，与时间顺序相反（用户看到的"下面的块跑到上面"）。
+    // 按 `data-ord` 插到第一个"更晚创建"的临时块之前，顺序就与创建（=时间）一致。
+    const ord=Number(prov.dataset.ord||0);
+    let ref=null;
+    for(const el of c.children){
+      if(el===prov)continue;
+      // 注意：`classList.contains` 只认**单个类名**（写 'crow.live-prov' 恒为 false，
+      // 这条修复第一次就是这么静默失效的——真浏览器与核对仪都验不出来）
+      if(el.classList&&el.classList.contains('live-prov')
+         &&Number(el.dataset.ord||0)>ord){ref=el;break}
+    }
+    if(ref)c.insertBefore(prov,ref);else c.appendChild(prov);
+  }
   return prov.querySelector('.gbox');
 }
 function removeProv(aid){
@@ -1441,7 +1508,14 @@ function renderLiveOne(aid,isActor){
   let rebuilt=false;
   const done=box.querySelector('.live-done');
   if(done){
-    const sig=((LIVE.events[aid]||[]).length)+':'+aid+':'+Object.keys(LIVE.calls).length;
+    // **覆盖度必须进签名**（2026-09-14 修，真浏览器审计抓到"复制"）：官方轮询
+    // 把事件拉进 `CONV` 后，`liveDoneHtml` 会按 `coveredEvIds()` 让位——但旧签名
+    // 只看"直播事件数 + 调用数"，覆盖度变了不会重绘，于是同一张工具卡在直播区
+    // 与正式块里**并存**到下一个直播事件到达为止。实测窗口：1.2s / 11.3s / 2.1s
+    // （长命令期间没有新事件，窗口就是分钟级）。`coveredEvIds()` 按数组身份+长度
+    // 记忆化，每帧调用只是一次比较。
+    const sig=((LIVE.events[aid]||[]).length)+':'+aid+':'+Object.keys(LIVE.calls).length
+      +':'+coveredEvIds().size;
     if(sig!==LIVE.doneSig[aid]){
       done.innerHTML=liveDoneHtml(aid,host);
       rebuilt=true;
@@ -1464,25 +1538,70 @@ function renderLiveOne(aid,isActor){
   //    用户报的"尾部一直显示着之前渲染过的正文"就是靠隐藏收口留下的缝。
   const tail=box.querySelector('.live-tail');
   if(tail){
-    if(isActor&&(LIVE.think||LIVE.ans)){
+    if(isActor&&(LIVE.think||LIVE.ans||LIVE.act)){
       const items=[];
       if(LIVE.think)items.push({t:'think',text:LIVE.think,k:aid+':live:think'});
       if(LIVE.ans)items.push({t:'text',text:LIVE.ans,md:true,k:aid+':live:ans'});
+      // 只有状态、还没有任何内容：一条浅色行顶着（工具卡落地时被事件顶掉，见 applyChunk）
+      if(!LIVE.think&&!LIVE.ans&&LIVE.act)items.push({t:'sys',text:'⏳ '+LIVE.act,tmIndex:0});
       const html=items.map(it=>itemHtml(it,LIVE.calls)).join('');
-      if(tail._md!==html){tail.innerHTML=html;tail._md=html;highlightIn(tail)}
+      if(tail._md!==html){
+        // **同类同数就原地更新，不许整体重建**（2026-09-14 修，用户报"正在思考的消息块
+        // 点不开"）：流式期间每个分片都会走到这里，`innerHTML=html` 每次都把 `.think-box`
+        // 换成新元素——按下鼠标时它还在、松开时已被替换，click 落空（展开不了、文字也选
+        // 不中），用户手速再快也点不开。形状（条目种类/个数）没变时只改内容：元素身份、
+        // 展开态、文字选中都不动；形状变了（思考→正文、多出临时状态行）才重建。
+        const kinds=items.map(it=>it.t+':'+(it.md?'md':'')).join('|');
+        if(tail._kinds===kinds){
+          const kids=[...tail.children];
+          items.forEach((it,i)=>{
+            const el=kids[i];if(!el)return;
+            if(it.t==='think'){
+              const h=el.querySelector('.think-head'),b=el.querySelector('.think-body');
+              if(h)h.textContent=`💭 思考过程 · ${fmtN((it.text||'').length)} 字（点击展开）`;
+              if(b)b.textContent=String(it.text||'');
+            }else{
+              const b=el.querySelector('.bub')||el;
+              if(it.md)b.innerHTML=md(it.text);else b.textContent=String(it.text||'');
+            }
+          });
+        }else{
+          tail.innerHTML=html;
+          tail._kinds=kinds;
+        }
+        tail._md=html;highlightIn(tail);
+      }
       tail.style.display='';
     }else{
-      if(tail._md!==''){tail.innerHTML='';tail._md=''}
+      if(tail._md!==''){tail.innerHTML='';tail._md='';tail._kinds=''}
       tail.style.display='none';
   }
     }
   // ③ **两边都不剩内容就整块隐藏**（2026-09-13，用户报"方块重复、续到最下面"）：官方
   //    已经画过这一轮的（部分）事件、直播也没在飞内容时，这个块是**纯重复**——收起来，
   //    不要留一个空块挂在最下面。有新内容（或新的在飞文本）时自动再显示。
+  //
+  //    **但"空"不允许藏掉这一轮的唯一表示**（2026-09-14 修，真浏览器审计实测：首分钟
+  //    里块消失 850ms / 2540ms 各一次——"消失"就是这么来的）：直播完成区与在飞缓冲在
+  //    换步/事件到达那一帧会同时为空（`flushLiveStep` 清了缓冲、事件还没落成条目），
+  //    此时若还没有"同轮同 agent 且有内容的正式块"兜底，藏掉就等于整轮从页面上消失。
+  //    判据收紧为：**只有同一容器（正式块的 gbox）里已经有别人的内容时才允许隐藏**
+  //    ——那才真是"纯重复"；否则保持在场（哪怕只显示"· 进行中"这一行）。
+  const boxHost=box.parentNode;                  // 注意：`host` 已是本函数的参数（挂载点）
+  const inProv=!!(boxHost&&boxHost.closest&&boxHost.closest('.crow.live-prov'));
+  // "正式块里已经有别人的内容"要**排除直播盒子自己**：真 DOM 的 `host.innerHTML`
+  // 会把 box 自己也算进去（appendChild 后非空），直接读它恒为真（写这条时踩到）。
+  let formalHasContent=false;
+  if(boxHost&&!inProv){
+    for(const ch of boxHost.children){
+      if(ch===box||(ch.classList&&ch.classList.contains('livebox')))continue;
+      if(String(ch.innerHTML||'').trim()||String(ch.textContent||'').trim()){formalHasContent=true;break}
+    }
+  }
   const emptyDone=!(done&&String(done.innerHTML||'').trim());
   const emptyTail=!(tail&&tail.style.display!=='none'
                     &&String(tail.innerHTML||'').trim());
-  const hide=emptyDone&&emptyTail;
+  const hide=emptyDone&&emptyTail&&formalHasContent;
   box.style.display=hide?'none':'';
   const prov=box.parentNode&&box.parentNode.closest
     ? box.parentNode.closest('.crow.live-prov') : null;
@@ -1744,7 +1863,21 @@ function drawConv(c,toBottom){
   }else{
     LIVE.keep=null;
   }
+  // **滚动锚点按"第一条可见子块"记**（2026-09-14 修，真浏览器审计实测 -322px 跳动）：
+  // 原先记 (scrollTop, scrollHeight)，重绘后按**高度差**补偿——它默认"高度变化发生在
+  // 视口上方"。但直播块在**底部**长高/收缩（在飞思考/正文每步 ±120~170px，实测），
+  // 这个补偿会把视口一起拽走：用户滚到某处后，底部块一收缩，视口里的内容就整体
+  // 位移（"错位/跳跃"）。改成记住"视口顶部那条子块 + 它在视口内的偏移"，重绘后把它
+  // 放回同一偏移——无论高度变化在锚点上方还是下方，视口里的内容都不动。
   const anchorTop=c.scrollTop,anchorH=c.scrollHeight;
+  const anchorKids=[...c.children];
+  const anchorIdx=anchorKids.findIndex(el=>el.offsetTop+el.offsetHeight>anchorTop);
+  const anchorOff=anchorIdx>=0?anchorKids[anchorIdx].offsetTop-anchorTop:null;
+  // **重建窗口内临时关掉浏览器原生锚定**（2026-09-14）：原生锚定（`overflow-anchor`
+  // 默认 auto）负责"流式渲染时上方内容变矮不推走视口"；但 `innerHTML` 整体替换时
+  // 锚点节点被销毁，原生行为在这一帧不稳定——重建这块由下面按**子块索引**的锚定
+  // 接管，两者不能叠加（会双倍补偿）。
+  c.style.overflowAnchor='none';
   REBUILDING=true;
   c.innerHTML=html;
   restoreOpenBlocks(openKeys);          // **保住用户展开的块**：整段重绘会把
@@ -1763,13 +1896,20 @@ function drawConv(c,toBottom){
     c.querySelectorAll('.livebox').forEach(b=>b.remove());
     c.querySelectorAll('.crow.live-prov').forEach(p=>p.remove());
   }
+  const anchorDone=()=>{ c.style.overflowAnchor=''; REBUILDING=false; };
   if(toBottom){
     c.scrollTop=c.scrollHeight;
     requestAnimationFrame(()=>{c.scrollTop=c.scrollHeight;
-      requestAnimationFrame(()=>{REBUILDING=false})});
+      requestAnimationFrame(anchorDone)});
   }else{
-    c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
-    requestAnimationFrame(()=>{REBUILDING=false});
+    // 锚点恢复：优先"同一条子块放回同一偏移"；索引越界（子块数变了）才退回高度差补偿
+    const nk=c.children;
+    if(anchorOff!==null&&anchorIdx>=0&&anchorIdx<nk.length&&nk[anchorIdx].offsetTop!==undefined){
+      c.scrollTop=Math.max(0,nk[anchorIdx].offsetTop-anchorOff);
+    }else{
+      c.scrollTop=Math.max(0,anchorTop+(c.scrollHeight-anchorH));
+    }
+    requestAnimationFrame(anchorDone);
   }
   if(LIVE.job&&CUR===LIVE.cur)renderLive();   // 重绘后把直播区接回来
 }
@@ -1800,7 +1940,10 @@ function itemHtml(it,calls){
   }
   if(it.t==='text'){
     if(it.interim){   // 过程发言：左边一条细线，弱化呈现
-      return `<div class="bub interim">${esc(it.text)}</div>${mtm(it.tm)}`;
+      // **也走 MD 渲染**（2026-09-14 修，用户报"正文有时候会不 MD 渲染"）：长任务里
+      // 过程发言常是成段的说明/清单，纯文本会把 `**加粗**`、`- 列表` 原样显示出来。
+      // 弱化仍由 `.interim` 样式负责，渲染管线与最终回答统一。
+      return `<div class="bub interim">${md(it.text)}</div>${mtm(it.tm)}`;
     }
     const inner=it.md?md(it.text):esc(it.text);
     return (it.note?`<div class="sysline" style="text-align:left;margin:2px 0">${esc(it.note)}</div>`:'')+
@@ -2450,29 +2593,6 @@ function fileChips(d){
       + hist.map(f=>`<span class="fd" style="opacity:.55" title="历史文件（被取代/只读/已删）——挂在它下面当记录">${esc(f)}</span>`).join('');
   return ((d&&d.file_domains)||[]).map(f=>`<span class="fd" style="opacity:.7" title="旧口径的路径前缀（历史数据）">${esc(f)}</span>`).join('');
 }
-function pendingAgentCards(reg){
-  // 分裂产物里的域（尚未出现在注册表）也按正常 agent 卡片呈现
-  const have=new Set(reg.map(e=>e.name));
-  const seen=new Set(); const out=[];
-  for(const r of META.round_list||[]){
-    const sp=r.split; if(!sp)continue;
-    for(const d of sp.domains||[]){
-      if(!d.name||have.has(d.name)||seen.has(d.name))continue;
-      seen.add(d.name);
-      const sz=(VIEWSIZES&&VIEWSIZES.agents||[]).find(a=>a.name===d.name);
-      const col=agentColor(d.name);
-      out.push(`<div class="agent"><div class="top">
-        <span class="st" style="background:${col};box-shadow:0 0 8px ${col}66" title="分裂产出"></span>
-        <span class="id">${esc((sz&&sz.id)||'?')}</span><span class="nm">${esc(d.name)}</span>
-        ${sz?`<span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">≈${fmtN(sz.tokens||Math.round((sz.total_chars||0)/3))} tok · ${sz.count} 条</span>`:''}
-        </div>
-        <div class="desc desc-clamp" id="desc-${esc((d.name||'').slice(0,10))}">${esc(d.description||'')}</div>
-        ${(d.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
-        ${fileChips(d)}</div>`);
-    }
-  }
-  return out.join('');
-}
 function ctxViz(){
   const rl=META.round_list||[];
   const reg=META.registry||[];
@@ -2514,7 +2634,6 @@ function ctxViz(){
   // ④ 分裂结构树（多层级：内部节点=语义层，叶子=活性文件；叶子下挂非 LIVE/保底块/用户块）
   const splitRounds=rl.filter(r=>r.split);
   const lastSplit=splitRounds.length?splitRounds[splitRounds.length-1].split:null;
-  const regNames=new Set(reg.map(e=>e.name));
   let splitHtml='<div class="empty" style="padding:8px 0">本会话尚无分裂分析产物</div>';
   if(lastSplit){
     const doms=(lastSplit.domains||[]).filter(d=>d&&d.name);
@@ -2525,6 +2644,8 @@ function ctxViz(){
                       (d.files||[]).forEach(f=>inTree.add(f));
                       (d.file_domains||[]).forEach(f=>inTree.add(f)); });
     const missing=(lastSplit.live_files||[]).filter(f=>!inTree.has(f));
+    // 结构树正文（2026-09-14 用户："上下文与整理可视化里面的内容别动"——复原）
+    const regNames=new Set(reg.map(e=>e.name));
     const byParent=new Map(), names=new Set(doms.map(d=>d.name));
     doms.forEach(d=>{ const p=String(d.parent||'').trim();
                       const k=names.has(p)?p:'';
@@ -2537,7 +2658,9 @@ function ctxViz(){
       const att=[];
       (d.files||[]).forEach(f=>att.push(`<span class="fd">${esc(f)}</span>`));
       (d.file_domains||[]).forEach(f=>att.push(`<span class="fd">${esc(f)}</span>`));
-      (d.history_files||[]).forEach(f=>att.push(`<span class="fd" style="opacity:.6">↳ ${esc(f)}</span>`));
+      const hist=(d.history_files||[]);
+      if(hist.length) att.push(`<details class="hist" style="display:inline-block"><summary style="font-size:10.5px;color:var(--tx3)">↳ 历史文件 ${hist.length}</summary>
+        <div style="margin-top:3px">${hist.map(f=>`<span class="fd" style="opacity:.6">${esc(f)}</span>`).join('')}</div></details>`);
       const ids=(arr,lab)=>{ if(!(arr||[]).length)return;
         att.push(`<span class="mono" style="color:var(--tx3);font-size:10.5px">${lab} ${arr.length}：${esc(arr.slice(0,5).join('、'))}${arr.length>5?'…':''}</span>`); };
       ids(d.chat_block_ids,'保底块'); ids(d.user_block_ids,'用户块');
@@ -2545,7 +2668,8 @@ function ctxViz(){
       return `<div style="margin:3px 0 0 ${depth*16}px">
         <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap${isLeaf?';min-width:0':''}">
           <span style="color:var(--tx3)">${isLeaf?'📄':'▸'}</span><b style="font-size:11.5px;${isLeaf?'white-space:nowrap;overflow:hidden;text-overflow:ellipsis':''}">${esc(label)}</b>
-          ${merged?'<span class="fbadge t-create">已入注册表</span>':''}
+          ${d.main_agent?'<span class="fbadge" style="background:var(--bg3);color:var(--tx2)">归主 agent</span>':''}
+          ${(!d.main_agent&&merged)?'<span class="fbadge t-create">已入注册表</span>':''}
           ${(!isLeaf&&d.description)?`<span style="color:var(--tx3);font-size:10.5px">${esc(String(d.description).slice(0,120))}</span>`:''}
         </div>
         ${att.length?`<div style="margin:2px 0 3px 18px;display:flex;gap:6px;flex-wrap:wrap;align-items:center">${att.join('')}</div>`:''}
@@ -2559,8 +2683,6 @@ function ctxViz(){
       <span class="mono" style="color:var(--tx3);font-size:10px">${doms.length} 节点 · 活性文件 ${(lastSplit.live_files||[]).length} · 未归属块 ${un.length}</span></div>`
       +(missing.length?`<div style="margin-top:6px;color:var(--red);font-size:11px">⚠ ${missing.length} 个活性文件没有作为叶子出现在树里（Runtime 会拒收整批）：${esc(missing.slice(0,8).join('、'))}${missing.length>8?'…':''}</div>`:'')
       +`<div style="margin-top:6px;max-height:420px;overflow:auto">${roots||'<div class="empty" style="padding:6px 0">（树为空）</div>'}</div>`
-      +(un.length?`<div style="margin-top:6px"><b style="font-size:11.5px">▸ 主 agent（闲谈/未归属）</b>
-        <div style="margin:2px 0 0 18px;font-size:10.5px;color:var(--tx3)">${un.length} 块：${esc(un.slice(0,6).join('、'))}${un.length>6?'…':''}</div></div>`:'')
       +(a.reason?`<details class="hist" style="margin-top:6px"><summary style="font-size:11px">说明</summary>
         <div class="ev"><pre>${esc(a.reason)}</pre></div></details>`:'');
   }
@@ -2584,8 +2706,6 @@ function renderProject(c){
   const reg=META.registry||[];
   const status=fileStatusIndex();
   // 待生效的分裂产物（暂存区里的域，尚未并入注册表）
-  const pendingDoms=(META.round_list||[]).reduce((n,r)=>
-    n+((r.split&&r.split.pending)?(r.split.domains||[]).length:0),0);
   const q=(window._treeQ||'').toLowerCase();
   const defects=META.registry_defects||[];
   const defectHtml=defects.length?`<div class="lcard" style="border-color:var(--red);margin-bottom:10px">
@@ -2613,7 +2733,8 @@ function renderProject(c){
       <div class="desc desc-clamp">${esc(a.description||'')}</div>
       ${(a.description||'').length>90?`<span class="chip" style="cursor:pointer;margin-top:4px" onclick="toggleDesc(this)">展开职责</span>`:''}
       ${(a.files||[]).map(f=>`<span class="fd" style="cursor:pointer" onclick="document.getElementById('tree-q').value='${esc(f)}';window._treeQ='${esc(f)}';renderTab()" title="它维护的文件（LIVE）——在左树中过滤">${esc(f)}</span>`).join('')}
-      ${(a.history_files||[]).map(f=>`<span class="fd" style="opacity:.55" title="历史文件（被取代/只读/已删）——挂在它下面当记录，不单独分裂">${esc(f)}</span>`).join('')}
+      ${(a.history_files||[]).length?`<details class="hist" style="margin-top:4px;width:100%"><summary style="font-size:10.5px;color:var(--tx3)">历史文件 ${a.history_files.length}（被取代/只读/已删——挂在它下面当记录，不单独分裂）</summary>
+        <div style="margin-top:3px">${(a.history_files||[]).map(f=>`<span class="fd" style="opacity:.55">↳ ${esc(f)}</span>`).join('')}</div></details>`:''}
       ${!(a.files||[]).length&&!(a.history_files||[]).length?(a.file_domains||[]).map(f=>`<span class="fd" style="opacity:.7" title="旧口径的路径前缀（历史数据）">${esc(f)}</span>`).join(''):''}</div>`;
   }).join('')||'<div class="empty" style="padding:14px 0">无注册表（未发生分裂）</div>';
   c.innerHTML=`
@@ -2648,8 +2769,8 @@ function renderProject(c){
         <div class="tree-foot mono">根目录：${esc(TREE.root||'—')}</div>
       </div>
       <div class="proj-right">
-        <h3 class="sec">多 agent 职责划分 · ${reg.length+pendingDoms}${pendingDoms?` <span style="font-weight:400;color:var(--tx3)">（其中 ${pendingDoms} 个来自本次分裂产物）</span>`:''}</h3>
-        <div class="reg-grid">${agents}${pendingAgentCards(reg)}</div>
+        <h3 class="sec">多 agent 职责划分 · ${reg.length}</h3>
+        <div class="reg-grid">${agents}</div>
         ${defectHtml}
         ${ctxViz()}
       </div>

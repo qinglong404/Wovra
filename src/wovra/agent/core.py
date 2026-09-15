@@ -844,7 +844,8 @@ class _CoreMixin:
         self._persist_rounds()
         return True
 
-    def _record_event(self, type: str, message: dict, tool_name: str = "") -> dict:  # noqa: A002
+    def _record_event(self, type: str, message: dict, tool_name: str = "",  # noqa: A002
+                      thinking: str = "") -> dict:
         """把一条协议消息登记为 Event（生成 ID 与 Truncated 索引行）。
 
         **同时也是直播的事件源**（2026-09-13 大改，worklog §92）：落盘事件后把它的
@@ -852,6 +853,11 @@ class _CoreMixin:
         增量、**根本不推事件**，于是运行中看不到工具调用（"思考连一块、中间的工具块
         没有"就是这个）——因为**服务端就没推**。所有事件都从这里落账（唯一入口），
         所以这里就是唯一该挂的点。
+
+        `thinking` 必须在**推直播副本之前**挂上（2026-09-14 修，用户报"思考完思考块
+        就被清除了、只剩工具块"）：调用方原先在 `_record_event` 返回后才 `ev["thinking"]=…`，
+        而直播副本在函数内部已经推出去了——**直播事件永远不带思考**，于是"事件一到、
+        在飞缓冲一清，思考就从画面上没了"（刷新/轮结束后正式渲染才有，因为落盘那条带）。
         """
         if self.current_round is None:
             self.messages.append(message)
@@ -859,6 +865,10 @@ class _CoreMixin:
         seq = len(self.current_round["events"]) + 1
         event_id = f"R{self.current_round['seq']}-E{seq:02d}"
         event = truncate.make_event(event_id, type, message, tool_name=tool_name)
+        if thinking:
+            # 思考过程随事件落盘（零截断口径）；只进 event 不进 message——装配读
+            # message，上下文内容不受影响。**先挂再推直播**（顺序是这条修复的全部）。
+            event["thinking"] = thinking
         self.current_round["events"].append(event)
         self.messages.append(event["message"])
         if self.on_event is not None:
@@ -1252,11 +1262,8 @@ class _CoreMixin:
                             for tc in ordered
                         ],
                     },
+                    thinking=self._last_thinking,
                 )
-                if self._last_thinking:
-                    # 思考过程随事件落盘（零截断口径）；只进 event 不进
-                    # message——装配读 message，上下文内容不受影响
-                    ev["thinking"] = self._last_thinking
                 if self.task is not None:
                     # 工具卡即时上屏：调用已发出即落盘，结果回来再补——
                     # 网页端不必等工具跑完（几分钟的命令）才看到卡片
@@ -1305,9 +1312,8 @@ class _CoreMixin:
                     self.on_progress("响应为空（流被中断），自动重试…")
                 continue
             ev_ans = self._record_event(
-                "final_answer", {"role": "assistant", "content": answer})
-            if self._last_thinking:
-                ev_ans["thinking"] = self._last_thinking
+                "final_answer", {"role": "assistant", "content": answer},
+                thinking=self._last_thinking)
             if self.task is not None:
                 self.task.record("final_answer", answer)
             # **会合**（2026-09-12 用户口径）：本轮还有排队的参与者 →

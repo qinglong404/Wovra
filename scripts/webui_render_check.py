@@ -141,8 +141,14 @@ function mkEl(tag){
     removeChild(c){ const i=this.children.indexOf(c); if(i>=0)this.children.splice(i,1);
                     c.parentNode=null; c.isConnected=false; },
     remove(){ if(this.parentNode)this.parentNode.removeChild(this); },
-    insertBefore(c,_ref){ return this.appendChild(c); },
-    closest(){ return null; },
+    insertBefore(c,ref){ if(!ref)return this.appendChild(c);
+      const i=this.children.indexOf(ref); if(i<0)return this.appendChild(c);
+      c.parentNode=this; c.parentElement=this; c.isConnected=true;
+      this.children.splice(i,0,c); return c; },
+    // **closest 必须真走祖先链**（2026-09-14 修桩）：原先是 `return null` 的空桩——
+    // 产品代码里 `box.parentNode.closest('.crow.live-prov')`／`hit.closest('.crow')`
+    // 这类判定在仪器里恒为空 → 场景空跑（AM/AG 都被它骗过）。
+    closest(sel){ let p=this; while(p){ if(matchOne(p,sel))return p; p=p.parentNode; } return null; },
     addEventListener(){}, removeEventListener(){}, setAttribute(){}, getAttribute(){return null},
     scrollIntoView(){}, focus(){}, click(){}, replaceChildren(){ this.children=[]; },
     querySelector(sel){ DOMQ.n++; const g=matchAll(this,sel); DOMQ.nodes+=g.length;
@@ -271,7 +277,9 @@ global.CSS = { escape:(s)=>String(s) };
 global.marked = { parse:(s)=>String(s||'').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>') };
 global.DOMPurify = { sanitize:(s)=>String(s||'') };
 global.hljs = null;
-global.EventSource = function(){ return { close(){}, addEventListener(){} } };
+const ES_INSTANCES = [];
+global.EventSource = function(){ const es={close(){}, addEventListener(){}};
+  ES_INSTANCES.push(es); return es; };   // 场景 AF 要驱动 onmessage
 
 // ---- 执行 webui 脚本 ----
 // 拼成**同一个文件**再跑（不另起 eval）：渲染函数读的模块级绑定（META/TREE…）
@@ -504,7 +512,12 @@ renderLive();
   const head = tailEl && tailEl.querySelector('.think-head');
   if (head && !/点击展开/.test(head.textContent)) problems.push('F: 思考块头部没有"点击展开"提示');
   const body = tailEl && tailEl.querySelector('.think-body');
-  if (body && body.textContent !== '再想第二段。') problems.push('F: 在飞思考文本不对');
+  const bodyText = String((body && body.textContent) || '');
+  if (!/再想第二段。/.test(bodyText)) problems.push('F: 在飞思考文本不对');
+  // **状态到达不许清掉上一段**（2026-09-14 修，用户报"思考完/输出完会消失一下"）：
+  // 旧断言期望这里只剩第二段——那正是被报障的行为；收口改由**事件到达**做（见下方 ②）。
+  if (!/先想第一段。/.test(bodyText))
+    problems.push('F: 状态一到就清了上一段思考（会"消失一下再出现"）');
   // ④ 在飞正文必须走 md()（不是 textContent）——**在事件到达之前**查（事件一到，
   //    这段文本就由事件条目接管，在飞缓冲被清空，尾部区块清空是**正确**行为）
   const ab = tailEl && tailEl.querySelector('.bub');
@@ -1420,13 +1433,329 @@ META.round_list = [{seq:7, active_view:'Main', events:4, steps_used:2}];
 
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('.livebox'); }
 
+console.log('场景 AM｜续轮：直播块必须挂在"最后一段"，不许跑到用户消息上面');
+// 用户审计（2026-09-14）："我消息在最下面，消息块，在上面加载"。续轮（用户消息落进
+// 同一个开放轮）时同一个 agent 有多个块被用户消息切开；旧 `liveGbox` 取**第一个**匹配行
+// → 直播内容挂到了那条用户消息**上面**。修法：取最后一个匹配行，且其后还有本轮用户行时
+// 改用临时块（追加在末尾 = 用户消息之下）。
+resetLive();
+LIVE.seq = 7;
+META.round_list = [{seq:7, active_view:'Main', events:3, steps_used:2}];
+META.status = 'in_progress';
+CONV = {session:'s1', seqs:[], cache:{}};
+// 造出"被用户消息切开的同一轮"：agent 段 → user → （直播内容应落在这里之后）
+const AM1 = mountRound(DOM.content, 7, false, 'Main');
+const u = mkEl('div'); u.className = 'crow user'; DOM.content.appendChild(u);
+applyChunk({k:'think', s:'续轮之后的思考'});
+renderLive();
+{
+  const box = DOM.content.querySelector('.livebox');
+  const host = box && box.closest ? box.closest('.crow') : null;
+  const hostIsFirst = !!(host && host === AM1.row);
+  const order = [...DOM.content.children].map(el => String(el.className).slice(0, 20));
+  const boxIdx = order.findIndex(x => x.startsWith('crow agent live-prov'));
+  const userIdx = order.findIndex(x => x === 'crow user');
+  if (hostIsFirst) problems.push('AM: 直播块挂进了用户消息**上面**那一段（"消息块在上面加载"）');
+  if (boxIdx >= 0 && userIdx >= 0 && boxIdx < userIdx)
+    problems.push('AM: 直播块排在用户行之前（时间顺序反了）');
+  console.log(`   AM 宿主=第一段?${hostIsFirst} 顺序=${order.join(' | ')}`);
+}
+
+console.log('场景 AL｜流式追问：在飞思考块的**元素身份**跨帧保持（否则点不开）');
+// 用户审计（2026-09-14）："正在思考的消息块点不开"。根因：尾巴每次分片都 `innerHTML=`
+// 整体重建，`onclick=toggleThink(this)` 的那个元素在 mousedown 与 click 之间被替换掉。
+// 修法：条目种类/个数不变时原地更新内容，元素身份保持。
+resetLive();
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:0, steps_used:1}];
+META.status = 'in_progress';
+applyChunk({k:'think', s:'第一段'});
+renderLive();
+const AL1 = DOM.content.querySelector('.livebox .live-tail .think-box');
+applyChunk({k:'think', s:'，第二段'});
+renderLive();
+{
+  const AL2 = DOM.content.querySelector('.livebox .live-tail .think-box');
+  if (!AL1 || !AL2) problems.push('AL: 前置条件没造出来（应有在飞思考块）');
+  else if (AL1 !== AL2) problems.push('AL: 追问后思考块换了新元素（点击会落空 → 点不开）');
+  const body = AL2.querySelector('.think-body');
+  if (!body || String(body.textContent || '') !== '第一段，第二段')
+    problems.push('AL: 原地更新后文本不对（应累积到"第一段，第二段"）');
+  console.log(`   AL 同一元素=${AL1 === AL2} 文本=${body ? String(body.textContent).slice(0, 12) : '-'}`);
+}
+
+console.log('场景 AK｜状态到达不许清在飞内容（用户报"思考完/输出完会消失一下再重新 MD 渲染"）');
+// 根因：状态是"工具名一分片到达"就发的（core.py `_stream_call`），而承载这段内容的**事件**
+// 要等参数全部流完才落（大文件参数流几秒）——在 status 上清缓冲，内容就先消失。
+// 正确的清点是事件到达（与重新渲染同帧）。本场景钉住两件事：
+// ① status 到达后，在飞正文/思考**仍在**；② 事件到达后，才由事件接管（缓冲清空、内容成条目）。
+resetLive();
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:0, steps_used:1}];
+META.status = 'in_progress';
+applyChunk({k:'ans', s:'**最终回答**正在流式输出的一段'});
+renderLive();
+{
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  if (!tail || !/最终回答/.test(String(tail.innerHTML || '')))
+    problems.push('AK: 前置条件没造出来（在飞正文应在尾巴里）');
+}
+applyChunk({k:'status', s:'正在写入文件…'});     // 工具名刚到（事件还没落）
+renderLive();
+{
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  const keep = tail && /最终回答/.test(String(tail.innerHTML || ''));
+  if (!keep) problems.push('AK: 状态一到就把在飞内容清了（用户看到"输出完消失一下"）');
+  console.log(`   AK 状态后仍在飞=${!!keep}`);
+}
+applyChunk({k:'event', st:1, ag:'Main', e:ev({id:'R7-E61', type:'final_answer', agent:'Main',
+  role:'assistant', content:'**最终回答**正在流式输出的一段'})});
+renderLive();
+{
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  const cleared = !tail || !String(tail.innerHTML || '').trim();
+  const done = DOM.content.querySelector('.livebox .live-done');
+  const landed = done && /strong/.test(String(done.innerHTML || ''));
+  if (!cleared) problems.push('AK: 事件落地后在飞缓冲没让位（会与条目重复）');
+  if (!landed) problems.push('AK: 事件内容没有落成条目（正文没接住）');
+  console.log(`   AK 事件后缓冲清空=${cleared} 条目接住=${!!landed}`);
+}
+
+console.log('场景 AI｜工具动作状态先到：块里要立刻有一条临时行，事件落地后被顶掉');
+// 用户审计（2026-09-14）："下面状态老是先于消息块，例如'修改文件中…/写入中…'，块要等几秒
+// 才出现"。服务端在**工具名一分片到达**就报这个状态（core.py `_stream_call`），而工具卡
+// 要等**参数全部流完**才落成事件——中间几秒块内空着。修法：状态到达时在直播块里画一条
+// 浅色临时行；工具卡（事件）落地即被顶掉。
+resetLive();
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:0, steps_used:1}];
+META.status = 'in_progress';
+applyChunk({k:'status', s:'正在写入文件…', ag:'Main'});
+renderLive();
+{
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  const has = tail && /正在写入文件/.test(String(tail.innerHTML || ''));
+  if (!has) problems.push('AI: 工具动作状态到了，块里却没有临时行（用户看到"状态先于块"）');
+  console.log(`   AI 状态到达后临时行=${has}`);
+}
+applyChunk({k:'event', st:1, ag:'Main', e:ev({id:'R7-E41', type:'tool_call', agent:'Main',
+  role:'assistant', content:'',
+  tool_calls:[{id:'w1', function:{name:'write_file', arguments:'{}'}}]})});
+renderLive();
+{
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  const still = tail && /正在写入文件/.test(String(tail.innerHTML || ''));
+  if (still) problems.push('AI: 工具卡已落地，临时状态行还赖着（会与卡片重复）');
+  console.log(`   AI 事件落地后临时行仍在=${still}`);
+}
+
+console.log('场景 AJ｜过程发言（带工具调用那步的正文）也要走 MD 渲染');
+// 用户审计（2026-09-14）："正文有时候会不 MD 渲染"。`eventItems` 里只有
+// `type==='final_answer'` 才 `md:true`；过程发言走纯文本，于是长任务里大段的
+// 说明/清单把 `**加粗**`、`- 列表` 原样显示。修法：interim 也过 `md()`，弱化仍由样式管。
+resetLive();
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:0, steps_used:1}];
+applyChunk({k:'event', st:1, ag:'Main', e:ev({id:'R7-E51', type:'tool_call', agent:'Main',
+  role:'assistant', content:'**先看现状**，再动手：\n- 读文件\n- 改实现',
+  tool_calls:[{id:'r1', function:{name:'read_file', arguments:'{}'}}]})});
+renderLive();
+{
+  const done = DOM.content.querySelector('.livebox .live-done');
+  const html = String((done && done.innerHTML) || '');
+  const ok = /<strong>先看现状<\/strong>/.test(html);
+  if (!ok) problems.push('AJ: 过程发言没过 MD 渲染（**加粗** 会原样显示）');
+  console.log(`   AJ 过程发言含 <strong>=${ok}`);
+}
+
+console.log('场景 AH｜一轮里多名 agent：临时块的上下顺序必须与创建（=时间）序一致');
+// 用户审计（2026-09-14）："分裂后运行中，下面的消息块老是跑到上面 Main 中"。
+// 根因：drawConv 保活后 renderLive 按 `who`（**当前 actor 排第一**）逐个挂回，
+// 接手方的块被 append 在主 agent 块之后又轮到主 agent 追加 → 顺序颠倒。
+resetLive();
+LIVE.seq = 7;
+META.round_list = [{seq:7, active_view:'Main', events:1, steps_used:1}];
+META.status = 'in_progress';
+META.registry = [{id:'Main',name:'主agent'},{id:'B',name:'web 线'}];
+REG = {Main:{id:'Main',name:'主agent'}, B:{id:'B',name:'web 线'}, 'web 线':{id:'B',name:'web 线'}};
+// 主 agent 先干（创建 Main 的临时块）
+applyChunk({k:'think', s:'主 agent 的思考', ag:'Main'});
+renderLive();
+// 换手给 B（创建 B 的临时块）
+applyChunk({k:'event', st:2, ag:'B', e:ev({id:'R7-E01', type:'tool_call', agent:'B',
+  role:'assistant', content:'', tool_calls:[{id:'b1', function:{name:'read_file', arguments:'{}'}}]})});
+renderLive();
+{
+  const provs = [...DOM.content.querySelectorAll('.crow.live-prov')];
+  const order = provs.map(p => ((p.querySelector('.gbox') || {}).dataset || {}).agent);
+  if (order.length !== 2) problems.push(`AH: 前置条件不对（应有 2 个临时块，实际 ${order.length}）`);
+  else if (order[0] !== 'Main' || order[1] !== 'B')
+    problems.push(`AH: 临时块顺序应为 Main 在上、B 在下，实际 ${order.join(' / ')}`);
+  console.log(`   AH 顺序=${order.join(' → ')}`);
+}
+// 整段重绘（保活摘挂）之后顺序仍须一致——这才是用户实际遇到的场景
+// 夹具：CONV 清空（否则 drawConv 会从 CONV 画出正式行、把临时块合法地并进去）
+{
+  // 夹具：CONV 里放**上一轮**（不空，避免 drawConv 走"还没有对话"提前返回把 DOM 清空；
+  // 也不放本轮 seq 7 的事件，避免它合法地把临时块并进正式行）
+  CONV = {session:'s1', seqs:[6], cache:{6:{seq:6, blocks:[], events:[
+    {id:'R6-E01', type:'user', role:'user', content:'上一轮', time:''}]}}};
+  drawConv(DOM.content, false);
+  const order = [...DOM.content.querySelectorAll('.crow.live-prov')]
+    .map(p => ((p.querySelector('.gbox') || {}).dataset || {}).agent);
+  if (order.length !== 2 || order[0] !== 'Main' || order[1] !== 'B')
+    problems.push(`AH: 重绘后顺序变了（${order.join(' / ')}）——就是"下面的块跑到上面"`);
+  console.log(`   AH 重绘后=${order.join(' → ')}`);
+}
+
+console.log('场景 AG｜换步那一帧缓冲为空：只要这轮还没有正式块兜底，直播块不许消失');
+// 用户审计（2026-09-14）："消失"。真浏览器实测：首分钟里直播块被 `display:none` 藏掉
+// 850ms / 2540ms 各一次——完成区与在飞缓冲在换步那一帧同时为空（flushLiveStep 清了
+// 缓冲、事件还没落成条目），而"两边都空就整块隐藏"没有区分"还有没有正式块兜底"。
+resetLive();
+LIVE.seq = 7;                                  // 轮号已知；**不挂正式块**（只有临时块）
+META.round_list = [{seq:7, active_view:'Main', events:1, steps_used:1}];
+META.status = 'in_progress';
+applyChunk({k:'think', s:'第一段思考'});
+renderLive();
+{
+  const box = DOM.content.querySelector('.livebox');
+  if (!box) problems.push('AG: 前置条件没造出来（应有直播节点）');
+}
+applyChunk({k:'status', s:'等待模型响应…'});   // 换步：缓冲清空、事件未落 → 两区都空
+renderLive();
+{
+  const box = DOM.content.querySelector('.livebox');
+  const hidden = !box || box.style.display === 'none';
+  if (hidden) problems.push('AG: 缓冲空一帧就把直播块藏了（这轮还没有正式块兜底 → 整轮从页面消失）');
+  console.log(`   AG 唯一表示时 隐藏=${hidden}`);
+}
+// 对照：正式块里**已有别人的内容**时，空的直播块允许收起（那才是"纯重复"）
+{
+  const m = mountRound(DOM.content, 7, false, 'Main');
+  // 夹具注意：迷你 DOM 的元素内容要靠**标签间文本**才有 textContent（空标签算空）
+  m.gbox.innerHTML = '<div class="tcard" data-call="x9">正式块已有的一条</div>';
+  applyChunk({k:'think', s:''});                                   // 保持两区都空
+  LIVE.think = ''; LIVE.ans = '';
+  renderLive();
+  const box = DOM.content.querySelector('.livebox');
+  const hidden = !box || box.style.display === 'none';
+  if (!hidden) problems.push('AG: 正式块已有内容时，空直播块应收起（否则留一个纯重复块）');
+  console.log(`   AG 有兜底时 收起=${hidden}`);
+}
+
+console.log('场景 AE｜官方（轮询）覆盖了直播已画的事件后，直播区必须同步让位，不许两份并存');
+// 用户审计（2026-09-14）："复制"。真浏览器实测窗口 1.2s / 11.3s / 2.1s——官方
+// 轮询把同一条事件拉进 CONV 后，正式块画了它，而直播完成区因为**重绘签名里没有
+// 覆盖度**而不重绘，于是同一张工具卡两份并存（长命令期间没有新事件，窗口拖到分钟级）。
+resetLive();
+CONV = { session:'s1', seqs:[7], cache:{7:{events:[
+  {id:'R7-E01', type:'user', role:'user', content:'干活', time:''}], blocks:[]}} };
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:1, steps_used:1}];
+META.status = 'in_progress';
+const AE_TOOLCALL = [{id:'ae1', function:{name:'read_file', arguments:'{}'}}];
+const AE_EV = {id:'R7-E09', type:'tool_call', agent:'Main', time:'2026-09-13T17:00:09',
+               role:'assistant', thinking:'', content:'', tool_calls:AE_TOOLCALL};
+// ① 直播事件到达（官方还没覆盖）→ 直播完成区画出工具卡
+applyChunk({k:'event', e:AE_EV, ag:'Main', st:2});
+renderLive();
+renderLive();          // 再画一帧：等渲染副作用（calls 登记）把签名稳定下来
+{
+  const done = DOM.content.querySelector('.livebox .live-done');
+  // 用 `dataset` 读：迷你 DOM 的 `getAttribute` 是空桩（踩过），`dataset` 才是真存储
+  const liveCards = done ? [...done.querySelectorAll('.tcard')].map(c=>c.dataset.call) : [];
+  if (!liveCards.includes('ae1')) problems.push('AE: 前置条件没造出来（直播区应有工具卡 ae1）');
+}
+// ② 官方轮询把它拉进 CONV（覆盖度变化；**没有**新的直播事件）→ 官方那侧画它
+CONV.cache[7].events.push({id:'R7-E09', type:'tool_call', agent:'Main',
+                           time:'2026-09-13T17:00:09', role:'assistant', content:'',
+                           tool_calls:AE_TOOLCALL});
+drawConv(DOM.content, false);
+renderLive();                                   // 直播这一侧的一帧（无新事件）
+{
+  const liveCards = [...DOM.content.querySelectorAll('.livebox .tcard')].map(c=>c.dataset.call);
+  const formalCards = [...DOM.content.querySelectorAll('.crow.agent[data-seq="7"]:not(.live-prov) .gbox .tcard')]
+    .map(c=>c.dataset.call);
+  const both = liveCards.filter(x=>x!=='?'&&formalCards.includes(x));
+  if (both.length) problems.push(`AE: 同一张工具卡在直播区与正式块并存（${both.join(',')}）——官方覆盖后直播区没让位`);
+  console.log(`   AE 直播卡=${liveCards.length} 正式卡=${formalCards.length} 并存=${both.length}`);
+}
+
+console.log('场景 AF｜SSE 事件到达：尾巴必须**同步**清掉（不许被节流留 120ms）');
+// 用户审计（2026-09-14）："尾部滞留"。真浏览器定位：SSE 路径对**结构性变化**
+// 也走 120ms 节流（`scheduleLive`），而事件到达时在飞缓冲已被清空
+// （`applyChunk` → `flushLiveStep`）——DOM 里的旧尾巴就多留最多 120ms 才消失。
+// 轮询路径（dirty>=2 立刻 renderLive）本来就是对的，两条路要同口径。
+resetLive();
+mountRound(DOM.content, 7, false, 'Main');
+META.round_list = [{seq:7, active_view:'Main', events:0, steps_used:1}];
+META.status = 'in_progress';
+LIVE.next = 0;
+applyChunk({k:'ans', s:'上一段在飞正文，事件到达后必须立刻让位'});
+renderLive();
+{
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  // 迷你 DOM：清空走 `innerHTML=''`（setter 会清 children，但**不清 textContent**
+  // ——那是第八个同类假象，断言必须看 innerHTML）
+  if (!tail || !String(tail.innerHTML || '').length)
+    problems.push('AF: 前置条件没造出来（在飞正文应渲染在尾巴里）');
+}
+sseConnect('jx', 0);
+const AF_ES = ES_INSTANCES[ES_INSTANCES.length - 1];
+if (!AF_ES || !AF_ES.onmessage) problems.push('AF: SSE 桩没拿到 onmessage（夹具失效）');
+else {
+  // 一条**事件**到达：applyChunk 会清空在飞缓冲；渲染必须同步跟上（节流不许留尾巴）
+  AF_ES.onmessage({ data: JSON.stringify({ k:'event', st:1, ag:'Main',
+    e: ev({id:'R7-E31', type:'final_answer', agent:'Main', role:'assistant',
+           content:'正式落地的回答'}) }) });
+  const tail = DOM.content.querySelector('.livebox .live-tail');
+  const tailLen = tail ? String(tail.innerHTML || '').length : -1;
+  const done = DOM.content.querySelector('.livebox .live-done');
+  const doneTxt = done ? domAllText(done) : '';
+  if (tailLen > 0)
+    problems.push(`AF: 事件到达后尾巴还留着 ${tailLen} 字（被 120ms 节流拖住 → 视觉上"残留一下"）`);
+  if (!/正式落地的回答/.test(doneTxt))
+    problems.push('AF: 事件内容没有同步画进完成区');
+  console.log(`   AF 事件后尾巴=${tailLen} 完成区含正文=${/正式落地的回答/.test(doneTxt)}`);
+}
+
+console.log('场景 AD｜轮号已知但正式块还没画出来：连画两帧不许把自己的临时块摘掉');
+// 用户报（2026-09-14）："R3 的消息块一会出现、一会消失"。真浏览器逐帧记录 +
+// 调用追踪定位到的根因：临时块（`.live-prov`）为了挂进消息流也带 `data-seq` 与
+// `.gbox[data-agent]`，于是 `liveGbox` 查"正式块"时**匹配到它自己** → 走精确命中
+// 分支 `removeProv` 摘掉自己，而直播盒子还留在那个被摘除的节点里
+// （`parentNode===host` 成立，不会重挂）→ 整块从页面上消失，直到下一帧重建
+// 临时块（实测每 ~150ms 闪一次）。
+resetLive();
+LIVE.seq = 9;                                   // 轮号由服务端报回；正式块还没渲染出来
+META.round_list = [{seq:9, active_view:'Main', events:1, steps_used:1}];
+applyChunk({k:'think', s:'第一段思考'});
+renderLive();                                   // 第 1 帧：造出临时块 + 直播节点
+const AD_FIRST = DOM.content.querySelector('.livebox');
+{
+  const provs = DOM.content.querySelectorAll('.crow.live-prov').length;
+  if (!AD_FIRST || provs !== 1)
+    problems.push('AD: 前置条件没造出来（第 1 帧后应有 1 个临时块 + 直播节点）');
+}
+applyChunk({k:'think', s:'，第二段思考'});      // 文字继续长（每帧都会 renderLive）
+renderLive();                                   // 第 2 帧
+{
+  const after = DOM.content.querySelector('.livebox');
+  const provs = DOM.content.querySelectorAll('.crow.live-prov').length;
+  if (!after) problems.push('AD: 第 2 帧把直播节点弄丢了（临时块被当成正式块摘掉）');
+  else if (after !== AD_FIRST) problems.push('AD: 第 2 帧换了新节点（展开态/增量会丢）');
+  if (provs !== 1) problems.push(`AD: 临时块应恒为 1，实际 ${provs}（自己被自己摘掉）`);
+  console.log(`   AD 两帧后 直播节点=${after?1:0} 临时块=${provs} 同一节点=${!!(AD_FIRST&&after===AD_FIRST)}`);
+}
+
 console.log('');
 if (problems.length) {
   console.log('渲染核对：失败 ' + problems.length + ' 项');
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（30 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（40 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 
