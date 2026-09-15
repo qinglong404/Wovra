@@ -79,7 +79,7 @@ def _salvage_state_json(text: str) -> dict | None:
 
     src = str(text or "")
     out: dict = {}
-    for key in ("domains", "unassigned", "split_assessment"):
+    for key in ("domains", "unassigned", "split_assessment", "responsibilities"):
         m = re.search(r'"' + key + r'"\s*:\s*([\[{])', src)
         if not m:
             continue
@@ -92,6 +92,19 @@ def _salvage_state_json(text: str) -> dict | None:
             except ValueError:
                 pass
         if m.group(1) != "[":
+            # 截断的**对象**：职责表（`{"节点名": "职责", …}`）走这条——逐个抠
+            # 写完整的键值对，丢掉没写完的尾巴。它是产物的**最后一节**，于是
+            # "被截断"只损失几条描述（描述本就有文件开头兜底），树完好无损。
+            pairs: dict = {}
+            for pm in re.finditer(
+                    r'"((?:[^"\\]|\\.)*)"\s*:\s*"((?:[^"\\]|\\.)*)"', src[start:]):
+                try:
+                    pairs[_json.loads('"' + pm.group(1) + '"')] = _json.loads(
+                        '"' + pm.group(2) + '"')
+                except ValueError:
+                    continue
+            if pairs:
+                out[key] = pairs
             continue
         # 截断的数组：逐个抠完整的元素
         items: list = []
@@ -2093,23 +2106,73 @@ class _MaintenanceMixin:
             return None
         if salvaged is not None and self.task is not None:
             n = len(salvaged.get("domains") or [])
+            r = len(salvaged.get("responsibilities") or {})
             self.task.record(
                 "maintenance",
                 f"split：产物被截断，Runtime 抢救出 {n} 个完整节点"
-                f"（丢掉没写完的尾巴；残缺由归位兜）",
+                + (f" + {r} 条职责" if r else "（职责一节没写完，改用文件开头兜底）")
+                + "（丢掉没写完的尾巴；残缺由归位兜）",
             )
-        # 空壳判定（2026-09-11）：截断到只剩 {} 的 arguments 能解析成功，
-        # 但三个产物键一个都没有——那不算"空域合法"，是无产物。
+        # **空壳判定**（2026-09-11）：截断到只剩 {} 的 arguments 能解析成功，
+        # 但产物键一个都没有——那不算"空域合法"，是无产物。
         if not any(
-            k in state for k in ("domains", "unassigned", "split_assessment")
+            k in state for k in ("domains", "unassigned", "split_assessment",
+                                 "responsibilities")
         ):
             return None
         domains = _MaintenanceMixin._dedupe_domains(state.get("domains") or [])
+        # **职责表合并**（2026-09-15 用户口径："分裂只需要写结构树和每个 agent 的
+        # 职责"）：职责写在产物的**最后一节**（`responsibilities: {节点名: 职责}`），
+        # 树在前、职责在后——流被端点掐断时只丢尾部几条描述（有文件开头兜底），
+        # 树与路径完好。以前描述内联在节点里，截断会**连整棵树的那个节点一起丢**。
+        merged = _MaintenanceMixin._merge_responsibilities(domains, state)
+        if merged and self.task is not None:
+            # 留痕：确认产物真的按"末节职责表"写（1,100 tok 的产物里职责占 ~700，
+            # 它是"截断只丢描述"这条保证的落点；模型若仍内联，这里就看不到）
+            self.task.record(
+                "maintenance",
+                f"split：职责表合并 {merged} 条（产物末节 `responsibilities`）",
+            )
         return (
             domains,
             state.get("unassigned") or {},
             state.get("split_assessment") or {},
         )
+
+    @staticmethod
+    def _merge_responsibilities(domains: list, state: dict) -> int:
+        """把产物末节的职责并回各节点（原地改）；节点自己写了描述就不覆盖。
+
+        容错三种写法：字典 `{节点名: 职责}`、数组 `[{name, description}]`、
+        以及模型把职责直接写在节点上的老写法（不动）。
+        """
+        resp = state.get("responsibilities")
+        pairs: dict[str, str] = {}
+        if isinstance(resp, dict):
+            pairs = {str(k).strip(): str(v).strip()
+                     for k, v in resp.items() if str(v).strip()}
+        elif isinstance(resp, list):
+            for item in resp:
+                if isinstance(item, dict):
+                    name = str(item.get("name") or item.get("node") or "").strip()
+                    text = str(item.get("description") or item.get("responsibility")
+                               or "").strip()
+                    if name and text:
+                        pairs[name] = text
+        if not pairs:
+            return 0
+        merged = 0
+        for d in domains or []:
+            if not isinstance(d, dict):
+                continue
+            if str(d.get("description") or "").strip():
+                continue                      # 节点自带描述优先（老写法）
+            name = str(d.get("name") or "").strip()
+            text = pairs.get(name) or pairs.get(f"{name}（Runtime 自动归类）")
+            if text:
+                d["description"] = text
+                merged += 1
+        return merged
 
     @staticmethod
     def _dedupe_domains(domains: list) -> list:

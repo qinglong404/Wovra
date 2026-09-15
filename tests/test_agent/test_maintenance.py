@@ -1671,7 +1671,7 @@ def test_split_instruction_carries_view_watermarks(monkeypatch, tmp_path):
     assert "考虑在其内部再裂一层" in prompt      # 到没到水位的机械结论仍给（体量事实）
     assert "你的**唯一任务**" in prompt          # 只写树 + 职责，不做分裂判定
     assert "每个节点填 name + parent + path" in prompt   # 2026-09-15：节点用路径声明范围
-    assert "职责只写给会成为 agent 的节点" in prompt      # 职责只给顶层
+    assert "最后一节" in prompt and "responsibilities" in prompt   # 职责放末节（截断只丢描述）
     assert "不要逐文件列清单" in prompt          # 文件归属由代码算
 
 
@@ -2658,3 +2658,70 @@ def test_split_binding_fills_description_from_file_head(monkeypatch, tmp_path):
 
     assert doms[0]["files"] == ["src/demo/a.py"]
     assert doms[0]["description"].startswith("演示模块")   # 首行注释被"窃取"
+
+
+def test_salvage_keeps_tree_when_responsibilities_truncated():
+    """产物**末节**（职责表）被截断 → 树完好、只丢尾部几条描述。
+
+    2026-09-15 用户问"只做结构树、职责放下一步是不是能进一步提升成功率？"
+    实测裁定：模型写出来的产物只有 ~1,100 token（思考占 3,200），缩短产物收益
+    有限；真正的杠杆是**让截断变便宜**——职责从"内联在节点里"挪到"产物最后一节"
+    （`responsibilities`），于是掐断只损失几条描述（有文件开头兜底），
+    树/路径/归属全在。以前截断会连**整个节点**一起丢（实测"抢救出 22 个完整节点"）。
+    """
+    from wovra.agent.maintenance import _salvage_state_json
+
+    truncated = (
+        '{"domains":['
+        '{"name":"工具层","path":"src/wovra/tools/"},'
+        '{"name":"运行时","path":"src/wovra/agent/"},'
+        '{"name":"测试层","path":"tests/"}'
+        '],"responsibilities":{"工具层":"实现并回归三类工具；不碰 tests/",'
+        '"运行时":"工具调用与提示词注册；不含工具实现",'
+        '"测试层":"回归与取证，不改实现'
+    )  # ← 在这里被端点掐断（最后一条只写了一半）
+
+    state = _salvage_state_json(truncated)
+
+    assert [d["name"] for d in state["domains"]] == ["工具层", "运行时", "测试层"]
+    resp = state["responsibilities"]
+    assert resp["工具层"].startswith("实现并回归")           # 写完的照收
+    assert resp["运行时"].startswith("工具调用")             # 写完的照收
+    assert "测试层" not in resp                              # 没写完的丢掉（有兜底）
+
+
+def test_extract_domains_merges_responsibilities_into_nodes():
+    """职责并回节点（`responsibilities` → `description`）：下游（注册表/视图）
+    读的还是 `description`，一处翻译，零下游改动；节点自带的描述优先。"""
+    agent = Agent(llm=_StubLLM(), tools=[])
+    args = json.dumps({
+        "domains": [
+            {"name": "工具层", "path": "src/wovra/tools/"},
+            {"name": "运行时", "path": "src/wovra/agent/", "description": "节点自带"},
+        ],
+        "responsibilities": {"工具层": "三类工具的实现与回归；不碰 tests/",
+                            "运行时": "不该覆盖节点自带描述"},
+        "split_assessment": {"splittable": True, "reason": "两条线"},
+    }, ensure_ascii=False)
+    chunk = _chunk(_delta(tool_calls=[
+        _fragment(0, id="d1", name="submit_domains", arguments=args)]))
+
+    got = agent._extract_domains("", [{"name": "submit_domains", "arguments": args}])
+
+    assert got is not None
+    domains = got[0]
+    assert domains[0]["description"].startswith("三类工具")   # 末节职责被并进来
+    assert domains[1]["description"] == "节点自带"            # 自带优先，不覆盖
+
+
+def test_split_instruction_puts_responsibilities_last():
+    """指令与 schema 都要写明"树在前、职责在最后一节"——顺序就是成功率。"""
+    from wovra.agent import prompts as prompts_module
+
+    instr = prompts_module._SPLIT_INSTRUCTIONS
+    assert "最后一节" in instr and "responsibilities" in instr
+    assert "先写" in instr and "最后写职责" in instr
+    schema = json.dumps(prompts_module._ORG_DOMAINS_SCHEMA["function"]["parameters"],
+                        ensure_ascii=False)
+    assert "responsibilities" in schema
+    assert schema.index('"responsibilities"') < schema.index('"domains"')  # 末节在前：截断先丢它
