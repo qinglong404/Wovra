@@ -1060,26 +1060,23 @@ def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):
     assert bucket and chat_bid in bucket[0]["chat_block_ids"]  # 闲聊→主 agent 桶节点
 
 
-def test_split_auto_claims_file_without_domain(monkeypatch, tmp_path):
-    """文件没被域认领 → **Runtime 机械归位**，不再整批中止（2026-09-15 用户授权：
-    "你看着按最好的来，我只要效果，可以和之前冲突的方法实现"）。
+def test_split_incomplete_coverage_does_not_split(monkeypatch, tmp_path):
+    """产物**覆盖不全** → **本次不分裂**（2026-09-15 用户拍板）。
 
-    旧口径（2026-09-13）"主 agent 不许有文件 → 直接报错中止"在实测里变成了空转：
-    会话 20260915-131130-010611 两批分裂 27/29 个文件全未认领（模型把路径写成
-    项目自己的视角/漏前缀），每闭合一轮再来一次、再失败一次，烧掉 134 万 prompt
-    tok 一个域都没长出来。现在改成：**最近的节点接手 + 留痕**——文件仍然
-    **绝不落主 agent**（原口径的实质保留），产物照常暂存。
+    用户原话："不可以的，你这样降级……如果不行，就不分裂了，就直接按整理后结构来。
+    不可以给我错误分裂，错误分裂不如不分裂。"
 
-    判据仍是 `views.ownership` 的同一套（文件集合匹配；匹配不到时跟本轮
-    `active_view` 走）；这里让轮**没有**归属、文件**也没人认领**。
+    旧行为是把没被认领的文件塞进"Runtime 自动归类"的机械桶再照常落地——那等于
+    **用一棵错的树**（模型没看完材料，落了地还长 agent）。现在的处置：丢弃产物、
+    **保留整理结果**（`org_state` 不动，不回水位——那会让整理白跑）、
+    `split_state='skipped'` + `split_skipped` 留痕；下一次水位满时材料完整再判断。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    # 域只认领 src/other.py —— 轮里写的 src/a.py 没人要
     domains_args = json.dumps({
         "domains": [{
             "name": "后端",
             "description": "服务端逻辑",
-            "file_domains": ["src/other.py"],
+            "file_domains": ["src/other.py"],       # 范围盖不到轮里写的 src/a.py
             "block_ids": [],
         }],
         "unassigned": {"block_ids": [], "reason": ""},
@@ -1092,7 +1089,6 @@ def test_split_auto_claims_file_without_domain(monkeypatch, tmp_path):
     task.rounds = [_mk_file_round(1, "写文件", ["src/a.py"])]
     for r in task.rounds:
         r["org_state"] = ""
-        r["active_view"] = ""            # 本轮也没归域 → 兜底不成立，是真漏认领
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_org_json()))]],
                      split_responses=[[chunk]]),
@@ -1100,23 +1096,18 @@ def test_split_auto_claims_file_without_domain(monkeypatch, tmp_path):
         org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000
+
     agent._maybe_organize_batch()
 
-    # ① 留痕：自动归位写进账（谁被挂到哪），不再是"中止"
-    entries = [str(e.get("detail") or "") for e in (task.history or [])
-               if e.get("kind") == "maintenance"]
-    assert any("自动归位" in x and "src/a.py" in x for x in entries), entries[-3:]
-    assert not any("中止" in x for x in entries), entries[-3:]
-    # ② 产物照常暂存：src/a.py 挂进「后端」（同目录 src/other.py 在那儿），
-    #    绝不落主 agent；轮不再标 failed
-    assert task.rounds[0]["org_state"] == "done"
-    doms = (task.rounds[0].get("pending_org") or {}).get("domains") or []
-    assert doms, "产物必须暂存"
-    back = next(d for d in doms if d.get("name") == "后端")
-    assert "src/a.py" in (back.get("files") or [])
-    assert all(not d.get("main_agent") or "src/a.py" not in (d.get("files") or [])
-               for d in doms)
-    assert not any((d.get("files") or []) and d.get("main_agent") for d in doms)
+    entries = [str(e.get("detail")) for e in task.history]
+    assert any("不分裂" in x and "覆盖不全" in x for x in entries), entries[-4:]
+    assert not any("中止" in x for x in entries)
+    r1 = task.rounds[0]
+    assert r1["org_state"] == "done", "整理结果必须保留（不回水位，别让整理白跑）"
+    assert r1["split_state"] == "skipped"
+    assert not (r1.get("pending_org") or {}).get("domains"), "产物必须丢弃"
+    assert [str(e.get("id")) for e in task.registry] == ["Main"], "不分裂 = 不长 agent"
+    assert any(e.get("kind") == "split_skipped" for e in task.history)
 
 
 def test_registry_entry_description_falls_back_mechanically():
@@ -1166,20 +1157,28 @@ def test_runtime_auto_buckets_do_not_become_agents(monkeypatch, tmp_path):
     assert "协议线" in [e.get("name") for e in merged]
 
 
-def test_extract_domains_salvages_truncated_call(monkeypatch, tmp_path):
-    """截断产物经**提取路径**也能用（并留一条抢救痕迹）——不是只测静态函数。"""
+def test_extract_domains_rejects_truncated_product(monkeypatch, tmp_path):
+    """产物被**截断** → 不落产物（残树不可信），只留痕；整理结果不受影响。
+
+    2026-09-15 用户拍板："错误分裂不如不分裂"。旧行为是抠出写完的部分照落
+    （"抢救出 22 个完整节点"），那是**残树**——用户判定它比不分裂更坏。
+    """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
-    task = Task.create(goal="目标")
-    agent = Agent(llm=_StubLLM([[]]), tools=[], task=task)
-    truncated = ('{"domains": [{"name": "A 线", "files": ["L00"]},'
-                 ' {"name": "B 线", "files": ["L01"], "desc')
-    product = agent._extract_domains(
-        "", [{"name": "submit_domains", "arguments": truncated}])
-    assert product is not None
-    domains, _unassigned, _split = product
-    assert [d.get("name") for d in domains] == ["A 线"]
-    joined = "\n".join(str(h.get("detail")) for h in task.history)
-    assert "抢救" in joined, joined[-3:]
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    truncated = (
+        '{"domains":[{"name":"工具层","path":"src/wovra/tools/"},'
+        '{"name":"运行时","path":"src/wovra/agent/"},'
+        '{"name":"测试层","path":"tests/"'
+    )  # ← 被端点掐断（最后一个节点没写完）
+
+    got = agent._extract_domains("", [{"name": "submit_domains",
+                                       "arguments": truncated}])
+
+    assert got is None, "截断的产物不许落地"
+    rec = [str(e.get("detail")) for e in task.history
+           if e.get("kind") == "split_skipped"]
+    assert rec and "不分裂" in rec[-1] and "截断" in rec[-1]
 
 
 def test_stream_call_retries_on_endpoint_throttle(monkeypatch):
@@ -1234,12 +1233,12 @@ def test_stream_call_retries_on_endpoint_throttle(monkeypatch):
 
 
 def test_split_salvages_truncated_product():
-    """产物被**截断**时抢救出写完的部分（2026-09-15）。
+    """`_salvage_state_json` 能把截断产物里写完的元素抠出来（**只用于诊断**）。
 
-    分裂/整理产物动辄一两万字符，模型输出撞端点预算就被截断 → `json.loads`
-    失败 → 整批白算（实测会话 20260915-131130-010611：第一次产物 13,523 字符
-    死在解析上，重发再烧 20 万 tok）。抢救：逐个元素抠，写完的节点照收，
-    丢掉没写完的尾巴。
+    2026-09-15 用户拍板之后，抢救结果**不再落地**（残树不可信，见
+    `test_extract_domains_rejects_truncated_product`）；这个函数现在只用来在留痕里
+    说清"丢了多少"，所以这里测的是**解析能力**本身：逐个元素抠、写完的节点照收。
+    被测动机来自实测会话 20260915-131130-010611（13,523 字符的产物死在解析上）。
     """
     from wovra.agent.maintenance import _salvage_state_json
 
@@ -1319,12 +1318,12 @@ def test_split_normalizes_prefixless_path_refs(monkeypatch, tmp_path):
     assert d2[0]["files"] == ["x.py"] and normalized2 == []
 
 
-def test_split_does_not_abort_when_round_is_already_routed(monkeypatch, tmp_path):
-    """文件没人认领、但**本轮已归某域** → 不算漏认领（跟 `views.ownership` 同判据）。
+def test_split_incomplete_coverage_does_not_abort_or_land(monkeypatch, tmp_path):
+    """「本轮已归某域」不再需要特判：覆盖不全就**不分裂**（不抛错、不落错树）。
 
-    这条正是实测会话 20260913-175945-533c5d 的情形：R5 的 `active_view` 已经是
-    「眼睛（视觉通道）与改文件回显」，它的 7 个文件块按轮归属本来就该进那个域——
-    分裂检查不能对着已经归好域的轮报错。
+    历史背景：会话 20260913-175945-533c5d 里 R5 已归某域，旧检查把它的文件块
+    当成"漏认领"报错中止。2026-09-15 用户口径改成闭锁之后，这类情形统一按
+    "产物覆盖不全 → 本次不分裂、保留整理结果"处置——既不中止、也不拿残树落地。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     domains_args = json.dumps({
@@ -1344,7 +1343,7 @@ def test_split_does_not_abort_when_round_is_already_routed(monkeypatch, tmp_path
     task.rounds = [_mk_file_round(1, "写文件", ["src/a.py"])]
     for r in task.rounds:
         r["org_state"] = ""
-        r["active_view"] = "甲"          # 本轮已归"甲" → 文件块跟着它
+        r["active_view"] = "甲"          # 本轮已归"甲"
     agent = Agent(
         llm=_StubLLM([[_chunk(_delta(content=_org_json()))]],
                      split_responses=[[chunk]]),
@@ -1352,13 +1351,14 @@ def test_split_does_not_abort_when_round_is_already_routed(monkeypatch, tmp_path
         org_cooldown_rounds=0,
     )
     agent.last_context_estimate = 5000
-    agent._maybe_organize_batch()
 
-    entries = [str(e.get("detail") or "") for e in (task.history or [])
-               if e.get("kind") == "maintenance"]
-    assert not any("分裂中止" in x or "SplitCoverageError" in x for x in entries)
-    # 产物正常暂存（照旧往下走）
-    assert (task.rounds[0].get("pending_org") or {}).get("domains")
+    agent._maybe_organize_batch()        # 不抛错即通过（旧行为会 SplitCoverageError）
+
+    entries = [str(e.get("detail")) for e in task.history]
+    assert not any("中止" in x or "SplitCoverageError" in x for x in entries)
+    assert task.rounds[0]["org_state"] == "done"      # 整理结果保留
+    assert task.rounds[0]["split_state"] == "skipped"  # 覆盖不全 → 不分裂
+    assert [str(e.get("id")) for e in task.registry] == ["Main"]
 
 
 def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
@@ -2374,19 +2374,16 @@ def test_chat_bucket_is_materialized_as_top_level_node(monkeypatch, tmp_path):
     assert "unassigned" not in staged[0]["pending_org"]     # 已并入桶节点
 
 
-def test_stale_split_product_requeues_instead_of_hard_reject(monkeypatch, tmp_path):
-    """**材料过期 ≠ 根基缺陷**（2026-09-15 修，会话 20260914-181519-0d3875 实测）。
+def test_incomplete_split_product_is_dropped_keeping_org_result(monkeypatch, tmp_path):
+    """产物**覆盖不全** → 丢弃产物、**保留整理结果**、标记 skipped（用户口径 2026-09-15）。
 
-    产物是对某一批材料做的；之后又有轮闭合（新文件）时必然覆盖不全。旧行为按
-    "根基缺陷"拒收，而那批轮留在 `org_state=done` → 再也不会被选进整理批次 →
-    会话永久没有可用域树（实测卡死）。新行为：缺陷**全是"未覆盖"**且存在更新轮次
-    → 本批回入水位（`org_state=failed`）＋`split_state=stale`＋记 `split_stale`。
+    旧行为是"回入水位、下批重整"（`org_state=failed`）——那会让**整理白跑一遍**，
+    而用户明确说"就直接按整理后结构来"。新行为：产物不落、`split_state='skipped'`、
+    `org_state` 保持 done；下一次水位满时（新轮进批、`_live_files()` 是全局口径）
+    材料完整，再判断是否分裂。
     """
-    from wovra import registry as registry_module
-
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     task = Task.create(goal="g")
-    # 本批：R1 写 a.py（产物只覆盖 a.py）；其后 R2 又写了 b.py（材料变了）
     task.rounds = [
         _mk_file_round(1, "写 a.py", ["a.py"]),
         _mk_file_round(2, "写 b.py", ["b.py"]),
@@ -2394,24 +2391,22 @@ def test_stale_split_product_requeues_instead_of_hard_reject(monkeypatch, tmp_pa
     for r in task.rounds:
         r["org_state"] = ""
     product = [{"name": "A 域", "description": "a.py 这条线", "file": "a.py"}]
-    # 材料过期的信号（2026-09-15 起）：`_bind_files_by_path` 记下"节点声明的
-    # 范围覆盖不到的文件"——它不再触发拒收（Runtime 会机械归位），但配合
-    # "有更新轮次"仍是"这份产物对旧材料做的"的可靠证据。
+    # 覆盖不全的信号：节点声明的范围盖不住 b.py（`_bind_files_by_path` 记的）
     task.rounds[0]["pending_org"] = {"domains": product,
                                      "uncovered_by_scope": ["b.py"]}
     task.rounds[0]["org_state"] = "done"
     task.rounds[0]["org_generation"] = 1
     task.rounds[0]["end_state"] = "completed"
-    task.rounds[1]["end_state"] = "completed"     # R2 已闭合但未整理（材料更新）
-    agent = Agent(llm=_StubLLM(), tools=[], task=task,
-                  org_watermark=10**9)            # 不让水位在本测试里另起批次
+    task.rounds[1]["end_state"] = "completed"
+    agent = Agent(llm=_StubLLM(), tools=[], task=task, org_watermark=10**9)
 
     agent._promote_org_results()
 
-    assert task.rounds[0]["org_state"] == "failed", "过期产物应把本批回入水位"
-    assert task.rounds[0]["split_state"] == "stale"
-    assert any(e.get("kind") == "split_stale" for e in task.history), "缺少 split_stale 留痕"
-    assert [str(e.get("id")) for e in task.registry] == ["Main"], "过期产物不许落进注册表"
+    assert task.rounds[0]["org_state"] == "done", "整理结果必须保留（别让整理白跑）"
+    assert task.rounds[0]["split_state"] == "skipped"
+    assert not task.rounds[0].get("pending_org"), "产物应丢弃"
+    assert any(e.get("kind") == "split_skipped" for e in task.history)
+    assert [str(e.get("id")) for e in task.registry] == ["Main"], "不分裂 = 不长 agent"
 
 
 def test_hard_split_defect_still_rejected_and_marked(monkeypatch, tmp_path):
@@ -2535,19 +2530,20 @@ def test_promote_after_early_publish_is_idempotent(monkeypatch, tmp_path):
     assert task.rounds[0].get("split_state") == "done"
 
 
-def test_stale_requeues_immediately_without_boundary(monkeypatch, tmp_path):
-    """过期产物**立刻**回入水位（纯账目），不必等轮闭合——这是卡死会话的自愈路径。"""
-    # 夹具注意：新轮必须在构造 Agent **之前**挂上（Agent 构造时浅拷贝轮列表）
+def test_incomplete_product_skips_immediately_without_boundary(monkeypatch, tmp_path):
+    """覆盖不全的产物**立刻**判"不分裂"（纯账目），不必等轮闭合。
+
+    与旧行为的差别就一句：**不回水位、不落产物**——保留整理结果，等下批水位再判断。
+    """
     agent, task = _early_fixture(monkeypatch, tmp_path, newer_round=True)
 
-    landed = agent._publish_product_early()
+    agent._publish_product_early()
 
-    assert landed == 1
-    assert task.rounds[0]["org_state"] == "failed", "过期批次应立即回入水位"
-    assert task.rounds[0].get("split_state") == "stale"
-    assert not task.rounds[0].get("pending_org"), "过期产物应丢弃（下批重做）"
-    assert any(e.get("kind") == "split_stale" for e in task.history)
-    assert [str(e.get("id")) for e in task.registry] == ["Main"], "过期产物不许落注册表"
+    assert task.rounds[0]["org_state"] == "done", "整理结果保留（旧行为会改成 failed）"
+    assert task.rounds[0].get("split_state") == "skipped"
+    assert not task.rounds[0].get("pending_org"), "产物应丢弃"
+    assert any(e.get("kind") == "split_skipped" for e in task.history)
+    assert [str(e.get("id")) for e in task.registry] == ["Main"], "不分裂不许落注册表"
 
 
 def test_early_publish_lands_envelope_and_display_fields(monkeypatch, tmp_path):
@@ -2630,10 +2626,11 @@ def test_split_binds_files_by_declared_path_scopes(monkeypatch, tmp_path):
     assert by_name["工具层"]["files"] == ["src/wovra/tools/eyes.py"]
     assert by_name["运行时"]["files"] == ["src/wovra/agent/core.py"]
     assert by_name["文档"]["files"] == ["docs/a.md"]
-    # `README.md` 没有任何范围命中 → 机械桶接住（不是主 agent）
+    # `README.md` 没有任何范围命中 → 只**报告**、不补救：
+    # 覆盖不全就是"本次不分裂"（2026-09-15 用户拍板"错误分裂不如不分裂"）——
+    # 旧行为会新建"Runtime 自动归类"桶再照常落地，那等于拿一棵残树去长 agent。
     assert uncovered == ["README.md"]
-    buckets = [d for d in doms if d.get("runtime_auto")]
-    assert buckets and buckets[0]["files"] == ["README.md"]
+    assert not [d for d in doms if d.get("runtime_auto")], "不许再造机械桶兜底"
     # 范围声明用完即清：归宿只有 `files` 一处真源（否则前缀会与清单重叠）
     assert not any(d.get("file_domains") for d in doms)
 

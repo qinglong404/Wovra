@@ -69,11 +69,13 @@ def _scan_value_end(text: str, start: int) -> int:
 def _salvage_state_json(text: str) -> dict | None:
     """**截断/坏 JSON 的抢救式解析**（2026-09-15）。
 
-    分裂/整理产物动辄一两万字符（每个节点带描述），模型输出一撞端点预算就被
-    截断 → `json.loads` 失败 → 整批算白（实测会话 20260915-131130-010611：
-    第一次产物 13,523 字符就死在解析上，重发再烧 20 万 tok）。这里**逐个元素**
-    抠：`domains` 数组里写完的节点照收，丢掉没写完的尾巴；`unassigned` /
-    `split_assessment` 同样按对象抠。残缺由 Runtime 归位兜（同一批已实现）。
+    分裂/整理产物动辄一两万字符，模型输出撞端点预算就被截断 → `json.loads` 失败。
+    这里**逐个元素**抠：`domains` 数组里写完的节点照收、丢掉没写完的尾巴；
+    `unassigned` / `split_assessment` / `responsibilities` 按对象抠。
+
+    ⚠ **用途已变**（2026-09-15 用户拍板"错误分裂不如不分裂"）：抢救结果**不再**
+    拿去落地——残树落下去就是错的域树与错的 agent。现在它只用来**诊断与报告**
+    （`_extract_domains` 数一下"抢救出几个节点"就丢弃产物、本次不分裂）。
     """
     import json as _json
 
@@ -457,40 +459,41 @@ class _MaintenanceMixin:
         )
         return str((ent or {}).get("id") or "")
 
-    def _requeue_if_stale(self, product_round: dict, defects: list) -> bool:
-        """缺陷**全是"未覆盖"** 且存在不属于本批的已闭合轮 → 材料过期：批次回入水位。
+    def _skip_incomplete_split(self, product_round: dict, uncovered: list) -> bool:
+        """产物**覆盖不全**（节点声明的范围盖不住现有文件）→ **本次不分裂**。
 
-        纯账目变更（`org_state`/`split_state`/清暂存），任何时刻都能落——而且**必须
-        早落**：晚落的代价实测过（worklog §104.7）——产物拖到轮闭合才校验，文件集早被
-        期间的新轮改过，判成"根基缺陷"拒收，批次留在 done，会话永久没有域树。
+        用户口径（2026-09-15，原话）："不可以的，你这样降级……如果不行，就不分裂了，
+        就直接按整理后结构来。不可以给我错误分裂，错误分裂不如不分裂。"
+
+        于是这里从"机械归位 + 照常落地"改成**闭锁**：
+
+        * 产物声明 `path`/`paths` 却盖不住现有活性文件 → 这棵树是残缺的（模型没看完
+          材料 / 边做边加了文件）——落下去就是**错的域树与错的 agent**；
+        * 处置：**丢弃产物、不落域树**，但**保留整理结果**（`org_state` 不动，
+          不把批次打回水位——那会让整理白跑一遍）；`split_state='skipped'` +
+          `split_skipped` 留痕；
+        * 下一次水位满时（新轮进批、`_live_files()` 已是全局口径）会重新判断是否分裂，
+          届时材料完整，树也就完整。
+
+        返回 True 表示"已按不分裂处置"。
         """
-        if self.task is None or not defects:
+        if self.task is None or not uncovered:
             return False
-        # 信号现在是"节点声明的范围覆盖不到的文件"（`_bind_files_by_path` 记在
-        # `pending["uncovered_by_scope"]`）——不再是从缺陷列表里挑"未覆盖"：
-        # 那类缺陷已经不拒收了（2026-09-15），但"材料过期"这个判据本身仍然有效。
-        newer = [
-            rr for rr in self.rounds
-            if rr is not product_round
-            and str(rr.get("end_state") or "") == "completed"
-            and str(rr.get("org_state") or "") != "done"
-        ]
-        if not newer:
-            return False
-        product_round.pop("pending_org", None)     # 过期产物丢弃，下批重做
+        product_round.pop("pending_org", None)     # 产物丢弃：不落域树、不落注册表
         gen = product_round.get("org_generation")
         for rr in self.rounds:
             if (str(rr.get("org_state") or "") == "done"
                     and rr.get("org_generation") == gen):
-                rr["org_state"] = "failed"         # 回入水位：下批重整
-                rr["split_state"] = "stale"
+                rr["split_state"] = "skipped"
         self.task.record(
-            "split_stale",
-            "分裂产物材料已过期（有更新轮次）→ 批次回入水位、下批重整："
-            + "；".join(str(d) for d in defects[:4]),
+            "split_skipped",
+            "分裂产物覆盖不全（声明范围盖不住 "
+            f"{len(uncovered)} 个文件：{'、'.join(str(u) for u in uncovered[:3])}"
+            "…）——**本次不分裂**：保留整理后的结构，等下一次水位再判断是否分裂"
+            "（用户口径：错误分裂不如不分裂）",
         )
         if self.on_progress:
-            self.on_progress("↻ 分裂产物过期，批次已回入水位（下批重整）")
+            self.on_progress("⏸ 分裂产物覆盖不全 → 本次不分裂（保留整理结果，下批再判断）")
         return True
 
     def _publish_product_early(self) -> int:
@@ -539,7 +542,7 @@ class _MaintenanceMixin:
             # 早落路径同样区分两类：**材料过期**（声明的范围覆盖不到 → 回水位，
             # 可自愈不必等边界）与**硬缺陷**（重叠/空域 → 留到边界分类留痕）。
             # 未覆盖不再是缺陷（2026-09-15：Runtime 已机械归位）。
-            if self._requeue_if_stale(r, list(pending.get("uncovered_by_scope") or [])):
+            if self._skip_incomplete_split(r, list(pending.get("uncovered_by_scope") or [])):
                 landed += 1
                 continue
             defects = registry_module.split_defects(
@@ -1804,8 +1807,8 @@ class _MaintenanceMixin:
           `file_domains`（目录前缀）同样当范围用；
         * 每个文件取**匹配最深**的范围（`src/wovra/tools/` 优先于 `src/`）；
           同深度时按节点声明顺序取前一个（确定性，不随机）；
-        * 命中不了的 → `_auto_claim`（同目录 → 最近前缀 → Runtime 机械桶），
-          **绝不落主 agent**；
+        * 命中不了的 → **不补救**：记为"覆盖不全"交应用侧闭锁（本次不分裂，
+          见 `_skip_incomplete_split`）——错树比如不分裂更坏（用户口径）；
         * 各节点的 `files` 由本函数**重建**（不再信模型手抄的清单）——因此
           "重叠/未覆盖"这两类缺陷在构造上不可能出现，`split_defects` 相应的
           拒收路径随之退场；
@@ -1877,16 +1880,14 @@ class _MaintenanceMixin:
                 note = self._guess_file_note(node["files"][0])
                 if note:
                     node["description"] = note
-        if unmatched:
-            # 复用 §114 的机械归位：同目录 → 最近前缀 → 新建 Runtime 桶
-            # 就近判据要带**已声明的范围**（它们已被清空，`_auto_claim` 默认
-            # 只看 files/file_domains/history_files）——否则"同目录"这条最像的
-            # 判据失效，文件会被无谓地扔进机械桶。
-            notes += [f"Runtime 自动归位——{n}" for n in self._auto_claim(
-                domains, sorted(unmatched), "files", hints=node_scopes)]
+        # **未命中范围的文件 = 产物覆盖不全 → 本次不分裂**（2026-09-15 用户拍板：
+        # "不可以给我错误分裂，错误分裂不如不分裂"）。旧行为是把它们塞进
+        # "Runtime 自动归类"的机械桶再照常落地——那等于**用错的树**（模型没看完
+        # 材料的产物落了地、还长了 agent）。现在只报告、不补救：`uncovered_by_scope`
+        # 交应用侧闭锁（丢弃产物、保留整理结果、下批水位再判断）。
         notes.append(f"文件归属按路径机械绑定（{len(live)} 个活性文件 → "
                      f"{sum(1 for n in nodes if n['files'])} 个节点"
-                     f"{f'，另有 {len(unmatched)} 个由 Runtime 归位' if unmatched else ''}）")
+                     f"{f'，{len(unmatched)} 个没被任何节点范围覆盖' if unmatched else ''}）")
         return notes, unmatched
 
     @staticmethod
@@ -2090,29 +2091,36 @@ class _MaintenanceMixin:
             try:
                 state = json.loads(raw)
             except json.JSONDecodeError:
-                # **截断抢救**（2026-09-15）：长产物撞端点预算 → 抠出写完的部分，
-                # 至少让这批能落地（比"整批失败 + 重发再烧 20 万 tok"好得多）。
-                salvaged = _salvage_state_json(raw)
-                state = salvaged
+                # **截断 → 本次不分裂**（2026-09-15 用户拍板，口径变更）：
+                # "不可以给我错误分裂，错误分裂不如不分裂"——截断的产物是**残树**，
+                # 落下去就是错的域树与错的 agent（实测"抢救出 22 个完整节点"正是
+                # 这种残树）。故只**记录**，不落产物：整理结果照常生效，这一批
+                # 不产生域树，等下一次水位满时再判断要不要分裂。
+                # （旧口径是抠出写完的部分让"至少能落地"——用户判定那是更坏的结果。）
+                salvaged = _salvage_state_json(raw) or {}
+                state = None
             if isinstance(state, dict):
                 break
             state = None
         if state is None:
-            state = _MaintenanceMixin._parse_state_json(content)
-            if not isinstance(state, dict) and content:
-                salvaged = salvaged or _salvage_state_json(content)
-                state = salvaged
+            parsed = _MaintenanceMixin._parse_state_json(content)
+            if not isinstance(parsed, dict) and content:
+                salvaged = salvaged or _salvage_state_json(content) or {}
+                parsed = None
+            state = parsed
         if not isinstance(state, dict):
+            if salvaged and self.task is not None:
+                n = len(salvaged.get("domains") or [])
+                self.task.record(
+                    "split_skipped",
+                    f"分裂产物被截断（抢救出 {n} 个节点也不可信）——**本次不分裂**："
+                    f"保留整理后的结构，等下一次水位再判断是否分裂"
+                    f"（用户口径：错误分裂不如不分裂）",
+                )
+                if self.on_progress:
+                    self.on_progress(
+                        "⏸ 分裂产物被截断 → 本次不分裂（保留整理结果，下批再判断）")
             return None
-        if salvaged is not None and self.task is not None:
-            n = len(salvaged.get("domains") or [])
-            r = len(salvaged.get("responsibilities") or {})
-            self.task.record(
-                "maintenance",
-                f"split：产物被截断，Runtime 抢救出 {n} 个完整节点"
-                + (f" + {r} 条职责" if r else "（职责一节没写完，改用文件开头兜底）")
-                + "（丢掉没写完的尾巴；残缺由归位兜）",
-            )
         # **空壳判定**（2026-09-11）：截断到只剩 {} 的 arguments 能解析成功，
         # 但产物键一个都没有——那不算"空域合法"，是无产物。
         if not any(
@@ -2366,7 +2374,8 @@ class _MaintenanceMixin:
                 # 装配进上下文），由 split_defects 的 F3-历史检查兜底。
                 # **材料过期判定**（不拒收、但仍要识别）：产物声明的范围覆盖
                 # 不到当前材料 + 有更新轮次 → 本批回水位，下批带新材料重做。
-                if self._requeue_if_stale(r, list(pending.get("uncovered_by_scope") or [])):
+                if self._skip_incomplete_split(
+                        r, list(pending.get("uncovered_by_scope") or [])):
                     continue
                 defects = registry_module.split_defects(
                     pending["domains"], self._live_files(), self._non_live_files()
