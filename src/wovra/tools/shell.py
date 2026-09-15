@@ -134,6 +134,7 @@ def run_command(command: str, timeout: int | None = None) -> str:
     reason = safety._confirm_reason(command)
     if reason and not safety._ask_yes_no(
         f"命令包含敏感操作（命中 `{reason}`），是否允许执行？\n  {command[:200]}"
+        f"{safety._confirm_hint(command)}"
     ):
         safety._audit(f"[run_command][用户拒绝] {command}")
         return (

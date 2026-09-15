@@ -104,7 +104,11 @@ def test_view_image_emits_marker_and_not_base64(eye_root):
     assert "【图片】path=pic.png" in out
     assert "看配色" in out
     assert base64.b64encode(raw).decode()[:40] not in out
-    assert "下一次请求" in out
+    assert "下一次" in out
+    # §3.2 的 P0 修复：必须**显著**声明"尚未进入视野"，否则模型会把
+    # "已调用"当成"已看到"（复盘里真发生了多轮无依据确认）
+    assert "尚未" in out and "进入你的视野" in out
+    assert "不要声称已查看" in out
 
 
 def test_view_image_too_large_is_refused(eye_root, monkeypatch):
@@ -129,6 +133,25 @@ def test_load_image_part_returns_none_on_junk(eye_root):
     assert eyes.load_image_part("e.png") is None
     (eye_root / "x.txt").write_text("t", encoding="utf-8")
     assert eyes.load_image_part("x.txt") is None      # 后缀不是图片
+
+
+def test_eye_marker_regex_ignores_marker_shaped_source_text(eye_root):
+    """标记正则不得把**源码/JSON 里形如标记的文本**当成图片引用。
+
+    2026-09-15 实测的噪声：读过 `eyes.py`（里面有 `f"【图片】path={rel}{hint}"`）
+    与本测试文件后，轮的提示里堆出一片"未注入"假报告——那些"路径"是
+    `{rel}{hint}\\n"` 这种代码片段，拿去查文件必然"不存在"。
+    """
+    code = ('    return (f"【图片】path={rel}{hint}\\n"\n'
+            '            f"（{size:,} 字节，延迟投递。）")')
+    blob = 'text = "【图片】path=a.png\\n【图片】path=b.png"'
+    assert eyes.EYE_MARKER_RE.findall(code) == []
+    assert eyes.EYE_MARKER_RE.findall(blob) == []
+    assert eyes.eye_parts_from_marker(code) == []
+    # 真标记（行首 + 图片后缀）照旧能抽出来
+    (eye_root / "real.png").write_bytes(_png_solid(4, 4, (9, 9, 9)))
+    assert eyes.EYE_MARKER_RE.findall("【图片】path=real.png　关注点：配色") == ["real.png"]
+    assert len(eyes.eye_parts_from_marker("【图片】path=real.png\n")) == 1
 
 
 def test_eye_parts_from_marker_finds_multiple(eye_root):
@@ -194,6 +217,56 @@ def test_screenshot_surfaces_browser_failure(eye_root, monkeypatch):
     assert "截图失败" in screenshot("a.html") and "不静止" in screenshot("a.html")
 
 
+def _fake_shot(size=(100, 100), actual=None):
+    """造一个假的 _run_browser：按请求的 W×H 写一张 PNG（可指定实际尺寸）。"""
+    def _run(browser, url, out, width, height, wait_ms, timeout):
+        w, h = actual or (width, height)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(_png_solid(w, h, (200, 30, 30)))
+        return True, ""
+    return _run
+
+
+def test_screenshot_reports_clamped_request(eye_root, monkeypatch):
+    """§3.1：请求尺寸被夹时必须明说「请求 vs 实际」，不能静默照单全收。
+
+    复盘里连续两次 1440×9000/14000 都被砍到 6000 而调用方毫无察觉——
+    这正是缺陷所在。现在：① 上限不再是那个凭空的 6000，而是服务端真能
+    接受的 8192px/边（`IMAGE_HARD_MAX_SIDE`）；② 超限一律明写出来。
+    """
+    monkeypatch.setattr(eyes, "find_browser", lambda: "fake-chrome")
+    monkeypatch.setattr(eyes, "_run_browser", _fake_shot())
+    (eye_root / "a.html").write_text("<html></html>", encoding="utf-8")
+    out = screenshot("a.html", width=1440, height=9000)
+    assert "超出上限" in out and "1440×9000" in out
+    assert "8192" in out                             # 明写上限，不再"静默砍"
+
+    out = screenshot("a.html", width=1440, height=6000)
+    assert "超出上限" not in out                      # 6000 以内正常出图
+    assert "已截图" in out
+
+
+def test_screenshot_ceiling_matches_server_hard_limit():
+    """上限必须 ≤ 服务端硬上限：超了就是"截得出、看不见"的废图。
+
+    实施中的真实教训（2026-09-15）：先按"浏览器能出图"把上限抬到 20000，
+    本机 chrome 确实出得来——但服务端每边只收到 8192，超过的图既发不出去，
+    还会把整轮之后**每一次**请求都 400（`load_image_part` 会拒注，可那张图
+    对模型就等于不存在）。故上限卡在硬上限上。
+    """
+    assert max(eyes._MAX_SHOT_WIDTH, eyes._MAX_SHOT_HEIGHT) <= eyes.IMAGE_HARD_MAX_SIDE
+    assert eyes._MAX_SHOT_HEIGHT > 6000            # 但确实比原来那个 6000 宽
+
+
+def test_screenshot_reports_actual_vs_requested(eye_root, monkeypatch):
+    """浏览器实际出图与请求不一致时也要报出来（尺寸以实际为准）。"""
+    monkeypatch.setattr(eyes, "find_browser", lambda: "fake-chrome")
+    monkeypatch.setattr(eyes, "_run_browser", _fake_shot(actual=(800, 400)))
+    (eye_root / "a.html").write_text("<html></html>", encoding="utf-8")
+    out = screenshot("a.html", width=1200, height=900)
+    assert "实际出图" in out and "800×400" in out and "1200×900" in out
+
+
 def test_pixel_stats_detect_blank_and_dark():
     """像素统计要能把「全黑/全白/纯色」判出来——这就是机器的那只眼。"""
     white = eyes._describe_pixels(_png_solid(32, 32, (255, 255, 255)))
@@ -225,3 +298,79 @@ def test_screenshot_real_browser_when_available(eye_root):
     assert "几乎全白" not in out
     shots = list((eye_root / ".shots").glob("*.png"))
     assert shots, "截图应当落盘到 .shots/"
+
+
+# ---- 图片尺寸两道线：服务端硬上限 8192 / 我们的预算上限 3000（2026-09-15 用户拍板）
+
+def _jpeg_header(w: int, h: int) -> bytes:
+    """只造到 SOF0 段为止的 JPEG 头——尺寸解析只读头部，不需要真图像。"""
+    return (b"\xff\xd8" + b"\xff\xe0" + struct.pack(">H", 16) + b"JFIF\x00" + b"\x00" * 9
+            + b"\xff\xc0" + struct.pack(">H", 17) + b"\x08"
+            + struct.pack(">HH", h, w) + b"\x03" + b"\x00" * 9)
+
+
+def test_image_size_reads_headers_of_common_formats():
+    """尺寸解析只读头部（不解码像素），PNG/GIF/JPEG/WebP 都要认。"""
+    assert eyes._image_size(_png_noise(40, 30)) == (40, 30)
+    assert eyes._image_size(b"GIF89a" + struct.pack("<HH", 12, 34) + b"\x00" * 4) == (12, 34)
+    assert eyes._image_size(_jpeg_header(640, 480)) == (640, 480)
+    vp8x = (b"RIFF" + struct.pack("<I", 30) + b"WEBP" + b"VP8X" + b"\x00" * 8
+            + (9).to_bytes(3, "little") + (5).to_bytes(3, "little"))
+    assert eyes._image_size(vp8x) == (10, 6)
+    assert eyes._image_size(b"not an image") is None
+
+
+def test_image_at_budget_limit_is_injected_above_is_not(eye_root, monkeypatch):
+    """3000px/边 = 放行；3001px = 拦（token 经济，用户口径"上限给 3000"）。"""
+    monkeypatch.setattr(eyes, "IMAGE_MAX_SIDE", 3000)
+    (eye_root / "ok.png").write_bytes(_png_solid(3000, 8, (10, 20, 30)))
+    (eye_root / "big.png").write_bytes(_png_solid(3001, 8, (10, 20, 30)))
+
+    assert eyes.load_image_part("ok.png") is not None
+    assert eyes.load_image_part("big.png") is None
+    reason = eyes.image_reject_reason("big.png")
+    assert "3001×8" in reason and "3000" in reason
+    assert "区域" in reason                       # 引导范围截取，而不是只说"不行"
+
+
+def test_image_over_hard_limit_is_reported_as_undeliverable(eye_root, monkeypatch):
+    """超过服务端硬上限（8192）要说"发不出去"——即使预算线被调高也不放行。"""
+    monkeypatch.setattr(eyes, "IMAGE_MAX_SIDE", 100_000)
+    (eye_root / "huge.png").write_bytes(_png_solid(8193, 8, (10, 20, 30)))
+    (eye_root / "edge.png").write_bytes(_png_solid(8192, 8, (10, 20, 30)))
+
+    assert eyes.load_image_part("edge.png") is not None
+    assert eyes.load_image_part("huge.png") is None
+    assert "硬上限" in eyes.image_reject_reason("huge.png")
+    assert eyes.image_reject_reason("edge.png") == ""
+
+
+def test_eye_image_message_annotates_skipped_image(eye_root, monkeypatch):
+    """超上限的图**不注入**，但尾部消息必须写明"未注入"。
+
+    2026-09-15 用户报障（会话 20260915-155432-b13727）：1440×9000 的图被注入后
+    服务端 400，**整轮之后每次请求都失败**（续跑也没用）。现在装配层不再注入，
+    且把"没注入"讲清楚——否则工具结果那句"下一次回复会作为图像出现"就成了谎言。
+    """
+    from wovra.agent import Agent
+    from wovra.task import Task
+
+    monkeypatch.setattr(eyes, "IMAGE_MAX_SIDE", 3000)
+    (eye_root / "big.png").write_bytes(_png_solid(4000, 8, (1, 2, 3)))
+    (eye_root / "small.png").write_bytes(_png_solid(40, 8, (1, 2, 3)))
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.current_round = {"seq": 1, "events": [
+        {"type": "tool_result",
+         "message": {"role": "tool",
+                     "content": "【图片】path=big.png\n【图片】path=small.png"}},
+    ]}
+
+    message = agent._eye_image_message()
+
+    assert message is not None
+    kinds = [p.get("type") for p in message["content"]]
+    assert kinds.count("image_url") == 1                  # 只注入小的那张
+    text = message["content"][0]["text"]
+    assert "未注入" in text and "big.png" in text and "3000" in text
+    assert "区域" in text                                  # 引导范围截取

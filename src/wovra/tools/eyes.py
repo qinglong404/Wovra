@@ -40,7 +40,16 @@ from . import safety
 
 # view_image 结果里的引用标记：装配期按它找图并展开成 image parts。
 # 格式固定（`【图片】path=<工作区内相对路径>`），正则与装配端共用一处定义。
-EYE_MARKER_RE = re.compile(r"【图片】path=(\S+)")
+#
+# 2026-09-15 收紧（实施中实测的假阳性）：原式 `【图片】path=(\S+)` 会把**源码/JSON
+# 里形如标记的文本**也当成引用（`f"【图片】path={rel}{hint}\n"`、测试文件里的
+# `"【图片】path=a.png\n…"`），于是那些"路径"被拿去查文件、一律报"文件不存在"，
+# 在轮的提示里堆出一片假的"未注入"噪声。现在要求三件事：**行首** + 路径字符集
+# 不含引号/花括号/括号/空白 + **以图片后缀结尾**。真标记天然满足（`view_image`
+# 的返回值就是行首那一行），而源码里的模板字面量一个都不满足。
+EYE_MARKER_RE = re.compile(
+    r"""(?m)^【图片】path=([^\s"'{}()<>|;*?]+\.(?:png|jpe?g|webp|gif|bmp))""",
+    re.I)
 
 # 单张图上限（base64 后 ×1.37 进请求体；超过就不该塞进上下文）
 _MAX_IMAGE_BYTES = 12_000_000
@@ -55,6 +64,20 @@ TOKENS_PER_IMAGE = 1500
 
 # 一次注入上下文的最大图片张数（多了就是拿钱换噪声）
 MAX_INJECTED_IMAGES = 4
+
+# 截图尺寸上限。**两次实测才定下来**（2026-09-15）：
+# ① 旧代码把 height 静默夹到 6000——TOOLING_REVIEW.md §3.1 记的两次"截更大
+#    尺寸全无效"就是撞在这条上；本机 chrome 实测 12000/20000 都能出图，
+#    说明 **6000 是我们自己的夹取，不是浏览器的**。
+# ② 但"能出图"不等于"能看见"：把上限抬到 20000 后实测发现服务端对图片有
+#    **每边 8192px 硬上限**（1440×8192 接受、1440×8193 被 400 拒），超限图
+#    既发不出去、又会把这一轮之后**每一次**请求都 400（`eyes.IMAGE_HARD_MAX_SIDE`）。
+#    即"抬到 20000"会造出一批**永远看不见**的图——比原缺陷更坏。
+# 故上限 = 服务端硬上限：截得出、也看得见。（模型看图另有 3000px 预算线，
+# 那条由 `image_reject_reason` 在 view_image 时讲清楚，且用户口径是
+# "鼓励小图、只截需要的区域"，不该由工具在这里替它决定截多大。）
+_MAX_SHOT_WIDTH = 8192
+_MAX_SHOT_HEIGHT = 8192
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
@@ -334,6 +357,12 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
     控制——要看长页面就调大 height。页面有 JS 渲染时传 wait_ms（毫秒）
     等它画完。
 
+    **图越小越省钱，优先只截需要的区域**（2026-09-15 用户口径）：图片的 token
+    成本随像素增长，全页长图又贵又糊。要看模型能真正"看见"的图，每边别超过
+    图片上限（默认 3000px/边，`WOVRA_IMAGE_MAX_SIDE` 可调）——超了 view_image
+    时模型看不到；局部
+    信息（某个按钮/某段文字/某个控件）用小窗口按需截，长内容分几次截。
+
     返回：截图路径 + 尺寸 + **像素统计**（平均亮度、明暗分布、主色）。
     统计就是为了让"全黑/全白/崩版"当场可见，不必等你调 view_image。
     看到图本身请接着调 view_image(path)。
@@ -342,8 +371,9 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
     if resolved is None:
         return f"截图失败：{note}"
     try:
-        width = max(64, min(int(width), 4000))
-        height = max(64, min(int(height), 6000))
+        asked_width, asked_height = int(width), int(height)
+        width = max(64, min(asked_width, _MAX_SHOT_WIDTH))
+        height = max(64, min(asked_height, _MAX_SHOT_HEIGHT))
         wait_ms = max(0, min(int(wait_ms), 30000))
     except (TypeError, ValueError):
         return "截图失败：width/height/wait_ms 需为整数"
@@ -374,8 +404,42 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
     safety._audit(f"[screenshot] {target} → {rel}（{size:,} 字节）")
     raw = dest.read_bytes()
     stats = _describe_pixels(raw) if size <= _MAX_IMAGE_BYTES else "（图过大，跳过统计）"
-    return (f"已截图 {rel}（{size:,} 字节，窗口 {width}×{height}，{note}）\n"
-            f"{stats}\n看这张图请调 view_image('{rel}')。")
+    # 尺寸核对（TOOLING_REVIEW.md §3.1）：请求尺寸被夹过、或浏览器实际出图
+    # 与请求不符时**明写出来**——旧文案只说"窗口 W×H"，连自己夹了高度都
+    # 不吭声，"截更长看全整页"于是变成两次无效调用。尺寸用 `_image_size`
+    # 从文件头读（多格式，PNG/GIF/JPEG/WebP），不做像素解码。
+    actual = _image_size(raw)
+    lines = []
+    if (width, height) != (asked_width, asked_height):
+        lines.append(
+            f"⚠ 请求尺寸 {asked_width}×{asked_height} 超出上限"
+            f"（{_MAX_SHOT_WIDTH}×{_MAX_SHOT_HEIGHT}），已按上限截取。"
+        )
+        if height == _MAX_SHOT_HEIGHT:
+            lines.append(
+                "页面可能仍未截全：要一次看更长的内容，可调小 width"
+                "（面积不变、高度更高），或分两次截不同高度再逐段看。"
+            )
+    if actual and actual != (width, height):
+        lines.append(
+            f"⚠ 实际出图 {actual[0]}×{actual[1]}，与请求的 {width}×{height} 不一致"
+            "——浏览器侧截断或页面高度不足，请以此尺寸为准。"
+        )
+    # 模型**看图**的预算上限（2026-09-15 用户拍板 3000px/边）：超过就不注入了，
+    # 与其等 view_image 时才发现"看不到"，不如截图当场说清怎么改。
+    if actual and max(actual) > _side_limit():
+        lines.append(
+            f"⚠ 此图 {actual[0]}×{actual[1]} 超过图片上限 {_side_limit()}px/边"
+            f"——view_image 时模型**看不到**（图越大越费 token）。"
+            f"请只截需要的**区域**：调小 width/height（例如 1024×768 截局部），"
+            f"长内容分几次截不同高度。"
+        )
+    warn = ("\n".join(lines) + "\n") if lines else ""
+    return (f"已截图 {rel}（{size:,} 字节，"
+            f"{'窗口' if not warn else '实际'} "
+            f"{actual[0] if actual else width}×{actual[1] if actual else height}"
+            f"，请求 {width}×{height}，{note}）\n"
+            f"{warn}{stats}\n看这张图请调 view_image('{rel}')。")
 
 
 # ---- 看图 ---------------------------------------------------------------------
@@ -383,11 +447,15 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
 def view_image(path: str, note: str = "") -> str:
     """把一张已落盘的图片送进你的视野（多模态）。
 
-    path 传工作区内相对路径（screenshot 的返回值里就有）。调用后，图片
-    会在**下一次请求**的上下文尾部出现，你就能真正看到像素——用于
-    判断配色是否刺眼、布局是否错位、元素是否重叠这类文字量不出来的事。
+    path 传工作区内相对路径（screenshot 的返回值里就有）。⚠ **本工具是延迟
+    投递**：图片在**下一次请求**才出现在上下文尾部——本次调用你**还没看到
+    它**，不得据此声称"已查看"或描述画面内容（TOOLING_REVIEW.md §3.2 记的
+    正是"把已调用当成已看到"导致的幻觉式确认）。
 
-    图片本体不进历史存档（只留一行引用），所以放心调用，不会撑爆任务文件。
+    图每边超过图片上限（默认 3000px，省 token）或服务端硬上限
+    （8192px，发不出去）时**不会投递**，返回值会说明原因——那时请只截需要的
+    **区域**（更小的 width/height）再试。
+
     note 可写你想从图里确认什么（会一并显示在图片旁）。
     """
     try:
@@ -416,14 +484,129 @@ def view_image(path: str, note: str = "") -> str:
         rel = path
     safety._audit(f"[view_image] {rel}（{size:,} 字节）")
     hint = f"　关注点：{note.strip()[:200]}" if note and note.strip() else ""
+    # 延迟投递的显著标记（TOOLING_REVIEW.md §3.2 的建议 1）：先给机器可读的
+    # 尺寸，再明确说"还没到你眼前"——旧文案把关键信息藏在括号里，很容易被
+    # 略过，于是模型当轮就描述起"看到"的画面。
+    size_note = ""
+    actual = _image_size(target.read_bytes())
+    if actual:
+        size_note = f"，{actual[0]}×{actual[1]}"
     return (f"【图片】path={rel}{hint}\n"
-            f"（{size:,} 字节，将在下一次请求中作为图像送给你。）")
+            f"⚠ 本图**尚未**进入你的视野：它会在你**下一次**回复时作为图像出现。"
+            f"在此之前不要声称已查看、也不要描述画面内容。\n"
+            f"（{size:,} 字节{size_note}，延迟投递。）")
+
+
+# 图片**每边像素数**的两道线（不是文件字节数）。
+#
+# ① 服务端硬上限（物理，实测裁定）：1440×8192 接受、1440×8193 被 400 拒
+#    （文案写着 "unsupported image … formats: webp,png,jpeg,gif"，指的是尺寸
+#    不是格式——图本身是合法 PNG）；8000×1440 也接受，故这是"每边"而非总面积。
+#    超过就**绝不能注入**：注入是每步重建的，一张超限图会让本轮之后**每一次**
+#    请求（含续跑）都 400——一次截图就能把整轮永久锁死（2026-09-15 实测报障）。
+IMAGE_HARD_MAX_SIDE = int(os.environ.get("WOVRA_IMAGE_HARD_MAX_SIDE", "8192"))
+#
+# ② 我们自己的**预算上限**（默认 3000，2026-09-15 用户拍板："图片上限给 3000，
+#    浪费 token；尽量鼓励小图片、范围截取"）：图片的 token 成本随像素增长，
+#    全页长图又贵又模糊——只截**需要的区域**更省更准。超这条不注入，并明确
+#    告诉模型怎么改（见 `image_reject_reason`）。
+IMAGE_MAX_SIDE = int(os.environ.get("WOVRA_IMAGE_MAX_SIDE", "3000"))
+
+
+def _side_limit() -> int:
+    """实际放行线 = 预算上限与硬上限的**严者**（现算，改了立刻生效）。
+
+    现算而不是 import 期算死：预算线可以被 env/测试调高，但**物理硬上限永远
+    不可绕过**——调高预算线不该把"服务端根本发不出去的图"放进来。
+    """
+    return min(IMAGE_MAX_SIDE, IMAGE_HARD_MAX_SIDE)
+
+
+def _image_size(raw: bytes) -> tuple[int, int] | None:
+    """只读**头部**取图片像素尺寸（不做像素解码）；认不出返回 None。
+
+    为什么需要（2026-09-15 用户报障，会话 20260915-155432-b13727）：服务端对
+    图片有**每边 8192px** 的硬上限（实测 1440×8192 接受、1440×8193 被 400 拒，
+    而 8000×1440 接受——报错文案误导成"格式不支持"，实际图是合法 PNG）。
+    超限图一旦被注入装配尾部，**这一轮之后的每一次请求都会 400**（续跑也没用），
+    因为注入是每步重建的。故注入前必须按尺寸拦。
+    """
+    if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
+        return struct.unpack(">II", raw[16:24])
+    if raw[:3] == b"GIF" and len(raw) >= 10:
+        return struct.unpack("<HH", raw[6:10])
+    if raw.startswith(b"\xff\xd8"):                     # JPEG：扫段找 SOF
+        pos = 2
+        while pos + 9 < len(raw):
+            if raw[pos] != 0xFF:
+                pos += 1
+                continue
+            marker = raw[pos + 1]
+            if marker in (0xD8, 0x01) or 0xD0 <= marker <= 0xD7:
+                pos += 2
+                continue
+            if marker == 0xD9:
+                break
+            seg_len = struct.unpack(">H", raw[pos + 2:pos + 4])[0]
+            if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
+                          0xC9, 0xCA, 0xCB) and pos + 9 <= len(raw):
+                height, width = struct.unpack(">HH", raw[pos + 5:pos + 9])
+                return (width, height)
+            pos += 2 + seg_len
+        return None
+    if raw[:4] == b"RIFF" and raw[8:12] == b"WEBP" and len(raw) >= 30:
+        kind = raw[12:16]
+        if kind == b"VP8X":                              # 扩展：24 位宽高减一
+            w = int.from_bytes(raw[24:27], "little") + 1
+            h = int.from_bytes(raw[27:30], "little") + 1
+            return (w, h)
+        if kind == b"VP8 " and len(raw) >= 30:           # 有损：14 位宽高
+            w = struct.unpack("<H", raw[26:28])[0] & 0x3FFF
+            h = struct.unpack("<H", raw[28:30])[0] & 0x3FFF
+            return (w, h)
+        if kind == b"VP8L" and len(raw) >= 25:           # 无损：位打包
+            bits = int.from_bytes(raw[21:25], "little")
+            return ((bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1)
+    return None
+
+
+def image_reject_reason(path: str) -> str:
+    """这张图为什么**进不了模型**（能给就返回原因，能进就返回空串）。
+
+    装配期用它把"没注入"讲清楚——否则工具结果里那句"它会在你下一次回复时
+    作为图像出现"就变成谎言：模型会以为看到了图并据此描述（2026-09-15 实测
+    这类误判正是 TOOLING_REVIEW.md 记过的痛点）。
+    """
+    try:
+        target = Path(safety.workspace_root()) / path
+        if not target.is_file():
+            return f"文件不存在（{path}）"
+        raw = target.read_bytes()
+    except OSError:
+        return f"读不到（{path}）"
+    if not raw:
+        return f"空文件（{path}）"
+    if _MIME.get(target.suffix.lower()) is None:
+        return f"格式不支持（{target.suffix or '无后缀'}）"
+    if len(raw) > _MAX_IMAGE_BYTES:
+        return f"文件过大（{len(raw):,} 字节 > 上限 {_MAX_IMAGE_BYTES:,}）"
+    size = _image_size(raw)
+    if size and max(size) > IMAGE_HARD_MAX_SIDE:
+        return (f"尺寸 {size[0]}×{size[1]} 超过服务端硬上限 {IMAGE_HARD_MAX_SIDE}px/边"
+                f"（实测 {IMAGE_HARD_MAX_SIDE} 接受、{IMAGE_HARD_MAX_SIDE + 1} 被 400 拒）"
+                f"——这张图**发不出去**，请务必缩小")
+    if size and max(size) > _side_limit():
+        return (f"尺寸 {size[0]}×{size[1]} 超过图片上限 {_side_limit()}px/边"
+                f"（图越大越费 token，只截**需要的区域**更省也更清楚）："
+                f"请用更小的 width/height 重截该区域，或分段截图")
+    return ""
 
 
 def load_image_part(path: str) -> dict | None:
     """把工作区内的图片读成 OpenAI 协议的 image_url part（装配期用）。
 
-    读不到/超限/格式不支持都返回 None——装配绝不能因为一张坏图整体失败。
+    读不到/超限/格式不支持/超尺寸都返回 None——装配绝不能因为一张坏图整体失败，
+    更不能把图塞进请求让服务端 400（那样整轮都再也发不出去）。
     """
     try:
         target = Path(safety.workspace_root()) / path
@@ -436,6 +619,9 @@ def load_image_part(path: str) -> dict | None:
         return None
     mime = _MIME.get(target.suffix.lower())
     if mime is None:
+        return None
+    size = _image_size(raw)
+    if size and max(size) > _side_limit():
         return None
     b64 = base64.b64encode(raw).decode()
     return {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}}

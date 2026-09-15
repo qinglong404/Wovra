@@ -59,8 +59,12 @@ def test_dangerous_command_is_audited_and_not_executed(monkeypatch, tmp_path):
     agent = Agent(llm=_StubLLM(), tools=[run_command], task=task)
     agent._execute("c1", "run_command", json.dumps({"command": "rm -rf /"}))
 
-    # 拒绝结果回传给模型（红色判定标记在）
+    # 拒绝结果回传给模型：`rm -rf /` 仍被**拒绝**——2026-09-15 起它走的是
+    # "递归删除确认门 + 根目录不可授权"两道判定（TOOLING_REVIEW.md §4.2 把
+    # `rm -r` 从黑名单移入确认门，但文件系统根**永不可授权**的硬线没松），
+    # 故这里断言"被拒"，不再断言具体是哪一道拦的。
     tool_msg = next(m for m in agent.messages if m["role"] == "tool")
-    assert "已拒绝执行危险命令" in tool_msg["content"]
+    assert "已拒绝" in tool_msg["content"]
+    assert "过于宽泛" in tool_msg["content"] or "不可授权" in tool_msg["content"]
     # 审计记录完整保留了试图执行的命令原文
     assert any("rm -rf /" in e["detail"] for e in task.history if e["kind"] == "file_change")

@@ -194,3 +194,78 @@ def test_thinking_head_single_line():
     head = ui.thinking_head(long)
     assert head.startswith("…") and len(head) <= 102
     assert ui.thinking_line("x").startswith("💭")
+
+
+def test_stream_call_retries_without_image_when_server_rejects_it():
+    """图片被服务端拒（400）→ **去掉图片重发一次**，不把整轮卡死。
+
+    2026-09-15 用户报障（会话 20260915-155432-b13727）：一张 1440×9000 的图被
+    注入装配尾部后，服务端每次都 400（"unsupported image"，文案误导——图是
+    合法 PNG，真实原因是每边超过 8192px），于是**这一轮之后的每一次请求都失败，
+   续跑也没用**。装配层已按尺寸拦（`eyes.load_image_part`），这里是兜底。
+    """
+    from wovra.task import Task
+
+    class _ImageRejectLLM:
+        model = "stub"
+
+        def __init__(self):
+            self.calls: list[list[dict]] = []
+
+        def chat(self, messages, tools=None, stream=True, **kwargs):
+            self.calls.append(messages)
+            if any(
+                isinstance(m.get("content"), list)
+                and any(isinstance(p, dict) and p.get("type") == "image_url"
+                        for p in m["content"])
+                for m in messages
+            ):
+                raise RuntimeError(
+                    "Error code: 400 - {'error': {'message': "
+                    "'You have uploaded an unsupported image. Please make sure your "
+                    "image is valid', 'type': 'invalid_request_error'}}"
+                )
+            return iter([_chunk(_delta(content="好"))])
+
+    task = Task.create(goal="g")
+    llm = _ImageRejectLLM()
+    agent = Agent(llm=llm, tools=[], task=task)
+    messages = [
+        {"role": "user", "content": "看图"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "图在本消息之后"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]},
+    ]
+
+    content, _tcs, _usage = agent._stream_call(messages)
+
+    assert content == "好"
+    assert len(llm.calls) == 2                       # 第一次带图被拒 → 第二次去图
+    assert any(isinstance(p, dict) and p.get("type") == "image_url"
+               for p in llm.calls[0][1]["content"])   # 第一次确实带了图
+    assert not any(isinstance(p, dict) and p.get("type") == "image_url"
+                   for m in llm.calls[1] if isinstance(m.get("content"), list)
+                   for p in m["content"])             # 重发时图已去掉
+    assert all(m is not None for m in agent.messages)  # 原 messages 未被就地改写
+    assert any(isinstance(p, dict) and p.get("type") == "image_url"
+               for p in messages[1]["content"])       # 原列表里的图还在
+    skipped = [e for e in task.history if e.get("kind") == "image_skipped"]
+    assert skipped and "unsupported image" in skipped[-1]["detail"]
+
+
+def test_stream_call_does_not_swallow_real_errors_as_image_problems():
+    """非图片类 400/异常不许被当成"图片问题"吞掉（否则真 bug 被静默降级）。"""
+
+    class _BoomLLM:
+        model = "stub"
+
+        def chat(self, messages, tools=None, stream=True, **kwargs):
+            raise RuntimeError("Error code: 400 - invalid_request_error: unknown field")
+
+    agent = Agent(llm=_BoomLLM(), tools=[])
+    try:
+        agent._stream_call([{"role": "user", "content": "hi"}])
+        raise AssertionError("非图片错误必须原样抛出")
+    except RuntimeError as error:
+        assert "invalid_request_error" in str(error)

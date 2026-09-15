@@ -5,6 +5,7 @@ assembly.py；水位维护管线在 maintenance.py——四者由 __init__.py �
 同一个 Agent 类（mixin）。方法体里的跨模块调用走 self，与拆分前一致。
 """
 import copy
+import inspect
 import json
 import queue
 import threading
@@ -64,6 +65,55 @@ def _is_throttle_error(error: BaseException) -> bool:
     """
     text = str(error).lower()
     return any(m in text for m in _THROTTLE_MARKERS)
+
+
+def _signature_hint(fn, parsed: dict, error: TypeError) -> str:
+    """TypeError 时补一句"正确用法"（TOOLING_REVIEW.md §4.4）。
+
+    参数名不统一（文件类是 `path`，遍历类是 `directory`/`pattern`）是现实，
+    但错误信息不该只说"unexpected keyword argument"就完事——把签名与最接近
+    的正确参数名一并给出来，省掉一轮"翻文档/试参数"。同类名（`path` vs
+    `file`/`dir`）给指路；实在没得猜就只列签名。
+    """
+    try:
+        signature = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return ""
+    accepted = [name for name in signature.parameters
+                if signature.parameters[name].kind in (
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                    inspect.Parameter.KEYWORD_ONLY)]
+    bad = [key for key in parsed if key not in accepted]
+    usage = f"{fn.__name__}({', '.join(accepted)})"
+    hint = f"\n  正确参数名：{usage}"
+    for key in bad:
+        near = [name for name in accepted if _same_kind_of_arg(key, name)]
+        if near:
+            hint += f"\n  你给的 `{key}` 应该写成 `{near[0]}`。"
+        else:
+            hint += f"\n  没有 `{key}` 这个参数——请按上面的名单换一个。"
+    return hint
+
+
+def _same_kind_of_arg(given: str, accepted: str) -> bool:
+    """两个参数名是否**强同类**（file/path、dir/directory、regex/pattern…）。
+
+    只认两种强信号：一个名字完整包含另一个（`dir` ⊂ `directory`），或
+    公共前缀 ≥4 个字符。**故意不认 3 个字符的前缀**——实测 `path` 与
+    `pattern` 前三个字母都是 "pat"，据此建议"`path` 应写成 `pattern`"是
+    错的（正确的那个是 `directory`），错误建议比不给建议更坏。
+    """
+    given, accepted = given.lower(), accepted.lower()
+    if given == accepted:
+        return True
+    if len(given) >= 3 and (given in accepted or accepted in given):
+        return True
+    shared = 0
+    for a, b in zip(given, accepted):
+        if a != b:
+            break
+        shared += 1
+    return shared >= 4
 
 
 class _CoreMixin:
@@ -1446,6 +1496,11 @@ class _CoreMixin:
             # 权限"，出栈即还原。
             with tools_module.permissions.guard_scope(self._file_guard_object()):
                 result = fn(**parsed)
+        except TypeError as error:
+            # 参数名/数量不对时**给出正确参数名**（TOOLING_REVIEW.md §4.4）：
+            # 实测调用方按直觉写 search_files(path=…) 只拿到一句
+            # "unexpected keyword argument 'path'"，还得自己去翻签名。
+            return f"工具执行出错: {error!r}{_signature_hint(fn, parsed, error)}"
         except Exception as error:  # noqa: BLE001——错误回传给模型而不是中断循环
             return f"工具执行出错: {error!r}"
         if not isinstance(result, str):
@@ -1514,6 +1569,70 @@ class _CoreMixin:
         for tc in ordered:
             self._execute(tc["id"], tc["name"], tc["arguments"])
 
+    @staticmethod
+    def _is_image_rejection(error: BaseException) -> bool:
+        """服务端是不是在抱怨图片（400）——**文案常写成"格式不支持"**。
+
+        实测（2026-09-15，会话 20260915-155432-b13727）：一张合法的 1440×9000
+        PNG 被回 "unsupported image ... formats: webp, png, jpeg, and gif"，
+        真实原因是**每边超过 8192px**（8192 接受、8193 拒绝）。别被文案骗了去
+        查格式——超尺寸才是主因。
+        """
+        text = str(error)
+        return ("unsupported image" in text
+                or ("image" in text.lower() and "invalid_request_error" in text))
+
+    @staticmethod
+    def _strip_images(messages: list[dict]) -> Optional[list[dict]]:
+        """把带图的消息换成纯文本说明（图片被拒时降级重发用）；本来没图返回 None。
+
+        不原地改（`messages` 就是轮的消息，改了会污染后续装配）。
+        """
+        found = False
+        out: list[dict] = []
+        for message in messages:
+            content = message.get("content")
+            if isinstance(content, list) and any(
+                    isinstance(p, dict) and p.get("type") == "image_url"
+                    for p in content):
+                found = True
+                kept = [p for p in content
+                        if not (isinstance(p, dict) and p.get("type") == "image_url")]
+                kept.append({"type": "text", "text": (
+                    "（本消息里的图片被服务端拒绝，已跳过——你现在**看不到**它，"
+                    "不要描述其内容；要看请用更小的尺寸重截或分段截图后再 view_image）"
+                )})
+                out.append({**message, "content": kept})
+            else:
+                out.append(message)
+        return out if found else None
+
+    def _stream_request(self, messages: list[dict], tools,
+                        extra_body: Optional[dict] = None):
+        """发起一次流式请求；**图片被服务端拒**时去掉图片重发一次。
+
+        为什么必须有这层（2026-09-15 用户报"续跑也没用"）：图片是在装配尾部
+        每步重建注入的，所以只要轮里有一张服务端不收的图，**这一轮之后的每一次
+        请求都会 400**，续跑也永远失败——一次截图就能把整轮永久锁死。装配层
+        已按尺寸拦（`eyes.load_image_part`），这里是兜底：无论图从哪来（别的
+        生产者、别家端点、更严的上限），都退化为"这轮不要图"继续干活。
+        """
+        try:
+            return self.llm.chat(messages, tools=tools, stream=True,
+                                 extra_body=extra_body)
+        except Exception as error:
+            stripped = (self._strip_images(messages)
+                        if self._is_image_rejection(error) else None)
+            if stripped is None:
+                raise
+            self._emit_status("图片被服务端拒绝（超尺寸/格式）——已跳过该图继续本轮")
+            if self.task is not None:
+                self.task.record(
+                    "image_skipped",
+                    f"服务端拒绝图片，已去图重发：{str(error)[:160]}",
+                )
+            return self.llm.chat(stripped, tools=tools, stream=True)
+
     def _stream_call(
         self,
         messages: list[dict],
@@ -1550,8 +1669,7 @@ class _CoreMixin:
             attempt_start = time.monotonic()
             try:
                 try:
-                    stream = self.llm.chat(messages, tools=tools, stream=True,
-                                           extra_body=extra_body)
+                    stream = self._stream_request(messages, tools, extra_body)
                 except Exception:
                     if not extra_body:
                         raise
@@ -1563,7 +1681,7 @@ class _CoreMixin:
                         self._emit_status(
                             "后台整理：当前模型不支持整理用的参数，已自动降级重试（本次会话仅提示一次）"
                         )
-                    stream = self.llm.chat(messages, tools=tools, stream=True)
+                    stream = self._stream_request(messages, tools)
                 break
             except Exception as _error:
                 if _throttle_try >= 3 or not _is_throttle_error(_error):

@@ -6,6 +6,7 @@
 
 import itertools
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -86,6 +87,7 @@ def run_background(command: str, keep_alive: bool = False) -> str:
     reason = safety._confirm_reason(command)
     if reason and not safety._ask_yes_no(
         f"后台命令包含敏感操作（命中 `{reason}`），是否允许启动？\n  {command[:200]}"
+        f"{safety._confirm_hint(command)}"
     ):
         safety._audit(f"[run_background][用户拒绝] {command}")
         return (
@@ -165,7 +167,40 @@ def check_background(task_id: str) -> str:
         log_ref = entry["log"].relative_to(safety.workspace_root()).as_posix()
     except ValueError:
         log_ref = str(entry["log"])
-    return f"[{task_id}] {status}\n{limits.clip(body, f'bg-{task_id}', source=log_ref)}"
+    note = _exit_mismatch_note(proc, running, new_text)
+    return (f"[{task_id}] {status}{note}\n"
+            f"{limits.clip(body, f'bg-{task_id}', source=log_ref)}")
+
+
+def _exit_mismatch_note(proc: subprocess.Popen, running: bool, text: str) -> str:
+    """退出码为 0 但输出像报错 → 明确标出（TOOLING_REVIEW.md §4.5）。
+
+    实测坑：`uv add pyserial` 后台跑完 `exit_code=0`，而它内部其实报
+    "No `pyproject.toml` found" —— 调用方只看返回头会以为成功，全靠主动
+    check 才看到。这里不猜语义，只做两件确定性的事：退出码为 0 时若输出
+    命中已知错误形态，就在头一行标 "⚠ 输出含报错字样"；日志为空也点出来。
+    """
+    if running:
+        return ""
+    if proc.returncode != 0:
+        return ""
+    hits = _ERRORISH_RE.findall(text or "")
+    if hits:
+        seen = sorted({h.strip() for h in hits})[:2]
+        return f"　⚠ 退出码为 0，但输出含报错字样（{'、'.join(seen)}）——请核对日志"
+    if not (text or "").strip():
+        return "　（本次查看无新输出；完整日志见下方路径，或 read_file 取回）"
+    return ""
+
+
+# 已知"看起来像失败"的输出形态：不猜语义，只做词面命中——命中的一律标出，
+# 让调用方去看日志。宁可是"其实没问题"的一次提醒，也不要静默成功。
+_ERRORISH_RE = re.compile(
+    r"(?:error|failed|failure|not found|no such file|traceback|exception"
+    r"|cannot|unable|denied|refused|invalid|fatal)\b|"
+    r"(?:错误|失败|找不到|不存在|异常|拒绝|无法)",
+    re.I,
+)
 
 
 def _ownership_error(task_id: str, entry: dict) -> str | None:

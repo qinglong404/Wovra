@@ -39,7 +39,34 @@ def test_background_lifecycle():
 
 
 def test_background_rejects_dangerous_patterns():
-    assert "已拒绝执行危险命令" in run_background("rm -r something")
+    """后台通道与 run_command 同一套判定：黑名单 + 确认门。
+
+    `rm -r` 于 2026-09-15 从黑名单移入确认门（TOOLING_REVIEW.md §4.2），
+    故这里改验仍在黑名单里的项；确认门本身由 test_safety 的专项用例覆盖。
+    """
+    assert "已拒绝执行危险命令" in run_background("sudo rm -r something")
+
+
+def test_background_flags_zero_exit_with_errorish_output(monkeypatch):
+    """§4.5：退出码 0 但输出像报错时必须标出来（实测的静默失败）。
+
+    现场：`uv add pyserial` 后台退出码为 0，内部其实报
+    "No `pyproject.toml` found" —— 只看返回头会以为成功。
+    """
+    from wovra.tools import background
+
+    ok = background._exit_mismatch_note(
+        type("P", (), {"returncode": 0})(), False, "error: No pyproject.toml found")
+    assert "⚠" in ok and "报错字样" in ok
+    # 正常输出不误报
+    assert background._exit_mismatch_note(
+        type("P", (), {"returncode": 0})(), False, "building wheel... done") == ""
+    # 非零退出由 exit_code 本身表达，不叠这条提示
+    assert background._exit_mismatch_note(
+        type("P", (), {"returncode": 1})(), False, "error: boom") == ""
+    # 仍在运行不提示
+    assert background._exit_mismatch_note(
+        type("P", (), {"returncode": None})(), True, "error: x") == ""
 
 
 def test_list_background_reports_empty_or_tasks():

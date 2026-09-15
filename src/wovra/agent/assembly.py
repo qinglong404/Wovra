@@ -748,6 +748,7 @@ class _AssemblyMixin:
         if self.current_round is None:
             return None
         parts: list[dict] = []
+        skipped: list[str] = []
         seen: set[str] = set()
         for event in self.current_round.get("events") or []:
             if event.get("type") != "tool_result":
@@ -763,12 +764,31 @@ class _AssemblyMixin:
                 part = eyes_module.load_image_part(rel)
                 if part is not None:
                     parts.append(part)
-        if not parts:
+                else:
+                    # **没注入就必须说没注入**（2026-09-15 用户报障）：工具结果里
+                    # 那句"它会在你下一次回复时作为图像出现"此时是假的，模型会据此
+                    # 描述没看见的画面。超尺寸是主因（服务端每边 8192px 硬上限，
+                    # 1440×9000 这种图会让**整轮之后每一次请求都 400**）。
+                    skipped.append(
+                        f"{rel}（{eyes_module.image_reject_reason(rel) or '原因未知'}）"
+                    )
+        if not parts and not skipped:
             return None
-        parts = parts[-eyes_module.MAX_INJECTED_IMAGES:]
-        head = (f"[图片]（view_image 送来的 {len(parts)} 张图；图在本消息之后。"
-                f"图中文字若要看细节，可再看 read_file/search_files）")
-        return {"role": "user", "content": [{"type": "text", "text": head}] + parts}
+        # 图片按注入上限截断时，被截掉的那些同样要说明（否则"说过会给我看"没下文）
+        if len(parts) > eyes_module.MAX_INJECTED_IMAGES:
+            parts = parts[-eyes_module.MAX_INJECTED_IMAGES:]
+        lines = []
+        if parts:
+            lines.append(f"[图片]（view_image 送来的 {len(parts)} 张图；图在本消息之后。"
+                         f"图中文字若要看细节，可再看 read_file/search_files）")
+        if skipped:
+            lines.append(
+                "⚠ 以下图片**未注入**（你现在看不到它们，不要描述其内容）："
+                + "；".join(skipped)
+                + "。要真的看到：**只截需要的区域**（更小的 width/height），"
+                  "长内容分几次截，别整页长图——图越大越费 token。"
+            )
+        return {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}] + parts}
 
     def _render_compact(self, r: dict) -> Optional[str]:
         """已整理轮次的紧凑视图：👤用户原文 + 🎯意图 + 📌关键约束 + 逐块细节。

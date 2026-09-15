@@ -75,15 +75,47 @@ def test_search_engines_parse_canned_html(monkeypatch):
            'Docs <b>Home</b></a><a class="result__snippet">All about docs</a></div>')
     monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeUrllib._Resp(ddg))
-    result = tools_module.web._search_ddg("docs", 5)
-    assert "https://docs.example.com" in result and "Docs Home" in result
+    rows, filtered = tools_module.web._search_ddg("docs home", 5)
+    assert rows[0][1] == "https://docs.example.com" and "Docs Home" in rows[0][0]
+
+    # lite 端点形态（单引号 + rel=nofollow + 协议相对跳转壳）也必须解出目标 URL
+    lite = ('<td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com'
+            '%2Fguide&amp;rut=x" class=\'result-link\'>Docs Guide</a></td>'
+            '<td class=\'result-snippet\'>Lite snippet</td>')
+    monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeUrllib._Resp(lite))
+    rows, _ = tools_module.web._search_ddg("docs guide", 5)
+    assert rows[0][1] == "https://docs.example.com/guide" and "Lite snippet" in rows[0][2]
 
     bing = ('<li class="b_algo"><h2><a href="https://bing.example.com/x">Bing Result</a></h2>'
             '<p>Bing snippet</p></li>')
     monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeUrllib._Resp(bing))
-    result = tools_module.web._search_bing("x", 5)
-    assert "Bing Result" in result and "Bing snippet" in result
+    rows, _ = tools_module.web._search_bing("bing result", 5)
+    assert rows[0][0] == "Bing Result" and rows[0][2] == "Bing snippet"
+
+
+def test_search_relevance_filter_drops_unrelated(monkeypatch):
+    """§2 的 P1 缺陷：与查询词零重叠的结果**不呈现**，宁缺毋滥。
+
+    实测现象（2026-09-15 复现）：中文长查询经 Bing 返回日本汉字字典页，
+    旧实现把它当合法结果交给模型。现在两条真实相关的过、两条无关的被滤。
+    """
+    from wovra import tools as tools_module
+
+    query = "智元 OmniPicker 夹爪 Modbus 通信协议"
+    relevant = ("智元OmniPicker机械夹爪调试技术指南",
+                "https://wenku.example.com/x",
+                "OmniPicker 系列机械夹爪 Modbus 通信协议与寄存器说明")
+    unrelated = ("漢字「智」の部首・画数", "https://kanji.example.jp/2719",
+                 "智は、ちえ / さといなどの意味を持つ漢字です。")
+    assert tools_module.web._relevant(query, *relevant) is True
+    assert tools_module.web._relevant(query, *unrelated) is False
+    # 全被滤掉 → 明说"未找到相关结果"，不拿噪声充数
+    out = tools_module.web._screen(query, [unrelated], 5)
+    assert isinstance(out, str) and "未找到相关结果" in out
+    kept, filtered = tools_module.web._screen(query, [unrelated, relevant], 5)
+    assert len(kept) == 1 and filtered == 1
 
 
 def test_redirect_to_internal_is_blocked(monkeypatch):
@@ -152,12 +184,13 @@ def test_web_search_falls_back_to_second_engine(monkeypatch):
     monkeypatch.setattr(tools_module.web, "_cache_get", lambda k, t: None)
     monkeypatch.setattr(tools_module.web, "_cache_put", lambda k, t, v: None)
     monkeypatch.setattr(tools_module.web, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
-    monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "搜索 'q' 的结果：\n1. 命中")
+    monkeypatch.setattr(tools_module.web, "_search_bing",
+                        lambda q, n: ([("命中标题", "https://x.example.com", "")], 0))
     assert "命中" in tools_module.web_search("q")
 
     monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "bing 失败: 限流")
     result = tools_module.web_search("q")
-    assert "所有搜索通道都失败了" in result and "bing 失败" in result
+    assert "未找到相关结果" in result and "bing 失败" in result
 
 
 def test_web_fetch_cache_hit_skips_network(monkeypatch, tmp_path):
@@ -175,12 +208,19 @@ def test_web_fetch_cache_hit_skips_network(monkeypatch, tmp_path):
         raise AssertionError("缓存命中后不应再发真实请求")
 
     monkeypatch.setattr(tools_module.web, "_open_url", fake_fetch)
-    # 先直接写缓存（模拟第一次抓取已落盘）
-    tools_module.web._cache_put("fetch", "https://cached.example.com/doc",
-                                "[https://cached.example.com/doc] 正文内容")
+    # 先直接写缓存（模拟第一次抓取已落盘）——缓存存**完整正文**，不是渲染结果
+    tools_module.web._fetch_cache_put("https://cached.example.com/doc",
+                                      "[https://cached.example.com/doc] 正文 12 字符",
+                                      "正文内容正文内容正文内容")
     result = tools_module.web.web_fetch("https://cached.example.com/doc")
     assert "[缓存命中" in result and "正文内容" in result
     assert calls["n"] == 0
+    # §1 附带问题回归：缓存存完整正文，后续**小额度**调用不得把残缺内容固化
+    small = tools_module.web.web_fetch("https://cached.example.com/doc", max_chars=4)
+    assert "正文内容"[:4] in small and "已按 max_chars 截断" in small
+    assert "已落盘 output/spill/" in small      # 完整正文可取回
+    full = tools_module.web.web_fetch("https://cached.example.com/doc")
+    assert full.count("正文内容") == 3           # 全量调用仍拿到完整正文
 
 
 def test_html_to_text_density_filters_nav(monkeypatch):

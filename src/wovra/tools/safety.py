@@ -106,12 +106,11 @@ def workspace_bound_target(fn):
 #   文件账本/块标签全部委托它。此处不再保留任何判定表。
 
 # 破坏性命令黑名单：子串匹配，宁可误杀不可放过。
-# 有意保持保守——rm -r 这类即使"看起来安全"也拒绝，
-# 模型收到拒绝文本后会自行寻找替代方案（这是流式循环的好处）。
 # git 类破坏性操作（push/reset/clean/checkout/restore）2026-09-11 起
 # 移出黑名单、改走确认门：用户 y/N 授权一次即可执行，不硬拦。
+# `rm -r` 同样于 2026-09-15 移出（TOOLING_REVIEW.md §4.2 的用户侧建议）——
+# 见 `_CONFIRM_PATTERNS` 的递归删除条目。
 _DENIED_PATTERNS = (
-    "rm -r",          # 递归删除（含 -rf/-fr）
     " -delete",       # find 的删除变体
     "sudo ",
     "mkfs",
@@ -168,6 +167,43 @@ _ALLOWED_ABS_EXACT = (
     "/etc/hosts", "/etc/resolv.conf",     # 网络排障高频（DNS 解析失败必看）
     "/dev/null", "/dev/stdin", "/dev/stdout", "/dev/stderr", "/dev/tty",
 )
+
+# 已知安全的**设备/内核只读**路径（TOOLING_REVIEW.md §4.1，2026-09-15）。
+# 硬件类任务每次查串口都要 `ls -l /dev/ttyUSB*` / 读 `/sys/bus/usb/devices/*`，
+# 而绝对路径此前一律走越界授权（非交互环境直接拒绝），逼得调用方绕道
+# Python 的 glob/open —— 绕道更不透明，连"读了什么"都看不见。
+# 放行是**有条件的只读**：见 `_device_read_ok`（有写意图照旧拦）。
+_DEVICE_READ_PREFIXES = (
+    "/dev/tty", "/dev/serial/", "/dev/serial0", "/dev/serial1",
+    "/sys/class/tty", "/sys/bus/usb/devices", "/sys/class/net",
+    "/sys/class/serial", "/sys/devices",
+    "/proc/cpuinfo", "/proc/version", "/proc/meminfo", "/proc/tty/drivers",
+)
+# "有写意图"的判据：重定向/tee、会改动内容的命令、解释器内联写操作、
+# 以及会改设备参数的 stty/setserial/hdparm（这些不是文件写，但同样改变设备状态）。
+_DEVICE_WRITE_HINT = re.compile(
+    r">|\btee\b|\bstty\b|\bsetserial\b|\bhdparm\b|"
+    r"\b(?:rm|mv|cp|chmod|chown|ln|dd|truncate|shred|touch|install|mkfs|fdisk|parted)\b|"
+    r"open\s*\([^)]*['\"][wax]|\.write\s*\(|os\.remove|os\.unlink|shutil\.|\.unlink\s*\(|rmtree"
+)
+
+
+def _device_read_ok(token: str, command: str) -> bool:
+    """设备/sysfs 只读路径放行判定（TOOLING_REVIEW.md §4.1）。
+
+    条件全部满足才放行：① token 落在已知设备/内核只读前缀下；② 整条命令
+    **没有任何写意图**（`_DEVICE_WRITE_HINT`）。所以：
+
+        ls -l /dev/ttyUSB* /dev/serial/by-id/      → 放行（只读列举）
+        cat /sys/bus/usb/devices/1-1/product       → 放行（只读）
+        python3 -c "import glob; print(glob.glob('/dev/tty*'))"  → 放行
+        echo x > /dev/ttyUSB0                      → 拦（有重定向）
+        rm /dev/ttyUSB0 / stty -F /dev/ttyUSB0 …   → 拦（有写意图）
+    """
+    if _DEVICE_WRITE_HINT.search(command):
+        return False
+    return any(token == prefix or token.startswith(prefix)
+               for prefix in _DEVICE_READ_PREFIXES)
 
 # 解释器/工具路径放行：`/usr/bin/python3 script.py` 是正常调用，不该拦。
 # 只放行**指向可执行文件本体**的形式（末段是文件名），不放行目录列举
@@ -613,6 +649,8 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
             continue
         if any(token == p for p in _ALLOWED_ABS_EXACT):
             continue
+        if _device_read_ok(token, masked):   # 设备/内核只读路径（§4.1）
+            continue
         if _INTERPRETER_PATH.match(token):  # 解释器本体：放行
             continue
         found.append(token)
@@ -1048,9 +1086,26 @@ _CONFIRM_PATTERNS = (
     r"\b(docker|podman)\s+(rm|rmi|system\s+prune)\b",
 )
 
+# 递归删除的专门确认（2026-09-15，TOOLING_REVIEW.md §4.2 从黑名单改确认门）：
+# "rm -r" 这种子串匹配会把**任何提到它的文本**一起拦死（写文档、跑 grep、
+# 甚至查询里带这个字面量），于是删除目录只能绕道 Python 的 shutil.rmtree——
+# 比直接命令更不透明。改判"有递归删除意图"：rm 后 40 字符内出现含 r 的
+# 短选项组合（-r/-rf/-fr/-R/--recursive）。
+_RECURSIVE_RM = re.compile(r"\brm\b[^\n]{0,40}?(?:-[A-Za-z]*[rR][A-Za-z]*|--recursive)\b")
+
+
+def _confirm_hint(command: str) -> str:
+    """确认门的补充说明：对递归删除讲清不可恢复（并给出替代做法）。"""
+    if _RECURSIVE_RM.search(command):
+        return ("\n  注意：递归删除不可恢复（无归档、无回收站）。若要删的是"
+                "工作区内的文件/目录，`delete_file` 会先归档、可 restore_file 回滚。")
+    return ""
+
 
 def _confirm_reason(command: str) -> str | None:
     """命令命中敏感操作 → 返回命中的模式；否则 None。"""
+    if _RECURSIVE_RM.search(command):
+        return "递归删除（rm -r/-rf/--recursive）"
     for pattern in _CONFIRM_PATTERNS:
         if re.search(pattern, command):
             return pattern

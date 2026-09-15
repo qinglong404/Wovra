@@ -18,6 +18,30 @@ def test_ask_user_degrades_in_non_interactive_environment():
     assert "非交互环境" in result
 
 
+def test_tool_type_error_names_correct_parameters(monkeypatch):
+    """§4.4：参数名写错时给出**正确参数名**，不再只抛一句 unexpected keyword。
+
+    现场：调用方按直觉写 `search_files(path=…)`，实际参数是
+    `directory`/`pattern`——旧实现只回一句 TypeError，得自己去翻签名。
+    """
+    import json as _json
+
+    from wovra import tools as tools_module
+    from wovra.agent import Agent
+
+    agent = Agent(system_prompt="x", tools=[tools_module.search_files], task=None)
+    out = agent._invoke_tool("search_files", _json.dumps({"path": "src"}))
+    assert "正确参数名" in out
+    assert "search_files(pattern, directory, glob, context)" in out
+    # 误配的名字**不硬猜**（path/pattern 前三个字母同为 "pat"，据此建议改名是错的）
+    assert "应该写成 `pattern`" not in out
+
+    # 提示本身不能把成功调用带偏：参数名正确时照常执行
+    ok = agent._invoke_tool("search_files", _json.dumps(
+        {"pattern": "def test_tool_type_error", "directory": "tests/test_tools"}))
+    assert "正确参数名" not in ok
+
+
 def test_ask_yes_no_marks_user_input_pending(monkeypatch):
     """等待用户回答期间置 pending 标记（看门狗据此静默且不计秒）。"""
     import builtins
