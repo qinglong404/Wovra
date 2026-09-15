@@ -20,6 +20,7 @@ import re
 import sys
 import threading
 import time
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
@@ -807,6 +808,61 @@ def confirm_tag(question: str) -> str:
     return "q:" + q.strip()[:60]
 
 
+def maint_state(data: dict) -> dict:
+    """维护（整理/分裂）在不在跑、跑到哪一步、多久了、上次结果是什么。
+
+    为什么要它（2026-09-15 用户报"没有 UI 进度提示"）：维护跑在**后台线程**里，
+    轮一闭合作业就结束了——前端原来的 `/plan` 轮询以"有作业在跑"为前提，于是
+    整理 + 分裂这一两分钟里页面**一点反馈都没有**（实测一批 89s：org 57s +
+    split 32s，用户看到的就是"卡住了"）。
+
+    状态全部**从盘上现取**（零新机制、零 LLM）：
+    * 轮的 `org_state == "pending"` → 整理中；`split_state ∈ {running, ready,
+      deferred}` → 分裂中（这两个字段本来就是维护线程写的）；
+    * history 里最后一条「启动：批次 …」（其后没有「结束：」）→ 在跑，并给出
+      起始时刻算已耗时；
+    * 最后一条 `split_defect`/`split_stale` → 上次结果（**拒收原因必须看得见**：
+      以前它只落在 history 里，页面上只有一个小徽标）。
+    """
+    rounds = [r for r in (data.get("rounds") or []) if isinstance(r, dict)]
+    pending = [r.get("seq") for r in rounds
+               if str(r.get("org_state") or "") == "pending"]
+    splitting = [r.get("seq") for r in rounds
+                 if str(r.get("split_state") or "") in ("running", "ready", "deferred")]
+    since = ""
+    batch = ""
+    last_end = ""
+    finished_at = ""
+    last_defect = ""
+    for h in data.get("history") or []:
+        if not isinstance(h, dict):
+            continue
+        kind = str(h.get("kind") or "")
+        detail = str(h.get("detail") or "")
+        if kind == "maintenance" and detail.startswith("启动：批次"):
+            since, batch, last_end, finished_at = str(h.get("time") or ""), detail, "", ""
+        elif kind == "maintenance" and detail.startswith("结束："):
+            # `last_end` 存**原文**（界面直接显示"结束：org=True split=True"），
+            # 时间另存 `finished_at`
+            last_end, finished_at, since = detail, str(h.get("time") or ""), ""
+        elif kind in ("split_defect", "split_stale"):
+            last_defect = detail
+    elapsed = 0
+    if since:
+        try:
+            delta = datetime.now() - datetime.fromisoformat(since)
+            elapsed = max(0, int(delta.total_seconds()))
+        except ValueError:
+            elapsed = 0
+    phase = ""
+    if since:
+        phase = "分裂" if splitting else ("整理" if pending else "收尾")
+    return {"active": bool(since), "phase": phase, "since": since,
+            "elapsed": elapsed, "org_pending": pending, "splitting": splitting,
+            "batch": batch, "last_end": last_end, "finished_at": finished_at,
+            "last_defect": last_defect}
+
+
 def todo_log(data: dict, limit: int = 60) -> list[dict]:
     """todo 工具调用流水（从轮事件机械派生，零新口径）。
 
@@ -873,6 +929,7 @@ def session_summary(task_id: str, data: dict) -> dict:
                         "end_state": rounds[-1].get("end_state")} if rounds
                        else None),
         "usage": usage_totals(data.get("history")),
+        "maint": maint_state(data),
     }
 
 
@@ -1607,6 +1664,9 @@ class _Handler(BaseHTTPRequestHandler):
                 "rounds": len(rounds),
                 "steps": sum(int(r.get("steps_used") or 0) for r in rounds),
                 "tools": tool_call_count(data.get("history")),
+                # 维护进度（整理/分裂在后台跑，轮闭合作业就没了——界面靠它
+                # 显示"整理中…/分裂中…（已 Ns）"，见 `maint_state`）
+                "maint": maint_state(data),
             })
         mtree = re.fullmatch(r"/api/sessions/([^/]+)/tree", path)
         if mtree:

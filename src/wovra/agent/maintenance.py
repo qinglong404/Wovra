@@ -453,8 +453,9 @@ class _MaintenanceMixin:
         """
         if self.task is None or not defects:
             return False
-        if not all(str(d).startswith("未覆盖：") for d in defects):
-            return False
+        # 信号现在是"节点声明的范围覆盖不到的文件"（`_bind_files_by_path` 记在
+        # `pending["uncovered_by_scope"]`）——不再是从缺陷列表里挑"未覆盖"：
+        # 那类缺陷已经不拒收了（2026-09-15），但"材料过期"这个判据本身仍然有效。
         newer = [
             rr for rr in self.rounds
             if rr is not product_round
@@ -522,13 +523,16 @@ class _MaintenanceMixin:
         for r in products:
             pending = r["pending_org"]
             domains = pending.get("domains")
+            # 早落路径同样区分两类：**材料过期**（声明的范围覆盖不到 → 回水位，
+            # 可自愈不必等边界）与**硬缺陷**（重叠/空域 → 留到边界分类留痕）。
+            # 未覆盖不再是缺陷（2026-09-15：Runtime 已机械归位）。
+            if self._requeue_if_stale(r, list(pending.get("uncovered_by_scope") or [])):
+                landed += 1
+                continue
             defects = registry_module.split_defects(
                 domains, self._live_files(), self._non_live_files()
             )
             if defects:
-                # 过期 → 立刻回水位（可自愈，不必等边界）；其余缺陷留到边界分类留痕
-                if self._requeue_if_stale(r, defects):
-                    landed += 1
                 continue
             early: list[str] = []
             # **信封类字段：任何路径都能立刻落**（2026-09-15 用户裁定"能提前的都提前"）：
@@ -1427,56 +1431,35 @@ class _MaintenanceMixin:
             if b in all_ids
         ]
 
-        # **主 agent 不许持有文件块**（2026-09-13 用户口径："现在如果分裂完主 agent
-        # 有文件，直接给我报错，不要往下进行了"）。
-        # 判据**必须与 `views.ownership` 完全一致**，否则两边打架：那边允许"文件没人
-        # 认领时跟本轮的归属走"，这边若只认域的文件集合，就会对着已经归好域的轮报错。
-        # 故：文件被某域文件集合命中 ✓ 或它所在轮已归某域（`active_view` 是域）✓
-        # 都算认领；**两者都不成立**才是真漏认领 → 抛错中止。
-        # 2026-09-14：**只查活性文件**（被写过且现在还在）——只读文件的块
-        # 不是分裂对象（用户口径：压缩后要用时会重新读），它们的块按
-        # `views.ownership` 判据 3 跟所在轮走，不参与本校验。
-        _entries = views_module._file_domain_entries(domains)
-        live = set(self._live_files())          # 已归一
-        view_of = {r["seq"]: str(r.get("active_view") or "") for r in rounds}
-        file_of = {
-            b["id"]: (str(b.get("file") or ""), seq)
-            for seq, blocks in round_blocks.items() for b in blocks
-            if b.get("kind") == "file" and b.get("file")
-            and pathmatch_module.norm(str(b.get("file"))) in live
-        }
+        # **主 agent 不许持有文件块**（2026-09-13 用户口径）现在由**构造**保证：
+        # 下面 `_bind_files_by_path` 把每个活性文件机械分给某个节点（分不出去就
+        # 进 Runtime 机械桶），主 agent 手里永远不会出现文件块——原来的"事后校验
+        # + 抛错中止"因此可以整体退场（那也正是"每闭合一轮失败一次"的来源）。
+        # 判据仍与 `views.ownership` 同源：归属看节点的 files/file_domains 并集。
 
-        def _claimed(path: str, seq: int) -> bool:
-            if views_module._match_domain(path, _entries) is not None:
-                return True
-            view = view_of.get(seq, "")
-            return bool(view) and view != views_module.MAIN_AGENT_ID
+        # **文件归属 = 代码算**（2026-09-15 用户口径："分裂只需要写结构树和每个
+        # agent 的职责，其它都不需要搞了"）：节点用 `path`/`paths` 声明**范围**，
+        # 这里把**每个活性文件**按**最深路径前缀**机械分给节点——不再要求模型
+        # 逐文件填编号（那是产物被截断、被拒收的头号来源：实测一次写满编号的
+        # 产物截断只抢救出 22 个节点、另一次因两个历史文件落点被整批拒收）。
+        # 没有节点声明到它的文件 → 仍走 `_auto_claim`（同目录 → 最近前缀 →
+        # 机械桶），**绝不落主 agent**（2026-09-13 原口径不变）。
+        bind_notes, uncovered_by_scope = self._bind_files_by_path(domains)
+        if bind_notes and self.task is not None:
+            for n in bind_notes[:6]:
+                self.task.record("maintenance", f"split：{n}")
+            if len(bind_notes) > 6:
+                self.task.record(
+                    "maintenance",
+                    f"split：{bind_notes[0]}（等 {len(bind_notes)} 条，同类的见上）",
+                )
+        # 绑定按**代码**重建了各节点的 files，故 `_claimed`（模型声明 vs 轮归属）
+        # 不再需要——保留下面的历史文件机械挂载即可。
 
-        unclaimed = sorted({
-            f for f, seq in file_of.values() if not _claimed(f, seq)
-        })
-        if unclaimed:
-            # **Runtime 机械归位，不再整批中止**（2026-09-15 用户授权："我只要
-            # 效果，可以和之前冲突的方法实现"）：中止只会空转——实测会话
-            # 20260915-131130-010611 两批分裂 27/29 个文件全未认领，每闭合一轮
-            # 再来一次、再失败一次。归位判据仍是代码算：同目录 → 最长公共目录
-            # 前缀 → 新建 Runtime 节点（绝不落主 agent，保护 2026-09-13 的原口径）。
-            notes = self._auto_claim(domains, unclaimed, "files")
-            if self.task is not None:
-                for n in notes[:6]:
-                    self.task.record("maintenance", f"split：Runtime 自动归位——{n}")
-                if len(notes) > 6:
-                    self.task.record(
-                        "maintenance",
-                        f"split：Runtime 自动归位——另 {len(notes) - 6} 条（见上同类）",
-                    )
-
-        # **非 LIVE 文件也必须挂满**（2026-09-14 用户口径："非 LIVE 文件也是
+        # **非 LIVE 文件机械挂载**（2026-09-14 用户口径："非 LIVE 文件也是
         # 必须填满的"——磁盘上没了不等于没用：临时测试脚本验过什么、结果如何，
-        # 是后面装配上下文要用的结论）。判据与 `registry.split_defects` 的
-        # F3-历史检查同一套：每个非 LIVE 文件出现在某个节点的 history_files 里。
-        # 匹配走 pathmatch 三档鲁棒规则（2026-09-14）：模型抄的 `agent-test/x.md`、
-        # `/abs/path/x.md`、`./x.md` 都能对上 Runtime 侧的真路径；同名歧义不认。
+        # 是后面装配上下文要用的结论）。2026-09-15 起**不再要求模型填**：
+        # Runtime 按"最近的活性兄弟/同目录"挂到某个节点下，挂不上的进机械桶。
         claimed_hist = [
             str(f) for d in domains if isinstance(d, dict)
             for f in (d.get("history_files") or [])
@@ -1541,6 +1524,11 @@ class _MaintenanceMixin:
         # 暂存到批首轮（与 state_patch 同通道），下一轮开启随 promote 生效
         pending = rounds[0].setdefault("pending_org", {})
         pending["domains"] = domains
+        # **材料过期的信号**（2026-09-15）：节点声明的**范围**覆盖不到的文件。
+        # 不再据此拒收（Runtime 已把它们机械归位），但它是"这份产物是对旧材料
+        # 做的"的可靠证据——轮到边界生效时若有更新轮次，本批回水位重做（原来
+        # 这条判据挂在"未覆盖"缺陷上，那正是整批拒收的来源）。
+        pending["uncovered_by_scope"] = list(uncovered_by_scope)
         # **分裂主体**（2026-09-12，worklog §64）：这批轮里出现最多的那个视图。
         # 为什么不取"promote 那一刻的本轮视图"：异步维护可能跨轮完成，届时
         # 当前轮早已换人（甚至换成主 agent）——产物就会被登记成"主 agent 分裂"
@@ -1792,8 +1780,105 @@ class _MaintenanceMixin:
             _check(unassigned.get("block_ids"), "unassigned.block_ids")
         return defects
 
+    def _bind_files_by_path(self, domains: list) -> list[str]:
+        """把**每个活性文件**按节点声明的 `path`/`paths` 机械归属（最深前缀优先）。
+
+        2026-09-15 用户口径："分裂只需要写结构树和每个 agent 的职责，其它都不
+        需要搞了"——模型给**范围**，代码算**归宿**：
+
+        * 节点可用 `path`（一个目录前缀或具体文件）或 `paths`（多个）声明范围；
+          兼容字段 `file`/`files`（路径或已翻译成路径的 L 编号）与旧
+          `file_domains`（目录前缀）同样当范围用；
+        * 每个文件取**匹配最深**的范围（`src/wovra/tools/` 优先于 `src/`）；
+          同深度时按节点声明顺序取前一个（确定性，不随机）；
+        * 命中不了的 → `_auto_claim`（同目录 → 最近前缀 → Runtime 机械桶），
+          **绝不落主 agent**；
+        * 各节点的 `files` 由本函数**重建**（不再信模型手抄的清单）——因此
+          "重叠/未覆盖"这两类缺陷在构造上不可能出现，`split_defects` 相应的
+          拒收路径随之退场；
+        * 没有描述的节点，描述取**它第一份文件的开头**（`_guess_file_note`：
+          首行注释/标题/docstring）——"文件描述窃取文件开头一部分"，永远新鲜、
+          不需要模型抄。
+
+        返回 `(留痕行, 没被任何范围命中的文件)`——后者是**材料过期**的信号
+        （写进 `pending["uncovered_by_scope"]`），不再用来拒收。
+        """
+        live = sorted(set(self._live_files()))
+        if not live:
+            return [], []          # 返回值是二元组：调用方按 (留痕, 未命中) 解包
+
+        def scopes_of(node: dict) -> list[str]:
+            raw: list[str] = []
+            for key in ("path", "paths", "file", "files", "file_domains"):
+                value = node.get(key)
+                if isinstance(value, str):
+                    raw.append(value)
+                elif isinstance(value, (list, tuple)):
+                    raw.extend(str(x) for x in value)
+            out: list[str] = []
+            for item in raw:
+                norm = pathmatch_module.norm(str(item)).strip("/")
+                if not norm or norm == ".":
+                    continue
+                # 目录形态（末段没有扩展名）统一成前缀，按前缀匹配；具体文件
+                # 精确匹配（`webui/index.html` 不该吞掉 `webui/index.html.bak`）。
+                is_file = "." in norm.rsplit("/", 1)[-1]
+                out.append(norm if is_file else norm + "/")
+            return out
+
+        nodes = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
+        # **先把范围算出来**（`file_domains`/`files`/`file` 都可能是范围声明的载体），
+        # 再清空这些字段——顺序反了就会把范围源清掉、所有文件都掉进机械桶
+        # （实测：整批被误判"材料过期"回退，工作流空转一轮）。
+        node_scopes = {id(node): scopes_of(node) for node in nodes}
+        for node in nodes:
+            node["files"] = []
+            # 旧字段 `file_domains`（目录前缀/文件路径）是**范围声明**，不是归宿：
+            # 已经当 scope 用过了，这里清掉——否则 `views._file_domain_entries` 的
+            # 并集会让"前缀"与"重建后的具体清单"在两个节点上同时命中同一个文件
+            # （F2 重叠又回来了）。归宿现在只有一处真源：上面的 `files`。
+            node["file_domains"] = []
+        notes: list[str] = []
+        unmatched: list[str] = []
+        for path in live:
+            norm = pathmatch_module.norm(path)
+            best: tuple[int, int, dict] | None = None   # (深度, 节点序, 节点)
+            for order, node in enumerate(nodes):
+                for scope in node_scopes[id(node)]:
+                    if scope.endswith("/"):
+                        if not norm.startswith(scope):
+                            continue
+                        depth = scope.count("/")
+                    else:
+                        if norm != scope:
+                            continue
+                        depth = 1000                       # 精确文件：最高优先
+                    if best is None or (depth, -order) > (best[0], -best[1]):
+                        best = (depth, order, node)
+            if best is None:
+                unmatched.append(path)
+                continue
+            best[2]["files"].append(norm)
+        for node in nodes:
+            if node["files"] and not str(node.get("description") or "").strip():
+                note = self._guess_file_note(node["files"][0])
+                if note:
+                    node["description"] = note
+        if unmatched:
+            # 复用 §114 的机械归位：同目录 → 最近前缀 → 新建 Runtime 桶
+            # 就近判据要带**已声明的范围**（它们已被清空，`_auto_claim` 默认
+            # 只看 files/file_domains/history_files）——否则"同目录"这条最像的
+            # 判据失效，文件会被无谓地扔进机械桶。
+            notes += [f"Runtime 自动归位——{n}" for n in self._auto_claim(
+                domains, sorted(unmatched), "files", hints=node_scopes)]
+        notes.append(f"文件归属按路径机械绑定（{len(live)} 个活性文件 → "
+                     f"{sum(1 for n in nodes if n['files'])} 个节点"
+                     f"{f'，另有 {len(unmatched)} 个由 Runtime 归位' if unmatched else ''}）")
+        return notes, unmatched
+
     @staticmethod
-    def _auto_claim(domains: list, paths: list[str], field: str) -> list[str]:
+    def _auto_claim(domains: list, paths: list[str], field: str,
+                    hints: dict[int, list[str]] | None = None) -> list[str]:
         """**Runtime 机械归位**：把没人认领的文件挂到最近的节点下（原地修改）。
 
         2026-09-15 用户授权（"你看着按最好的来，我只要效果，可以和之前冲突的方法
@@ -1813,12 +1898,14 @@ class _MaintenanceMixin:
         if not paths:
             return []
 
+        hint_map = hints or {}
+
         def claimed_of(d: dict) -> list[str]:
             # 节点"已认领的文件"= 它声明过的**全部**文件形态（与
             # `views._file_domain_entries` 同一并集：files/单文件 file/
             # 旧目录前缀 file_domains/history_files）——只读 files 会漏掉
             # 用旧字段声明的节点，归位就会挑错邻居。
-            out: list[str] = []
+            out: list[str] = list(hint_map.get(id(d), []))   # 调用方已知的声明范围
             for key in ("files", "file_domains", "history_files"):
                 out += [str(x) for x in (d.get(key) or [])]
             if d.get("file"):
@@ -1954,16 +2041,21 @@ class _MaintenanceMixin:
                     f"（只读——被读过没写过；读 {g['read']} 次；块: {refs}）"
                 )
         lines = [
-            "- 活性文件清单（`Lxx` = 活性文件编号，产物里**只写编号**；"
+            "- 活性文件清单（**路径**就是归属依据：节点的 `path`/`paths` 写它所在的"
+            "目录前缀或文件路径，Runtime 按**最深前缀**机械分配——你**不用**逐文件"
+            "列清单；`Lxx` 只是行号提示，写编号也行。"
             "LIVE=被写过且现在还在，只读/已删的不是分裂单元）："
         ]
         lines += live_lines or ["  （无——当前无任何活性文件）"]
-        lines.append(f"- 活性文件数：{n}（每个都必须是一个叶子节点）")
         lines.append(
-            f"- 非 LIVE 文件清单（`Hxx` = 非 LIVE 编号；共 {len(hist_lines)} 个；"
-            "**不是分裂单元、不计入上限**，但**一个不漏**——磁盘上没了不等于没用："
-            "它们承载早期工作的结论，后面装配上下文要用——挂到相关叶子下面，"
-            "字段 history_files 里写编号）："
+            f"- 活性文件数：{n}（**不必**每个文件一个节点：按语义给目录级节点即可，"
+            "代码会把文件分到最深的那个路径范围内）"
+        )
+        lines.append(
+            f"- 非 LIVE 文件清单（`Hxx` = 编号；共 {len(hist_lines)} 个；"
+            "**不是分裂单元、不计入上限**——磁盘上没了不等于没用：它们承载早期工作的"
+            "结论，后面装配上下文要用。**归属由 Runtime 机械挂载**（挂到最近的活性"
+            "兄弟下），你**不需要**填 history_files）："
         )
         lines += hist_lines or ["  （无）"]
         return lines, n
@@ -2209,6 +2301,10 @@ class _MaintenanceMixin:
                 # 2026-09-14：活性文件必须 100% 分完；**非 LIVE 文件也必须
                 # 挂满**（用户口径：磁盘上没了不等于没用——早期结论后面要
                 # 装配进上下文），由 split_defects 的 F3-历史检查兜底。
+                # **材料过期判定**（不拒收、但仍要识别）：产物声明的范围覆盖
+                # 不到当前材料 + 有更新轮次 → 本批回水位，下批带新材料重做。
+                if self._requeue_if_stale(r, list(pending.get("uncovered_by_scope") or [])):
+                    continue
                 defects = registry_module.split_defects(
                     pending["domains"], self._live_files(), self._non_live_files()
                 )
@@ -2222,8 +2318,6 @@ class _MaintenanceMixin:
                     # 域树（实测就卡在这里：R1-R6 done、产品被拒、R7 另起一批也覆盖不全）。
                     # 判据：① 缺陷**全是"未覆盖"**（覆盖不全，非 F2 重叠/空域这类结构错）；
                     # ② 存在**不属于本批**的已闭合轮（材料确实变了）→ 回入水位，下批重整。
-                    if self._requeue_if_stale(r, defects):
-                        continue
                     for rr in self.rounds:
                         if (str(rr.get("org_state") or "") == "done"
                                 and rr.get("org_generation") == r.get("org_generation")):

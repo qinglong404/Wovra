@@ -63,14 +63,22 @@ def test_merge_into_retires_the_split_domain():
     assert set(added) >= {"A-1", "A-2"}
 
 
-def test_split_defects_catches_overlap_and_uncovered():
-    """**入口校验**（F2 互斥 + F3 完备）：重叠 / 未覆盖 / 空域都要抓出来。
+def test_split_defects_catches_overlap_but_not_uncovered_or_grouping():
+    """入口校验（2026-09-15 简化后）：**只剩重叠**是硬缺陷。
 
-    用户口径（2026-09-12，worklog §62）：一个文件不可能两个子 agent 共同维护；
-    被分裂者名下的文件必须 100% 分完——有缺陷就**拒收**（"根基错了，测试无意义"）。
+    口径变化（用户："分裂只需要写结构树和每个 agent 的职责，其它都不需要搞了"，
+    以及实测报障"分裂又失败了"）：
+
+    * **重叠**仍是缺陷（F2：一个文件不能两个域都管——谁写谁读的真冲突）；
+    * **未覆盖不再拒收**：`_bind_files_by_path` 已把每个活性文件按最深路径机械
+      分派、分不出去的进 Runtime 机械桶——到校验这一步还"没人认领"只说明调用方
+      没走绑定，报出来会让整批白算；
+    * **纯分组节点合法**：树写得细一点就整批失败，正是缺陷本身；
+    * **历史（非 LIVE）文件不再校验落点**：实测会话 20260915-155432-b13727 整批
+      产物只因两个历史文件的落点被拒收（4 轮全 rejected、注册表只剩 Main）。
     """
     files = ["src/a.py", "src/wovra/tools/b.py", "webui/x.js"]
-    # 前缀重叠：`src/` 与 `src/wovra/tools/` 会同时命中 b.py
+    # 前缀重叠：`src/` 与 `src/wovra/tools/` 会同时命中 b.py → 仍是缺陷
     defects = registry_module.split_defects(
         [{"name": "工具层", "file_domains": ["src/"]},
          {"name": "深工具", "file_domains": ["src/wovra/tools/"]},
@@ -79,44 +87,44 @@ def test_split_defects_catches_overlap_and_uncovered():
     )
     assert any("重叠" in d and "src/wovra/tools/b.py" in d for d in defects)
 
-    # 未覆盖：webui/x.js 没人认领
-    defects = registry_module.split_defects(
-        [{"name": "工具层", "files": ["src/a.py", "src/wovra/tools/b.py"]}],
-        files,
+    # 未覆盖：不再拒收（Runtime 机械归位兜着）
+    assert not any(
+        "未覆盖" in d for d in registry_module.split_defects(
+            [{"name": "工具层", "files": ["src/a.py", "src/wovra/tools/b.py"]}],
+            files,
+        )
     )
-    assert any("未覆盖" in d and "webui/x.js" in d for d in defects)
 
-    # 空域：给了个域但没有任何文件
-    defects = registry_module.split_defects(
-        [{"name": "空壳", "files": []}], ["src/a.py"]
-    )
-    assert any("空域" in d for d in defects)
+    # 纯分组节点（自己没文件、子节点有）：合法，不是"空域"
+    grouped = [
+        {"name": "工程层", "files": []},
+        {"name": "工具层", "parent": "工程层", "files": ["src/a.py"]},
+    ]
+    assert registry_module.split_defects(grouped, ["src/a.py"]) == []
 
-    # 通过：精确文件清单、恰好覆盖、互不重叠
+    # 真·空域（没有子节点、也没有文件）仍然是缺陷
+    assert any("空域" in d for d in registry_module.split_defects(
+        [{"name": "空壳", "files": []}], ["src/a.py"]))
+
+    # 通过：精确文件清单、互不重叠
     assert registry_module.split_defects(
         [{"name": "工具层", "files": ["src/a.py", "src/wovra/tools/b.py"]},
          {"name": "前端", "files": ["webui/x.js"]}],
         files,
     ) == []
 
-    # **非 LIVE（历史）也要有落点**（只读/被取代/被删都挂在最相关 LIVE 块下）
+    # **历史（非 LIVE）文件的落点不再参与判定**：漏了、重叠都不拒收
     hist = ["docs/old-notes.md", "src/legacy.py"]
-    defects = registry_module.split_defects(
-        [{"name": "工具层", "files": ["src/a.py"],
-          "history_files": ["src/legacy.py"]},
+    assert registry_module.split_defects(
+        [{"name": "工具层", "files": ["src/a.py"]},
          {"name": "前端", "files": ["webui/x.js"]}],
         ["src/a.py", "webui/x.js"], hist,
-    )
-    assert any("历史未落点" in d and "docs/old-notes.md" in d for d in defects)
-    assert not any("src/legacy.py" in d for d in defects)   # 已挂在工具层下
-
-    # 历史文件也不能两个域都认领
-    defects = registry_module.split_defects(
+    ) == []
+    assert registry_module.split_defects(
         [{"name": "甲", "files": ["src/a.py"], "history_files": ["src/legacy.py"]},
          {"name": "乙", "files": ["webui/x.js"], "history_files": ["src/legacy.py"]}],
         ["src/a.py", "webui/x.js"], ["src/legacy.py"],
-    )
-    assert any("历史重叠" in d for d in defects)
+    ) == []
 
 
 def test_build_entries_empty_and_dirty_parent():

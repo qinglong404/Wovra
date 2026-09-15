@@ -207,12 +207,17 @@ def split_defects(
     domains = [d for d in (domains or [])
                if isinstance(d, dict) and not d.get("main_agent")]
     all_files = [str(f).strip().strip("/") for f in (files or []) if str(f).strip()]
+    # 纯分组节点（自己没有文件、但子节点有）是**合法**的语义层：2026-09-15
+    # 用户口径"分裂只需要写结构树和每个 agent 的职责"之后，分组节点本来就不该
+    # 管文件——旧规则把它判"空域"整批拒收，正是"树写细一点就失败"的来源。
+    has_children = {str(e.get("parent") or "") for e in entries if e.get("parent")}
     for entry in entries:
         name = f"{entry.get('id')}（{entry.get('name')}）"
-        if not entry_files(entry) and not entry_prefixes(entry):
+        if (not entry_files(entry) and not entry_prefixes(entry)
+                and str(entry.get("name") or "") not in has_children):
             defects.append(f"空域：{name} 没有给任何文件清单——不知道它维护什么")
         # 一个域自己内部不许重复声明（同文件既在清单又在某前缀下）
-        if len(all_files):
+        if len(all_files) and (entry_files(entry) or entry_prefixes(entry)):
             hits = [f for f in all_files if file_owned_by(entry, f)]
             if not hits:
                 defects.append(f"空域：{name} 的文件清单没有命中任何现有文件")
@@ -224,33 +229,16 @@ def split_defects(
                 f"重叠：{path} 同时被 " + "、".join(owners) + " 认领"
                 "（一个文件只能属于一个域）"
             )
-        elif not owners:
-            defects.append(
-                f"未覆盖：{path} 没有任何域认领（分裂必须把现有文件 100% 分完）"
-            )
-    # **非 LIVE 的落点**（用户口径：只读/被取代/被删的都挂在最相关 LIVE 块
-    # 下面当历史）——它们不属于分裂单元，但**必须有归宿**（写在某个域的
-    # history_files 或 files 里），否则就是漏项。
-    hist_entries = [(e, f"{e.get('id')}（{e.get('name')}）") for e in entries]
-
-    def _claims(entry: dict, path: str) -> bool:
-        from . import pathmatch as pathmatch_module
-        return (file_owned_by(entry, path)
-                or pathmatch_module.matches(path, entry_history(entry)))
-
-    for path in [str(f).strip().strip("/")
-                 for f in (history_files or []) if str(f).strip()]:
-        owners = [label for e, label in hist_entries if _claims(e, path)]
-        if len(owners) > 1:
-            defects.append(
-                f"历史重叠：{path} 同时被 " + "、".join(owners) + " 认领"
-                "（历史文件也只能挂一处）"
-            )
-        elif not owners:
-            defects.append(
-                f"历史未落点：{path} 没有任何域认领（非 LIVE 也要挂在最相关"
-                " LIVE 块所属的域下当历史）"
-            )
+        # 未覆盖**不再**是缺陷（2026-09-15）：`_bind_files_by_path` 已把每个
+        # 活性文件机械分给某个节点、分不出去的进 Runtime 机械桶——到这一步
+        # 还"没人认领"只可能是把产物喂给校验器的调用方没走绑定，报出来只
+        # 会让整批白算（用户口径："我只要效果"）。
+    # **非 LIVE（历史）文件的落点不再由这里判定**（2026-09-15 用户报障：
+    # "分裂又失败了"——实测会话 20260915-155432-b13727 整批产物只因两个历史
+    # 文件落点缺陷被拒收，4 轮全 rejected、注册表只剩 Main，一个 agent 都没
+    # 长出来）。非 LIVE 文件是**结论的载体**，不是谁写谁读的冲突源：Runtime
+    # 在 `_bind_files_by_path` 后按"最近的活性兄弟/同目录"机械挂载，挂不上
+    # 的进机械桶——不需要模型填、也不会因此作废整批。
     return defects
 
 

@@ -293,6 +293,13 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 /* 开放轮条（2026-09-15，用户口径："开放轮，添加UI显示，同时增加续跑按钮"）：
    上一轮没产出最终回答（中断/步数用尽）时，它一直开着——新输入会并入这一轮，
    由当时的执行方继续处理。要让人**看见**这件事，并给一个显式的"续跑"。 */
+#maintbar{display:none;align-items:center;gap:9px;padding:9px max(var(--pad-x),calc((100% - var(--read-max))/2));background:linear-gradient(180deg,#1b2430,#151c26);border-top:1px solid #2f4d6b;font-size:12.5px;color:var(--tx)}
+#maintbar.show{display:flex}
+#maintbar .mb-tag{color:#7fb6e8;font-family:var(--mono);flex-shrink:0}
+#maintbar .mb-sub{color:var(--tx3)}
+#maintbar .mb-x{margin-left:auto;flex-shrink:0;cursor:pointer;color:var(--tx3);padding:0 6px}
+#maintbar.bad{background:linear-gradient(180deg,#301c22,#22151a);border-top-color:#6b3440}
+#maintbar.bad .mb-tag{color:#ff98a6}
 #openbar{display:none;align-items:center;gap:9px;padding:9px max(var(--pad-x),calc((100% - var(--read-max))/2));background:linear-gradient(180deg,#2a2417,#1c1912);border-top:1px solid #6b552a;font-size:12.5px;color:var(--tx)}
 #openbar.show{display:flex}
 #openbar .ob-tag{color:var(--gold);font-family:var(--mono);flex-shrink:0}
@@ -436,6 +443,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div id="content"><div class="empty">等待选择会话…</div></div>
   <div id="runline"></div>
   <div id="pending-bar"></div>
+  <div id="maintbar"></div>
   <div id="openbar"></div>
   <div id="composer">
     <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 或 \c 续跑开放轮）"></textarea>
@@ -748,6 +756,7 @@ function renderHeader(){
     (META.todo_milestone?`<span class="chip warn">阶段进行中</span>`:'')+
     `<span class="chip bad" style="cursor:pointer;margin-left:auto" onclick="deleteSession('${META.id}')">删除会话</span>`;
   renderKpis(u,META.rounds,tools,'');
+  if(META.maint&&META.maint.active)applyMaint(META.maint);
   const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['project','项目'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
     `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
@@ -1269,6 +1278,50 @@ function showCmdOutput(title,text){
   pre.textContent=String(text).replace(/\x1b\[\[\d;]*m/g,'');   // 剥 ANSI
   const b=$('#d-body');b.innerHTML='';b.appendChild(pre);
 }
+/* 维护（整理/分裂）进度条（2026-09-15 用户报"没有 UI 进度提示"）。
+   维护跑在**后台线程**里，轮闭合作业就结束了——旧前端在"没有作业"时停止轮询，
+   于是那一两分钟页面毫无反馈（看起来像卡死）。`/plan` 现在带 `maint` 现算态，
+   这里显示阶段 + 已耗时，并在**结束时给出结果**（尤其拒收原因——它以前只落在
+   history 里，页面上只有一个小徽标）。 */
+let MAINT=null;                       // 最近一次收到的 maint（{active,phase,elapsed,...}）
+function renderMaintBar(){
+  const bar=document.getElementById('maintbar');
+  if(!bar)return;
+  if(!CUR||!MAINT||TAB!=='conv'||!(MAINT.active||MAINT.notice)){
+    bar.classList.remove('show','bad');
+    if(bar.innerHTML)bar.innerHTML='';
+    return;
+  }
+  const bad=!!MAINT.bad;
+  bar.classList.toggle('show',true);
+  bar.classList.toggle('bad',bad);
+  const tag=MAINT.active
+    ? (MAINT.phase==='分裂'?'⛏ 分裂中…':MAINT.phase==='整理'?'⏳ 整理中…':'⚙ 维护收尾…')
+    : (bad?'⛔ 分裂被拒收':'✓ 维护完成');
+  const sub=MAINT.active
+    ? `已 ${MAINT.elapsed||0}s · 后台跑，完成前不必等（可以继续看别的页签）`
+    : esc(MAINT.notice||'');
+  bar.innerHTML=`<span class="mb-tag">${tag}</span><span class="mb-sub">${sub}</span>`
+    +`<span class="mb-x" onclick="dismissMaint()" title="收起">✕</span>`;
+}
+function dismissMaint(){ if(MAINT)MAINT={}; renderMaintBar(); }
+function applyMaint(m){
+  if(!m)return;
+  const wasActive=!!(MAINT&&MAINT.active);
+  if(m.active){
+    MAINT={active:true,phase:m.phase,elapsed:m.elapsed,batch:m.batch||''};
+    window._maintTail=Date.now()+15000;   // 结束后再多拉 15s，别漏掉结果那一条
+  }else if(wasActive){
+    // 刚结束 → 给一次结果提示：维护完成后接口至少要能回答"成了还是没成"
+    MAINT={active:false,bad:!!m.last_defect,
+           notice:(m.last_defect||m.last_end||'维护已结束').slice(0,300)};
+    window._maintTail=0;
+    if(typeof select==='function')select(CUR);   // 结果落地 → 重取元数据（徽标/注册表）
+  }else{
+    return;                              // 本来就没在跑：UI 不动
+  }
+  renderMaintBar();
+}
 /* 把 `/plan` 带的**现算值**应用到顶部六格（2026-09-15 用户口径："按步更新，不要
    再按轮更新"）。返回是否有变化——独立签名（用量每步都在变，计划却可能几十步不变），
    所以不跟计划账本的签名共用早退点；没有变化时一个字节都不动（不白刷 DOM）。 */
@@ -1285,9 +1338,15 @@ function applyPlanKpis(d){
   return true;
 }
 async function pollPlan(){
-  // 跑轮期间把**计划账本**单拉一次（轻量口 /plan）：`todo` 一被调用就重画
-  // 「当前进行中的阶段（上）/ 已验收阶段（下）」，不必等这一轮结束
-  if(!LIVE.job||!CUR)return;
+  // 把**计划账本 + 维护进度**单拉一次（轻量口 /plan）：`todo` 一被调用就重画
+  // 「当前进行中的阶段（上）/ 已验收阶段（下）」，不必等这一轮结束。
+  //
+  // **为什么维护期间也要轮询**（2026-09-15 用户报"没有 UI 进度提示"）：整理 +
+  // 分裂跑在**后台线程**里，轮一闭合作业就结束了——旧门 `!LIVE.job` 于是让页面
+  // 在这 1~2 分钟里彻底不动（实测一批 89s：org 57s + split 32s），看起来像卡死。
+  // 现在维护在跑（`MAINT.active`）或刚结束（`_maintTail`）时继续拉。
+  if(!CUR)return;
+  if(!LIVE.job && !(MAINT&&MAINT.active) && !(Date.now()<(window._maintTail||0)))return;
   const now=Date.now();
   if(now-(window._planAt||0)<900)return;        // 节流：不到 1 秒不重复拉
   window._planAt=now;
@@ -1298,6 +1357,7 @@ async function pollPlan(){
   // 独立签名比对——计划没变也可能用量变了（每步都在变），所以这条不跟下面的计划
   // 分支共用早退点。
   applyPlanKpis(d);
+  applyMaint(d.maint);
   const sig=JSON.stringify(d.todo||{})+'|'+JSON.stringify(d.todo_log||[]);
   if(sig===(window._planSig||''))return;        // 计划没变化 → 后面的都不动
   window._planSig=sig;
@@ -2537,6 +2597,7 @@ async function resumeOpenRound(){
    1.5s 状态轮询兜底收尾。`resume=true` 时 POST 无 body、不插用户气泡
    （与 /c 完全同一条服务端路径）。 */
 async function startTurn(url,body,resume){
+  MAINT=null; renderMaintBar();          // 新一轮开始：收起上一次的维护结果提示
   $('#send').disabled=true;
   const c=$('#content');
   if(resume){

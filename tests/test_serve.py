@@ -1276,3 +1276,60 @@ def test_pending_views_alt_is_full_assembly_and_main_uses_id(tmp_path, monkeypat
     # ② 主 agent 视图按 id 装配：闲聊桶的块能看见，不再是空历史
     body = "\n".join(str(m.get("content") or "") for m in main.get("messages") or [])
     assert "本域尚无命中轮" not in body
+
+
+def test_maint_state_reports_phase_elapsed_and_last_defect():
+    """维护进度：整理/分裂在后台跑、轮闭合作业就结束——UI 只能靠这个现算态。
+
+    用户报（2026-09-15）："分裂又失败了，且没有UI进度提示"。前端原来的 `/plan`
+    轮询以"有作业在跑"为前提，于是维护那一两分钟（实测 89s）页面毫无反馈。
+    """
+    import datetime as _dt
+
+    # 在跑：history 里有"启动：批次"、没有"结束："；轮上分别写着两个阶段
+    started = (_dt.datetime.now() - _dt.timedelta(seconds=45)).isoformat(timespec="seconds")
+    data = {
+        "rounds": [
+            {"seq": 1, "org_state": "done", "split_state": "done"},
+            {"seq": 2, "org_state": "pending", "split_state": ""},
+        ],
+        "history": [
+            {"kind": "maintenance", "time": started,
+             "detail": "启动：批次 R1-R2（2 轮，输入快照 10 条消息，硬上限 900s）"},
+        ],
+    }
+    m = serve.maint_state(data)
+    assert m["active"] is True and m["phase"] == "整理"
+    assert m["org_pending"] == [2] and m["splitting"] == []
+    assert 44 <= m["elapsed"] <= 90          # 宽松：只验"算了个正数、量级对"
+
+    # 分裂阶段：轮上 split_state=running
+    data["rounds"][1]["org_state"] = "done"
+    data["rounds"][1]["split_state"] = "running"
+    m = serve.maint_state(data)
+    assert m["active"] is True and m["phase"] == "分裂" and m["splitting"] == [2]
+
+    # 结束：出现"结束：" → 不再 active，但**最后结果要留着**（拒收原因必须看得见）
+    data["history"] += [
+        {"kind": "maintenance", "time": started, "detail": "结束：org=True split=True"},
+        {"kind": "split_defect", "time": started,
+         "detail": "分裂产物被拒收（根基缺陷）：历史未落点：x.md 没有任何域认领"},
+    ]
+    data["rounds"][1]["split_state"] = "rejected"
+    m = serve.maint_state(data)
+    assert m["active"] is False and m["phase"] == ""
+    assert "历史未落点" in m["last_defect"]
+    assert m["last_end"].startswith("结束：") and m["finished_at"]
+
+    # 没有维护痕迹的老会话：字段齐全、不炸
+    empty = serve.maint_state({})
+    assert empty["active"] is False and empty["elapsed"] == 0 and empty["phase"] == ""
+
+
+def test_http_plan_and_meta_carry_maint(server):
+    """`/plan`（每 tick）与 `session_meta`（首屏）都要带 maint——同源同口径。"""
+    code, body = _get(server + "/api/sessions/s1/plan")
+    assert code == 200 and "maint" in body
+    assert body["maint"]["active"] is False          # 夹具没有维护痕迹
+    _, meta = _get(server + "/api/sessions/s1")
+    assert "maint" in meta

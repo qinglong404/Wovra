@@ -1847,6 +1847,41 @@ resetLive();
   }
 }
 
+console.log('场景 AY｜维护进度条：整理/分裂在后台跑，界面要有进度与结果');
+// 用户报（2026-09-15）："分裂又失败了，且没有UI进度提示"。维护（整理+分裂）跑在
+// **后台线程**里、轮一闭合作业就结束了——旧前端的 `/plan` 轮询以"有作业在跑"为前提，
+// 于是那 1~2 分钟页面毫无反馈（实测一批 89s）。`/plan` 现在带 `maint` 现算态。
+resetLive();
+{
+  const bar = document.getElementById('maintbar');
+  if (!bar) problems.push('AY: 静态 id 里没有 #maintbar（夹具失效）');
+  else {
+    TAB = 'conv'; CUR = 's1'; META = {id:'s1', round_list:[]};
+    // ① 整理中
+    applyMaint({active:true, phase:'整理', elapsed:12});
+    let txt = String(bar.textContent || '');
+    if (!bar.classList.contains('show')) problems.push('AY: 维护在跑却没显示进度条');
+    if (!/整理中/.test(txt) || !/12s/.test(txt)) problems.push('AY: 整理中没写阶段与已耗时：' + txt);
+    // ② 分裂中
+    applyMaint({active:true, phase:'分裂', elapsed:45});
+    txt = String(bar.textContent || '');
+    if (!/分裂中/.test(txt) || !/45s/.test(txt)) problems.push('AY: 分裂中没写阶段与已耗时：' + txt);
+    // ③ 结束且被拒收 → 原因必须看得见（以前只落在 history 里）
+    applyMaint({active:false, last_defect:'分裂产物被拒收（根基缺陷）：历史未落点：x.md'});
+    txt = String(bar.textContent || '');
+    if (!/拒收/.test(txt) || !/历史未落点/.test(txt)) problems.push('AY: 拒收原因没显示：' + txt);
+    if (!bar.classList.contains('bad')) problems.push('AY: 拒收没标成异常色');
+    // ④ 收起
+    dismissMaint();
+    if (bar.classList.contains('show')) problems.push('AY: 收起后进度条还在');
+    // ⑤ 非对话页签不显示（与未闭合条同一策略：别的页签有各自的进度语义）
+    applyMaint({active:true, phase:'分裂', elapsed:3});
+    TAB = 'ledger'; renderMaintBar();
+    if (bar.classList.contains('show')) problems.push('AY: 非对话页签也在显示维护条');
+    TAB = 'conv'; dismissMaint();
+  }
+}
+
 console.log('场景 AV｜跟随尾部：内容一次长高超过阈值，不许"跟着跟着突然停住"');
 // 用户报（2026-09-15）："跟随着跟随着突然停到某一位置不跟随了"。两个叠加的毛病：
 //   ① 自动 pin 有"离底部 < tol(≥160px)"门控——内容一次长高超过它，`near` 恒假、
@@ -2165,7 +2200,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（48 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（49 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
 });
 """
 

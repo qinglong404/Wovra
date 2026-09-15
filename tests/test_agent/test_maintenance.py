@@ -1283,9 +1283,14 @@ def test_split_instruction_marks_rounds_for_descriptions(monkeypatch, tmp_path):
     assert n == 2
     assert "src/a.py" in joined and "轮 2" in joined     # 多轮文件有轮数
     assert "src/b.py" in joined and "轮 1" in joined     # 单轮文件也有（叶子据此省描述）
-    # 指令里写明"叶子可省描述"
+    # 指令里写明新口径（2026-09-15 用户："分裂只需要写结构树和每个 agent 的
+    # 职责，其它都不需要搞了"）：节点用 path 声明范围、不逐文件列清单、
+    # 文件描述由 Runtime 取文件开头
     from wovra.agent import prompts as prompts_module
-    assert "单文件单轮" in prompts_module._SPLIT_INSTRUCTIONS
+    instr = prompts_module._SPLIT_INSTRUCTIONS
+    assert "每个节点填 name + parent + path" in instr
+    assert "不要逐文件列清单" in instr
+    assert "文件开头" in instr
 
 
 def test_split_normalizes_prefixless_path_refs(monkeypatch, tmp_path):
@@ -1664,9 +1669,10 @@ def test_split_instruction_carries_view_watermarks(monkeypatch, tmp_path):
     assert "各视图自身体量" in prompt            # 硬数据行（体量事实仍给）
     assert "工具层" in prompt
     assert "考虑在其内部再裂一层" in prompt      # 到没到水位的机械结论仍给（体量事实）
-    assert "你的**唯一任务**" in prompt          # 2026-09-14：只写树，不做分裂判定
-    assert "叶子 = **一个活性文件**" in prompt     # 2026-09-14：叶子是活性文件
-    assert "挂到对应的节点上" in prompt          # 非 LIVE/保底块/用户块挂在节点下
+    assert "你的**唯一任务**" in prompt          # 只写树 + 职责，不做分裂判定
+    assert "每个节点填 name + parent + path" in prompt   # 2026-09-15：节点用路径声明范围
+    assert "职责只写给会成为 agent 的节点" in prompt      # 职责只给顶层
+    assert "不要逐文件列清单" in prompt          # 文件归属由代码算
 
 
 def test_split_view_watermarks_skips_main_agent_and_empty_domains(monkeypatch, tmp_path):
@@ -1732,7 +1738,10 @@ def test_split_hard_data_lists_non_live_files_as_history(monkeypatch, tmp_path):
     assert n == 1                                   # 只读的不算活性、不计上限
     assert "非 LIVE 文件清单" in joined and "共 1 个" in joined
     assert "H00 = old.txt" in joined and "L00 = a.txt" in joined
-    assert "一个不漏" in joined and "只写编号" in joined
+    # 2026-09-15 新口径：文件归属由代码按 path 范围**机械分配**、历史文件由 Runtime
+    # **机械挂载**——故硬数据里不再要求"逐文件写编号 / 一个不漏地填 history_files"
+    assert "机械分配" in joined and "机械挂载" in joined
+    assert "不需要" in joined and "history_files" in joined
 
 
 def test_split_auto_claims_non_live_file_without_home(monkeypatch, tmp_path):
@@ -2385,7 +2394,11 @@ def test_stale_split_product_requeues_instead_of_hard_reject(monkeypatch, tmp_pa
     for r in task.rounds:
         r["org_state"] = ""
     product = [{"name": "A 域", "description": "a.py 这条线", "file": "a.py"}]
-    task.rounds[0]["pending_org"] = {"domains": product}
+    # 材料过期的信号（2026-09-15 起）：`_bind_files_by_path` 记下"节点声明的
+    # 范围覆盖不到的文件"——它不再触发拒收（Runtime 会机械归位），但配合
+    # "有更新轮次"仍是"这份产物对旧材料做的"的可靠证据。
+    task.rounds[0]["pending_org"] = {"domains": product,
+                                     "uncovered_by_scope": ["b.py"]}
     task.rounds[0]["org_state"] = "done"
     task.rounds[0]["org_generation"] = 1
     task.rounds[0]["end_state"] = "completed"
@@ -2458,6 +2471,12 @@ def _early_fixture(monkeypatch, tmp_path, *, prior_tree=False, newer_round=False
         nr["end_state"] = "completed"
         nr["org_state"] = ""
         task.rounds.append(nr)
+        # 另一半：产物声明的**范围覆盖不到**新文件（2026-09-15 起材料过期的
+        # 信号是 `uncovered_by_scope`，不再是"未覆盖"缺陷——那个已不拒收）
+        for rr in task.rounds:
+            pending = rr.get("pending_org")
+            if pending:
+                pending["uncovered_by_scope"] = ["c.py"]
     # 开放轮：用户正在说话
     open_round = _mk_read_round(9, "正在聊", [])
     open_round["end_state"] = "open"
@@ -2581,3 +2600,61 @@ def test_early_publish_applies_attribution_on_full_path_only(monkeypatch, tmp_pa
     assert agent2.rounds[1].get("active_view") in (None, "", "Main"), \
         "视图路径下提前写归属会改开放轮历史字节"
     assert agent2.rounds[1].get("pending_view"), "预备值应留到轮边界"
+
+
+def test_split_binds_files_by_declared_path_scopes(monkeypatch, tmp_path):
+    """**文件归属由代码算**（2026-09-15 用户："分裂只需要写结构树和每个 agent 的
+    职责，其它都不需要搞了"）：节点用 `path`/`paths` 声明范围 → 每个活性文件按
+    **最深前缀**机械归属；精确文件优先于目录前缀；没声明到的走 `_auto_claim`
+    （同目录/最近/机械桶），**绝不落主 agent**。
+
+    这条钉住"归属不再依赖模型逐文件填编号"——那正是产物被截断、被整批拒收的
+    头号来源（实测：一次截断只抢救出 22 个节点；另一次两个历史文件落点把整批
+    作废，4 轮全 rejected、注册表只剩 Main）。
+    """
+    agent = Agent(llm=_StubLLM(), tools=[])
+    live = ["src/wovra/tools/web.py", "src/wovra/tools/eyes.py",
+            "src/wovra/agent/core.py", "docs/a.md", "README.md"]
+    monkeypatch.setattr(agent, "_live_files", lambda: live)
+    doms = [
+        {"name": "工具层", "path": "src/wovra/tools/"},
+        {"name": "运行时", "path": "src/wovra/agent/"},
+        {"name": "精确定位", "path": "src/wovra/tools/web.py"},   # 精确文件优先
+        {"name": "文档", "paths": ["docs/"]},
+    ]
+
+    _notes, uncovered = agent._bind_files_by_path(doms)
+
+    by_name = {d["name"]: d for d in doms}
+    assert by_name["精确定位"]["files"] == ["src/wovra/tools/web.py"]
+    assert by_name["工具层"]["files"] == ["src/wovra/tools/eyes.py"]
+    assert by_name["运行时"]["files"] == ["src/wovra/agent/core.py"]
+    assert by_name["文档"]["files"] == ["docs/a.md"]
+    # `README.md` 没有任何范围命中 → 机械桶接住（不是主 agent）
+    assert uncovered == ["README.md"]
+    buckets = [d for d in doms if d.get("runtime_auto")]
+    assert buckets and buckets[0]["files"] == ["README.md"]
+    # 范围声明用完即清：归宿只有 `files` 一处真源（否则前缀会与清单重叠）
+    assert not any(d.get("file_domains") for d in doms)
+
+
+def test_split_binding_fills_description_from_file_head(monkeypatch, tmp_path):
+    """没有描述的节点：描述**取它第一份文件的开头**（首行注释/标题）——
+    用户口径"文件描述可以窃取文件开头一部分"，永远新鲜、不用模型抄。"""
+    from wovra import task as task_module2
+    from wovra.tools import safety as safety_module
+
+    monkeypatch.setattr(task_module2, "TASKS_ROOT", tmp_path / "tasks")
+    ws = tmp_path / "ws"
+    (ws / "src" / "demo").mkdir(parents=True)
+    (ws / "src" / "demo" / "a.py").write_text(
+        "# 演示模块：把输入转成输出\nimport os\n", encoding="utf-8")
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", ws)
+    agent = Agent(llm=_StubLLM(), tools=[])
+    monkeypatch.setattr(agent, "_live_files", lambda: ["src/demo/a.py"])
+    doms = [{"name": "演示线", "path": "src/demo/"}]
+
+    agent._bind_files_by_path(doms)
+
+    assert doms[0]["files"] == ["src/demo/a.py"]
+    assert doms[0]["description"].startswith("演示模块")   # 首行注释被"窃取"
