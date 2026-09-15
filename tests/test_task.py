@@ -659,7 +659,12 @@ def test_load_self_heals_legacy_v1_blocks(monkeypatch, tmp_path):
 
 
 def test_task_binds_and_restores_workspace(monkeypatch, tmp_path):
-    """会话绑定工作区：创建时记录，加载时恢复——从任何目录恢复都回原地。"""
+    """会话绑定工作区：创建时记录，加载后能回到原工作区干活。
+
+    2026-09-15 起"恢复"不再由 `load()` 改进程全局：绑定发生在**用它的线程**
+    里（`safety.bind_workspace`，`cli.prompt._build_agent` 调用）——见
+    `test_load_does_not_repoint_workspace_global`。
+    """
     from wovra import tools as tools_module
 
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
@@ -671,11 +676,70 @@ def test_task_binds_and_restores_workspace(monkeypatch, tmp_path):
     assert task.workspace == str(ws)
     task.save()
 
-    # 模拟从别处启动：PROJECT_ROOT 已变，但加载旧会话会恢复其绑定的工作区
+    # 模拟从别处启动：进程默认已变，但会话记录着自己的原工作区
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
     loaded = Task.load(task.id)
     assert loaded.workspace == str(ws)
-    assert str(tools_module.safety.PROJECT_ROOT) == str(ws)
+    # 加载只读盘、不动全局；要进那个文件世界得显式绑
+    assert str(tools_module.safety.workspace_root()) == str(tmp_path)
+    tools_module.safety.bind_workspace(loaded.workspace)
+    assert str(tools_module.safety.workspace_root()) == str(ws)
+
+
+def test_workspace_binding_is_thread_local(monkeypatch, tmp_path):
+    """回归（2026-09-15 用户报障，会话 20260915-150152-fd7962）：
+
+    加载**别的会话**不得动本线程的文件世界。现场是 serve 多线程：一轮在跑，
+    另一个标签页点开别的会话（`/view-sizes` → `Task.load`），而 `Task.load`
+    曾把进程级 `PROJECT_ROOT` 改成那个会话的工作区——本轮随后的
+    `read_file other/TOOLING_REVIEW.md` 被解析到那个工作区下，报"文件不存在"。
+    现在工作区是线程绑定（`safety.bind_workspace` / `workspace_root`）。
+    """
+    from wovra.tools import files as files_module
+    from wovra.tools import safety as safety_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
+    ws_a = tmp_path / "ws_a"
+    ws_b = tmp_path / "ws_b"
+    ws_a.mkdir()
+    ws_b.mkdir()
+    (ws_a / "note.md").write_text("我是 A 的文件", encoding="utf-8")
+    (ws_b / "note.md").write_text("我是 B 的文件", encoding="utf-8")
+
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", ws_a)
+    task_a = Task.create(goal="A")
+    task_a.save()
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", ws_b)
+    task_b = Task.create(goal="B")
+    task_b.save()
+    assert task_a.workspace == str(ws_a) and task_b.workspace == str(ws_b)
+
+    # 本线程 = serve 的一轮：进程默认回到 A，并绑到会话 A ——此后文件都按 A 解析
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", ws_a)
+    safety_module.bind_workspace(task_a.workspace)
+    assert safety_module.workspace_root() == ws_a
+    assert "我是 A 的文件" in files_module.read_file("note.md", 1, 5)
+
+    # 别的会话被加载（另一标签页/另一轮）——不得动**进程默认**，也不得动本线程
+    Task.load(task_b.id)
+    assert safety_module.PROJECT_ROOT == ws_a              # ← 修复前这里变成 ws_b
+    assert safety_module.workspace_root() == ws_a
+    assert "我是 A 的文件" in files_module.read_file("note.md", 1, 5)
+
+    # 另一个线程里给会话 B 绑工作区，同样不串到本线程
+    seen: list = []
+
+    def _other_thread() -> None:
+        safety_module.bind_workspace(task_b.workspace)
+        seen.append(safety_module.workspace_root())
+        seen.append(files_module.read_file("note.md", 1, 5))
+
+    worker = threading.Thread(target=_other_thread)
+    worker.start()
+    worker.join()
+
+    assert seen[0] == ws_b and "我是 B 的文件" in seen[1]
+    assert safety_module.workspace_root() == ws_a
 
 
 def test_apply_state_patch_syncs_goal_to_task(monkeypatch, tmp_path):

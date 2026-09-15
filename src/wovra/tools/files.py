@@ -67,7 +67,7 @@ def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
     去重：链接与其目标都命中时只产出一次（按真实路径判重）——
     否则 `glob *.txt` 会把同一个文件列两遍，模型会以为有两份。
     """
-    root_resolved = safety.PROJECT_ROOT.resolve()
+    root_resolved = safety.workspace_root().resolve()
     # 界外授权目录：起点已获授权 → 该目录内部按授权目录为边界
     try:
         boundary = (
@@ -121,7 +121,7 @@ def _display_rel(path: Path) -> Path:
     访问（2026-09-11 授权机制引入后新增场景）。
     """
     try:
-        return path.relative_to(safety.PROJECT_ROOT)
+        return path.relative_to(safety.workspace_root())
     except ValueError:
         return path
 
@@ -395,16 +395,16 @@ _HISTORY_KEEP = 10
 
 
 def _history_slot(target: Path) -> Path | None:
-    """文件 → 它的版本档案目录（从 PROJECT_ROOT 现算，测试可重定向）。
+    """文件 → 它的版本档案目录（从有效工作区现算，测试可重定向）。
 
     授权目录外的文件（界外链接目标）不属于工作区版本档案：返回 None
     （_archive_version 会跳过归档，写入照常进行）。
     """
     try:
-        rel = target.relative_to(safety.PROJECT_ROOT).as_posix()
+        rel = target.relative_to(safety.workspace_root()).as_posix()
     except ValueError:
         return None
-    return safety.PROJECT_ROOT / ".wovra" / "history" / rel.replace("/", "__")
+    return safety.workspace_root() / ".wovra" / "history" / rel.replace("/", "__")
 
 
 _VERSION_SEQ = itertools.count(1)

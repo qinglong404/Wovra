@@ -109,7 +109,7 @@ _HOOK_TIMEOUT = 10
 
 
 def _hook_script(name: str) -> Path | None:
-    script = safety.PROJECT_ROOT / ".wovra" / "hooks" / name
+    script = safety.workspace_root() / ".wovra" / "hooks" / name
     return script if script.is_file() else None
 
 
@@ -120,7 +120,7 @@ def _run_hook(script: Path, payload: dict) -> tuple[int, str] | None:
             [sys.executable, str(script)],
             input=json.dumps(payload, ensure_ascii=False),
             capture_output=True, text=True, timeout=_HOOK_TIMEOUT,
-            cwd=safety.PROJECT_ROOT,
+            cwd=safety.workspace_root(),
             env=dict(os.environ, PYTHONUTF8="1"),
         )
     except (subprocess.TimeoutExpired, OSError):

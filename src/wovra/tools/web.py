@@ -27,7 +27,7 @@ _CACHE_MAX_ENTRIES = 500
 
 
 def _cache_dir() -> Path:
-    path = Path(safety.PROJECT_ROOT) / _CACHE_DIR
+    path = Path(safety.workspace_root()) / _CACHE_DIR
     try:
         path.mkdir(parents=True, exist_ok=True)
     except OSError:

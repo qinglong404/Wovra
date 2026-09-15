@@ -81,7 +81,7 @@ def list_limit(default: int) -> int:
 def _spill_dir() -> Path:
     from . import safety
 
-    path = Path(safety.PROJECT_ROOT) / "output" / "spill"
+    path = Path(safety.workspace_root()) / "output" / "spill"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -98,7 +98,7 @@ def spill(text: str, name: str) -> str | None:
         from . import safety
 
         try:
-            return target.relative_to(Path(safety.PROJECT_ROOT)).as_posix()
+            return target.relative_to(Path(safety.workspace_root())).as_posix()
         except ValueError:
             return str(target)
     except OSError:

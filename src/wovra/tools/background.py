@@ -7,6 +7,7 @@
 import itertools
 import os
 import subprocess
+from pathlib import Path
 
 from . import limits, safety
 from .shell import _decode_output, _kill_process_tree
@@ -39,7 +40,16 @@ def set_current_session(task_id: str | None) -> None:
     """标记当前会话：后台任务按会话归属，防止跨会话误管。"""
     global _CURRENT_SESSION
     _CURRENT_SESSION = task_id
-_BACKGROUND_LOG_DIR = safety.PROJECT_ROOT / ".wovra-background"
+
+
+def _log_dir() -> Path:
+    """后台日志目录（`.wovra-background/`）——**现算**，不 import 期定死。
+
+    2026-09-15：工作区改成线程绑定后，"进程启动目录"不再等于"干活的工作区"
+    （serve 里每个轮/预览各自绑自己的会话）。import 期算出的常量会把日志
+    写到启动目录去，故改成每次现取有效工作区。
+    """
+    return safety.workspace_root() / ".wovra-background"
 
 
 def run_background(command: str, keep_alive: bool = False) -> str:
@@ -65,7 +75,7 @@ def run_background(command: str, keep_alive: bool = False) -> str:
         else:
             return (
                 f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
-                f"后台命令同样默认限定在工作区 {safety.PROJECT_ROOT} 内运行；"
+                f"后台命令同样默认限定在工作区 {safety.workspace_root()} 内运行；"
                 f"越界访问需用户授权一次（授权后自动放行）。"
             )
     reason = safety._confirm_reason(command)
@@ -91,9 +101,10 @@ def _launch_background(command: str, keep_alive: bool) -> tuple[str, subprocess.
 
     输出重定向到日志文件（增量查看用）；进程自成进程组，退出时整树强杀。
     """
-    _BACKGROUND_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_dir = _log_dir()
+    log_dir.mkdir(parents=True, exist_ok=True)
     task_id = f"bg-{next(_BACKGROUND_SEQ)}"
-    log_path = _BACKGROUND_LOG_DIR / f"{task_id}.log"
+    log_path = log_dir / f"{task_id}.log"
     env = dict(os.environ, PYTHONUTF8="1")
     # 同 run_command：后台子进程显式声明非交互（worklog-20260911.md §7）
     env[safety.NONINTERACTIVE_ENV] = "1"
@@ -107,7 +118,7 @@ def _launch_background(command: str, keep_alive: bool) -> tuple[str, subprocess.
             stdin=subprocess.DEVNULL,
             stdout=log_file,
             stderr=subprocess.STDOUT,
-            cwd=safety.PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            cwd=safety.workspace_root(),  # 固定工作目录：相对路径都在项目内
             env=env,
             start_new_session=os.name != "nt",  # 与 run_command 同一套树杀约定
             # Windows：新进程组免疫 Ctrl+C——用户中断主会话不能带走
@@ -146,7 +157,7 @@ def check_background(task_id: str) -> str:
     # 超限时指明**日志原文**（不是副本）：它能被 read_file(pattern=...) 定位，
     # 也能被 search_files 搜——大日志不必全量加载，但随时可检索、可全取。
     try:
-        log_ref = entry["log"].relative_to(safety.PROJECT_ROOT).as_posix()
+        log_ref = entry["log"].relative_to(safety.workspace_root()).as_posix()
     except ValueError:
         log_ref = str(entry["log"])
     return f"[{task_id}] {status}\n{limits.clip(body, f'bg-{task_id}', source=log_ref)}"

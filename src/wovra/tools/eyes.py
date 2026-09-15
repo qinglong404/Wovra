@@ -66,7 +66,7 @@ _MIME = {
 
 def shots_dir() -> Path:
     """截图落盘目录（`.shots/`，已 gitignore，serve 的噪声目录清单也认它）。"""
-    path = Path(safety.PROJECT_ROOT) / ".shots"
+    path = Path(safety.workspace_root()) / ".shots"
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -368,7 +368,7 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
         return f"截图失败：{diag}"
     size = dest.stat().st_size
     try:
-        rel = dest.relative_to(Path(safety.PROJECT_ROOT)).as_posix()
+        rel = dest.relative_to(Path(safety.workspace_root())).as_posix()
     except ValueError:
         rel = str(dest)
     safety._audit(f"[screenshot] {target} → {rel}（{size:,} 字节）")
@@ -411,7 +411,7 @@ def view_image(path: str, note: str = "") -> str:
     if size == 0:
         return f"看图失败：{path} 是空文件"
     try:
-        rel = target.relative_to(Path(safety.PROJECT_ROOT)).as_posix()
+        rel = target.relative_to(Path(safety.workspace_root())).as_posix()
     except ValueError:
         rel = path
     safety._audit(f"[view_image] {rel}（{size:,} 字节）")
@@ -426,7 +426,7 @@ def load_image_part(path: str) -> dict | None:
     读不到/超限/格式不支持都返回 None——装配绝不能因为一张坏图整体失败。
     """
     try:
-        target = Path(safety.PROJECT_ROOT) / path
+        target = Path(safety.workspace_root()) / path
         if not target.is_file():
             return None
         raw = target.read_bytes()

@@ -493,10 +493,11 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
         if not task.goal:
             task.goal = content.strip()[:80]   # 目标随对话成形（对齐 CLI）
             task.save()
-        if task.workspace and Path(task.workspace).is_dir():
-            # Task.load 已切 safety.PROJECT_ROOT；cli 侧是 import 时值快照，
-            # 系统提示词里的"工作区：…"必须一起切（全局单飞下无竞争）
-            _cli_prompt.PROJECT_ROOT = Path(task.workspace)
+        # 工作区**不在这里**动进程全局：`_build_turn_agent`（下面的
+        # `_build_agent`）会把本会话的工作区绑到**本轮这个线程**上。
+        # 2026-09-15 修掉的正是"在这里改全局"——serve 每轮的线程与每个
+        # HTTP 请求线程并发，另一个标签页点开别的会话就会把本轮的文件世界
+        # 换掉（read_file 解析到别的目录，实测报障 fd7962）。
         with _TURN_GATE:
             _acquire_session_lock(task)  # 被占用时抛 SystemExit（CLI 语义）
             try:
@@ -1876,12 +1877,17 @@ class _Handler(BaseHTTPRequestHandler):
     def _local_command(self, task_id: str, name: str, arg: str) -> None:
         """/ 命令的文本类输出（maint/report/bg/todo）：纯本地零模型成本。"""
         from . import ui
+        from .tools import safety as _safety
         if name in ("help", "h", "?", "帮助"):
             return self._json({"text": _WEB_HELP})
         try:
             task = task_module.Task.load(task_id)
         except (OSError, ValueError, json.JSONDecodeError):
             return self._json({"error": "session not found"}, 404)
+        # 命令在本请求线程里跑：bg 那几个工具要按**本会话的工作区**找日志/
+        # 起进程，故先绑到本线程（其余分支只读 task 数据，绑了也无害）。
+        if task.workspace:
+            _safety.bind_workspace(task.workspace)
         if name in ("maint", "维护", "进度"):
             text = ui.maint_view(task)
         elif name in ("report", "报告"):

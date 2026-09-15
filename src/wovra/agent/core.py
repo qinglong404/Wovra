@@ -552,7 +552,7 @@ class _CoreMixin:
             return ""
         try:
             target = tools_module.safety._safe_path_lexical(raw)
-            return target.relative_to(tools_module.PROJECT_ROOT).as_posix()
+            return target.relative_to(tools_module.safety.workspace_root()).as_posix()
         except Exception:  # noqa: BLE001——越界/畸形路径交给工具层原有检查
             return raw.replace("\\", "/").strip("/")
 
@@ -632,7 +632,7 @@ class _CoreMixin:
     def _guess_file_note(rel: str) -> str:
         """机械占位描述（零 LLM）：首行注释 / markdown 标题 / docstring 首句。"""
         try:
-            target = tools_module.safety.PROJECT_ROOT / str(rel)
+            target = tools_module.safety.workspace_root() / str(rel)
             head = target.read_text(encoding="utf-8", errors="ignore")[:600]
         except (OSError, ValueError):
             return ""

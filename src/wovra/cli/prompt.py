@@ -2,10 +2,12 @@
 工具清单装配（_build_agent 是组合根）。
 """
 
+from pathlib import Path
+
 from ..agent import Agent, MODE_MANAGED
 from ..task import Task
+from ..tools import safety as safety_module
 from ..tools import (
-    PROJECT_ROOT,
     ask_user,
     check_background,
     delete_file,
@@ -58,7 +60,8 @@ def _system_prompt(mode: str) -> str:
         env = "当前环境：Linux，shell 是 POSIX sh。"
 
     common = (
-        f"你是 Wovra 的执行助手。工作区：{PROJECT_ROOT}——所有文件工具与"
+        f"你是 Wovra 的执行助手。工作区：{safety_module.workspace_root()}——"
+        "所有文件工具与"
         "命令都限定并执行于此目录内。会话持久化在磁盘上：每轮结束自动"
         "保存，用户可随时退出、下次接着做。需要时使用工具获取真实信息或"
         "完成任务：找内容用 search_files，按文件名找文件用 glob_files，"
@@ -171,7 +174,7 @@ def _workspace_instructions() -> str:
     亲手写的纪律，截掉一半比不加载更糟；现放宽到 100,000 字符，正常
     文件根本碰不到，只防误放巨型文件进提示词。
     """
-    doc = PROJECT_ROOT / "AGENTS.md"
+    doc = safety_module.workspace_root() / "AGENTS.md"
     try:
         content = doc.read_text(encoding="utf-8").strip()
     except OSError:
@@ -195,7 +198,15 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
     baseline（全量回放 + 阈值压缩的对照组）。
     async_organization：整理是否后台异步执行（chat 模式开，
     run 模式关——一次性进程退出前必须同步完成）。
+
+    **工作区绑定点**（2026-09-15）：这里是会话与文件世界的唯一绑定点——
+    谁要带着工具干活（CLI 的一轮、serve 的一轮、serve 的预览/命令），
+    谁在自己的线程里经此绑上该会话的工作区。绑定放在提示词/AGENTS.md
+    读取之前，否则系统提示词里的"工作区：…"会和工具实际解析的目录不一致。
     """
+    workspace = str(getattr(task, "workspace", "") or "").strip()
+    if workspace and Path(workspace).is_dir():
+        safety_module.bind_workspace(workspace)
     return Agent(
         system_prompt=_system_prompt(mode),
         tools=[

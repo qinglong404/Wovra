@@ -483,8 +483,10 @@ class Task:
     # baseline 记账：累计输入 token（用于 80% 阈值压缩触发）与压缩摘要
     baseline_prompt_used: int = 0
     baseline_summary: str = ""
-    # 会话绑定的工作区（创建时的 PROJECT_ROOT）。恢复会话时以此为准——
-    # 无论从哪个目录启动 wovra，都回到该会话原本的文件世界
+    # 会话绑定的工作区（创建时取进程默认工作区；可在新建时指定）。
+    # 恢复会话时以它为准——无论从哪个目录启动 wovra，都回到该会话原本的
+    # 文件世界。绑定动作在用它的线程里做（`safety.bind_workspace`，见
+    # `cli.prompt._build_agent`），不在 `load()` 里改进程全局。
     workspace: str = ""
     # 安全模式（2026-09-12）："approve" = 一切敏感操作先问人（默认）；
     # "auto" = 自主运行——确认闸门全部放行（适合无人值守长跑）
@@ -659,7 +661,7 @@ class Task:
             id=task_id,
             goal=goal,
             requirements=list(requirements or []),
-            workspace=str(tools_module.safety.PROJECT_ROOT),
+            workspace=str(tools_module.safety.workspace_root()),
             # 注册表默认只有主 agent；分裂执行时扩充（机制三/四）。
             # ID 体系 v2（2026-09-12 用户拍板）：主 agent = `Main`，第一次
             # 分裂的顶层域取 `A`、`B`、`C`…，A 满了才在 A 内裂 `A-1`。
@@ -691,7 +693,6 @@ class Task:
         迁移（旧进程会用内存里的旧数据覆盖回去，只有重启后的新进程能治）。
         """
         from . import registry as registry_module
-        from . import tools as tools_module
         from .blocks import migrate as migrate_module
 
         path = TASKS_ROOT / task_id / "task.json"
@@ -787,10 +788,12 @@ class Task:
                 "（人视图此前显示“目标待明确”）",
             )
             task.save()
-        if task.workspace:
-            workspace = Path(task.workspace)
-            if workspace.is_dir():
-                tools_module.safety.PROJECT_ROOT = workspace
+        # **加载不再改工作区**（2026-09-15 用户报障修复）：这里曾把进程级
+        # `safety.PROJECT_ROOT` 改成本会话的 workspace——serve 是多线程的，
+        # 于是"另一个标签页点开别的会话"就能把正在跑的那一轮的文件世界换掉
+        # （read_file 被解析到别的目录而报"文件不存在"，实测复现）。
+        # 现在由**用的人**在自己的线程里绑：`cli.prompt._build_agent` 开头
+        # `safety.bind_workspace(task.workspace)`——一轮一个线程，各绑各的。
         return task
 
     @classmethod

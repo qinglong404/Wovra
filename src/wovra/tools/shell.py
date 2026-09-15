@@ -119,11 +119,11 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 f"{note}。"
                 if note else
                 "越界访问需用户授权：授权一次后该路径自动放行"
-                f"（授权清单: {safety.PROJECT_ROOT / '.wovra' / 'authorized-paths.json'}）。"
+                f"（授权清单: {safety.workspace_root() / '.wovra' / 'authorized-paths.json'}）。"
             )
             return (
                 f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
-                f"所有命令默认限定在工作区 {safety.PROJECT_ROOT} 内运行。"
+                f"所有命令默认限定在工作区 {safety.workspace_root()} 内运行。"
                 f"{hint}{tail}"
             )
     reason = safety._confirm_reason(command)
@@ -163,7 +163,7 @@ def run_command(command: str, timeout: int | None = None) -> str:
             stdin=subprocess.DEVNULL,
             stdout=out_f,
             stderr=err_f,
-            cwd=safety.PROJECT_ROOT,  # 固定工作目录：相对路径都在项目内
+            cwd=safety.workspace_root(),  # 固定工作目录：相对路径都在项目内
             env=child_env,
             # POSIX：让子进程自成进程组，超时后 killpg 整组杀掉而不伤自身
             start_new_session=os.name != "nt",

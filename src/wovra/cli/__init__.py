@@ -32,7 +32,6 @@ from .session import (  # noqa: F401
     _session_lock_path,
 )
 from .prompt import (  # noqa: F401
-    PROJECT_ROOT,
     _build_agent,
     _system_prompt,
     _workspace_instructions,

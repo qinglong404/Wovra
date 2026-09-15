@@ -404,7 +404,10 @@ class _MaintenanceMixin:
         if self._org_thread is not None and self._org_thread.is_alive():
             return
         self._org_thread = threading.Thread(
-            target=self._org_worker, name="wovra-organization", daemon=True
+            # 整理线程要按**本会话的工作区**读文件（`_guess_file_note` 等），
+            # 而 thread-local 不随新建线程继承——把父线程那份带进去。
+            target=safety_module.workspace_bound_target(self._org_worker),
+            name="wovra-organization", daemon=True,
         )
         self._org_thread.start()
 
@@ -2148,7 +2151,8 @@ class _MaintenanceMixin:
                     self._persist_rounds()
 
         thread = threading.Thread(
-            target=run, name="wovra-maintenance", daemon=True
+            target=safety_module.workspace_bound_target(run),
+            name="wovra-maintenance", daemon=True,
         )
         # 落盘由 `_persist_rounds` 统一"先重读盘 + 并集合并"（§86）：整理改异步
         # 之后，维护线程（旧 agent）与下一轮的 agent 会同时写 task.json，而两边写

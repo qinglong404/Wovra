@@ -3,11 +3,21 @@
 本模块是 `wovra.tools` 包的共享底层，被 files / shell / background / web /
 interaction 各模块依赖；它自身不 import 包内其它模块。
 
-**可变全局的属主规则**（重构纪律）：`PROJECT_ROOT`、`_audit_recorder`、
-`_user_input_pending` 在此定义。包内其它模块一律通过 `safety.PROJECT_ROOT`
-动态读取；外部改写（task.py 绑定会话工作区、测试/探针重定向）也必须写到
-这里——`wovra.tools.PROJECT_ROOT` 只是 import 时的值快照，改写包属性不会
-生效（cli.py 需要快照语义，探针另有 cli_module 补丁，属既有行为）。
+**有效工作区的属主规则**（2026-09-15 重构）：`PROJECT_ROOT` 是**进程默认**
+工作区（启动目录 / `WOVRA_WORKSPACE`），测试与探针改写它重定向整个进程；
+**有效工作区**由 `workspace_root()` 给出 = 当前线程绑定优先、进程默认兜底：
+
+    safety.bind_workspace(task.workspace)   # 谁要在哪个会话的文件世界里干活，谁绑
+    safety.workspace_root()                 # 工具层一律读这个，不再直接读 PROJECT_ROOT
+
+为什么改成线程绑定（2026-09-15 用户报障，会话 20260915-150152-fd7962）：serve 是
+多线程的（`ThreadingHTTPServer`：一轮一个线程，每个 HTTP 请求也各一个线程），而
+`Task.load` 曾把**进程级** `PROJECT_ROOT` 改写成该会话的工作区——于是另一个标签页
+点开别的会话（`/view-sizes` → `Task.load`）就能把正在跑的那一轮的文件世界换掉：
+`read_file other/TOOLING_REVIEW.md` 被解析成 `/…/agent-test/other/…` 而报"文件
+不存在"（已实测复现）。线程绑定后各轮、各预览、各请求互不打扰。
+
+其余可变全局（`_audit_recorder`、`_user_input_pending`）仍按原属主规则在此定义。
 
 路径安全层**两道判定**：① 词法层拒绝 `..` 且不跟随末段链接；
 ② 解析层在 ① 之上再拦"解析后指向界外的链接"（需授权一次）。
@@ -31,21 +41,62 @@ import json
 import os
 import re
 import sys
+import threading
 from pathlib import Path, PurePosixPath
 
 
-# 项目根目录（工作区）：所有文件与命令都限定在这里。
+# **进程默认**工作区：所有文件与命令默认限定在这里。
 # 解析顺序：
 #   1. 环境变量 WOVRA_WORKSPACE（显式指定，脚本/自动化用）
 #   2. 启动目录——在哪启动，工作区就在哪（2026-09-07 用户拍板：
 #      曾有"仓库子目录自动回退仓库根"的反 Surprise 规则，实测与
 #      使用直觉冲突——从 web/ 启动就该以 web/ 为工作区，删除）
-# 注意：会话会绑定其工作区（见 task.py）——恢复旧会话时以会话记录为准。
+# 会话要到自己的文件世界里干活时，由调用方 `bind_workspace()` 绑到当前线程
+# （见下面的 `workspace_root()`）——不再由 `Task.load` 改写这个进程级默认值。
 PROJECT_ROOT = Path.cwd().resolve()
 _env_ws = os.environ.get("WOVRA_WORKSPACE")
 if _env_ws:
     PROJECT_ROOT = Path(_env_ws).resolve()
     PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
+
+# 线程绑定的有效工作区（模块头有完整背景）。用 thread-local 而不是进程全局：
+# serve 的一轮、一次预览、一个请求各在自己的线程里跑，谁都不该把别人的文件
+# 世界换掉。注意 thread-local **不随新建线程继承**——派生线程要干活（后台
+# 整理/分裂要走工作区读文件），用 `workspace_bound_target` 把父线程那份带进去。
+_WORKSPACE = threading.local()
+
+
+def workspace_root() -> Path:
+    """当前线程的有效工作区：线程绑定优先，进程默认兜底。"""
+    bound = getattr(_WORKSPACE, "root", None)
+    return bound if bound is not None else PROJECT_ROOT
+
+
+def bind_workspace(path) -> Path:
+    """把工作区绑定到**当前线程**——此后本线程内的相对路径都按它解析。"""
+    root = Path(path).resolve()
+    _WORKSPACE.root = root
+    return root
+
+
+def unbind_workspace() -> None:
+    """解除当前线程的绑定（回到进程默认）。测试隔离用。"""
+    _WORKSPACE.root = None
+
+
+def workspace_bound_target(fn):
+    """线程入口包装：把**父线程**的有效工作区带进新建的线程。
+
+    thread-local 不随线程继承，而后台整理/分裂线程要走工作区读文件
+    （`_guess_file_note` 等）——不带过去就会退回进程默认、读错目录。
+    """
+    root = workspace_root()
+
+    def _run(*args, **kwargs):
+        bind_workspace(root)
+        return fn(*args, **kwargs)
+
+    return _run
 
 # 工具结果成败判定**已迁出本模块**（2026-09-14）：
 #   原 `FAILURE_MARKERS` 是**全文子串**判定，正文里出现"工具执行出错"等字样
@@ -417,7 +468,7 @@ def _linked_outside(command: str) -> str | None:
     数据引号段（commit message 等）先掩码——那只是文本引用，不是执行。
     """
     command = _mask_quoted_text(command)
-    root = PROJECT_ROOT.resolve()
+    root = workspace_root().resolve()
     for raw in re.findall(r"[^\s'\"|;&<>=()$`]+", command):
         token = raw.strip(",;:")
         if not token or token.startswith("-"):
@@ -486,7 +537,7 @@ def _follows_path_command(command: str, token: str) -> bool:
 def _traverses_outside(command: str) -> str | None:
     """命令里的相对路径 token 经归一化后落在界外 → 返回该 token。"""
     command = _mask_quoted_text(command)
-    root = PROJECT_ROOT.resolve()
+    root = workspace_root().resolve()
     for raw in re.findall(r"[^\s'\"|;&<>=()$`]+", command):
         token = raw.strip(",;:")
         if not token or token.startswith("-") or "://" in token:
@@ -523,7 +574,7 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
     数据不是访问；`-c` 代码段内的绝对路径（python3 -c "open('/x')"）
     仍由下方 findall 在**原始命令**上捕获。
     """
-    root = str(PROJECT_ROOT.resolve())
+    root = str(workspace_root().resolve())
     found: list[str] = []
     # 单独一个 `/`（如 `find / -name x`）也是界外目标；只有紧跟命令词/
     # 选项才是根目录访问（见 _has_root_slash_target 注释）
@@ -574,7 +625,7 @@ def _outside_absolute_paths(command: str, masked: str | None = None) -> list[str
     # 只在 Windows 上启用：POSIX 里 `C:\x` 只是普通文件名（相对路径），
     # 不是绝对路径，据此判定会在"PROJECT_ROOT ≠ cwd"时产生误拦。
     if os.name == "nt":
-        root_resolved = PROJECT_ROOT.resolve()
+        root_resolved = workspace_root().resolve()
         for raw in _WIN_ABS_PATH.findall(masked):
             token = raw.rstrip(",;")
             if not token:
@@ -609,7 +660,7 @@ def _command_escape_targets(command: str) -> tuple[str, list[str]] | None:
     target = r"['\"]?(?:\.\.|/|~|\$HOME|\$\{HOME\})"      # 界外目标（可带引号）
     if re.search(command_word + wrapper + r"cd\s+" + target, command):
         targets = _extract_cd_targets(command)
-        root_resolved = PROJECT_ROOT.resolve()
+        root_resolved = workspace_root().resolve()
         # 界内 cd 放行（2026-09-11 运行者实测误伤）：`cd /home/.../Wovra`
         # 是工作区本身的绝对路径，不该拦；`cd /tmp`、`cd ..` 仍拦。
         # targets 提取失败（空）时保守拦截。
@@ -644,14 +695,14 @@ def _extract_cd_targets(command: str) -> list[str]:
     ):
         raw = m.group(1).rstrip(",;")
         if raw in (".", ".."):
-            resolved = (PROJECT_ROOT / raw).resolve()
+            resolved = (workspace_root() / raw).resolve()
         elif raw.startswith("~"):
             expanded = os.path.expanduser(raw)
             resolved = Path(expanded).resolve()
         elif raw.startswith("/"):
             resolved = Path(raw).resolve()
         else:
-            resolved = (PROJECT_ROOT / raw).resolve()
+            resolved = (workspace_root() / raw).resolve()
         targets.append(str(resolved))
     return targets
 
@@ -713,7 +764,7 @@ def _within_root(path: Path) -> bool:
     `..` 与已存在的链接前缀。
     """
     try:
-        return path.resolve().is_relative_to(PROJECT_ROOT.resolve())
+        return path.resolve().is_relative_to(workspace_root().resolve())
     except OSError:  # 链接成环等病态路径：一律视为界外
         return False
 
@@ -732,22 +783,22 @@ def _safe_path_lexical(relative: str) -> Path:
     if pure.is_absolute() or re.match(r"^[A-Za-z]:", relative):
         raise ValueError(
             f"路径越界，只允许访问项目目录内的文件: {relative}"
-            f"（允许的根目录: {PROJECT_ROOT}）"
+            f"（允许的根目录: {workspace_root()}）"
         )
     if ".." in pure.parts:
         raise ValueError(
             f"路径越界，只允许访问项目目录内的文件: {relative}"
             f"（不接受 `..` 上溯，请直接用工作区内的相对路径；"
-            f"允许的根目录: {PROJECT_ROOT}）"
+            f"允许的根目录: {workspace_root()}）"
         )
     cleaned = [part for part in pure.parts if part not in ("", ".")]
     if not cleaned:
-        return PROJECT_ROOT
-    parent = (PROJECT_ROOT / Path(*cleaned[:-1])).resolve() if len(cleaned) > 1 else PROJECT_ROOT
-    if not parent.is_relative_to(PROJECT_ROOT):
+        return workspace_root()
+    parent = (workspace_root() / Path(*cleaned[:-1])).resolve() if len(cleaned) > 1 else workspace_root()
+    if not parent.is_relative_to(workspace_root()):
         raise ValueError(
             f"路径越界，只允许访问项目目录内的文件: {relative}"
-            f"（允许的根目录: {PROJECT_ROOT}）"
+            f"（允许的根目录: {workspace_root()}）"
         )
     return parent / cleaned[-1]
 
@@ -772,7 +823,7 @@ def _safe_write_path(relative: str) -> Path:
         ):
             raise ValueError(
                 f"路径越界，只允许访问项目目录内的文件: {relative}"
-                f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}。"
+                f"（该路径是指向工作区之外的符号链接；允许的根目录: {workspace_root()}。"
                 f"越界访问需用户授权一次，授权后自动放行）"
             )
     return target
@@ -795,7 +846,7 @@ def _safe_directory(directory: str) -> Path:
         ):
             raise ValueError(
                 f"路径越界，只允许访问项目目录内的文件: {directory}"
-                f"（该路径是指向工作区之外的符号链接；允许的根目录: {PROJECT_ROOT}。"
+                f"（该路径是指向工作区之外的符号链接；允许的根目录: {workspace_root()}。"
                 f"越界访问需用户授权一次，授权后自动放行）"
             )
     return target
@@ -885,7 +936,7 @@ def _ask_yes_no(question: str) -> bool:
 # 授权粒度：单文件或目录（目录授权 = 其下全部内容，按前缀匹配）。
 
 def _authorized_store() -> Path:
-    return PROJECT_ROOT / ".wovra" / "authorized-paths.json"
+    return workspace_root() / ".wovra" / "authorized-paths.json"
 
 
 def _is_too_broad(path: Path) -> bool:
@@ -901,7 +952,7 @@ def _is_too_broad(path: Path) -> bool:
     try:
         if path.parent == path:
             return True
-        root = PROJECT_ROOT.resolve()
+        root = workspace_root().resolve()
         return root.is_relative_to(path)
     except (OSError, ValueError):
         return True  # 判不了就保守驳回

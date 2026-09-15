@@ -30,9 +30,11 @@
 #     web.py          web_search / web_fetch
 #     interaction.py  ask_user / 用户 Hooks / 当前时间
 #
-# 注意：`PROJECT_ROOT` 的**属主是 safety.py**；本包这一份是 import 时的
-# 值快照（cli/ 依赖这份快照语义）。要重定向工作区请改
-# `wovra.tools.safety.PROJECT_ROOT`（task.py / 测试 / 探针均如此）。
+# 注意：`PROJECT_ROOT` 的**属主是 safety.py**，且它只是**进程默认**工作区
+# （启动目录 / `WOVRA_WORKSPACE`）；本包这一份还是 import 时的值快照。
+# 工具层现在一律读 `safety.workspace_root()`（线程绑定优先、进程默认兜底）；
+# 要重定向整个进程请改 `wovra.tools.safety.PROJECT_ROOT`（测试 / 探针均如此），
+# 要给某个会话绑文件世界请调 `safety.bind_workspace()`（见 cli/prompt.py）。
 
 #
 #     eyes.py         眼睛：screenshot（无头浏览器截图）+ view_image（多模态看图）

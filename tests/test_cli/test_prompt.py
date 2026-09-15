@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from wovra import cli as cli_module
 from wovra.cli import main as cli_main
+from wovra.tools import safety as safety_module
 
 # 共享夹具/工具（_helpers.py 是原文件的公共头部）
 from ._helpers import *  # noqa: F401,F403
@@ -99,7 +100,8 @@ def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):
     (tmp_path / "AGENTS.md").write_text(
         "测试用 uv run pytest；不要动 .wovra/ 目录", encoding="utf-8"
     )
-    monkeypatch.setattr(cli_module.prompt, "PROJECT_ROOT", tmp_path)
+    # 工作区来源是 `safety.workspace_root()`（线程绑定优先、进程默认兜底）
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", tmp_path)
 
     prompt = cli_module._system_prompt("managed")
 
@@ -108,9 +110,39 @@ def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):
 
 
 def test_workspace_instructions_absent_is_silent(monkeypatch, tmp_path):
-    monkeypatch.setattr(cli_module.prompt, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(safety_module, "PROJECT_ROOT", tmp_path)
     prompt = cli_module._system_prompt("managed")
     assert "[工作区指令]" not in prompt
+
+
+def test_build_agent_binds_session_workspace(monkeypatch, tmp_path):
+    """`_build_agent` 是会话 ↔ 文件世界的绑定点（2026-09-15）。
+
+    它必须在读提示词/AGENTS.md **之前**绑——否则系统提示词里的"工作区：…"
+    与实际工具解析的目录会不一致（serve 此前靠改进程全局来对齐，多线程下
+    会互相串台，见 safety.py 模块头）。这里用假 Agent 只验绑定与提示词来源。
+    """
+    from wovra.cli import prompt as prompt_module
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    (ws / "AGENTS.md").write_text("用 uv run pytest 跑测试", encoding="utf-8")
+    captured: dict = {}
+
+    def _fake_agent(**kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(**kwargs)
+
+    monkeypatch.setattr(prompt_module, "Agent", _fake_agent)
+    task = SimpleNamespace(workspace=str(ws), id="t1", task_state={},
+                           registry=[], rounds=[])
+
+    agent = prompt_module._build_agent(task)
+
+    assert safety_module.workspace_root() == ws
+    assert "用 uv run pytest 跑测试" in agent.system_prompt   # AGENTS.md 按绑定后的工作区读
+    assert str(ws) in agent.system_prompt                     # 提示词里的工作区就是它
+    assert captured["task"] is task
 
 
 def test_config_error_exits_with_friendly_message(monkeypatch, capsys):
