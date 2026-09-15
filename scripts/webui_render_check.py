@@ -2006,6 +2006,49 @@ __deferred.push((async () => {
   console.log(`   AX /home→${'/home/lkf'}｜根→/home｜Windows→${'C:\\\\Users\\\\me'}｜报错=${errBox()||'无'}｜最后请求=${AX_ASK[AX_ASK.length-1]}`);
 })());
 
+console.log('场景 AZ｜顶部六格按步更新（跑轮期间随 /plan 重画，不再只等轮闭合）');
+// 用户口径（2026-09-15）："将现在页面最上面六个显示，改成按步更新，不要再按轮更新了。"
+// `/plan` 除计划账本还带 usage/rounds/steps 的现算值（与 session_meta 同源），
+// pollPlan 每 tick 拉一次 → `applyPlanKpis` 独立签名比对，一变就只重画六格。
+{
+  META = {id:'s1', status:'in_progress', rounds:7,
+          usage:{calls:1,prompt:1000,cached:900,miss:100,completion:10,ttft_sum:2.0},
+          round_list:[{seq:7, steps_used:3}], registry:[]};
+  CUR = 's1'; TAB = 'conv';
+  window._kpiSig = '';
+  const kpiText = () => { const el = document.getElementById('kpis'); return el ? domAllText(el) : ''; };
+  renderHeader();                       // 首屏：META 里的（旧）数
+  const t0 = kpiText();
+  const plan1 = {usage:{calls:2,prompt:900,cached:810,miss:90,completion:20,ttft_sum:4.0},
+                 rounds:7, steps:4};
+  const changed = applyPlanKpis(plan1);
+  const t1 = kpiText();
+  if (!changed) problems.push('AZ: 用量变了却没认（按步更新失效）');
+  if (!/900/.test(t1)) problems.push('AZ: 六格没吃到 /plan 的现算值（Σprompt=900 没出现）');
+  const stepCell = (document.getElementById('kpis').children||[])[4];
+  const stepTxt = stepCell ? String(stepCell.textContent || '') : '';
+  if (!/4/.test(stepTxt) || !/步/.test(stepTxt)) problems.push('AZ: 总步数没按 /plan 更新');
+  if (t1 === t0) problems.push('AZ: 六格内容没变');
+  // 同一份现算值再来一次：一个字节都不许动（不白刷 DOM）
+  const again = applyPlanKpis(plan1);
+  if (again) problems.push('AZ: 用量没变却重画了（签名比对失效）');
+  const t2 = kpiText();
+  if (t2 !== t1) problems.push('AZ: 幂等调用把六格改了');
+  // 再长一步 → 又变
+  const plan2 = {usage:{calls:3,prompt:999,cached:899,miss:100,completion:30,ttft_sum:6.0},
+                 rounds:7, steps:5};
+  applyPlanKpis(plan2);
+  const t3 = kpiText();
+  if (!/999/.test(t3)) problems.push('AZ: 又长一步后六格没跟上');
+  // 六格之外不许被牵连（#tabs 每步重建会丢悬停态）
+  const tabsBefore = String((document.getElementById('tabs')||{}).innerHTML||'');
+  applyPlanKpis({usage:{calls:4,prompt:4000,cached:3600,miss:400,completion:40,ttft_sum:8.0},
+                 rounds:7, steps:6});
+  const tabsAfter = String((document.getElementById('tabs')||{}).innerHTML||'');
+  if (tabsAfter !== tabsBefore) problems.push('AZ: 按步刷新把 #tabs 也重建了（应只动六格）');
+  console.log(`   AZ 变化认=${changed} Σ900=${/900/.test(t1)} 步数=${/4/.test(stepTxt)&&/步/.test(stepTxt)} 幂等=${!again} 再长一步=${/999/.test(t3)} tabs不动=${tabsAfter===tabsBefore}`);
+}
+
 console.log('场景 AS｜收尾交接：缓存落后/为空时必须"先补齐、再上屏"');
 // 用户报（2026-09-15）：①"正文加载完会消失一会才出来" ②"会话结束整个消息块都没了，
 // 只剩上面那条 R7 的信息，重新刷新之后才出来"。同一个根因：`CONV.cache` 是快照，
@@ -2105,7 +2148,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（47 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（48 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/跟随尾部不变量全查）');
 });
 """
 
@@ -2126,12 +2169,13 @@ def main() -> int:
     # 静态接线核对（渲染桩照不到的地方）：#content 的 scroll 监听必须真的挂着——
     # "跟随尾部"整条逻辑都由它触发，线断了桩里测不出来（元素监听没法跨 resetDom 存活）。
     for need, why in (
-        ("closest('[data-p]')", "工作目录列表的点击委托"),
+        ("closest('[data-p]')", "工作目录列表的点击委托（点文件夹不会进目录）"),
         ("el.dataset.p = join(", "目录行的 data-p（委托消费的路径）"),
+        ("applyPlanKpis(d);", "顶部六格按步更新（/plan 的现算值没人应用）"),
     ):
         if need not in html:
             print("渲染核对：失败 1 项")
-            print(f"  ✗ 接线：{why} 没接上（选工作目录时点文件夹不会进目录）")
+            print(f"  ✗ 接线：{why} 没接上")
             return 1
     if "$('#content').addEventListener('scroll'" not in html:
         print("渲染核对：失败 1 项")

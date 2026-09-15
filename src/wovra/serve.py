@@ -1560,6 +1560,7 @@ class _Handler(BaseHTTPRequestHandler):
             if data is None:
                 return self._json({"error": "session not found"}, 404)
             rounds = data.get("rounds") or []
+            usage = usage_totals(data.get("history"))
             return self._json({
                 "todo": data.get("todo") or {},
                 "todo_log": todo_log(data),
@@ -1568,6 +1569,14 @@ class _Handler(BaseHTTPRequestHandler):
                 # 刷新看新注册表"，不必反复拉整份 session_meta。
                 "org_pending": [r.get("seq") for r in rounds
                                 if str(r.get("org_state") or "") == "pending"],
+                # **顶部六格的按步现算值**（2026-09-15 用户口径："按步更新，不要
+                # 再按轮更新"）：与 `session_meta` 的 usage/rounds/steps 同源同口径
+                # （`usage_totals(history)` + `Σsteps_used`），但**每 tick 现读**——
+                # 跑轮期间账本行逐调用落盘，前端拉到就能重画，不必等轮闭合。
+                "usage": {k: usage.get(k, 0) for k in (
+                    "calls", "prompt", "cached", "miss", "completion", "ttft_sum")},
+                "rounds": len(rounds),
+                "steps": sum(int(r.get("steps_used") or 0) for r in rounds),
             })
         mtree = re.fullmatch(r"/api/sessions/([^/]+)/tree", path)
         if mtree:

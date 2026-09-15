@@ -571,6 +571,29 @@ def test_fs_list_reports_sep_and_handles_roots(tmp_path):
     assert rel["error"] == "目录不存在"
 
 
+def test_http_plan_carries_live_kpis(server):
+    """`/plan` 除了计划账本，还带**顶部六格的现算值**（按步更新用，2026-09-15）。
+
+    用户口径："将现在页面最上面六个显示，改成按步更新，不要再按轮更新了。"
+    跑轮期间前端每 tick 拉一次这个轻量口：usage/rounds/steps 与 `session_meta`
+    同源同口径（`usage_totals(history)` + Σ`steps_used`），但每 tick 现读——
+    账本行逐调用落盘，拉到就能重画，不必等轮闭合。
+    """
+    code, body = _get(server + "/api/sessions/s1/plan")
+    assert code == 200
+    assert body["todo"]["milestone"]["goal"] == "大步一"
+    u = body["usage"]
+    assert u["calls"] == 1 and u["prompt"] == 100 and u["cached"] == 90
+    assert u["miss"] == 10 and u["completion"] == 5 and abs(u["ttft_sum"] - 1.0) < 1e-6
+    # 与 `session_meta` **同源同口径**（同一次口径两处读，数字必须一致）
+    _, meta = _get(server + "/api/sessions/s1")
+    assert body["rounds"] == len(meta["round_list"])
+    assert body["steps"] == sum((r.get("steps_used") or 0)
+                                for r in meta["round_list"])
+    code, body = _get(server + "/api/sessions/nope/plan")
+    assert code == 404
+
+
 def test_http_sessions_endpoint(server):
     code, body = _get(server + "/api/sessions")
     assert code == 200 and body["sessions"][0]["id"] == "s1"

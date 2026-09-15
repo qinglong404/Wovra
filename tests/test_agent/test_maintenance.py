@@ -1060,13 +1060,18 @@ def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):
     assert bucket and chat_bid in bucket[0]["chat_block_ids"]  # 闲聊→主 agent 桶节点
 
 
-def test_split_aborts_when_a_file_block_has_no_domain(monkeypatch, tmp_path):
-    """分裂完**主 agent 不许有文件**：文件块没有域认领 → 直接报错中止，不许往下走。
+def test_split_auto_claims_file_without_domain(monkeypatch, tmp_path):
+    """文件没被域认领 → **Runtime 机械归位**，不再整批中止（2026-09-15 用户授权：
+    "你看着按最好的来，我只要效果，可以和之前冲突的方法实现"）。
 
-    用户口径（2026-09-13）："现在如果分裂完主 agent 有文件，直接给我报错，不要往下
-    进行了。" 判据用 `views.ownership` 的同一套（文件集合匹配；匹配不到时跟本轮
-    `active_view` 走）——这里让轮**没有**归属、文件**也没人认领**，于是它是真漏认领：
-    必须记下错误、把轮标成 failed、且**什么都不暂存**（产物不 promote）。
+    旧口径（2026-09-13）"主 agent 不许有文件 → 直接报错中止"在实测里变成了空转：
+    会话 20260915-131130-010611 两批分裂 27/29 个文件全未认领（模型把路径写成
+    项目自己的视角/漏前缀），每闭合一轮再来一次、再失败一次，烧掉 134 万 prompt
+    tok 一个域都没长出来。现在改成：**最近的节点接手 + 留痕**——文件仍然
+    **绝不落主 agent**（原口径的实质保留），产物照常暂存。
+
+    判据仍是 `views.ownership` 的同一套（文件集合匹配；匹配不到时跟本轮
+    `active_view` 走）；这里让轮**没有**归属、文件**也没人认领**。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     # 域只认领 src/other.py —— 轮里写的 src/a.py 没人要
@@ -1097,13 +1102,47 @@ def test_split_aborts_when_a_file_block_has_no_domain(monkeypatch, tmp_path):
     agent.last_context_estimate = 5000
     agent._maybe_organize_batch()
 
-    # ① 报出来：账本里留下"中止"+ 文件名
+    # ① 留痕：自动归位写进账（谁被挂到哪），不再是"中止"
     entries = [str(e.get("detail") or "") for e in (task.history or [])
                if e.get("kind") == "maintenance"]
-    assert any("中止" in x and "src/a.py" in x for x in entries), entries[-3:]
-    # ② 不往下进行：轮标 failed，且**没有暂存任何产物**（不 promote）
-    assert task.rounds[0]["org_state"] == "failed"
-    assert not (task.rounds[0].get("pending_org") or {}).get("domains")
+    assert any("自动归位" in x and "src/a.py" in x for x in entries), entries[-3:]
+    assert not any("中止" in x for x in entries), entries[-3:]
+    # ② 产物照常暂存：src/a.py 挂进「后端」（同目录 src/other.py 在那儿），
+    #    绝不落主 agent；轮不再标 failed
+    assert task.rounds[0]["org_state"] == "done"
+    doms = (task.rounds[0].get("pending_org") or {}).get("domains") or []
+    assert doms, "产物必须暂存"
+    back = next(d for d in doms if d.get("name") == "后端")
+    assert "src/a.py" in (back.get("files") or [])
+    assert all(not d.get("main_agent") or "src/a.py" not in (d.get("files") or [])
+               for d in doms)
+    assert not any((d.get("files") or []) and d.get("main_agent") for d in doms)
+
+
+def test_split_normalizes_prefixless_path_refs(monkeypatch, tmp_path):
+    """路径引用要**归一**：模型按"项目自己的视角"写 `src/a.cpp`，真实是
+    `cpp/src/a.cpp` —— 唯一后缀命中就补成全路径，不靠模型把前缀写对。
+
+    实测（2026-09-15 会话 20260915-131130-010611）：工作区里混着 Python 版、
+    `cpp/`、文档，两批分裂都因为"27/29 个文件没有域认领"整批中止；根因之一
+    就是这种缺前缀/带反引号的路径引用**原样放行**、在覆盖检查里全军覆没。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    domains = [{
+        "name": "C++ 实现",
+        "description": "cpp/ 下的实现",
+        "files": ["`src/gripper.cpp`"],     # 缺前缀 + 反引号
+    }]
+    live = {"L00": "cpp/src/gripper.cpp", "L01": "cpp/include/omni.hpp"}
+    defects, normalized = Agent._resolve_file_refs(domains, None, live, {})
+    assert defects == []                                   # 归一是**痕迹**不是缺陷
+    assert domains[0]["files"] == ["cpp/src/gripper.cpp"]
+    assert normalized and "cpp/src/gripper.cpp" in normalized[0]
+    # 歧义（两个同名后缀）不许乱指：原样保留，交给 Runtime 归位
+    live2 = {"L00": "a/x.py", "L01": "b/x.py"}
+    d2 = [{"name": "N", "files": ["x.py"]}]
+    _defects2, normalized2 = Agent._resolve_file_refs(d2, None, live2, {})
+    assert d2[0]["files"] == ["x.py"] and normalized2 == []
 
 
 def test_split_does_not_abort_when_round_is_already_routed(monkeypatch, tmp_path):
@@ -1527,10 +1566,11 @@ def test_split_hard_data_lists_non_live_files_as_history(monkeypatch, tmp_path):
     assert "一个不漏" in joined and "只写编号" in joined
 
 
-def test_split_aborts_when_non_live_file_has_no_home(monkeypatch, tmp_path):
-    """非 LIVE 文件没挂到任何节点 → 与漏认领同级的硬错误（中止整批）。
+def test_split_auto_claims_non_live_file_without_home(monkeypatch, tmp_path):
+    """非 LIVE 文件没挂到任何节点 → 同样 **Runtime 机械归位**（不落主 agent）。
 
-    用户口径（2026-09-14）："非 LIVE 文件也是必须填满的"。
+    用户口径（2026-09-14）"非 LIVE 文件也是必须填满的"仍然成立——只是由代码来挂：
+    挂到最近的节点，全都不沾边就新建 Runtime 节点（按顶层目录聚合）。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     domains_args = json.dumps({
@@ -1561,9 +1601,12 @@ def test_split_aborts_when_non_live_file_has_no_home(monkeypatch, tmp_path):
 
     joined = "\n".join(str(h.get("detail")) for h in task.history
                         if h.get("kind") == "maintenance")
-    assert "非 LIVE 文件没有归宿" in joined and "tmp_probe.py" in joined
-    assert all(r.get("org_state") == "failed" for r in task.rounds)
-    assert not any(r.get("pending_org") for r in task.rounds)   # 产物不 promote
+    assert "自动归位（历史文件）" in joined and "tmp_probe.py" in joined, joined[-4:]
+    doms = (task.rounds[0].get("pending_org") or {}).get("domains") or []
+    assert doms, "产物必须暂存（不再中止）"
+    # tmp_probe.py 是顶层文件、谁也不沾边 → 新建 Runtime 节点接住它
+    holders = [d for d in doms if "tmp_probe.py" in (d.get("history_files") or [])]
+    assert holders and all(not d.get("main_agent") for d in holders)
 
 
 def test_split_accepts_tree_with_history_attached(monkeypatch, tmp_path):
@@ -1991,7 +2034,7 @@ def test_resolve_file_refs_translates_ids_and_reports_defects():
         {"name": "戊", "history_files": ["H99"]},      # 未知编号
         {"name": "己", "file": "src/plain.py"},        # 手写路径：放行
     ]
-    defects = Agent._resolve_file_refs(domains, None, live, hist)
+    defects, _normalized = Agent._resolve_file_refs(domains, None, live, hist)
     assert domains[0]["file"] == "a.py" and domains[0]["history_files"] == ["old.tmp"]
     assert domains[1]["history_files"] == ["old.tmp"]  # h00 → H00 → 路径
     assert domains[5]["file"] == "src/plain.py"

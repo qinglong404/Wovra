@@ -1288,8 +1288,17 @@ class _MaintenanceMixin:
             raise SplitCoverageError(reason)
 
         for _attempt in (0, 1):
+            file_defects, normalized = self._resolve_file_refs(
+                domains, unassigned, live_ids, hist_ids)
+            if normalized and self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"split：Runtime 归一了 {len(normalized)} 个文件引用"
+                    f"（{normalized[0]}…）" if len(normalized) > 1
+                    else f"split：Runtime 归一了文件引用（{normalized[0]}）",
+                )
             id_defects = (
-                self._resolve_file_refs(domains, unassigned, live_ids, hist_ids)
+                file_defects
                 + self._validate_block_refs(domains, unassigned, all_ids)
             )
             if not id_defects:
@@ -1366,18 +1375,20 @@ class _MaintenanceMixin:
             f for f, seq in file_of.values() if not _claimed(f, seq)
         })
         if unclaimed:
-            shown = "、".join(unclaimed[:8]) + ("…" if len(unclaimed) > 8 else "")
+            # **Runtime 机械归位，不再整批中止**（2026-09-15 用户授权："我只要
+            # 效果，可以和之前冲突的方法实现"）：中止只会空转——实测会话
+            # 20260915-131130-010611 两批分裂 27/29 个文件全未认领，每闭合一轮
+            # 再来一次、再失败一次。归位判据仍是代码算：同目录 → 最长公共目录
+            # 前缀 → 新建 Runtime 节点（绝不落主 agent，保护 2026-09-13 的原口径）。
+            notes = self._auto_claim(domains, unclaimed, "files")
             if self.task is not None:
-                self.task.record(
-                    "maintenance",
-                    f"split：**中止**——{len(unclaimed)} 个文件没有任何域认领：{shown}",
-                )
-                self._persist_rounds()
-            raise SplitCoverageError(
-                f"分裂中止：这批 {len(unclaimed)} 个文件块没有域认领"
-                f"（{shown}）。文件必须有归属——请让分裂把它们认领进某个域，"
-                f"不允许留在主 agent（用户口径 2026-09-13）。"
-            )
+                for n in notes[:6]:
+                    self.task.record("maintenance", f"split：Runtime 自动归位——{n}")
+                if len(notes) > 6:
+                    self.task.record(
+                        "maintenance",
+                        f"split：Runtime 自动归位——另 {len(notes) - 6} 条（见上同类）",
+                    )
 
         # **非 LIVE 文件也必须挂满**（2026-09-14 用户口径："非 LIVE 文件也是
         # 必须填满的"——磁盘上没了不等于没用：临时测试脚本验过什么、结果如何，
@@ -1394,18 +1405,18 @@ class _MaintenanceMixin:
             if not pathmatch_module.matches(p, claimed_hist)
         )
         if missing_hist:
-            shown = "、".join(missing_hist[:8]) + ("…" if len(missing_hist) > 8 else "")
+            # 同上：Runtime 归位（非 LIVE 文件也**绝不落主 agent**——用户口径
+            # 2026-09-14"必须挂满"仍成立，只是由代码来挂）
+            notes = self._auto_claim(domains, missing_hist, "history_files")
             if self.task is not None:
-                self.task.record(
-                    "maintenance",
-                    f"split：**中止**——{len(missing_hist)} 个非 LIVE 文件没有归宿：{shown}",
-                )
-                self._persist_rounds()
-            raise SplitCoverageError(
-                f"分裂中止：这批 {len(missing_hist)} 个非 LIVE 文件没有挂到任何节点"
-                f"（{shown}）。它们承载早期工作的结论、后面要装配进上下文——"
-                f"必须挂到相关叶子下面（history_files），一个不漏。"
-            )
+                for n in notes[:6]:
+                    self.task.record(
+                        "maintenance", f"split：Runtime 自动归位（历史文件）——{n}")
+                if len(notes) > 6:
+                    self.task.record(
+                        "maintenance",
+                        f"split：Runtime 自动归位（历史文件）——另 {len(notes) - 6} 条",
+                    )
 
         orphans = sorted(all_ids - covered - set(kept))
         if orphans:
@@ -1598,23 +1609,50 @@ class _MaintenanceMixin:
     def _resolve_file_refs(
         domains: list, unassigned, live_ids: dict[str, str],
         hist_ids: dict[str, str],
-    ) -> list[str]:
-        """把产物里的文件编号翻回真路径（原地修改）；返回缺陷清单。
+    ) -> tuple[list[str], list[str]]:
+        """把产物里的文件编号翻回真路径（原地修改）；返回 (缺陷清单, 归一痕迹)。
 
         * `file` / `files`：必须用 L 编号（或直接给路径，兼容手写/旧产物）；
         * `history_files`：必须用 H 编号（或路径）；
         * 编号未知 / 用错节（H 当叶子、L 当历史）→ 缺陷（调用方带诊断重发）。
+
+        **路径形态也要归一**（2026-09-15）：模型抄路径时会按"项目自己的视角"写
+        （`src/a.cpp` 而真实是 `cpp/src/a.cpp`）或带反引号/引号——原先原样放行，
+        于是覆盖检查里**全军覆没**（实测会话 20260915-131130-010611：两批分裂、
+        27/29 个文件"没有任何域认领"、烧掉 134 万 prompt tok 一个域没长出来）。
+        这里做**唯一化归位**：精确命中 → 用它；唯一后缀命中 → 补成全路径
+        （记一条归一痕迹，人视图可查）；对不上或歧义 → 原样保留（后面的
+        Runtime 归位再兜）。
         """
         import re as _re
         id_re = _re.compile(r"^([LH])(\d+)$", _re.IGNORECASE)
         defects: list[str] = []
+        normalized: list[str] = []
+        pool = [p for p in list(live_ids.values()) + list(hist_ids.values()) if p]
+
+        def canon(raw: str) -> str:
+            """路径引用 → 真路径：精确 → 唯一后缀；无命中/歧义原样返回。"""
+            want = pathmatch_module.norm(raw)
+            if not want:
+                return raw
+            for p in pool:
+                if pathmatch_module.norm(p) == want:
+                    return p
+            tail = "/" + want.lstrip("/")
+            hits = [p for p in pool if pathmatch_module.norm(p).endswith(tail)]
+            if len(hits) == 1:
+                return hits[0]
+            return raw
 
         def ref(v, where: str, ids: dict[str, str], other: dict[str, str],
                 label: str, wrong_label: str) -> str:
             raw = str(v or "").strip()
             m = id_re.match(raw)
             if not m:
-                return raw                     # 路径形态：放行（pathmatch 兜底）
+                fixed = canon(raw)
+                if fixed != raw:
+                    normalized.append(f"{raw} → {fixed}")
+                return fixed
             key = f"{m.group(1).upper()}{int(m.group(2)):02d}"
             if key in ids:
                 return ids[key]
@@ -1642,7 +1680,7 @@ class _MaintenanceMixin:
                         "非 LIVE 文件", "活性文件")
                     for f in d["history_files"]
                 ]
-        return defects
+        return defects, normalized
 
     @staticmethod
     def _validate_block_refs(
@@ -1672,6 +1710,92 @@ class _MaintenanceMixin:
         if isinstance(unassigned, dict):
             _check(unassigned.get("block_ids"), "unassigned.block_ids")
         return defects
+
+    @staticmethod
+    def _auto_claim(domains: list, paths: list[str], field: str) -> list[str]:
+        """**Runtime 机械归位**：把没人认领的文件挂到最近的节点下（原地修改）。
+
+        2026-09-15 用户授权（"你看着按最好的来，我只要效果，可以和之前冲突的方法
+        实现"）——原先"文件没域认领 → 整批中止"的口径（2026-09-13）让管道在
+        "每闭合一轮再失败一次"上空转（实测会话 20260915-131130-010611：两批分裂
+        27/29 个文件全未认领、烧掉 134 万 prompt tok 与约 7 分钟 LLM 时间、一个域
+        都没长出来）。归位的判据仍是**代码算**（模型给关系、代码算归宿），只是从
+        "拒收整批"改成"最近的节点接手 + 留痕"：
+
+        1. 该文件所在目录已有同节点的文件 → 挂那个节点（最像）；
+        2. 否则取**最长公共目录前缀**的节点（至少同一顶层目录）；
+        3. 全都不沾边 → 新建 Runtime 节点（按顶层目录聚合，名字写明
+           "Runtime 自动归类"）——下一批分裂可以把它拆细。
+
+        返回留痕行（谁被自动挂到哪）；文件**绝不会**落到主 agent 名下。
+        """
+        if not paths:
+            return []
+
+        def claimed_of(d: dict) -> list[str]:
+            # 节点"已认领的文件"= 它声明过的**全部**文件形态（与
+            # `views._file_domain_entries` 同一并集：files/单文件 file/
+            # 旧目录前缀 file_domains/history_files）——只读 files 会漏掉
+            # 用旧字段声明的节点，归位就会挑错邻居。
+            out: list[str] = []
+            for key in ("files", "file_domains", "history_files"):
+                out += [str(x) for x in (d.get(key) or [])]
+            if d.get("file"):
+                out.append(str(d["file"]))
+            return out
+
+        def shared_dirs(a: str, b: str) -> int:
+            pa = pathmatch_module.norm(a).split("/")[:-1]
+            pb = pathmatch_module.norm(b).split("/")[:-1]
+            n = 0
+            for x, y in zip(pa, pb):
+                if x != y:
+                    break
+                n += 1
+            return n
+
+        def score(path: str, d: dict) -> int:
+            best = 0
+            pd = pathmatch_module.norm(path).rsplit("/", 1)[0] if "/" in pathmatch_module.norm(path) else ""
+            for f in claimed_of(d):
+                s = shared_dirs(path, f)
+                if s <= 0:
+                    continue
+                if pathmatch_module.norm(f).rsplit("/", 1)[0] == pd:
+                    s += 100                     # 同目录：几乎肯定就是这个节点
+                best = max(best, s)
+            return best
+
+        notes: list[str] = []
+        strays: list[str] = []
+        for path in sorted(paths):
+            cands = [(score(path, d), i) for i, d in enumerate(domains)
+                     if isinstance(d, dict) and d.get("name")]
+            cands = [c for c in cands if c[0] > 0]
+            if cands:
+                _, i = max(cands)
+                domains[i].setdefault(field, [])
+                if path not in domains[i][field]:
+                    domains[i][field].append(path)
+                notes.append(f"{path} → 节点「{domains[i].get('name')}」（同目录/最近）")
+            else:
+                strays.append(path)
+        # 全都不沾边的：按顶层目录聚合，新建 Runtime 节点
+        groups: dict[str, list[str]] = {}
+        for path in strays:
+            norm = pathmatch_module.norm(path)
+            top = norm.split("/")[0] if "/" in norm else "根目录"
+            groups.setdefault(top, []).append(path)
+        for top, files in sorted(groups.items()):
+            name = f"{top}（Runtime 自动归类）"
+            node = {"name": name, "description":
+                    "Runtime 自动归类：分裂产物没有认领这些文件，按顶层目录先挂这里"
+                    "（不落主 agent）；下一批分裂可以把它拆细。",
+                    "files": [], "history_files": []}
+            node[field] = list(files)
+            domains.append(node)
+            notes.append(f"{'、'.join(files)} → 新建节点「{name}」")
+        return notes
 
     def _live_files(self) -> list[str]:
         """**分裂单元** = 现有文件（Q1 口径：只读与已删的算历史，不做分裂单元）。
