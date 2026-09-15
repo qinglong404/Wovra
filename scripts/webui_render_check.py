@@ -1433,6 +1433,32 @@ META.round_list = [{seq:7, active_view:'Main', events:4, steps_used:2}];
 
 function DOC_HAS_LIVEBOX(){ return !!DOM.content.querySelector('.livebox'); }
 
+console.log('场景 AR｜分裂状态落到轮头：待生效 / 已回入水位都要看得见');
+// 2026-09-15：维护状态原先只写 history（并发写时会被覆盖），现在落到轮的
+// `split_state` 并由 serve 透出——轮头要有 chip，否则用户只能看到"分裂没结束"。
+resetLive();
+CONV = {session:'s1', seqs:[7], cache:{7:{seq:7, blocks:[], events:[
+  {id:'R7-E01', type:'user', role:'user', content:'干活', time:''},
+  {id:'R7-E02', type:'final_answer', role:'assistant', agent:'Main', content:'完成', time:''}]}}};
+META.round_list = [{seq:7, active_view:'Main', events:2, steps_used:1,
+                    org_state:'done', split_state:'deferred'}];
+drawConv(DOM.content, false);
+{
+  const html = String(DOM.content.innerHTML || '');
+  if (!/分裂待生效/.test(html)) problems.push('AR: split_state=deferred 没显示"分裂待生效"');
+  META.round_list = [{seq:7, active_view:'Main', events:2, steps_used:1,
+                      org_state:'done', split_state:'stale'}];
+  drawConv(DOM.content, false);
+  const html2 = String(DOM.content.innerHTML || '');
+  if (!/已回入水位/.test(html2)) problems.push('AR: split_state=stale 没显示"已回入水位"');
+  META.round_list = [{seq:7, active_view:'Main', events:2, steps_used:1,
+                      org_state:'done', split_state:'done'}];
+  drawConv(DOM.content, false);
+  const html3 = String(DOM.content.innerHTML || '');
+  if (/分裂/.test(html3)) problems.push('AR: split_state=done 不该再显示分裂 chip');
+  console.log(`   AR deferred=${/分裂待生效/.test(html)} stale=${/已回入水位/.test(html2)} done静默=${!/分裂/.test(html3)}`);
+}
+
 console.log('场景 AM｜续轮：直播块必须挂在"最后一段"，不许跑到用户消息上面');
 // 用户审计（2026-09-14）："我消息在最下面，消息块，在上面加载"。续轮（用户消息落进
 // 同一个开放轮）时同一个 agent 有多个块被用户消息切开；旧 `liveGbox` 取**第一个**匹配行
@@ -1755,7 +1781,7 @@ if (problems.length) {
   problems.slice(0, 12).forEach(p => console.log('  ✗ ' + p));
   process.exit(1);
 }
-console.log('渲染核对：通过（40 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
+console.log('渲染核对：通过（41 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态不变量全查）');
 """
 
 

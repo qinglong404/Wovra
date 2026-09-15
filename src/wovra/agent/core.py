@@ -1009,6 +1009,25 @@ class _CoreMixin:
         for e in (fresh.registry or []):
             if isinstance(e, dict) and str(e.get("id")) not in ids:
                 self.task.registry.append(e)     # 别人的新条目：并进来
+        # **history 也要并集合并**（2026-09-15 修，用户问"为什么没有留痕"）：
+        # 原先只合并 rounds/registry，而两个写者（维护线程所在旧实例 / 正在跑的轮
+        # 的**新**实例，serve 每轮新建 agent）都写**整份**文件——维护线程写的
+        # "结束/超时/失败"记录会被轮的下一次保存静默覆盖。实测会话
+        # 20260914-181519-0d3875：只有 09:06:23 的"启动"活着（新实例是在它之后
+        # 才加载的），之后 split 的结束/超时/失败全没了——维护失败于是永远查不出来。
+        # 合并口径：按 (time, kind, detail) 去重后取并集，再按时间稳定排序。
+        seen = {(str(e.get("time")), str(e.get("kind")), str(e.get("detail")))
+                for e in (self.task.history or [])}
+        extra = [
+            e for e in (fresh.history or [])
+            if (str(e.get("time")), str(e.get("kind")), str(e.get("detail"))) not in seen
+        ]
+        if extra:
+            self.task.history.extend(extra)
+            try:
+                self.task.history.sort(key=lambda e: str(e.get("time") or ""))
+            except Exception:  # noqa: BLE001——排序失败不该挡住合并
+                pass
         if self.task is not None:
             self.task.record(
                 "maintenance",

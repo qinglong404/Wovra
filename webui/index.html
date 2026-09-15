@@ -764,6 +764,17 @@ function renderTab(){
   if(TAB==='usage')return renderUsage(c);
 }
 
+/* 分裂状态徽标（2026-09-15）：维护把状态落到轮上（`split_state`），这里显示成轮头 chip。
+   "待生效"=产物就绪但还在等轮闭合（口径：生效都在轮边界）；"已回入水位"=材料过期、
+   下批重整（不是根基缺陷）。 */
+const SPLIT_BADGE={
+  running:['<span class="seg" title="分裂分析进行中：模型正在产出域树（与整理同一次维护的第二阶段）">分裂中…</span>',''],
+  ready:['<span class="seg" style="color:var(--gold)" title="分裂产物已就绪，等待本轮闭合后生效（生效只在轮边界，轮内不改历史字节）">分裂待生效</span>',''],
+  deferred:['<span class="seg" style="color:var(--gold)" title="分裂产物已就绪；有轮正在进行，按轮边界纪律等它闭合后生效">分裂待生效</span>',''],
+  stale:['<span class="seg bad" title="分裂产物按旧材料做的、已过期：批次已回入水位，下批重整（不是根基缺陷，无需人工介入）">分裂过期·已回入水位</span>',''],
+  rejected:['<span class="seg bad" title="分裂产物被拒收（根基缺陷：文件重叠/空域等），需人工查整理/分裂/重组">分裂被拒收</span>',''],
+  failed:['<span class="seg bad" title="分裂阶段失败：本批回入水位，下批重做">分裂失败</span>',''],
+};
 const ORG_BADGE={
   done:'<span class="badge b-done" title="上下文整理已完成：这轮之后的历史已压缩进整理索引，后续轮读到的是整理后视图（省 token、保前缀缓存）">已整理</span>',
   pending:'<span class="badge b-pend" title="上下文整理进行中：原文暂存，整理完成后转为已整理">整理中</span>',
@@ -1745,6 +1756,7 @@ function drawConv(c,toBottom){
     flush();curSeq=seq;
     const d=CONV.cache[seq],m=metaBy[seq]||{};
     const ob=ORG_BADGE[m.org_state||'raw']||ORG_BADGE.raw;
+    const sb=(SPLIT_BADGE[m.split_state||'']||[])[0]||'';   // 分裂状态（存在才显示）
     const evs=d.events||[];
     // 事件时间轴：开始 = 事件 timestamp；持续 = 距下一事件（工具卡即执行耗时）；
     // 尾事件运行中显示已进行时长，历史尾事件无下一事件则不显示。
@@ -1764,6 +1776,7 @@ function drawConv(c,toBottom){
                   t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
                   aid:(senderOf(m)||{}).id,landing:String(m.active_view||''),
                   unassigned:!(senderOf(m)||{}).id,stage:(m.stage==null?-1:m.stage),
+                  sb:sb,
                   parts:(m.participants||[]),at:((String(m.user_input||'').match(/@[^\s，。]+/g)||[])),
                   hops:m.route_hops||0};
     let sepDone=false;
@@ -1811,6 +1824,7 @@ function drawConv(c,toBottom){
         :(row.aid?`<span class="ra" style="color:${agentColor(row.aid)}" title="${esc(landingTip)}">${row.hops?'Main → ':''}⬤ ${esc(row.aid)}</span>`:'');
       const segs=[
         row.ob,
+        row.sb||'',
         (row.steps!=null&&row.steps!=='')?`<span class="seg">${row.steps} 步</span>`:'',
         `<span class="seg">${row.n} 事件</span>`,
         row.stage===0?`<span class="seg" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'',

@@ -348,6 +348,178 @@ class _MaintenanceMixin:
                 # ——子 agent 与其重组上下文在下一轮开场前就建好（§50）。
                 self._settle_after_maintenance()
 
+    def _product_parent_id(self, parent: str) -> str:
+        """产物挂在哪条职责线下（嵌套分裂时 = 被再裂的那个子域条目 id）。"""
+        want = str(parent or "")
+        if not want or want == registry_module.MAIN_AGENT_ID:
+            return ""
+        if self.task is None:
+            return ""
+        ent = next(
+            (e for e in (self.task.registry or [])
+             if isinstance(e, dict)
+             and want in (str(e.get("id")), str(e.get("name")))),
+            None,
+        )
+        return str((ent or {}).get("id") or "")
+
+    def _requeue_if_stale(self, product_round: dict, defects: list) -> bool:
+        """缺陷**全是"未覆盖"** 且存在不属于本批的已闭合轮 → 材料过期：批次回入水位。
+
+        纯账目变更（`org_state`/`split_state`/清暂存），任何时刻都能落——而且**必须
+        早落**：晚落的代价实测过（worklog §104.7）——产物拖到轮闭合才校验，文件集早被
+        期间的新轮改过，判成"根基缺陷"拒收，批次留在 done，会话永久没有域树。
+        """
+        if self.task is None or not defects:
+            return False
+        if not all(str(d).startswith("未覆盖：") for d in defects):
+            return False
+        newer = [
+            rr for rr in self.rounds
+            if rr is not product_round
+            and str(rr.get("end_state") or "") == "completed"
+            and str(rr.get("org_state") or "") != "done"
+        ]
+        if not newer:
+            return False
+        product_round.pop("pending_org", None)     # 过期产物丢弃，下批重做
+        gen = product_round.get("org_generation")
+        for rr in self.rounds:
+            if (str(rr.get("org_state") or "") == "done"
+                    and rr.get("org_generation") == gen):
+                rr["org_state"] = "failed"         # 回入水位：下批重整
+                rr["split_state"] = "stale"
+        self.task.record(
+            "split_stale",
+            "分裂产物材料已过期（有更新轮次）→ 批次回入水位、下批重整："
+            + "；".join(str(d) for d in defects[:4]),
+        )
+        if self.on_progress:
+            self.on_progress("↻ 分裂产物过期，批次已回入水位（下批重整）")
+        return True
+
+    def _publish_product_early(self) -> int:
+        """A 步：产物就绪就**立刻**落"不碰上下文字节"的部分，不再等轮边界。
+
+        用户口径更正（2026-09-15）：「下一轮闭合生效」指的是**上下文替换**——只有会改
+        "当前开放轮正在用的装配字节"的东西才需要等边界。按这个口径拆开（读码核过）：
+
+        * **注册表**（子 agent 出现）→ 全量路径的装配**不读**它（职责表只塞进**视图
+          路径**的系统段；`assembly.py` 里 `responsibility_lines` 只有视图路径调用点）；
+        * **`split_state`** → 纯展示；
+        * **过期回入水位** → 纯账目；
+        * **必须等边界**的只有：`domains`（装配路径的开关）＋ 过去轮渲染用的整理字段
+          （summary/normalized/merged/state_patch）＋ 闭合轮归属（视图路径 judge-3 读它，
+          且用户口径本就要求"到下一轮才生效"）。
+
+        判据：开放轮**已经在视图路径**（它之前已有域树生效）时，职责表在它的系统段里
+        → 注册表仍等边界；只有纯账目类（split_state / 回水位）照落。
+
+        调用点：维护线程分裂产物刚暂存好（立刻），以及"产物就绪但轮在进行中"的让路路径。
+        """
+        if self.task is None:
+            return 0
+        products = [
+            r for r in self.rounds
+            if isinstance(r.get("pending_org"), dict)
+            and r["pending_org"].get("domains")
+        ]
+        if not products:
+            return 0
+        view_path = False
+        open_round = self._open_round_on_disk()
+        if open_round is not None:
+            try:
+                seq = int(open_round.get("seq") or 0)
+            except (TypeError, ValueError):
+                seq = 0
+            view_path = any(
+                r.get("domains") for r in self.rounds
+                if int(r.get("seq") or 0) < seq
+            )
+        landed = 0
+        for r in products:
+            pending = r["pending_org"]
+            domains = pending.get("domains")
+            defects = registry_module.split_defects(
+                domains, self._live_files(), self._non_live_files()
+            )
+            if defects:
+                # 过期 → 立刻回水位（可自愈，不必等边界）；其余缺陷留到边界分类留痕
+                if self._requeue_if_stale(r, defects):
+                    landed += 1
+                continue
+            early: list[str] = []
+            # **信封类字段：任何路径都能立刻落**（2026-09-15 用户裁定"能提前的都提前"）：
+            # `state_patch` → 账本只进**尾部信封**（每步重算、不是历史，动它不破前缀）；
+            # `unassigned`/`split_assessment` 纯展示（装配不读）。落完就从暂存区摘掉，
+            # 边界那一步不会重复应用。
+            if self.task is not None:
+                patch = pending.pop("state_patch", None)
+                if patch:
+                    report = self.task.apply_state_patch(patch)
+                    self._record_close_report(report)
+                    early.append("账本")
+                un = pending.pop("unassigned", None)
+                if un is not None:
+                    r["unassigned"] = un
+                    early.append("未归属")
+                sa = pending.pop("split_assessment", None)
+                if sa is not None:
+                    r["split_assessment"] = sa
+                    early.append("可分裂性")
+            if not view_path:
+                # **闭合轮归属（预备值）也能立刻落**：全量路径装配不读 active_view，
+                # 视图路径（职责表/归属都在开放轮系统段与历史里）才必须等边界。
+                if self._apply_staged_views(domains):
+                    early.append("归属")
+            if view_path or pending.get("registry_landed"):
+                if early and self.task is not None:
+                    self.task.record(
+                        "maintenance",
+                        "提前生效（不碰开放轮字节）：" + "、".join(early)
+                        + ("；注册表/归属等视图路径安全判据" if view_path else ""),
+                    )
+                    landed += 1
+                continue
+            parent_id = self._product_parent_id(
+                str(pending.get("split_parent") or "")
+            )
+            projected, added, updated, settle_lines = registry_module.project_merge(
+                self.task.registry, domains,
+                parent_id=parent_id, retire_id=parent_id,
+            )
+            if registry_module.registry_defects(projected):
+                continue                      # 跨条目互斥 → 留到边界按拒收处理
+            registry_module.land(self.task.registry, projected)
+            pending["registry_landed"] = True
+            if settle_lines:
+                self.task.record(
+                    "maintenance",
+                    f"归属结算：{len(settle_lines)} 个文件的清单从旧条目"
+                    "移到新域（" + "；".join(settle_lines[:6])
+                    + ("…" if len(settle_lines) > 6 else "") + "）",
+                )
+            gen = r.get("org_generation")
+            for rr in self.rounds:
+                if (str(rr.get("org_state") or "") == "done"
+                        and rr.get("org_generation") == gen):
+                    rr["split_state"] = "ready"
+            detail = "、".join((added + updated)[:6]) or "（无变化）"
+            self.task.record(
+                "maintenance",
+                f"registry：分裂产物**提前落实**（不等轮边界）——子 agent 即时可见"
+                f"（{detail}）"
+                + (f"；同时提前生效：{'、'.join(early)}" if early else "")
+                + "；上下文替换（域树/过去轮渲染字段）仍等轮闭合",
+            )
+            if self.on_progress:
+                self.on_progress(f"⚡ 子 agent 已就绪（{detail}）——上下文替换等轮闭合")
+            landed += 1
+        if landed:
+            self._persist_rounds()
+        return landed
+
     def _open_round_on_disk(self) -> Optional[dict]:
         """是否有开放轮——`current_round` 与**盘上**（跨实例）两处都算。
 
@@ -407,6 +579,10 @@ class _MaintenanceMixin:
         ]
         if not products:
             return 0
+        for rr in self.rounds:               # 状态可见：产物就绪、等轮边界
+            if (str(rr.get("org_state") or "") == "done"
+                    and str(rr.get("split_state") or "") in ("", "running", "ready")):
+                rr["split_state"] = "deferred"
         domains = products[-1]["domains"]
         parent = str(products[-1].get("split_parent") or "")
         if not parent and self.rounds:
@@ -468,7 +644,7 @@ class _MaintenanceMixin:
             self._persist_rounds()
         return len(staged)
 
-    def _apply_staged_views(self) -> int:
+    def _apply_staged_views(self, domains: Optional[list] = None) -> int:
         """轮边界：把 `pending_view` 预备区一次性生效（只写 `active_view`）。
 
         预备值只在**所依据的产物正好是现在落地的那一版**时採用（
@@ -481,8 +657,11 @@ class _MaintenanceMixin:
         ]
         if not staged:
             return 0
+        # `domains` 显式给出时用它的指纹（A 步：产物还在暂存区、尚未落档）；
+        # 缺省（B 步）用"已落档的最新域树"
         live = registry_module.domains_digest(
-            registry_module.latest_domains(self.rounds)
+            domains if domains is not None
+            else registry_module.latest_domains(self.rounds)
         )
         applied = 0
         for r in staged:
@@ -534,8 +713,10 @@ class _MaintenanceMixin:
                 open_round = self._open_round_on_disk()
                 if open_round is not None:
                     # 轮进行中：装配字节不许动（"一轮内上下文不变"），但归属
-                    # 判定可以现在就做完、记进预备区
+                    # 判定可以现在就做完、记进预备区；注册表等"不碰字节"的部分
+                    # 也立刻落（A 步，2026-09-15——不再让子 agent 干等轮边界）
                     self._prepare_settle_views(open_round)
+                    self._publish_product_early()
                     return
                 # 落盘前会由 `_persist_rounds` 自动重读盘 + 并集合并（§86）：
                 # 异步维护与下一轮的 agent 会同时写 task.json，两边写的都是整份
@@ -1707,11 +1888,24 @@ class _MaintenanceMixin:
                 return  # org 失败：split 跳过（依赖整理质量）
             try:
                 stage("分裂分析…")
+                for rr in batch:
+                    rr["split_state"] = "running"      # 界面上可见"分裂中"
+                self._persist_rounds()
                 results["split"] = self._split_rounds(
                     batch, box.get("exchange"), base
                 )
+                if results["split"]:
+                    for rr in batch:
+                        rr["split_state"] = "ready"    # 产物就绪、待轮边界生效
+                    self._persist_rounds()
+                    # **A 步：产物就绪即落**（2026-09-15）——注册表/split_state/回水位
+                    # 都不碰上下文字节，不必等轮边界；只有 `domains` 等边界（见方法注释）
+                    self._publish_product_early()
                 stage("整理完成")
             except Exception as error:  # noqa: BLE001
+                for rr in batch:
+                    rr["split_state"] = "failed"
+                self._persist_rounds()
                 if self.task is not None:
                     self.task.record(
                         "maintenance", f"split 阶段失败：{str(error)[:150]}"
@@ -1790,6 +1984,19 @@ class _MaintenanceMixin:
                 if defects:
                     r.pop("domains", None)
                     self._split_defects = defects
+                    # **材料过期 ≠ 根基缺陷**（2026-09-15 修，会话 20260914-181519-0d3875
+                    # 实测）：产物是对**某一批材料**做的；之后又有轮闭合（新文件/新改动）
+                    # 时，产物必然覆盖不全。旧行为把这判成"根基缺陷"拒收，而那批轮留在
+                    # `org_state=done`——它们再也不会被选进整理批次，于是会话永久没有可用
+                    # 域树（实测就卡在这里：R1-R6 done、产品被拒、R7 另起一批也覆盖不全）。
+                    # 判据：① 缺陷**全是"未覆盖"**（覆盖不全，非 F2 重叠/空域这类结构错）；
+                    # ② 存在**不属于本批**的已闭合轮（材料确实变了）→ 回入水位，下批重整。
+                    if self._requeue_if_stale(r, defects):
+                        continue
+                    for rr in self.rounds:
+                        if (str(rr.get("org_state") or "") == "done"
+                                and rr.get("org_generation") == r.get("org_generation")):
+                            rr["split_state"] = "rejected"
                     if self.task is not None:
                         self.task.record(
                             "split_defect",
@@ -1809,15 +2016,7 @@ class _MaintenanceMixin:
                 parent = str(pending.get("split_parent") or "")
                 if not parent:
                     parent = str((self.current_round or {}).get("active_view") or "")
-                parent_id = ""
-                if parent and parent != registry_module.MAIN_AGENT_ID:
-                    ent = next(
-                        (e for e in (self.task.registry or [])
-                         if isinstance(e, dict)
-                         and parent in (str(e.get("id")), str(e.get("name")))),
-                        None,
-                    )
-                    parent_id = str((ent or {}).get("id") or "")
+                parent_id = self._product_parent_id(parent)
                 projected: list[dict] = []
                 added: list[str] = []
                 updated: list[str] = []
@@ -1845,32 +2044,40 @@ class _MaintenanceMixin:
                             )
                         continue
                 r["domains"] = pending["domains"]
+                for rr in self.rounds:
+                    if (str(rr.get("org_state") or "") == "done"
+                            and rr.get("org_generation") == r.get("org_generation")):
+                        rr["split_state"] = "done"
                 # 组织层落地点（2026-09-11 用户拍板 A：Level 1 视图分化）：
                 # 域树 → 注册表条目是**机械翻译**（语义归模型、体量归机制）。
                 # 幂等合并：崩溃补做/重启重放只更新既有条目。注册表在此
                 # 才第一次长出主 agent 之外的条目——此前永远只有 A。
                 if self.task is not None:
-                    registry_module.land(self.task.registry, projected)
-                    if settle_lines:
-                        self.task.record(
-                            "maintenance",
-                            f"归属结算：{len(settle_lines)} 个文件的清单从旧条目"
-                            "移到新域（" + "；".join(settle_lines[:6])
-                            + ("…" if len(settle_lines) > 6 else "") + "）",
-                        )
-                    if added or updated:
-                        detail = []
-                        if added:
-                            detail.append(f"新增 {len(added)}（{'、'.join(added)}）")
-                        if updated:
-                            detail.append(
-                                f"更新 {len(updated)}（{'、'.join(updated)}）"
+                    # 已在 A 步（产物就绪即落）提前落过 → 不重复落/记账；
+                    # `domains` 仍等边界（见 `_publish_product_early`）。
+                    # 生命周期记录**恒跑**：它描述的是域树本身，与落在哪一步无关。
+                    if not pending.get("registry_landed"):
+                        registry_module.land(self.task.registry, projected)
+                        if settle_lines:
+                            self.task.record(
+                                "maintenance",
+                                f"归属结算：{len(settle_lines)} 个文件的清单从旧条目"
+                                "移到新域（" + "；".join(settle_lines[:6])
+                                + ("…" if len(settle_lines) > 6 else "") + "）",
                             )
-                        self.task.record(
-                            "maintenance",
-                            "registry：分裂产物落实为注册表条目——"
-                            + "，".join(detail),
-                        )
+                        if added or updated:
+                            detail = []
+                            if added:
+                                detail.append(f"新增 {len(added)}（{'、'.join(added)}）")
+                            if updated:
+                                detail.append(
+                                    f"更新 {len(updated)}（{'、'.join(updated)}）"
+                                )
+                            self.task.record(
+                                "maintenance",
+                                "registry：分裂产物落实为注册表条目——"
+                                + "，".join(detail),
+                            )
                     self._record_split_lifecycle(pending["domains"])
             if pending.get("unassigned"):
                 r["unassigned"] = pending["unassigned"]

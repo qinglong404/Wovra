@@ -794,7 +794,9 @@ def test_split_lane_stages_domains_in_parallel(monkeypatch, tmp_path):
     # **分裂主体**在提单时落笔（worklog §64）：异步维护跨轮完成时，promote
     # 那一刻的"本轮视图"早已换人，不能拿它当分裂主体
     assert "split_parent" in r1["pending_org"]
-    assert r1["pending_org"]["split_assessment"]["splittable"] is False
+    # A 步（2026-09-15）：展示类字段（split_assessment）产物就绪即落到轮上
+    assert (r1.get("split_assessment")
+            or r1["pending_org"].get("split_assessment"))["splittable"] is False
     agent._promote_org_results()
     assert r1["domains"][0]["name"] == "web 演示项目"
     assert r1["split_assessment"]["splittable"] is False
@@ -1262,7 +1264,10 @@ def test_split_appends_to_org_conversation(monkeypatch, tmp_path):
     assert "extra_body" not in split_calls[0] or not split_calls[0].get("extra_body")
     # 产物：thoughts 与 domains 都落暂存
     assert task.rounds[0]["pending_org"]["domains"][0]["name"] == "web 演示"
-    assert task.rounds[0]["pending_org"]["split_assessment"]["splittable"] is False
+    assert (
+            task.rounds[0].get("split_assessment")
+            or task.rounds[0]["pending_org"].get("split_assessment")
+        )["splittable"] is False
 
 
 def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
@@ -1279,10 +1284,12 @@ def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
     )
     assert [e["id"] for e in task.registry] == ["Main"]   # promote 前只有主 agent
     agent._maybe_organize_batch()
-    # 产物仍在暂存区——注册表此刻还不该动（原子生效协议）
-    assert [e["id"] for e in task.registry] == ["Main"]
+    # **A 步（2026-09-15）**：产物一就绪，注册表**立刻**落（子 agent 即时可见）——
+    # 全量路径的装配不读注册表，不必等轮边界；而 `domains`（上下文替换）仍在暂存区
+    assert [e["id"] for e in task.registry] == ["Main", "A"]
+    assert task.rounds[0]["pending_org"]["domains"]      # 域树仍等边界
 
-    agent._promote_org_results()
+    agent._promote_org_results()                         # 边界步：落域树（注册表幂等）
     ids = [e["id"] for e in task.registry]
     assert ids == ["Main", "A"]                         # 域树 → 路径 ID（顶层 A/B/C）
     entry = task.registry[1]
@@ -1293,8 +1300,9 @@ def test_promote_materializes_registry_entries(monkeypatch, tmp_path):
     # 故这里不再是 dormant，而是有材料的 active
     assert entry["status"] == "active"
     # 留痕：注册表变更进 maintenance 账本，可查
+    # 留痕（A 步"提前落实"/B 步"落实为注册表条目"两可，2026-09-15）
     assert any(
-        "registry：分裂产物落实为注册表条目" in str(h.get("detail"))
+        "registry：" in str(h.get("detail"))
         for h in task.history if h.get("kind") == "maintenance"
     )
 
@@ -1804,8 +1812,10 @@ def test_product_settles_at_round_close_before_next_round(monkeypatch, tmp_path)
     assert [e["id"] for e in task.registry] == ["Main", "A"]   # 子 agent 已建好
     assert task.rounds[0]["domains"][0]["name"] == "web 演示"   # 域树已落档
     assert "pending_org" not in task.rounds[0]                 # 暂存区已清空
+    # 注册表可能已由 A 步提前落实（"提前落实"/"落实…注册表条目"两可），但必须有账
     assert any(
-        "registry：分裂产物落实为注册表条目" in str(h.get("detail"))
+        "registry：" in str(h.get("detail")) and "子 agent" in str(h.get("detail"))
+        or "registry：分裂产物落实为注册表条目" in str(h.get("detail"))
         for h in task.history if h.get("kind") == "maintenance"
     )
 
@@ -1824,17 +1834,18 @@ def test_product_settle_defers_while_a_round_is_open(monkeypatch, tmp_path):
     agent._maybe_organize_batch()         # 同步跑完，产物先暂存
 
     assert task.rounds[0]["pending_org"]["domains"]      # 暂存区有产物
-    assert [e["id"] for e in task.registry] == ["Main"]
+    # A 步（2026-09-15）：注册表（子 agent）已提前落；域树（上下文替换）仍等边界
+    assert [e["id"] for e in task.registry] == ["Main", "A"]
 
-    # 模拟"用户已经在下一轮里"：不生效
+    # 模拟"用户已经在下一轮里"：**上下文替换**不生效（域树仍暂存，不许改轮内字节）
     agent.current_round = {
         "seq": 2, "user_input": {"original": "继续", "normalized": ""},
         "events": [], "refined_index": {}, "end_state": "open",
         "org_state": "", "active_view": "", "route_hops": 0,
     }
     agent._settle_after_maintenance()
-    assert task.rounds[0].get("pending_org")             # 仍暂存
-    assert [e["id"] for e in task.registry] == ["Main"]
+    assert task.rounds[0].get("pending_org")             # 域树仍暂存
+    assert not task.rounds[0].get("domains"), "轮内不许落域树（装配路径会中途切换）"
 
     # 轮闭合（无开放轮）→ 下一次结算即落地
     agent.current_round = None
@@ -2140,3 +2151,221 @@ def test_chat_bucket_is_materialized_as_top_level_node(monkeypatch, tmp_path):
     assert bucket[0]["name"] == "工具吐槽与前端灵感"
     assert bucket[0]["chat_block_ids"] == [chat_bid]
     assert "unassigned" not in staged[0]["pending_org"]     # 已并入桶节点
+
+
+def test_stale_split_product_requeues_instead_of_hard_reject(monkeypatch, tmp_path):
+    """**材料过期 ≠ 根基缺陷**（2026-09-15 修，会话 20260914-181519-0d3875 实测）。
+
+    产物是对某一批材料做的；之后又有轮闭合（新文件）时必然覆盖不全。旧行为按
+    "根基缺陷"拒收，而那批轮留在 `org_state=done` → 再也不会被选进整理批次 →
+    会话永久没有可用域树（实测卡死）。新行为：缺陷**全是"未覆盖"**且存在更新轮次
+    → 本批回入水位（`org_state=failed`）＋`split_state=stale`＋记 `split_stale`。
+    """
+    from wovra import registry as registry_module
+
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    # 本批：R1 写 a.py（产物只覆盖 a.py）；其后 R2 又写了 b.py（材料变了）
+    task.rounds = [
+        _mk_file_round(1, "写 a.py", ["a.py"]),
+        _mk_file_round(2, "写 b.py", ["b.py"]),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    product = [{"name": "A 域", "description": "a.py 这条线", "file": "a.py"}]
+    task.rounds[0]["pending_org"] = {"domains": product}
+    task.rounds[0]["org_state"] = "done"
+    task.rounds[0]["org_generation"] = 1
+    task.rounds[0]["end_state"] = "completed"
+    task.rounds[1]["end_state"] = "completed"     # R2 已闭合但未整理（材料更新）
+    agent = Agent(llm=_StubLLM(), tools=[], task=task,
+                  org_watermark=10**9)            # 不让水位在本测试里另起批次
+
+    agent._promote_org_results()
+
+    assert task.rounds[0]["org_state"] == "failed", "过期产物应把本批回入水位"
+    assert task.rounds[0]["split_state"] == "stale"
+    assert any(e.get("kind") == "split_stale" for e in task.history), "缺少 split_stale 留痕"
+    assert [str(e.get("id")) for e in task.registry] == ["Main"], "过期产物不许落进注册表"
+
+
+def test_hard_split_defect_still_rejected_and_marked(monkeypatch, tmp_path):
+    """根基缺陷（文件重叠）仍按原口径**拒收 + 停 + 响亮留痕**，但状态要落到轮上。
+
+    与"过期"的区别：不是覆盖不全（未覆盖），而是结构错（重叠/空域）——重做也修不了，
+    必须人工查；此时**不回入水位**（避免反复烧钱重做同一个错）。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    task.rounds = [_mk_file_round(1, "写 a.py", ["a.py"])]
+    task.rounds[0]["org_state"] = ""
+    product = [
+        {"name": "A 域", "description": "…", "file": "a.py"},
+        {"name": "B 域", "description": "…", "file": "a.py"},     # 重叠：根基缺陷
+    ]
+    task.rounds[0]["pending_org"] = {"domains": product}
+    task.rounds[0]["org_state"] = "done"
+    task.rounds[0]["org_generation"] = 1
+    task.rounds[0]["end_state"] = "completed"
+    agent = Agent(llm=_StubLLM(), tools=[], task=task, org_watermark=10**9)
+
+    agent._promote_org_results()
+
+    assert task.rounds[0]["org_state"] == "done", "根基缺陷不自动回入水位（人工介入）"
+    assert task.rounds[0]["split_state"] == "rejected"
+    assert any(e.get("kind") == "split_defect" for e in task.history)
+    assert [str(e.get("id")) for e in task.registry] == ["Main"]
+
+
+def _early_fixture(monkeypatch, tmp_path, *, prior_tree=False, newer_round=False):
+    """A 步夹具：一批已整理（产物暂存）+ 一个**开放轮**（模拟用户正在对话）。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="g")
+    if prior_tree:
+        # 已有旧域树生效（开放轮因此走**视图路径**）
+        task.rounds = [_mk_file_round(1, "写 a.py", ["a.py"]),
+                       _mk_file_round(2, "写 b.py", ["b.py"])]
+        task.rounds[0]["domains"] = [{"name": "旧域", "description": "…", "file": "a.py"}]
+        task.rounds[0]["end_state"] = "completed"
+        task.rounds[0]["org_state"] = "done"
+        task.rounds[1]["end_state"] = "completed"
+        task.rounds[1]["org_state"] = "done"
+        product = [{"name": "B 域", "description": "b.py 这条线", "file": "b.py"}]
+        task.rounds[1]["pending_org"] = {"domains": product}
+        task.rounds[1]["org_generation"] = 2
+    else:
+        task.rounds = [_mk_file_round(1, "写 a.py", ["a.py"])]
+        task.rounds[0]["end_state"] = "completed"
+        task.rounds[0]["org_state"] = "done"
+        task.rounds[0]["org_generation"] = 1
+        product = [{"name": "A 域", "description": "a.py 这条线", "file": "a.py"}]
+        task.rounds[0]["pending_org"] = {"domains": product}
+    if newer_round:
+        # 之后又有一轮闭合（写了新文件）→ 材料变了（过期判据的一半）
+        nr = _mk_file_round(3, "写 c.py", ["c.py"])
+        nr["end_state"] = "completed"
+        nr["org_state"] = ""
+        task.rounds.append(nr)
+    # 开放轮：用户正在说话
+    open_round = _mk_read_round(9, "正在聊", [])
+    open_round["end_state"] = "open"
+    open_round["org_state"] = ""
+    open_round["events"].append({
+        "id": "R9-E99", "type": "user", "message": {"role": "user", "content": "正在聊"}})
+    task.rounds.append(open_round)
+    agent = Agent(llm=_StubLLM(), tools=[], task=task, org_watermark=10**9)
+    agent.current_round = None          # 另一个实例的轮：本实例只是维护线程
+    return agent, task
+
+
+def test_early_publish_lands_registry_while_round_open(monkeypatch, tmp_path):
+    """A 步：全量路径下，产物就绪就落**注册表**（子 agent 即时可见），不等轮边界。
+
+    用户口径更正（2026-09-15）：「下一轮闭合生效」只指**上下文替换**。全量路径的装配
+    不读注册表（职责表只在视图路径的系统段），所以子 agent 出现不必等。
+    """
+    agent, task = _early_fixture(monkeypatch, tmp_path)
+    landed = agent._publish_product_early()
+
+    assert landed == 1
+    assert [str(e.get("id")) for e in task.registry] == ["Main", "A"], "子 agent 应立即出现"
+    assert task.rounds[0]["pending_org"].get("registry_landed") is True
+    assert not task.rounds[0].get("domains"), "域树（上下文替换）仍必须等轮边界"
+    assert task.rounds[0].get("split_state") == "ready"
+    assert any("提前落实" in str(e.get("detail")) for e in task.history)
+    # 开放轮没被碰：字节相关字段一律未写
+    assert task.rounds[-1].get("domains") is None
+
+
+def test_early_publish_skips_registry_on_view_path(monkeypatch, tmp_path):
+    """开放轮**已在视图路径**（之前已有域树）时，职责表在它的系统段里 → 注册表等边界。"""
+    agent, task = _early_fixture(monkeypatch, tmp_path, prior_tree=True)
+    before = [str(e.get("id")) for e in task.registry]
+
+    agent._publish_product_early()
+
+    assert [str(e.get("id")) for e in task.registry] == before, \
+        "视图路径下提前落注册表会改开放轮的系统段（前缀断裂）"
+
+
+def test_promote_after_early_publish_is_idempotent(monkeypatch, tmp_path):
+    """A 步先落注册表、B 步（轮闭合）落地域树：不许重复落、不许丢 `domains`。"""
+    agent, task = _early_fixture(monkeypatch, tmp_path)
+    agent._publish_product_early()
+    assert task.rounds[0]["pending_org"].get("registry_landed") is True
+
+    # 轮闭合 → B 步
+    agent.rounds[-1]["end_state"] = "completed"
+    agent._settle_after_maintenance()
+
+    ids = [str(e.get("id")) for e in task.registry]
+    assert ids == ["Main", "A"], f"注册表重复或缺失：{ids}"
+    assert task.rounds[0].get("domains"), "轮边界必须把域树落下来"
+    assert task.rounds[0].get("split_state") == "done"
+
+
+def test_stale_requeues_immediately_without_boundary(monkeypatch, tmp_path):
+    """过期产物**立刻**回入水位（纯账目），不必等轮闭合——这是卡死会话的自愈路径。"""
+    # 夹具注意：新轮必须在构造 Agent **之前**挂上（Agent 构造时浅拷贝轮列表）
+    agent, task = _early_fixture(monkeypatch, tmp_path, newer_round=True)
+
+    landed = agent._publish_product_early()
+
+    assert landed == 1
+    assert task.rounds[0]["org_state"] == "failed", "过期批次应立即回入水位"
+    assert task.rounds[0].get("split_state") == "stale"
+    assert not task.rounds[0].get("pending_org"), "过期产物应丢弃（下批重做）"
+    assert any(e.get("kind") == "split_stale" for e in task.history)
+    assert [str(e.get("id")) for e in task.registry] == ["Main"], "过期产物不许落注册表"
+
+
+def test_early_publish_lands_envelope_and_display_fields(monkeypatch, tmp_path):
+    """A 步（2026-09-15 用户裁定"能提前的都提前"）：信封类/展示类字段立刻落。
+
+    * `state_patch` → 账本只进**尾部信封**（每步重算，不是历史，动它不破前缀）；
+    * `unassigned`/`split_assessment` → 纯展示（装配不读）。
+    仍留在暂存区的只有**上下文替换**（`domains`）。
+    """
+    agent, task = _early_fixture(monkeypatch, tmp_path)
+    po = task.rounds[0]["pending_org"]
+    po["state_patch"] = {"current_status": "提前落的现状"}
+    po["unassigned"] = {"block_ids": ["R1-B9"], "reason": "闲聊"}
+    po["split_assessment"] = {"splittable": True, "reason": "两条线"}
+
+    agent._publish_product_early()
+
+    assert task.rounds[0].get("unassigned") == {"block_ids": ["R1-B9"], "reason": "闲聊"}
+    assert task.rounds[0].get("split_assessment") == {"splittable": True, "reason": "两条线"}
+    assert "提前落的现状" in str(task.get_state().current_status)
+    left = task.rounds[0].get("pending_org") or {}
+    assert "state_patch" not in left and "unassigned" not in left
+    assert left.get("domains"), "上下文替换（domains）仍必须等轮闭合"
+
+
+def test_early_publish_applies_attribution_on_full_path_only(monkeypatch, tmp_path):
+    """闭合轮归属（预备值）：全量路径立刻生效；视图路径（开放轮读它）仍等边界。"""
+    from wovra import registry as registry_module
+
+    agent, task = _early_fixture(monkeypatch, tmp_path)
+    # 夹具注意：Agent 构造时浅拷贝轮列表，`pending_view` 要挂在 **agent 手上那份**
+    # （真实流程里预备值是维护线程写进自己的 rounds、再随落盘并集合并）
+    product = agent.rounds[0]["pending_org"]["domains"]
+    agent.rounds[0]["pending_view"] = {
+        "view": "A 域", "reason": "文件命中",
+        "domains": registry_module.domains_digest(product),
+    }
+    agent._publish_product_early()
+    assert agent.rounds[0]["active_view"] == "A 域", "全量路径下归属应立刻生效"
+    assert "pending_view" not in agent.rounds[0]
+
+    # 视图路径：开放轮之前已有域树 → 归属在它的历史里被读 → 等边界
+    agent2, task2 = _early_fixture(monkeypatch, tmp_path, prior_tree=True)
+    product2 = agent2.rounds[1]["pending_org"]["domains"]
+    agent2.rounds[1]["pending_view"] = {
+        "view": "B 域", "reason": "文件命中",
+        "domains": registry_module.domains_digest(product2),
+    }
+    agent2._publish_product_early()
+    assert agent2.rounds[1].get("active_view") in (None, "", "Main"), \
+        "视图路径下提前写归属会改开放轮历史字节"
+    assert agent2.rounds[1].get("pending_view"), "预备值应留到轮边界"

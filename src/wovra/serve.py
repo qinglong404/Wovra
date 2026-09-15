@@ -1135,6 +1135,9 @@ def _round_meta(r: dict, usage: dict | None = None,
         "user_input": (r.get("user_input") or {}).get("original", ""),
         "end_state": r.get("end_state"),
         "org_state": r.get("org_state"),
+        # 分裂状态（2026-09-15）：running/ready/deferred/stale/rejected/failed/done——
+        # 维护只写 history 时会被并发写覆盖（见 worklog §106），落到轮上才可见、可查。
+        "split_state": r.get("split_state") or "",
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",

@@ -234,22 +234,25 @@ def test_product_never_lands_into_another_instance_running_round(monkeypatch):
     runner._persist_rounds()
     assert other.rounds[-1]["end_state"] == "open"
 
-    # 维护线程跑完的结算时刻：盘上有开放轮 → 不落 live，但归属判定已预备
+    # 维护线程跑完的结算时刻：盘上有开放轮 → **上下文替换**不落 live（注册表/子
+    # agent 由 A 步提前落，2026-09-15——它不碰任何开放轮的装配字节），归属判定已预备
     agent._settle_after_maintenance()
-    assert [str(e["id"]) for e in task.registry] == ["Main"]
+    assert [str(e["id"]) for e in task.registry] == ["Main", "A"]
     assert any("归属预判" in str(e.get("detail")) for e in task.history)
     fresh = Task.load(task.id)
     assert not any(r.get("domains") for r in fresh.rounds)
-    assert fresh.rounds[0].get("pending_org")            # 产物还在暂存区
-    assert fresh.rounds[0]["pending_view"]["view"] == "web 演示"   # 判定已就绪
-    assert fresh.rounds[0].get("active_view") in (None, "", "Main")  # 但未生效
+    assert fresh.rounds[0].get("pending_org")            # 上下文替换仍在暂存区
+    # A 步（2026-09-15 用户裁定"能提前的都提前"）：全量路径下归属**立刻生效**
+    # （装配不读 active_view）；仍在暂存区的是 `domains` 那笔上下文替换
+    assert fresh.rounds[0]["active_view"] == "web 演示"
+    assert "pending_view" not in fresh.rounds[0]
 
     # 运行中的轮中途落盘：产物/预备值不得影响它的装配路径
     runner._persist_rounds()
     assert not any(r.get("domains") for r in runner.rounds)
     assert runner._assemble_view_messages("Main", runner.rounds) is None
 
-    # 轮闭合 → 边界生效：预备值落地 + 域树落地 + 注册表长出子 agent
+    # 轮闭合 → 边界生效：预备值落地 + 域树落地（注册表已在 A 步提前长好）
     runner.close_round()
     fresh = Task.load(task.id)
     assert [str(e["id"]) for e in fresh.registry] == ["Main", "A"]
@@ -311,3 +314,32 @@ def test_staged_view_dropped_when_product_does_not_match(monkeypatch):
     assert agent.rounds[0].get("active_view") in (None, "", "Main")
     assert "pending_view" not in agent.rounds[0]
 
+
+
+def test_history_survives_cross_instance_save(monkeypatch):
+    """serve 跨实例：维护线程写的 history 不许被轮的保存覆盖（2026-09-15 修）。
+
+    serve 每轮新建 agent：维护跑在上一轮实例的后台线程，两边都写**整份**
+    `task.json`。`_rebase_if_stale` 原先只并集合并 rounds/registry，`history`
+    是"后写覆盖先写"——维护线程写的"结束/超时/失败"会被正在跑的轮的下一次保存
+    静默抹掉（实测会话 20260914-181519-0d3875：只有"启动"活着，split 的
+    结束/失败全没了，用户问"为什么没有留痕"）。
+    """
+    task = Task.create(goal="g")
+    task.rounds = [_round(1, "第一轮", "答案")]
+    task.save()
+
+    # B：轮实例（已加载；它手上那份**没有**下面这条维护记录）
+    other = Task.load(task.id)
+    round_agent = Agent(llm=_StubLLM(), tools=[], task=other)
+
+    # A：维护线程记录"结束"并落盘
+    task.record("maintenance", "结束：org=True split=False（超时返回，挂起阶段随守护线程终结）")
+    task.save()
+
+    # B 之后照常保存（它不知道自己错过了什么）
+    round_agent._persist_rounds()
+
+    fresh = Task.load(task.id)
+    assert any("结束：org=True" in str(e.get("detail")) for e in (fresh.history or [])), \
+        "维护线程写的记录被轮的保存覆盖了（history 没并集合并）"
