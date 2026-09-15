@@ -1119,6 +1119,164 @@ def test_split_auto_claims_file_without_domain(monkeypatch, tmp_path):
     assert not any((d.get("files") or []) and d.get("main_agent") for d in doms)
 
 
+def test_registry_entry_description_falls_back_mechanically():
+    """没写描述的节点 → 注册表条目用「名字+文件清单」机械兜底（不许出现"（无描述）"）。
+
+    指令现在只要求**顶层节点**写描述（产物太长会撞端点输出预算被截断——实测一次
+    13,523 字符的产物整批作废）。路由靠职责表，所以其余节点必须有兜底文本。
+    """
+    from wovra import registry as registry_module
+
+    domains = [
+        {"name": "协议线", "description": "负责协议规格与编解码", "files": ["a.hpp"]},
+        {"name": "实现线", "files": ["b.cpp", "c.cpp"]},          # 无描述
+    ]
+    entries = registry_module.build_entries(domains, "")
+    by_name = {str(e.get("name")): str(e.get("description")) for e in entries}
+    assert by_name["协议线"] == "负责协议规格与编解码"
+    assert by_name["实现线"].startswith("实现线：维护 ")
+    assert "b.cpp" in by_name["实现线"]
+    assert all(d and d != "（无描述）" for d in by_name.values())
+
+
+def test_runtime_auto_buckets_do_not_become_agents(monkeypatch, tmp_path):
+    """Runtime 自动归类的桶**不生成子 agent**（2026-09-15）。
+
+    它们是"没人认领的文件按目录先接住"的机械桶（`_auto_claim` 建的、带
+    `runtime_auto=True`）。让它们参与 `build_entries` 的选层会凭空多出几个
+    子 agent——实测一次瘦身实验里 4 个「cpp（Runtime 自动归类）」之类的桶各占
+    一个 agent，把用户满意的"不过分分裂"直接破坏。文件覆盖不受影响（覆盖检查
+    按 domains 算，与 entries 无关）。
+    """
+    from wovra import registry as registry_module
+
+    domains = [
+        {"name": "协议线", "description": "协议", "files": ["a.hpp"]},
+        {"name": "cpp（Runtime 自动归类）", "description": "机械桶",
+         "runtime_auto": True, "files": ["x.cpp", "y.cpp"]},
+        {"name": "tests（Runtime 自动归类）", "description": "机械桶",
+         "runtime_auto": True, "files": ["t.py"]},
+    ]
+    entries = registry_module.build_entries(domains, "")
+    names = [str(e.get("name")) for e in entries]
+    assert "协议线" in names
+    assert not any("自动归类" in n for n in names), names
+    # 覆盖不丢：那些文件仍在 domains 的文件集合里（覆盖检查的口径）
+    merged, added, _u, _s = registry_module.project_merge([], domains)
+    assert "协议线" in [e.get("name") for e in merged]
+
+
+def test_extract_domains_salvages_truncated_call(monkeypatch, tmp_path):
+    """截断产物经**提取路径**也能用（并留一条抢救痕迹）——不是只测静态函数。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([[]]), tools=[], task=task)
+    truncated = ('{"domains": [{"name": "A 线", "files": ["L00"]},'
+                 ' {"name": "B 线", "files": ["L01"], "desc')
+    product = agent._extract_domains(
+        "", [{"name": "submit_domains", "arguments": truncated}])
+    assert product is not None
+    domains, _unassigned, _split = product
+    assert [d.get("name") for d in domains] == ["A 线"]
+    joined = "\n".join(str(h.get("detail")) for h in task.history)
+    assert "抢救" in joined, joined[-3:]
+
+
+def test_stream_call_retries_on_endpoint_throttle(monkeypatch):
+    """端点限流（突发保护）→ **退避重试**，不再一次失败就让整批白算。
+
+    实测 2026-09-09：一批整理整批死在 "System protection triggered by
+    request burst" 上（当时没有任何重试）。
+    """
+    from wovra.agent import core as core_module
+    monkeypatch.setattr(core_module.time, "sleep", lambda _s: None)
+
+    class _ThrottleLLM:
+        model = "stub"
+
+        def __init__(self, failures, message):
+            self.failures = failures
+            self.message = message
+            self.calls = 0
+
+        def chat(self, messages, tools=None, stream=True, **kwargs):
+            self.calls += 1
+            if self.calls <= self.failures:
+                raise RuntimeError(self.message)
+            return iter([_chunk(_delta(content="好"))])
+
+    burst = ("System protection triggered by request burst. Please slow down "
+             "traffic growth and increase requests gradually before retrying.")
+    llm = _ThrottleLLM(2, burst)
+    agent = Agent(llm=llm, tools=[], task=None)
+    content, _tcs, _usage = agent._stream_call([{"role": "user", "content": "hi"}])
+    assert content == "好" and llm.calls == 3          # 两次限流后成功
+
+    # 非限流错误：立刻抛，不许把真 bug 当限流吞掉
+    llm2 = _ThrottleLLM(1, "ValueError: boom")
+    agent2 = Agent(llm=llm2, tools=[], task=None)
+    try:
+        agent2._stream_call([{"role": "user", "content": "hi"}])
+        raise AssertionError("非限流错误必须立刻抛")
+    except RuntimeError as error:
+        assert "boom" in str(error) and llm2.calls == 1
+
+
+def test_split_salvages_truncated_product():
+    """产物被**截断**时抢救出写完的部分（2026-09-15）。
+
+    分裂/整理产物动辄一两万字符，模型输出撞端点预算就被截断 → `json.loads`
+    失败 → 整批白算（实测会话 20260915-131130-010611：第一次产物 13,523 字符
+    死在解析上，重发再烧 20 万 tok）。抢救：逐个元素抠，写完的节点照收，
+    丢掉没写完的尾巴。
+    """
+    from wovra.agent.maintenance import _salvage_state_json
+
+    full = json.dumps({
+        # 顺序刻意让两个"小对象"在前：截断发生在它们之后，抢救才能把三段都拿回来
+        "split_assessment": {"splittable": True},
+        "unassigned": {"block_ids": ["R1-B1"]},
+        "domains": [
+            {"name": "A 线", "files": ["L00"]},
+            {"name": "B 线", "files": ["L01"], "description": "带 } 与 「引号」 的描述"},
+            {"name": "C 线", "files": ["L02"]},
+        ],
+    }, ensure_ascii=False)
+    # 截断在第 2 个节点中间（模拟输出预算掐断）
+    cut = full.index("C 线")
+    salvaged = _salvage_state_json(full[:cut])
+    assert salvaged is not None
+    names = [d.get("name") for d in salvaged.get("domains") or []]
+    assert names == ["A 线", "B 线"], names          # 写完的都要，未写完的丢掉
+    assert salvaged.get("split_assessment") == {"splittable": True}
+    # 正常 JSON 一律走原路（不误伤）
+    assert _salvage_state_json(full)["domains"][0]["name"] == "A 线"
+    # 彻底没形的东西 → None（不能凭空造产物）
+    assert _salvage_state_json("模型这次没调工具，只说了几句话") is None
+
+
+def test_split_instruction_marks_rounds_for_descriptions(monkeypatch, tmp_path):
+    """硬数据每行带**轮数**、指令允许叶子省描述（产物瘦身防截断）。"""
+    task = Task.create(goal="目标")
+    task.rounds = [
+        _mk_file_round(1, "写 a", ["src/a.py"]),
+        _mk_file_round(2, "再写 a", ["src/a.py"]),
+        _mk_file_round(3, "写 b", ["src/b.py"]),
+    ]
+    for r in task.rounds:
+        r["org_state"] = ""
+    agent = Agent(llm=_StubLLM([[ _chunk(_delta(content=_org_json() or "")) ]]),
+                  tools=[], task=task)
+    lines, n = agent._split_hard_data(agent.rounds)
+    joined = "\n".join(lines)
+    assert n == 2
+    assert "src/a.py" in joined and "轮 2" in joined     # 多轮文件有轮数
+    assert "src/b.py" in joined and "轮 1" in joined     # 单轮文件也有（叶子据此省描述）
+    # 指令里写明"叶子可省描述"
+    from wovra.agent import prompts as prompts_module
+    assert "单文件单轮" in prompts_module._SPLIT_INSTRUCTIONS
+
+
 def test_split_normalizes_prefixless_path_refs(monkeypatch, tmp_path):
     """路径引用要**归一**：模型按"项目自己的视角"写 `src/a.cpp`，真实是
     `cpp/src/a.cpp` —— 唯一后缀命中就补成全路径，不靠模型把前缀写对。

@@ -35,6 +35,84 @@ _ORG_SUBMIT_TOOL = "submit_organization"
 
 _SPLIT_SUBMIT_TOOL = "submit_domains"
 
+def _scan_value_end(text: str, start: int) -> int:
+    """从 text[start]（应为 `{` 或 `[`）扫到配对收尾的下标；被截断（扫到结尾）返回 -1。
+
+    字符串/转义感知——产物里带 `}` 的路径、JSON 里的引号都不会骗过它。
+    """
+    stack: list[str] = []
+    in_str = False
+    esc = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if not stack:
+                return -1
+            stack.pop()
+            if not stack:
+                return i
+    return -1
+
+
+def _salvage_state_json(text: str) -> dict | None:
+    """**截断/坏 JSON 的抢救式解析**（2026-09-15）。
+
+    分裂/整理产物动辄一两万字符（每个节点带描述），模型输出一撞端点预算就被
+    截断 → `json.loads` 失败 → 整批算白（实测会话 20260915-131130-010611：
+    第一次产物 13,523 字符就死在解析上，重发再烧 20 万 tok）。这里**逐个元素**
+    抠：`domains` 数组里写完的节点照收，丢掉没写完的尾巴；`unassigned` /
+    `split_assessment` 同样按对象抠。残缺由 Runtime 归位兜（同一批已实现）。
+    """
+    import json as _json
+
+    src = str(text or "")
+    out: dict = {}
+    for key in ("domains", "unassigned", "split_assessment"):
+        m = re.search(r'"' + key + r'"\s*:\s*([\[{])', src)
+        if not m:
+            continue
+        start = m.start(1)
+        end = _scan_value_end(src, start)
+        if end > 0:
+            try:
+                out[key] = _json.loads(src[start:end + 1])
+                continue
+            except ValueError:
+                pass
+        if m.group(1) != "[":
+            continue
+        # 截断的数组：逐个抠完整的元素
+        items: list = []
+        i = start + 1
+        while i < len(src):
+            j = src.find("{", i)
+            if j < 0:
+                break
+            e = _scan_value_end(src, j)
+            if e < 0:
+                break
+            try:
+                items.append(_json.loads(src[j:e + 1]))
+            except ValueError:
+                pass
+            i = e + 1
+        if items:
+            out[key] = items
+    return out or None
+
+
 class SplitCoverageError(RuntimeError):
     """分裂漏认领：有文件块没有任何域要它（用户口径 2026-09-13）。
 
@@ -1791,6 +1869,10 @@ class _MaintenanceMixin:
             node = {"name": name, "description":
                     "Runtime 自动归类：分裂产物没有认领这些文件，按顶层目录先挂这里"
                     "（不落主 agent）；下一批分裂可以把它拆细。",
+                    # **不生成 agent**（2026-09-15）：它是机械桶、不是语义工作线——
+                    # `registry.build_entries` 见到这个标记就跳过（实测：不作限制时
+                    # 4 个这样的桶各占一个子 agent，把用户满意的"不过分分裂"破坏）。
+                    "runtime_auto": True,
                     "files": [], "history_files": []}
             node[field] = list(files)
             domains.append(node)
@@ -1845,11 +1927,18 @@ class _MaintenanceMixin:
         for path in sorted(groups):
             g = groups[path]
             refs = " ".join(g["refs"]) or "无"
+            # **轮数**（2026-09-15）：叶子（单文件单轮）不写描述、多轮/多文件的
+            # 节点才写满三件——产物体量直接减半，少撞端点输出预算（截断是分裂
+            # 失败的头号来源）。轮号从块 ID（`R3-B2`）里机械派生，零额外数据。
+            rounds_hit = sorted({str(r).split("-")[0] for r in (g["refs"] or [])
+                                 if str(r).startswith("R")})
+            rtag = f"轮 {len(rounds_hit)}（{','.join(rounds_hit[:4])}"
+            rtag += "…）" if len(rounds_hit) > 4 else "）"
             if g["state"] == "live":
                 n += 1
                 live_lines.append(
                     f"  - {path_to_live.get(path, 'L??')} = {path}"
-                    f"（live；写 {g['write']}/读 {g['read']}；块: {refs}）"
+                    f"（live；{rtag}；写 {g['write']}/读 {g['read']}；块: {refs}）"
                 )
             elif g["state"] == "dead":
                 hist_lines.append(
@@ -1876,8 +1965,7 @@ class _MaintenanceMixin:
         lines += hist_lines or ["  （无）"]
         return lines, n
 
-    @staticmethod
-    def _extract_domains(content: str, ordered: list):
+    def _extract_domains(self, content: str, ordered: list):
         """从分裂分析响应提取产物：优先 submit_domains 调用参数，回退
         正文 JSON。返回 (domains, unassigned, split_assessment) 或 None。
 
@@ -1886,20 +1974,35 @@ class _MaintenanceMixin:
         静默落空。只有解析不出任何 dict 状态才算无产物。
         """
         state = None
+        salvaged = None
         for tc in ordered or []:
             if tc.get("name") != "submit_domains":
                 continue
+            raw = tc.get("arguments") or "{}"
             try:
-                state = json.loads(tc.get("arguments") or "{}")
+                state = json.loads(raw)
             except json.JSONDecodeError:
-                continue
+                # **截断抢救**（2026-09-15）：长产物撞端点预算 → 抠出写完的部分，
+                # 至少让这批能落地（比"整批失败 + 重发再烧 20 万 tok"好得多）。
+                salvaged = _salvage_state_json(raw)
+                state = salvaged
             if isinstance(state, dict):
                 break
             state = None
         if state is None:
             state = _MaintenanceMixin._parse_state_json(content)
+            if not isinstance(state, dict) and content:
+                salvaged = salvaged or _salvage_state_json(content)
+                state = salvaged
         if not isinstance(state, dict):
             return None
+        if salvaged is not None and self.task is not None:
+            n = len(salvaged.get("domains") or [])
+            self.task.record(
+                "maintenance",
+                f"split：产物被截断，Runtime 抢救出 {n} 个完整节点"
+                f"（丢掉没写完的尾巴；残缺由归位兜）",
+            )
         # 空壳判定（2026-09-11）：截断到只剩 {} 的 arguments 能解析成功，
         # 但三个产物键一个都没有——那不算"空域合法"，是无产物。
         if not any(

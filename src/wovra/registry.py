@@ -277,6 +277,16 @@ def build_entries(
     domains = [d for d in (domains or []) if isinstance(d, dict) and d.get("name")]
     if not domains:
         return []
+    # **Runtime 自动归类的桶不生成 agent**（2026-09-15）：那是 `_auto_claim` 给
+    # "没人认领的文件"按目录先接住的机械桶（`runtime_auto=True`），语义上还不是
+    # 一条工作线。让它们参与选层会**凭空多出几个子 agent**（实测一次瘦身实验里
+    # 4 个「cpp（Runtime 自动归类）」之类的桶各占一个 agent，直接破坏用户满意的
+    # "不过分分裂"）。它们的文件仍在覆盖之内（覆盖检查按 domains 算，与 entries
+    # 无关），下一批分裂里模型把文件认领进语义节点时自然接手。
+    if any(d.get("runtime_auto") for d in domains):
+        domains = [d for d in domains if not d.get("runtime_auto")]
+        if not domains:
+            return []
     by_name = _index_by_name(domains)
     # parent 指向不存在的域 → 视为顶层（脏数据兜底）
     roots = [
@@ -348,10 +358,19 @@ def build_entries(
             continue                      # 闲聊/未归属桶：归主 agent，不建子 agent
         files, hist, cons, notes = subtree(node)
         path_id = f"{parent_id}-{i}" if parent_id else top_id(i)
+        # **描述兜底**（2026-09-15）：指令现在只要求**顶层节点**写描述（产物太长
+        # 会撞端点输出预算被截断——实测一次 13,523 字符的产物整批作废、另有两次
+        # 截断靠抢救才活下来）。非顶层节点没描述不是错误，但注册表/职责表不能
+        # 出现"（无描述）"——路由就靠它。用**节点名 + 它的文件清单**机械拼一句。
+        desc = str(node.get("description") or "").strip()
+        if not desc:
+            own = [str(f) for f in (files or [])][:4]
+            desc = f"{node['name']}：维护 " + "、".join(own) + (
+                "…" if len(files or []) > 4 else "") if own else                 f"{node['name']}（结构树节点）"
         entries.append({
             "id": path_id,
             "name": str(node["name"]),
-            "description": str(node.get("description") or ""),
+            "description": desc,
             "goal": str(node.get("goal") or ""),
             "constraints": cons,
             # 归属**按文件**：`files` = 该域维护的具体文件清单（精确匹配）；

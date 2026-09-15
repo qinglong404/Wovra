@@ -49,6 +49,23 @@ from .prompts import (
 )
 
 
+_THROTTLE_MARKERS = (
+    "system protection", "rate limit", "too many requests", "slow down",
+    "requests burst", "429", "tpm limit", "rpm limit",
+)
+
+
+def _is_throttle_error(error: BaseException) -> bool:
+    """端点限流/突发保护类错误（**可安全退避重试**：连接期失败无副作用）。
+
+    实测文案（火山/方舟）："System protection triggered by request burst.
+    Please slow down traffic growth and increase requests gradually before
+    retrying."——2026-09-09 一批整理整批死在这上面（没有任何重试）。
+    """
+    text = str(error).lower()
+    return any(m in text for m in _THROTTLE_MARKERS)
+
+
 class _CoreMixin:
     def __init__(
         self,
@@ -1517,20 +1534,38 @@ class _CoreMixin:
         if purpose == "working":
             self.last_stats["llm_calls"] += 1
         start = time.monotonic()
-        try:
-            stream = self.llm.chat(messages, tools=tools, stream=True, extra_body=extra_body)
-        except Exception:
-            if not extra_body:
-                raise
-            # 部分端点不支持 extra_body 里的参数（如关闭思考的 thinking 开关），
-            # 降级为不带该参数重发——宁可让整理调用多思考，也不能直接失败。
-            # 提示每次会话只发一次，避免每轮刷屏
-            if not self._degrade_warned:
-                self._degrade_warned = True
+        # **端点限流退避重试**（2026-09-15）：维护调用动辄 20 万 tok 的输入，
+        # 与干活轮并发时端点会回"System protection triggered by request burst /
+        # rate limit"（实测 2026-09-09 一批整理整批死在这上面）——一次失败就
+        # 让整批白算。这里按 15s/30s/60s 退避重试（连接期错误，无副作用；
+        # 流中途的错误仍走上层空响应护栏，不在这里重试）。
+        delay = 15.0
+        for _throttle_try in range(4):
+            try:
+                try:
+                    stream = self.llm.chat(messages, tools=tools, stream=True,
+                                           extra_body=extra_body)
+                except Exception:
+                    if not extra_body:
+                        raise
+                    # 部分端点不支持 extra_body 里的参数（如关闭思考的 thinking 开关），
+                    # 降级为不带该参数重发——宁可让整理调用多思考，也不能直接失败。
+                    # 提示每次会话只发一次，避免每轮刷屏
+                    if not self._degrade_warned:
+                        self._degrade_warned = True
+                        self._emit_status(
+                            "后台整理：当前模型不支持整理用的参数，已自动降级重试（本次会话仅提示一次）"
+                        )
+                    stream = self.llm.chat(messages, tools=tools, stream=True)
+                break
+            except Exception as _error:
+                if _throttle_try >= 3 or not _is_throttle_error(_error):
+                    raise
                 self._emit_status(
-                    "后台整理：当前模型不支持整理用的参数，已自动降级重试（本次会话仅提示一次）"
+                    f"端点限流（{str(_error)[:60]}）——{int(delay)}s 后自动重试"
                 )
-            stream = self.llm.chat(messages, tools=tools, stream=True)
+                time.sleep(delay)
+                delay *= 2
         content_parts: list[str] = []
         thinking_parts: list[str] = []
         self._last_thinking = ""   # 流错误中途抛出时不得残留上一步的思考
