@@ -5,7 +5,7 @@
 import os as _os
 import re
 import pytest
-from wovra.tools import FAILURE_MARKERS, run_command, write_file
+from wovra.tools import result_status, run_command, write_file
 from wovra.tools.safety import _ask_yes_no, _confirm_reason
 
 # 共享夹具/工具（_helpers.py 是原文件的公共头部）
@@ -23,7 +23,7 @@ def test_run_command_reports_failure_exit_code():
     # 用界内路径制造失败（界外绝对路径现在会被安全层拒绝，测不到退出码）
     result = run_command("ls nonexistent-path-wovra")
     assert "命令执行失败" in result
-    assert any(marker in result for marker in FAILURE_MARKERS)
+    assert result_status(result) == "error"
 
 
 def test_run_command_timeout_kills_whole_tree(monkeypatch):

@@ -20,8 +20,11 @@ from typing import Any
 # Truncated 视图里单条事件预览的默认长度（与报告时间线口径一致）
 TRUNCATED_LIMIT = 120
 
-# 工具结果失败标记：与 task/ui 共用一套判定（tools.FAILURE_MARKERS）
-from .tools import FAILURE_MARKERS  # noqa: E402
+# 工具结果成败判定：唯一权威在 `tools/status.py`（2026-09-14 起）。
+# 本模块此前自带一份全文子串判定，实测把"成功的 read_file 读到源码"
+# 判成失败（42 条假阳性）——现在只委托，不再自己猜。
+from .tools import LABELS  # noqa: E402
+from .tools import result_status as _result_status  # noqa: E402
 
 
 def _head(text: str, limit: int = TRUNCATED_LIMIT) -> str:
@@ -33,10 +36,11 @@ def _head(text: str, limit: int = TRUNCATED_LIMIT) -> str:
 
 
 def _tool_result_status(content: str, name: str) -> str:
-    """提取工具结果的成败状态（供 Event.status 与截断文本使用）。"""
-    if any(marker in content for marker in FAILURE_MARKERS):
-        return "error"
-    return "ok"
+    """提取工具结果的成败状态（供 Event.status 与截断文本使用）。
+
+    取值 `ok` / `error` / `deny`（拒绝 = 系统或用户按策略挡下，没执行）。
+    """
+    return _result_status(content)
 
 
 def _truncate_tool_result(name: str, content: str) -> tuple[str, str]:
@@ -61,7 +65,7 @@ def _truncate_tool_result(name: str, content: str) -> tuple[str, str]:
         return status, " ".join(parts)
 
     # 通用规则：成败 + 头部预览
-    prefix = "失败，" if status == "error" else ""
+    prefix = f"{LABELS[status]}，" if status != "ok" else ""
     return status, f"{prefix}{_head(content)}"
 
 

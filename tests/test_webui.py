@@ -46,3 +46,20 @@ def test_webui_renders_without_undefined_or_nan():
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "渲染核对：通过" in result.stdout, result.stdout
+
+
+def test_webui_status_table_matches_python():
+    """第三道关：前端成败判定表与 Python 权威表不许漂移。
+
+    2026-09-14 用户报障"工具消息块对成功/失败的判断太草率"——病根是同一份
+    事实四处各猜一套文本（前端只认 5 个开头词，实测 90 条假阴性）。现在
+    判定表只有两个物理位置：`src/wovra/tools/status.py`（权威）+ 前端镜像；
+    本测试（`scripts/webui_status_sync.py`）比对表 + 把共享夹具
+    `tests/fixtures/tool_status_cases.json` 在 node 侧逐条跑一遍。
+    """
+    result = subprocess.run(
+        [sys.executable, str(_ROOT / "scripts" / "webui_status_sync.py")],
+        cwd=_ROOT, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "共享夹具" in result.stdout, result.stdout

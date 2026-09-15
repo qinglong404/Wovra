@@ -44,7 +44,13 @@ CLI 通过 `--mode managed|baseline` 切换（默认 managed），同一会话�
 
 - **Round**：用户一条消息从发出到最终回答的完整过程（工作记忆边界）
 - **Event**：Round 内的每条协议消息，结构：
-  `id (R{n}-E{nn}) / type (user|tool_call|tool_result|final_answer|assistant) / timestamp / status (ok|error) / truncated / message (Full)`
+  `id (R{n}-E{nn}) / type (user|tool_call|tool_result|final_answer|assistant) / timestamp / status (ok|error|deny) / truncated / message (Full)`
+
+  成败判定唯一权威 = `src/wovra/tools/status.py`（2026-09-14 起）：只看**首行**、
+  `exit_code` 结构化信号优先、三分类 `ok`/`error`/`deny`（`deny` = 被策略或
+  用户挡下、操作没发生；`error` = 执行了但失败）。CLI / 报告 / 文件账本 / 块标签 /
+  前端徽标全部委托它，跨语言一致性由 `tests/fixtures/tool_status_cases.json`
+  钉住（worklog-20260911.md §106）。
 
 ### 3.2 Truncated（Runtime 生成，零 LLM 成本）
 

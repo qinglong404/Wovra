@@ -42,15 +42,28 @@
 from . import limits
 from . import permissions  # noqa: E402——文件权限守卫（工具层强制）
 from . import safety, files, shell, background, web, interaction  # noqa: F401,E402
+from . import status  # noqa: E402,F401——工具结果成败判定的唯一权威口径
 
 # ---- 公开 API 再导出 ---------------------------------------------------------
 # cli/prompt.py 与 agent/core.py 的工具注册清单、实验探针的
 # getattr(tools_module, name) 都依赖这层形态：名字与重写前完全一致。
 from .safety import (  # noqa: E402
-    FAILURE_MARKERS,
     PROJECT_ROOT,
     set_audit_recorder,
     user_input_pending,
+)
+# 成败判定（2026-09-14 起唯一权威）：`classify` / `failed` / `denied` / `label`。
+# 旧的 `FAILURE_MARKERS`（全文子串）已删除——正文里出现"工具执行出错"等字样
+# 就判失败，实测 42 条假阳性。
+from .status import (  # noqa: E402
+    DENY,
+    ERROR,
+    LABELS,
+    OK,
+    classify as result_status,
+    denied as result_denied,
+    failed as result_failed,
+    label as result_label,
 )
 from .permissions import set_file_guard  # noqa: E402
 from .files import (  # noqa: E402

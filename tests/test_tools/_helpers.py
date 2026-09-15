@@ -9,8 +9,8 @@ from wovra import task as task_module
 from wovra.agent import Agent
 from wovra.task import Task
 from wovra.tools import (
-    FAILURE_MARKERS,
     ask_user,
+    result_status,
     user_input_pending,
     check_background,
     delete_file,

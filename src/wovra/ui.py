@@ -13,6 +13,7 @@
 """
 
 import os
+import re
 import sys
 import unicodedata
 
@@ -22,7 +23,12 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from . import tokens as tokens_module
-from .tools import FAILURE_MARKERS
+from .tools import result_label as _status_label
+from .tools import result_status as _classify
+
+# task.json 的历史 detail 会带 `工具名(参数) -> 结果` 包装（见 tools/status.py：
+# 判定前的同一层剥离；此处供"失败原因"取首行时去掉包装）。
+_WRAPPER_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_.]*(?:\([^\n]*?\))? -> ")
 
 
 def _detect_color() -> bool:
@@ -195,12 +201,17 @@ def answer_live_stop() -> None:
 
 def tool_pair(name: str, result_detail: str, limit: int = 100) -> str:
     """回放用的配对行：一行说清"调用了什么、成没成"。失败只取首行
-    原因，不再漏出整段 stdout（实测反馈）。"""
-    failed = any(tag in result_detail for tag in FAILURE_MARKERS)
-    if failed:
+    原因，不再漏出整段 stdout（实测反馈）。
+
+    成败判定委托 `tools/status.py`（唯一权威）；"拒绝"单独上金色——
+    它是"被策略挡住"（危险命令/越界/权限），与"执行了但出错"要分开看。
+    """
+    status = _classify(result_detail)
+    if status != "ok":
         first_line = (result_detail.splitlines() or [""])[0]
-        reason = " ".join(first_line.split())[:limit]
-        return paint(f"  [调用] {name} → 失败：{reason}", "red")
+        reason = _head_reason(result_detail, limit)
+        color = "yellow" if status == "deny" else "red"
+        return paint(f"  [调用] {name} → {_status_label(status)}：{reason}", color)
     return paint(f"  [调用] {name} → 成功", "green")
 
 
@@ -210,21 +221,26 @@ def tool_call(name: str) -> str:
 
 
 def tool_result(result: str, limit: int = 100) -> str:
-    """工具结果：一行说清成功/失败，失败才给简短原因。"""
-    failed = any(tag in result for tag in FAILURE_MARKERS)
-    if failed:
-        return paint(f"  [结果] 失败：{_head_reason(result, limit)}", "red")
+    """工具结果：一行说清成功/失败/拒绝，非成功才给简短原因。"""
+    status = _classify(result)
+    if status != "ok":
+        color = "yellow" if status == "deny" else "red"
+        return paint(
+            f"  [结果] {_status_label(status)}：{_head_reason(result, limit)}", color
+        )
     return paint("  [结果] 成功", "green")
 
 
 def _head_reason(text: str, limit: int) -> str:
-    """从失败结果里提取简短原因（跳过标记词本身）。"""
-    for tag in FAILURE_MARKERS:
-        position = text.find(tag)
-        if position != -1:
-            reason = text[position + len(tag):].lstrip("：（:,， ")
-            return " ".join(reason.split())[:limit]
-    return " ".join(text.split())[:limit]
+    """从非成功结果里提取简短原因——**首行的机械归一**。
+
+    不剥判定前缀（"命令执行失败（exit_code=1）"整句就是原因，
+    剥掉前缀只剩 "exit_code=1）" 反而丢信息）；只去掉 task 记录的
+    `工具名 -> ` 包装、折叠空白、限长。
+    """
+    head = (text.splitlines() or [""])[0]
+    reason = _WRAPPER_PREFIX.sub("", head, count=1).lstrip("：（:,， ")
+    return " ".join(reason.split())[:limit]
 
 
 def thinking_delta(text: str) -> str:

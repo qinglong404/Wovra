@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from .tools import status as status_module
+
 READ_TOOLS = ("read_file",)
 WRITE_TOOLS = ("write_file",)  # 整体写入/新建
 EDIT_TOOLS = ("edit_file", "replace_lines")  # 局部修改
@@ -34,7 +36,7 @@ _OP_OF = {
 }
 
 # 文件操作的失败判定（读/删"没真发生"）：文件不存在、越界拦截、用户拒绝、
-# 目标是目录——命中即不按成功计（幽灵文件不产生状态）。
+# 目标是目录、二进制不可读——命中即不按成功计（幽灵文件不产生状态）。
 #
 # 判定口径 = **只看返回文本的首行**（2026-09-11 机制评审修复）。旧实现按
 # 全文子串匹配"不存在"，而 read_file 的成功返回是
@@ -43,31 +45,22 @@ _OP_OF = {
 # 成功的读取被判成失败**：实测当次会话 10/81 块被打上"幽灵"标签（R1 纯读轮
 # 独占 8 个）。该标签是整理指令的输入（"标签 = 写多细、写什么的指令"），
 # 会让组织器把 live 文件当成 DEAD。首行判定从根上消除这类误伤。
-_OP_FAIL_PREFIXES = (
-    "文件不存在:",     # read_file / delete_file / move_file
-    "目录不存在:",     # list_files / search_files / glob_files
-    "工具执行出错:",   # 工具抛异常（agent/core._invoke_tool）
-    "路径越界，",      # safety 拦截（读/删界外路径）
-    "用户拒绝",        # 确认门被拒
-)
-
-# 首行中缀判定（前缀是路径本身，无法做 startswith）
-_OP_FAIL_INFIXES = (
-    "是目录",          # read/write/delete 对目录的参数误用预检
-)
+#
+# 表**不在这里维护**（2026-09-14）：判定表统一在 `tools/status.py`——此前
+# 四处各写一份，口径必然漂移（实测全文子串口径 42 条假阳性）。此处只保留
+# 本模块需要的粒度（"真发生/没发生"布尔），判据直接委托。
 
 
 def op_failed(content: str) -> bool:
     """读/删操作的返回文本是否表示"没真发生"（失败）。
 
-    只看**首行**：前缀命中，或首行含 `是目录`。正文中出现"不存在"不构成
-    失败（那是一次成功的读取）。与 blocks.segment._op_failure 同源口径，
-    保证块标签与文件账本对同一份事实的判断一致。
+    只看**首行**（判据 = `tools/status.classify`）：非 `ok` 即没真发生。
+    正文中出现"不存在"不构成失败（那是一次成功的读取）——这是 2026-09-11
+    幽灵误判与 2026-09-14 用户报障（"老是判断错"）的同一病根。
+    与 blocks.segment._op_failure 同源口径，保证块标签与文件账本对同一份
+    事实的判断一致。
     """
-    head = (content or "").split("\n", 1)[0]
-    if head.startswith(_OP_FAIL_PREFIXES):
-        return True
-    return any(m in head for m in _OP_FAIL_INFIXES)
+    return status_module.failed(content)
 
 STATE_LIVE = "live"
 STATE_DEAD = "dead"

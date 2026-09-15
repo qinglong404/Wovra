@@ -801,14 +801,105 @@ function argSummary(name,raw){
   const v=Object.values(a).find(x=>typeof x==='string'&&x);
   return v?String(v).slice(0,90):'';
 }
+/* >>> STATUS_TABLE（由 scripts/webui_status_sync.py 生成，勿手改） */
+/* 与 Python 侧 wovra.tools.status 同表同规则：只看首行（剥掉 task
+   记录的 `工具名 -> ` 包装）、结构化 exit_code 优先、三分类 ok/error/deny。
+   判定表改动请改 src/wovra/tools/status.py，再跑：
+     uv run --no-sync python scripts/webui_status_sync.py --write
+   检查（含共享夹具逐条核对）：
+     uv run --no-sync python scripts/webui_status_sync.py
+   ——两侧跑同一份 tests/fixtures/tool_status_cases.json，任一侧漂移即红。 */
+const STATUS_DENY_PREFIXES=[
+  "已拒绝执行",
+  "用户拒绝了",
+  "用户取消了",
+  "权限拒绝：",
+  "被用户钩子拦截：",
+  "拒绝访问内网",
+  "路径越界，"
+];
+const STATUS_DENY_INFIXES=[
+  "位于工作区之外",
+  "请在那个会话中管理",
+  "不接受 file://"
+];
+const STATUS_ERROR_PREFIXES=[
+  "工具执行出错:",
+  "未知工具:",
+  "工具参数不是合法 JSON",
+  "文件不存在:",
+  "目录不存在:",
+  "命令执行失败（",
+  "抓取失败:",
+  "duckduckgo 失败",
+  "bing 失败",
+  "所有搜索通道都失败了",
+  "仅支持 http/https",
+  "URL 缺少主机名",
+  "无法解析主机",
+  "URL 无文本内容",
+  "截图失败：",
+  "启动浏览器失败:",
+  "截图超时（",
+  "截图未产出文件",
+  "看图失败：",
+  "target 为空：",
+  "未找到后台任务:",
+  "未找到 agent：",
+  "未找到工作项：",
+  "无进行中的阶段",
+  "未知动作:",
+  "正则表达式无效:",
+  "目标已存在:",
+  "版本前缀",
+  "route_to：",
+  "consult：",
+  "notify：",
+  "join_with：",
+  "update_responsibility：",
+  "⚠ 防呆拦截："
+];
+const STATUS_ERROR_INFIXES=[
+  "而非目录",
+  "是目录而非",
+  "是目录（而非",
+  "是目录：",
+  "无法按文本读取",
+  "超出范围",
+  "已被外部修改",
+  "不是 UTF-8 文本文件",
+  "没有历史版本",
+  "已发送终止信号但未退出",
+  "被拒：",
+  "超过 3 条硬上限",
+  "需要 text",
+  "需要 reason（",
+  "需要 evidence（",
+  "需要 goal 与 acceptance"
+];
+const STATUS_EXIT_CODE=/\bexit_code=(-?\d+)/;
+const STATUS_WRAPPER=/^[A-Za-z_][A-Za-z0-9_.]*(?:\([^\n]*?\))? -> /;
+function statusOf(content){
+  let head=String(content==null?'':content).replace(/^[\s\uFEFF]+/,'').split('\n')[0];
+  head=head.replace(STATUS_WRAPPER,'');
+  if(!head.trim())return 'ok';
+  const m=head.match(STATUS_EXIT_CODE);
+  if(m)return m[1]==='0'?'ok':'error';
+  if(STATUS_DENY_PREFIXES.some(p=>head.startsWith(p))
+     ||STATUS_DENY_INFIXES.some(p=>head.indexOf(p)>=0))return 'deny';
+  if(STATUS_ERROR_PREFIXES.some(p=>head.startsWith(p))
+     ||STATUS_ERROR_INFIXES.some(p=>head.indexOf(p)>=0))return 'error';
+  return 'ok';
+}
+/* <<< STATUS_TABLE */
 function resultStatus(name,content){
-  // 只看结果开头 + 退出码——结果全文可能就是源码（read_file 读到
-  // "已拒绝执行"这几个字的实现代码），全文扫描必然误判
-  const s=String(content||'').trim();
-  if(/^已拒绝执行/.test(s))return['🚫 已拒绝','st-deny'];
-  const m=s.match(/exit_code=(-?\d+)/);
-  if(m)return m[1]==='0'?['✓ 成功','st-ok']:['✗ 出错','st-bad'];
-  if(/^(错误|失败|路径越界|文件不存在|Error|Traceback)/.test(s))return['✗ 出错','st-bad'];
+  // 成败判定 = statusOf（与 Python 侧同表同规则）。这里只负责"翻译成徽标"。
+  // 此前是本函数自带一套开头正则：只认 5 个开头词，于是 `工具执行出错:`、
+  // `截图失败：`、`抓取失败:` 全被判成"✓ 成功"（实测 90 条假阴性）。
+  // 拒绝（deny）单列一色：被策略挡住 ≠ 执行了但出错。
+  const s=statusOf(content);
+  if(s==='deny')return['🚫 已拒绝','st-deny'];
+  if(s==='error')return['✗ 出错','st-bad'];
   return['✓ 成功','st-ok'];
 }
 /* consult 回复归因：内容形如 "{agent-id} 的回复：…" 且 id 在注册表中 */

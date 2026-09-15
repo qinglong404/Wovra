@@ -38,7 +38,7 @@ from typing import Optional
 
 from . import registry as registry_module
 from . import tools as tools_module
-from .tools import FAILURE_MARKERS
+from .tools import result_status
 
 # 所有任务统一放在项目根目录的 tasks/ 下（本文件位于 src/wovra/）；
 # `WOVRA_TASKS_ROOT` 可指向另一份数据目录（演示/验收/只读回放都靠它——
@@ -992,8 +992,12 @@ class Task:
 
     @staticmethod
     def _result_tail(result: str) -> str:
-        """把工具结果文本转成给人看的一句话（错误原文/字数/短结果）。"""
-        if any(tag in result for tag in FAILURE_MARKERS):
+        """把工具结果文本转成给人看的一句话（错误原文/字数/短结果）。
+
+        成败判定委托 `tools/status.py`（唯一权威）：此前是全文子串匹配，
+        正文里出现"工具执行出错"等字样就报失败——读源码必中招。
+        """
+        if result_status(result) != "ok":
             return "，失败：" + _one_line(result, 80)
         if len(result) > 60:
             return f"，返回 {len(result)} 字（详见 task.json）"

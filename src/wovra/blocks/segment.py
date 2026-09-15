@@ -8,6 +8,7 @@ v3 的块类型：file（带生命周期标签）/ environment / user / fallback
 """
 from typing import Optional
 from .common import FILE_OP_TOOLS, READ_TOOLS, WRITE_TOOLS, _call_info, _remember, tag_command
+from ..tools.status import ESCAPE_MARKERS, NOT_FOUND_MARKERS
 
 def _new_block(kind: str) -> dict:
     return {
@@ -135,9 +136,12 @@ def _block_kind(name: str, args: dict) -> str:
         return "environment"
     return "tool"
 
-_NOT_FOUND_MARKERS = ("文件不存在:", "目录不存在:", "FileNotFoundError", "No such file")
+# 幽灵 / 越界的判据表**不在这里维护**（2026-09-14）：统一取
+# `tools/status.py` 的 `NOT_FOUND_MARKERS` / `ESCAPE_MARKERS`（同源同表，
+# 与 CLI、报告、前端共一份），本模块只做二级分类。
+_NOT_FOUND_MARKERS = NOT_FOUND_MARKERS
 
-_ESCAPE_MARKERS = ("路径越界，",)
+_ESCAPE_MARKERS = ESCAPE_MARKERS
 
 _VERIFY_TAGS = ("test", "build", "run")
 

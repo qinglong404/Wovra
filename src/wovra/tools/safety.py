@@ -47,15 +47,12 @@ if _env_ws:
     PROJECT_ROOT = Path(_env_ws).resolve()
     PROJECT_ROOT.mkdir(parents=True, exist_ok=True)
 
-# 变更类工具的失败标记：ui（红色显示）和 task 报告（"失败："前缀）
-# 共用这一份，判定口径保持一致
-FAILURE_MARKERS = (
-    "工具执行出错",
-    "未知工具",
-    "合法 JSON",
-    "已拒绝执行危险命令",
-    "命令执行失败（",
-)
+# 工具结果成败判定**已迁出本模块**（2026-09-14）：
+#   原 `FAILURE_MARKERS` 是**全文子串**判定，正文里出现"工具执行出错"等字样
+#   就判失败——成功的 read_file 读到本项目源码必然中招（实测 42 条假阳性，
+#   用户报障"老是判断错"）。唯一权威口径现在是 `tools/status.py::classify`
+#   （首行锚定 + 结构化 exit_code + ok/error/deny 三分类），CLI/前端/报告/
+#   文件账本/块标签全部委托它。此处不再保留任何判定表。
 
 # 破坏性命令黑名单：子串匹配，宁可误杀不可放过。
 # 有意保持保守——rm -r 这类即使"看起来安全"也拒绝，

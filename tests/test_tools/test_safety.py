@@ -7,12 +7,12 @@ import re
 import sys as _sys
 import pytest
 from wovra.tools import (
-    FAILURE_MARKERS,
     delete_file,
     edit_file,
     glob_files,
     read_file,
     move_file,
+    result_status,
     run_command,
     search_files,
     write_file,
@@ -393,7 +393,7 @@ def test_run_command_blocks_destructive_patterns():
     for command in dangerous:
         result = run_command(command)
         assert "已拒绝执行危险命令" in result, f"{command} 应被拒绝"
-        assert any(marker in result for marker in FAILURE_MARKERS)
+        assert result_status(result) == "deny"   # 拒绝：被策略挡住，不是"执行了但出错"
 
 
 def test_git_operations_go_through_confirm_gate(monkeypatch, tmp_path):
