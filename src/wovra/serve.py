@@ -808,6 +808,11 @@ def confirm_tag(question: str) -> str:
     return "q:" + q.strip()[:60]
 
 
+# 维护硬上限 900s（`_org_maint_timeout`）+ 5 分钟余量：超过这么久还没有「结束：」
+# 就认为那次维护没正常收尾（进程被杀），界面不再显示"进行中"。
+_MAINT_STALE_AFTER = 900 + 300
+
+
 def maint_state(data: dict) -> dict:
     """维护（整理/分裂）在不在跑、跑到哪一步、多久了、上次结果是什么。
 
@@ -854,13 +859,22 @@ def maint_state(data: dict) -> dict:
             elapsed = max(0, int(delta.total_seconds()))
         except ValueError:
             elapsed = 0
+    # **未收尾的启动不等于"正在跑"**（2026-09-15 做 README 截图时实测到的）：维护
+    # 跑在后台线程里，进程被杀（重启/崩溃）就不会写「结束：」——旧逻辑于是让界面
+    # 永远显示"分裂中…已 1380s"。判据：超过维护硬上限（900s）+ 余量还没结束 →
+    # 视为**上次没正常收尾**，不再显示进行中（给出说明比一个假的进度条诚实）。
+    if since and elapsed > _MAINT_STALE_AFTER:
+        return {"active": False, "phase": "", "since": since, "elapsed": elapsed,
+                "org_pending": pending, "splitting": splitting, "batch": batch,
+                "last_end": last_end or "（上次维护没有正常收尾：进程可能被重启/中断）",
+                "finished_at": finished_at, "last_defect": last_defect, "stale": True}
     phase = ""
     if since:
         phase = "分裂" if splitting else ("整理" if pending else "收尾")
     return {"active": bool(since), "phase": phase, "since": since,
             "elapsed": elapsed, "org_pending": pending, "splitting": splitting,
             "batch": batch, "last_end": last_end, "finished_at": finished_at,
-            "last_defect": last_defect}
+            "last_defect": last_defect, "stale": False}
 
 
 def todo_log(data: dict, limit: int = 60) -> list[dict]:

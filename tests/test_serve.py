@@ -1333,3 +1333,27 @@ def test_http_plan_and_meta_carry_maint(server):
     assert body["maint"]["active"] is False          # 夹具没有维护痕迹
     _, meta = _get(server + "/api/sessions/s1")
     assert "maint" in meta
+
+
+def test_maint_state_treats_unfinished_start_as_stale_not_running():
+    """**未收尾的启动 ≠ 正在跑**（2026-09-15 做 README 截图时实测到的）。
+
+    维护跑在后台线程里：进程被重启/杀掉就不会写「结束：」，旧逻辑于是让界面**永远**
+    显示"分裂中…已 1380s"。超过维护硬上限（900s）+ 余量 → 判为"上次没正常收尾"。
+    """
+    import datetime as _dt
+
+    old = (_dt.datetime.now() - _dt.timedelta(seconds=1380)).isoformat(timespec="seconds")
+    data = {"rounds": [{"seq": 1, "org_state": "pending", "split_state": "running"}],
+            "history": [{"kind": "maintenance", "time": old,
+                         "detail": "启动：批次 R1-R1（1 轮，输入快照 3 条消息，硬上限 900s）"}]}
+    m = serve.maint_state(data)
+    assert m["active"] is False and m["phase"] == "" and m["stale"] is True
+    assert "没有正常收尾" in m["last_end"]
+
+    # 刚启动（45s 前）：仍然算在跑，界面照常显示进度
+    fresh = (_dt.datetime.now() - _dt.timedelta(seconds=45)).isoformat(timespec="seconds")
+    data["history"][0]["time"] = fresh
+    m = serve.maint_state(data)
+    assert m["active"] is True and m["stale"] is False
+    assert m["phase"] == "分裂"          # 轮上 split_state=running → 分裂阶段

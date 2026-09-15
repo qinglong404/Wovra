@@ -264,12 +264,17 @@ src/wovra/
     prompts.py      model-visible prompts and tool schemas (pure data)
     support.py      run constants and stateless helpers (schema generation …)
   tools/          Built-in toolbox
-    safety.py       workspace root, audit hook, path guards, command-escape checks
+    safety.py       workspace root, audit hook, path guards, command-escape checks,
+                    confirm gate, write-protected zones, device read-only allow-list
     files.py        read/write/edit/delete/move/restore, search, checkpoints
     shell.py        run_command, process-tree kill
-    background.py   background task registry and lifecycle
-    web.py          web_search / web_fetch (with SSRF guard)
+    background.py   background task registry and lifecycle (flags "exit 0 but looks like an error")
+    web.py          web_search / web_fetch (SSRF guard, readability extraction, cache)
+    eyes.py         eyes: screenshot / view_image / page_text (image caps, "not injected" notice)
     interaction.py  ask_user, user hooks, current time
+    limits.py       unified output caps + spill-to-disk for oversized results
+    permissions.py  file permission guard (per-agent write/delete rights)
+    status.py       the single authority for tool-result success/failure
   cli/            Terminal entry point
     main.py         argparse, subcommand dispatch
     session.py      session lock, task/mode resolution
@@ -277,18 +282,127 @@ src/wovra/
     render.py       streaming turn rendering, replay
     interactive.py  chat loop, local commands
   blocks/         Zero-LLM block structure
+    common.py       shared base (event/message shapes)
     segment.py      round → blocks (per-file aggregation)
     labels.py       lifecycle labels → label line
     digest.py       block digests / inspection view
+    migrate.py      load-time migration v1 coarse blocks → v3 by-file blocks
   task.py         persistent task tree (Task, TaskState)
   lifecycle.py    file lifecycle ledger
   llm.py          LLM client (single funnel for all model calls)
   tokens.py       token estimation
   ui.py           terminal rendering
   truncate.py     event indexing
+  pathmatch.py    robust path matching (model-typed path forms normalized)
+  registry.py     responsibility registry (domain tree → agent entries)
+  routing.py      routing and the responsibility table
+  views.py        per-domain view material (what each agent sees)
+  economics.py    split economics (whether/where to split)
+  split_lifecycle.py  split lifecycle (pending/ready/rejected/skipped/…)
+  serve.py        web service (HTTP API + static frontend)
+  __main__.py     `python -m wovra` entry
+webui/            human-view frontend (static: index.html + vendor)
 ```
 
 ---
+
+## Web UI
+
+```bash
+wovra serve                 # http://127.0.0.1:8600/ by default
+wovra serve --port 8612     # another port (several instances can coexist)
+WOVRA_TASKS_ROOT=/tmp/demo wovra serve   # serve a demo data dir (never touches real sessions)
+```
+
+The **conversation tab** lays a round out in time order: your message, the model's thinking and
+answer (rendered as Markdown), every tool call with its result (collapsed by default — click for
+the raw text), and one message block per agent involved.
+
+![Conversation tab](docs/images/ui-conv.png)
+
+The six KPIs on top are the ledger *at this moment*: **Σ prompt / cache hit rate / LLM calls /
+rounds / tool calls / mean TTFT**. Two of them deserve a note: **tool calls** can exceed one per
+step (a step may call several read-only tools in parallel — which is exactly how you see the
+parallelism), and **mean TTFT counts working rounds only** — a maintenance call that reads 200K
+tokens at once would otherwise drag the average up. The six cells refresh **per step**, not per
+round. Each agent on the left has a context-occupancy bar (current/window plus observed peak).
+
+At the bottom sits the **maintenance progress bar**: organization and split run on background
+threads, and the job is finished the moment the round closes — without this bar those one or two
+minutes look like a frozen page. It also reports the outcome, **including why a split was
+rejected or skipped**.
+
+**Open rounds** (unclosed) get a bar of their own: a round only closes when the model produces a
+final answer, so an interrupted round (or one that ran out of steps) stays open and absorbs your
+next message. The UI says so explicitly and offers **▶ resume** (equivalent to `/c`: continue
+without injecting a new message):
+
+![Open round and resume](docs/images/ui-open-round.png)
+
+The **ledger tab** shows the current state and the state ledger produced by organization
+(escalations / pending experiments / decisions):
+
+![Ledger tab](docs/images/ui-ledger.png)
+
+The **project tab** shows the file tree (ownership, state, description) next to each agent's
+**responsibility** and the files it owns — the responsibility text comes from the split stage,
+while file ownership is computed mechanically from paths:
+
+![Project tab](docs/images/ui-project.png)
+
+The **usage tab** breaks the bill down: rounds attributed by stage, aggregated per agent, cache
+hits reconciled line by line:
+
+![Usage tab](docs/images/ui-usage.png)
+
+> They are real screenshots of a real session (the work happened in this very repository),
+> served by `wovra serve`. The UI also ships a **workspace picker** (choose the working directory
+> when creating a session, cross-platform) and an approve/auto safety toggle.
+
+## CLI and local commands
+
+| Command | What it does |
+|---|---|
+| `wovra run "<goal>"` | one-shot task (finishes organization/split before exiting) |
+| `wovra chat [id]` | interactive session (input history, status bar, local commands) |
+| `wovra list` · `wovra report <id>` · `wovra maint <id>` | list sessions · human-view report · maintenance ledger |
+| `wovra views <id>` | print each agent's assembled view (debug "who sees what") |
+| `wovra serve [--port N]` | start the Web UI |
+| `wovra delete <id>` | delete a session (and its local data) |
+
+Inside a session, **local commands** (`/` or `\` prefix, zero model cost): `/c`·`\c` **resume**
+the most recent open round (no new message injected), `/report`, `/todo`, `/maint`, `/bg`, `/help`.
+`Ctrl+C` exits at the prompt and interrupts the running round otherwise (the round stays open and
+can be resumed). `--mode managed|baseline` switches the context strategy; `approve` (ask before
+sensitive operations) / `auto` (let everything through, good for unattended runs) switches the
+safety mode.
+
+## Tooling and safety
+
+* **Full output by default**: tool output is capped at 200,000 characters
+  (`WOVRA_OUTPUT_LIMIT`); when it really overflows you get a head preview plus the original size
+  and an on-disk path (`output/spill/`) that `read_file` can fetch at any time — **nothing is
+  lost**.
+* **`tasks/` is write-protected**: session data is the Runtime's source of truth, so the tool
+  layer refuses writes and allows reads — and this rule **cannot be authorized** (out-of-workspace
+  access can be authorized once; this cannot).
+* **Image caps**: an image the model can "see" is at most **3000px** per side
+  (`WOVRA_IMAGE_MAX_SIDE`, to save tokens), and the provider's hard limit is **8192px**
+  (`WOVRA_IMAGE_HARD_MAX_SIDE`, measured: 8192 accepted, 8193 rejected). Oversized images are
+  **not injected**, and the next reply tells the model plainly "you did not see this image"
+  rather than letting it improvise.
+* **Boundaries and confirmations**: commands stay inside the workspace; crossing out of it needs
+  a one-time authorization recorded in `.wovra/authorized-paths.json`; destructive operations
+  (`rm -r`, `git push/reset/…`) go through a **confirm gate** (y/N, with an "always this kind"
+  option); a read-only device allow-list (`/dev/tty*`, `/sys/bus/usb/devices`, …) permits
+  hardware-troubleshooting reads while still blocking write intent.
+* **One authority for success/failure**: `tools/status.py` (first-line anchoring plus structured
+  `exit_code`) is shared by the CLI, the UI, reports and the file ledger — no more guessing from
+  the word "error" appearing in the text (that produced 42 false positives).
+* **File permission guard**: `tools/permissions.py` limits write/edit/delete by agent ownership —
+  "whether you may, not whether you should".
+* **Audit**: every mutating tool call keeps a full audit trail; background tasks whose output
+  looks like an error despite `exit_code=0` are flagged.
 
 ## Design Philosophy
 
@@ -349,22 +463,25 @@ This makes it possible to experiment with different underlying agents without ch
 > has been validated by controlled multi-session experiments and frozen
 > (see [docs/context-management-v3.md](docs/context-management-v3.md)).
 > Agent organization is now implemented as **context differentiation**:
-> watermark organization and split analysis run in one pass, and a
+> watermark organization and split analysis form a **serial two-stage
+> append pipeline** (org → split; split is skipped if org fails), and a
 > registry routes work inside a single runtime (one-way notify / two-way
-> consult). Next: real long-task validation, and a dedicated human-view
-> frontend (the terminal is a stopgap cockpit).
+> consult). The **human-view frontend has shipped** (`wovra serve` +
+> `webui/`, see [Web UI](#web-ui)). Next: real long-task validation and
+> independent task evaluation.
 
-* [x] Minimal agent runtime (29 tools: files / commands / background tasks / web / interactive confirmation / plan ledger / history expansion / routing / notify-consult / join / responsibility)
+* [x] Minimal agent runtime (**32** tools in managed mode, **22** in baseline: files / commands / background tasks / web / **eyes (screenshot · view_image · page_text)** / interactive confirmation / plan ledger / history expansion / routing / notify-consult / join / responsibility / **organization & split submission**)
 * [x] Task representation and persistent task state (Task / TaskState / report.md / workspace-bound sessions)
 * [x] Context management V3: zero truncation during execution, window guard, file map, anchor self-healing
-* [x] Watermark-triggered batch organization → split (serial append pipeline, promoted on the next round; older views folded by current file state)
-* [x] Safety (deny-list + sensitive-command confirmation + staleness guard + audit + atomic persistence)
+* [x] Watermark-triggered batch organization → split (**serial two-stage append pipeline**; the product takes effect **at the round-close boundary**, with "next round open" as the fallback for late async maintenance; older views folded by current file state)
+* [x] Split product = **a structure tree + one responsibility per agent** (nodes declare scope with `path`/`paths`): file ownership (deepest path prefix), file-level descriptions (taken from the file head), non-LIVE file attachment, whether/where to split — all computed mechanically by the Runtime. An **untrustworthy product means no split** (truncated or incomplete coverage → keep the organization result and re-judge at the next watermark batch; "a wrong split is worse than no split")
+* [x] Safety (**write-protected `tasks/`** (read-only, not even authorizable) + deny-list + sensitive-command confirmation (`rm -r` and destructive git go through the confirm gate) + device read-only allow-list + staleness guard + audit + atomic persistence)
 * [x] Cost accounting (purpose-split / effective input / context occupancy / cache hits, persisted per round)
 * [x] Two controlled comparison experiments (managed vs baseline, see results below)
-* [x] Responsibility-based agent isolation, realized as context differentiation: the same organization pass yields responsibility domains, and a registry + one-way notify / two-way consult route work inside one runtime — a natural outgrowth of organization (single-agent branching, not synchronous agents)
+* [x] Responsibility-based agent isolation, realized as context differentiation: the **split stage** produces the structure tree and the responsibilities, and a registry + one-way notify / two-way consult route work inside one runtime — a natural outgrowth of organization (single-agent branching, not synchronous agents)
+* [x] Human-view frontend: `wovra serve` (six tabs + six top KPIs + maintenance progress bar + resume for open rounds + workspace picker)
 * [ ] Pre-flight planning gate for open-ended / large-scope work (intent archived, not implemented)
 * [ ] Heavy-load validation (synthetic long-trajectory replay + real long tasks)
-* [ ] Dedicated human-view frontend (the terminal is a stopgap cockpit)
 * [ ] Independent task evaluation
 
 ## Experiment Results
@@ -410,6 +527,10 @@ Full data and derivation:
 | [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | Three-generation mechanism experiment |
 | [docs/preflight-planning-intent.md](docs/preflight-planning-intent.md) | Pre-flight planning gate for open-ended / large-scope work (intent archive, not implemented) |
 | [docs/venv-usability-prompt-reconcile-20260911.md](docs/venv-usability-prompt-reconcile-20260911.md) | Runner-experience fix: venv usability + system-prompt reconciliation (2026-09-11) |
+| [docs/organization-split-explained.md](docs/organization-split-explained.md) | Organization → split explained (product shape, when it takes effect) |
+| [docs/context-differentiation-runtime.md](docs/context-differentiation-runtime.md) | Context-differentiation runtime (responsibility domains, view assembly) |
+| [docs/worklog-20260911.md](docs/worklog-20260911.md) | Engineering log: motivation / evidence / rollback per change (ongoing) |
+| [docs/maint-progress-command-20260911.md](docs/maint-progress-command-20260911.md) | Maintenance progress accounting (cost and state of org/split) |
 | [experiments/README.md](experiments/README.md) | Controlled experiment protocol and tooling |
 
 The architecture will evolve through actual usage and experiments.
@@ -498,7 +619,13 @@ Implement:
 
 Introduce responsibility-based agents and controlled task delegation.
 
-### Phase 5 — Human Collaboration
+### Phase 5 — Human Collaboration (**mostly shipped**)
+
+`wovra serve` + `webui/` already provide: progress viewing (six tabs, six KPIs, maintenance
+progress bar), intervention (stop the round, resume an open round), approval (approve/auto
+toggle, confirm gate) and recovery (persistent sessions, resume after a crash). **Task editing**
+(change goal/constraints/plan from the UI) and **explanatory dialogue** are still ahead.
+The original list:
 
 Add:
 

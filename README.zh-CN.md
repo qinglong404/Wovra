@@ -264,12 +264,16 @@ src/wovra/
     prompts.py      模型可见的提示词与工具 schema（纯数据）
     support.py      运行常量与无状态工具函数（schema 生成等）
   tools/          内置工具箱
-    safety.py       工作区属主、审计挂钩、路径防护、命令越界判定
+    safety.py       工作区属主、审计挂钩、路径防护、命令越界判定、确认门、禁写区、设备只读白名单
     files.py        读/写/改/删/移/回滚、搜索、检查点
     shell.py        run_command、进程树强杀
-    background.py   后台任务注册表与生命周期
-    web.py          web_search / web_fetch（含 SSRF 防护）
+    background.py   后台任务注册表与生命周期（含"退出码 0 但输出像报错"标注）
+    web.py          web_search / web_fetch（含 SSRF 防护、正文提取、结果缓存）
+    eyes.py         眼睛：screenshot / view_image / page_text（含图片尺寸上限与"未注入"说明）
     interaction.py  ask_user、用户 Hooks、当前时间
+    limits.py       工具输出的统一上限与超限落盘（output/spill/）
+    permissions.py  文件权限守卫（按 agent 归属限制改写删）
+    status.py       工具结果成败判定的唯一权威口径
   cli/            终端入口
     main.py         argparse、子命令分发
     session.py      会话锁、任务/模式解析
@@ -277,18 +281,109 @@ src/wovra/
     render.py       流式轮次渲染、历史回放
     interactive.py  chat 主循环、本地命令
   blocks/         零 LLM 的块结构
+    common.py       共用底座（事件/消息形状）
     segment.py      轮 → 块（按文件聚合）
     labels.py       生命周期标签 → 标签行
     digest.py       块摘要 / 检视视图
+    migrate.py      v1 粗分块 → v3 按文件聚合的加载期迁移
   task.py         持久任务树（Task、TaskState）
   lifecycle.py    文件生命周期账本
   llm.py          模型客户端（所有模型调用的唯一出口）
   tokens.py       token 估算
   ui.py           终端渲染
   truncate.py     事件索引
+  pathmatch.py    路径的鲁棒匹配（模型抄的路径形态归一）
+  registry.py     职责注册表（域树 → agent 条目）
+  routing.py      路由与职责表（谁管什么）
+  views.py        域视图材料（每个 agent 看到什么）
+  economics.py    分裂经济判据（该不该裂、在哪层裂）
+  split_lifecycle.py  分裂生命周期（pending/ready/rejected/skipped…）
+  serve.py        Web 服务（HTTP API + 静态前端）
+  __main__.py     `python -m wovra` 入口
+webui/            人视图前端（纯静态：index.html + vendor）
 ```
 
 ---
+
+## Web UI（人视图）
+
+```bash
+wovra serve                 # 默认 http://127.0.0.1:8600/
+wovra serve --port 8612     # 换端口（可多实例并存）
+WOVRA_TASKS_ROOT=/tmp/demo wovra serve   # 用另一份数据目录起演示实例（不碰真实会话）
+```
+
+**对话页**把一轮之内发生的事按时间铺开：用户原文、模型的思考与正文（MD 实时渲染）、
+每一次工具调用与结果（默认折叠，点开是原文）、每个 agent 各占一个消息块。
+
+![对话页](docs/images/ui-conv.png)
+
+顶栏六格是"这一刻的账"：**Σ prompt / 缓存命中率 / LLM 调用 / 轮次 / 工具调用 / TTFT 均值**。
+两处口径值得说明：**工具调用**一步可以大于 1（一步里并行调多个只读工具，也就顺带看出
+并行度）；**TTFT 均值只统计干活轮**——整理/分裂那种一次读 20 万 token 的批量调用不计入，
+否则均值会被它们抬飞。六格在跑轮期间**按步刷新**，不必等这一轮结束。左边每个 agent
+一条上下文占用条（当前/窗口 + 实测峰值）。
+
+底部是**维护进度条**：整理与分裂跑在后台线程里，轮一闭合作业就结束了——没有它，那一两
+分钟页面是全黑的。结束时在这里给出结果，**包括"被拒收/本次未分裂"的原因**。
+
+**开放轮（未闭合）+ 续跑**：一轮只有产出最终回答才算闭合，被打断或步数用尽的轮会一直
+开着，新消息并入它——界面上明确标出来，并给一个「▶ 续跑」（等价于命令行 `/c`，不注入
+新消息）：
+
+![未闭合轮与续跑](docs/images/ui-open-round.png)
+
+**账本页**是整理产出的现状与状态账本（决策升级 / 待办实验 / 已决策）：
+
+![账本页](docs/images/ui-ledger.png)
+
+**项目页**给出文件树（归属、状态、描述）与每个 agent 的**职责**及它名下的文件——职责就是
+分裂阶段写的那段话，文件归属则是 Runtime 按路径机械算的：
+
+![项目页](docs/images/ui-project.png)
+
+**用量页**把账拆开：轮账按阶段归属、按 agent 聚合、缓存命中逐项对账：
+
+![用量页](docs/images/ui-usage.png)
+
+> 截图取自一个真实会话（内容是本仓库自身的一次修复工作），跑在 `wovra serve` 上。
+> 页面还有一个「工作目录选择器」（新建会话时挑工作区，跨平台）与审批/自主模式切换。
+
+## 命令行与本地命令
+
+| 命令 | 作用 |
+|---|---|
+| `wovra run "<目标>"` | 一次性跑完一个任务（退出前把整理/分裂做完） |
+| `wovra chat [id]` | 交互会话（输入历史 / 底栏状态 / 本地命令） |
+| `wovra list` · `wovra report <id>` · `wovra maint <id>` | 列会话 · 人视图报告 · 维护账 |
+| `wovra views <id>` | 打印各 agent 的装配视图（排查"谁看到了什么"） |
+| `wovra serve [--port N]` | 起 Web UI |
+| `wovra delete <id>` | 删除会话（其本地数据一并删除） |
+
+会话内的**本地命令**（`/` 或 `\` 前缀，零模型成本）：`/c`·`\c` **续跑**最近一个开放轮
+（不注入新消息）、`/report` 报告、`/todo` 计划、`/maint` 维护账、`/bg` 后台任务、`/help`。
+`Ctrl+C` 在输入行是退出、在轮运行中是中断本轮（轮保持开放，可续跑）。
+`--mode managed|baseline` 切换上下文策略；`approve`（敏感操作先问）/`auto`（全放行，
+适合无人值守长跑）切换安全模式。
+
+## 工具与安全能力
+
+* **输出默认全量**：工具输出上限 200,000 字符（`WOVRA_OUTPUT_LIMIT`）；真超限时返回开头
+  预览 + 原文体量 + 落盘路径（`output/spill/`），随时可以 `read_file` 取回——**不丢文本**。
+* **`tasks/` 是禁写区**：会话数据是 Runtime 的真相来源，工具层对它**拒写放读**，而且
+  **不可授权**（越界访问可以授权一次，禁写区不行）。
+* **图片上限**：模型能"看见"的图每边 ≤ **3000px**（`WOVRA_IMAGE_MAX_SIDE`，省 token），
+  服务端硬上限 **8192px**（`WOVRA_IMAGE_HARD_MAX_SIDE`，实测裁定：8192 收、8193 拒）；
+  超限的图**不注入**，并在下一次回复里明确告诉模型"这张图你没看到"（而不是让它编）。
+* **越界与确认**：命令默认限定在工作区内；跨工作区访问需**授权一次**并记入
+  `.wovra/authorized-paths.json`；`rm -r`、`git push/reset/…` 等破坏性操作走**确认门**
+  （y/N，可"以后同类"）；设备只读白名单（`/dev/tty*`、`/sys/bus/usb/devices` 等）允许
+  硬件排障类只读查询，带写意图照旧拦。
+* **成败判定只有一套口径**：`tools/status.py`（首行锚定 + 结构化 exit_code），CLI、前端、
+  报告、文件账本共用——不再靠"正文里出现'出错'字样"瞎猜（那会 42 条假阳性）。
+* **文件权限守卫**：`tools/permissions.py` 按 agent 归属限制改写删——"干不干看有没有权限，
+  不看该不该"。
+* **审计**：变更类工具调用留全文审计；后台任务"退出码 0 但输出像报错"会被标注出来。
 
 ## 设计哲学
 
@@ -347,21 +442,23 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 
 > **机制基线阶段（V3）。** 上下文管理机制经过真实多轮任务对照实验
 > 验证并封版（见 [docs/context-management-v3.md](docs/context-management-v3.md)）。
-> 组织层已以**上下文分化**形态落地：水位整理与分裂分析同一趟完成，
-> 注册表在单运行时内分流（单向 notify / 双向 consult）。下一站：真实
-> 长任务验证 + 独立的人视图前端（终端只是临时驾驶舱）。
+> 组织层已以**上下文分化**形态落地：水位整理与分裂分析是**串行两阶段纯追加管线**
+> （org → split，org 失败则 split 跳过），注册表在单运行时内分流（单向 notify /
+> 双向 consult）。**人视图前端已落地**（`wovra serve` + `webui/`，见
+> [Web UI](#web-ui人视图)）。下一站：真实长任务验证 + 独立任务评估。
 
-* [x] 最小智能体运行时（29 个工具：文件 / 命令 / 后台任务 / 网络检索 / 交互确认 / 计划账本 / 历史展开 / 路由 / 单向通知与双向咨询 / 会合 / 职责更新）
+* [x] 最小智能体运行时（managed **32** / baseline **22** 个工具：文件 / 命令 / 后台任务 / 网络检索 / **眼睛（截屏·看图·页面文本）** / 交互确认 / 计划账本 / 历史展开 / 路由 / 单向通知与双向咨询 / 会合 / 职责更新 / **整理与分裂的提交口**）
 * [x] 任务表示与持久任务状态（Task / TaskState / report.md / 会话绑定工作区）
 * [x] 上下文管理 V3：执行期零截断、窗口保底、文件地图、锚点自愈
-* [x] 水位触发的批量整理 → 分裂（串行纯追加管线，下一轮开启时生效；更早视图按文件现状折叠）
-* [x] 安全机制（黑名单 + 敏感确认 + 过期保护 + 审计 + 原子落盘）
+* [x] 水位触发的批量整理 → 分裂（**串行两阶段纯追加管线**；整理产物在**轮闭合边界即时生效**，异步维护迟到时以下一轮开启兜底；老轮按文件现状折叠）
+* [x] 分裂产物 = **结构树 + 每个 agent 的职责**（节点用 `path`/`paths` 声明范围）：文件归属（按最深路径前缀）、文件级描述（取文件开头）、非 LIVE 文件挂载、是否分裂与在哪层分裂，全部由 Runtime 机械算；产物**不可信就不分裂**（被截断或覆盖不全时保留整理结果、等下一批水位再判断——"错误分裂不如不分裂"）
+* [x] 安全机制（**禁写区**（`tasks/` 只读、不可授权）+ 黑名单 + 敏感确认（`rm -r`、git 破坏性操作走确认门）+ 设备只读白名单 + 过期保护 + 审计 + 原子落盘）
 * [x] 成本核算（三分账 / 等效输入 / 上下文占用 / 缓存命中，逐轮落盘）
 * [x] 对照实验两轮（managed vs baseline，见下方实测结果）
-* [x] 基于职责的智能体隔离，以「上下文分化」实现：水位整理同一趟产出职责域，注册表 + 单向 notify / 双向 consult 在单运行时内分流——是整理的自然产物（单 agent 分流，非同步多 Agent）
+* [x] 基于职责的智能体隔离，以「上下文分化」实现：**分裂阶段**产出结构树与职责，注册表 + 单向 notify / 双向 consult 在单运行时内分流——是整理的自然产物（单 agent 分流，非同步多 Agent）
+* [x] 人视图前端：`wovra serve`（六页签 + 顶栏六格 + 维护进度条 + 开放轮续跑 + 工作目录选择器）
 * [ ] 开放/大范围任务的开工前规划闸门（已写意图存档，未实现）
 * [ ] 重度场景验证（合成长轨迹回放 + 真实长任务）
-* [ ] 独立的人视图前端（终端只是临时驾驶舱）
 * [ ] 独立任务评估
 
 ## 实测结果
@@ -400,6 +497,10 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 | [docs/round11-context-experiment.md](docs/round11-context-experiment.md) | 三代机制对照实验 |
 | [docs/preflight-planning-intent.md](docs/preflight-planning-intent.md) | 开放/大范围任务的开工前规划闸门（意图存档，未实现） |
 | [docs/venv-usability-prompt-reconcile-20260911.md](docs/venv-usability-prompt-reconcile-20260911.md) | 运行者体验改进：venv 可用性 + 提示词对账（2026-09-11） |
+| [docs/organization-split-explained.md](docs/organization-split-explained.md) | 整理 → 分裂机制详解（含产物形状与生效时机） |
+| [docs/context-differentiation-runtime.md](docs/context-differentiation-runtime.md) | 上下文分化运行时（职责域与视图装配） |
+| [docs/worklog-20260911.md](docs/worklog-20260911.md) | 工程日志：每次改动的动机 / 证据 / 回滚（持续更新） |
+| [docs/maint-progress-command-20260911.md](docs/maint-progress-command-20260911.md) | 维护进度记账（整理/分裂的成本与状态） |
 | [experiments/README.md](experiments/README.md) | 受控实验协议与工具 |
 
 ## 开发者须知
@@ -481,7 +582,11 @@ LLM
 
 引入基于职责的智能体与受控的任务委托。
 
-### 阶段 5 —— 人机协作
+### 阶段 5 —— 人机协作（**大部分已落地**）
+
+`wovra serve` + `webui/` 已提供：进度查看（六页签 + 顶栏六格 + 维护进度条）、干预
+（终止本轮 / 开放轮续跑）、审批（approve/auto 切换、确认门）、恢复（会话持久化 + 崩溃后接着做）。
+**任务修改**（在界面上直接改目标/约束/计划）与**解释性会话**仍在路上。原清单：
 
 加入：
 
