@@ -693,19 +693,35 @@ async function select(id){
   renderHeader();renderTab();
   watchMaintenance();   // 打开一个"后台还在整理"的会话：界面要自己跟上（§86）
 }
-/* 顶部六格（Σprompt/缓存命中/LLM 调用/轮次/总步数/TTFT 均值）**单独一份渲染器**
+/* 顶部六格（Σprompt/缓存命中/LLM 调用/轮次/工具调用/TTFT 均值）**单独一份渲染器**
    （2026-09-15 用户口径："改成按步更新，不要再按轮更新"）：跑轮期间 `/plan` 每 tick
-   报一次现算值（`usage`+`rounds`+`steps`，与 session_meta 同源），一变就只重画这六格
+   报一次现算值（`usage`+`rounds`+`tools`，与 session_meta 同源），一变就只重画这六格
    ——不动 `#tabs`/`#chips`（那些每步重建会丢悬停态、也白花）。`live` 非空时在标题上
-   标一个"进行中"的角标，让人知道这几个数是活的。 */
-function renderKpis(u,rounds,steps,live){
+   标一个"进行中"的角标，让人知道这几个数是活的。
+
+   两处口径（2026-09-15 用户两问）：
+   * `工具调用`**替代了原来的"总步数"**——步 = 一次 LLM 交互，跟"LLM 调用"基本重复；
+     工具调用数才看得出**并行度**（一步里并行调多个工具 → 工具调用 ÷ LLM 调用 > 1）。
+   * `TTFT 均值`只统计**干活轮**（`ttft_work_*`）：整理/分裂的批量调用输入 8–20 万
+     tok，首字延迟本来就有 15–123s，混进来会把均值抬飞（用户报"虚大"的来源之一）。 */
+function renderKpis(u,rounds,tools,live){
   const hit=fmtP(u.cached||0,(u.cached||0)+(u.miss||0));
-  $('#kpis').innerHTML=[
+  // TTFT：有干活轮样本就用它；没有（老数据/全被维护调用占满）退回全量口径
+  const tn=(u.ttft_work_n!=null)?u.ttft_work_n:0;
+  const tsum=(tn>0)?(u.ttft_work_sum||0):(u.ttft_sum||0);
+  const tc=(tn>0)?tn:(u.calls||0);
+  const cells=[
     ['Σ prompt',fmtN(u.prompt||0),'tok'],
     ['缓存命中',hit,''], ['LLM 调用',fmtN(u.calls||0),'次'],
-    ['轮次',rounds||0,'轮'], ['总步数',fmtN(steps||0),'步'],
-    ['TTFT 均值',(u.calls?((u.ttft_sum||0)/u.calls).toFixed(1):'—'),'s'],
-  ].map(([k,v,sfx])=>`<div class="kpi${k==='缓存命中'?' acc':''}"><div class="v">${v}<small>${sfx}</small></div><div class="k">${k}${live?' ⟳':''}</div></div>`).join('');
+    ['轮次',rounds||0,'轮'], ['工具调用',fmtN(tools||0),'次'],
+    ['TTFT 均值',(tc?(tsum/tc).toFixed(1):'—'),'s',
+     '只统计干活轮的调用（整理/分裂的批量调用输入巨大、首字必然更慢，不计）；'
+     +'TTFT = 从发出请求到模型吐出第一个分片——思考是流式到达的，所以不含思考时长'],
+  ];
+  $('#kpis').innerHTML=cells.map(([k,v,sfx,tip])=>
+    `<div class="kpi${k==='缓存命中'?' acc':''}"${tip?` title="${tip}"`:''}>`
+    +`<div class="v">${v}<small>${sfx}</small></div><div class="k">${k}${live?' ⟳':''}</div></div>`
+  ).join('');
 }
 function renderHeader(){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
@@ -719,10 +735,9 @@ function renderHeader(){
   const u=META.usage||{};
   $('#goal').classList.remove('empty');
   $('#goal').textContent=META.goal||META.id;
-  // 总步数优先用 `/plan` 的现算值（跑轮期间当前轮的 steps_used 还在长，
-  // round_list 是上一次取的）；META 被重新取过之后 steps_total 不存在 → 回到现场求和。
-  const steps=(META.steps_total!=null)?META.steps_total
-    :(META.round_list||[]).reduce((a,r)=>a+(r.steps_used||0),0);
+  // 工具调用次数优先用 `/plan` 的现算值（跑轮期间还在长），否则用元数据里的
+  // 累计值（`META.tools`，同样从 history 逐调用落账行数出来）。
+  const tools=(META.tools_total!=null)?META.tools_total:(META.tools||0);
   const st=META.status==='in_progress'?'<span class="chip ok pulse">● 运行中</span>':'<span class="chip">完成</span>';
   $('#chips').innerHTML=st+
     `<span class="chip mono" title="点击复制" style="cursor:pointer" onclick="copySid(this)">⧉ ${esc(META.id)}</span>`+
@@ -732,7 +747,7 @@ function renderHeader(){
     (META.escalations?`<span class="chip bad">◉ ${META.escalations} 项待拍板</span>`:'')+
     (META.todo_milestone?`<span class="chip warn">阶段进行中</span>`:'')+
     `<span class="chip bad" style="cursor:pointer;margin-left:auto" onclick="deleteSession('${META.id}')">删除会话</span>`;
-  renderKpis(u,META.rounds,steps,'');
+  renderKpis(u,META.rounds,tools,'');
   const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['project','项目'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
     `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
@@ -1260,11 +1275,13 @@ function showCmdOutput(title,text){
 function applyPlanKpis(d){
   if(!META||!d||!d.usage)return false;
   const ks=[d.usage.calls,d.usage.prompt,d.usage.cached,d.usage.miss,
-            d.usage.completion,d.usage.ttft_sum,d.rounds,d.steps].join('|');
+            d.usage.completion,d.usage.ttft_sum,d.usage.ttft_work_sum,
+            d.usage.ttft_work_n,d.rounds,d.steps,d.tools].join('|');
   if(ks===(window._kpiSig||''))return false;
   window._kpiSig=ks;
-  META.usage=d.usage;META.rounds=d.rounds;META.steps_total=d.steps;
-  renderKpis(META.usage,META.rounds,META.steps_total,'live');
+  META.usage=d.usage;META.rounds=d.rounds;
+  META.steps_total=d.steps;META.tools_total=d.tools||0;
+  renderKpis(META.usage,META.rounds,META.tools_total,'live');
   return true;
 }
 async function pollPlan(){

@@ -2007,27 +2007,39 @@ __deferred.push((async () => {
 })());
 
 console.log('场景 AZ｜顶部六格按步更新（跑轮期间随 /plan 重画，不再只等轮闭合）');
-// 用户口径（2026-09-15）："将现在页面最上面六个显示，改成按步更新，不要再按轮更新了。"
-// `/plan` 除计划账本还带 usage/rounds/steps 的现算值（与 session_meta 同源），
-// pollPlan 每 tick 拉一次 → `applyPlanKpis` 独立签名比对，一变就只重画六格。
+// 用户口径（2026-09-15）："改成按步更新，不要再按轮更新"；同日两条口径修正：
+// ① "总步数"换成**工具调用**（步 = 一次 LLM 交互，与"LLM 调用"重复；工具调用数看并行度）；
+// ② "TTFT 均值"只统计**干活轮**（ttft_work_*）——整理/分裂的批量调用输入 8–20 万 tok、
+//    首字本来就有 15–123s，混进均值就"虚大"（用户报的就是这个）。
+// `/plan` 除计划账本还带 usage/rounds/tools 的现算值，pollPlan 每 tick 拉一次 →
+// `applyPlanKpis` 独立签名比对，一变就只重画六格。
 {
   META = {id:'s1', status:'in_progress', rounds:7,
-          usage:{calls:1,prompt:1000,cached:900,miss:100,completion:10,ttft_sum:2.0},
-          round_list:[{seq:7, steps_used:3}], registry:[]};
+          usage:{calls:1,prompt:1000,cached:900,miss:100,completion:10,
+                 ttft_sum:2.0,ttft_work_sum:2.0,ttft_work_n:1},
+          tools:1, round_list:[{seq:7, steps_used:3}], registry:[]};
   CUR = 's1'; TAB = 'conv';
   window._kpiSig = '';
   const kpiText = () => { const el = document.getElementById('kpis'); return el ? domAllText(el) : ''; };
+  const cellText = (i) => { const el = (document.getElementById('kpis').children||[])[i];
+                            return el ? String(el.textContent || '') : ''; };
   renderHeader();                       // 首屏：META 里的（旧）数
   const t0 = kpiText();
-  const plan1 = {usage:{calls:2,prompt:900,cached:810,miss:90,completion:20,ttft_sum:4.0},
-                 rounds:7, steps:4};
+  // /plan 现算值：prompt=900、工具调用 6、TTFT 干活轮样本 2 个共 6.0s。注意
+  // ttft_sum=100（含一条维护批量调用）——若把维护算进均值会显示 50.0s，正是要防的。
+  const plan1 = {usage:{calls:2,prompt:900,cached:810,miss:90,completion:20,
+                        ttft_sum:100.0,ttft_work_sum:6.0,ttft_work_n:2},
+                 rounds:7, steps:4, tools:6};
   const changed = applyPlanKpis(plan1);
   const t1 = kpiText();
   if (!changed) problems.push('AZ: 用量变了却没认（按步更新失效）');
   if (!/900/.test(t1)) problems.push('AZ: 六格没吃到 /plan 的现算值（Σprompt=900 没出现）');
-  const stepCell = (document.getElementById('kpis').children||[])[4];
-  const stepTxt = stepCell ? String(stepCell.textContent || '') : '';
-  if (!/4/.test(stepTxt) || !/步/.test(stepTxt)) problems.push('AZ: 总步数没按 /plan 更新');
+  const toolTxt = cellText(4);
+  if (!/6/.test(toolTxt) || !/次/.test(toolTxt)) problems.push('AZ: 工具调用没按 /plan 更新');
+  if (/步/.test(toolTxt)) problems.push('AZ: 第 5 格还是"总步数"（应换成工具调用）');
+  const ttftTxt = cellText(5);
+  if (!/3\.0/.test(ttftTxt)) problems.push('AZ: TTFT 均值没按干活轮样本算（应 6.0/2=3.0）');
+  if (/50/.test(ttftTxt)) problems.push('AZ: TTFT 均值把维护调用也平均进去了（虚大的来源）');
   if (t1 === t0) problems.push('AZ: 六格内容没变');
   // 同一份现算值再来一次：一个字节都不许动（不白刷 DOM）
   const again = applyPlanKpis(plan1);
@@ -2035,18 +2047,23 @@ console.log('场景 AZ｜顶部六格按步更新（跑轮期间随 /plan 重画
   const t2 = kpiText();
   if (t2 !== t1) problems.push('AZ: 幂等调用把六格改了');
   // 再长一步 → 又变
-  const plan2 = {usage:{calls:3,prompt:999,cached:899,miss:100,completion:30,ttft_sum:6.0},
-                 rounds:7, steps:5};
+  const plan2 = {usage:{calls:3,prompt:999,cached:899,miss:100,completion:30,
+                        ttft_sum:150.0,ttft_work_sum:9.0,ttft_work_n:3},
+                 rounds:7, steps:5, tools:11};
   applyPlanKpis(plan2);
   const t3 = kpiText();
   if (!/999/.test(t3)) problems.push('AZ: 又长一步后六格没跟上');
+  if (!/11/.test(cellText(4))) problems.push('AZ: 工具调用没跟着长（应 11）');
   // 六格之外不许被牵连（#tabs 每步重建会丢悬停态）
   const tabsBefore = String((document.getElementById('tabs')||{}).innerHTML||'');
-  applyPlanKpis({usage:{calls:4,prompt:4000,cached:3600,miss:400,completion:40,ttft_sum:8.0},
-                 rounds:7, steps:6});
+  applyPlanKpis({usage:{calls:4,prompt:4000,cached:3600,miss:400,completion:40,
+                        ttft_sum:200.0,ttft_work_sum:12.0,ttft_work_n:4},
+                 rounds:7, steps:6, tools:13});
   const tabsAfter = String((document.getElementById('tabs')||{}).innerHTML||'');
   if (tabsAfter !== tabsBefore) problems.push('AZ: 按步刷新把 #tabs 也重建了（应只动六格）');
-  console.log(`   AZ 变化认=${changed} Σ900=${/900/.test(t1)} 步数=${/4/.test(stepTxt)&&/步/.test(stepTxt)} 幂等=${!again} 再长一步=${/999/.test(t3)} tabs不动=${tabsAfter===tabsBefore}`);
+  console.log(`   AZ 变化认=${changed} Σ900=${/900/.test(t1)} 工具调用=${toolTxt.replace(/\s+/g,'')}`
+              +` TTFT=${ttftTxt.replace(/\s+/g,'')} 幂等=${!again} 再长一步=${/999/.test(t3)}`
+              +` tabs不动=${tabsAfter===tabsBefore}`);
 }
 
 console.log('场景 AS｜收尾交接：缓存落后/为空时必须"先补齐、再上屏"');

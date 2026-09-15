@@ -46,6 +46,54 @@ def test_usage_totals_aggregates():
     assert len(totals["rows"]) == 2
 
 
+def test_usage_totals_ttft_work_only_and_no_first_excluded():
+    """TTFT 均值的口径（2026-09-15 用户报"虚大"）：
+
+    * **只算干活轮**：整理/分裂的批量调用输入 8–20 万 tok，首字本来就有
+      15–123s（实测 orgtest 一条 123.3s），平均进来就虚高；
+    * **没有首字的调用不是延迟样本**（`nofirst=1`，空响应/被护栏切断那种），
+      它此前会以"全程耗时"冒充 TTFT 混进均值。
+    """
+    history = [
+        {"kind": "llm_call",
+         "detail": "[working] prompt=100 cached=0 miss=100 completion=5 ttft=4.0s dur=5.0s"},
+        {"kind": "llm_call",
+         "detail": "[organization] prompt=80,000 cached=0 miss=80,000 completion=9,000 "
+                   "ttft=123.3s dur=147.4s finish=tool_calls"},
+        {"kind": "llm_call",
+         "detail": "[working] prompt=200 cached=0 miss=200 completion=0 ttft=0.0s dur=47.0s nofirst=1"},
+        {"kind": "llm_call",
+         "detail": "[working] prompt=300 cached=0 miss=300 completion=8 ttft=6.0s dur=7.0s"},
+    ]
+    totals = serve.usage_totals(history)
+    assert totals["calls"] == 4
+    assert totals["nofirst"] == 1
+    assert abs(totals["ttft_sum"] - (4.0 + 123.3 + 6.0)) < 1e-6    # 没有首字的不进和
+    assert totals["ttft_work_n"] == 2                              # 两个干活轮样本
+    assert abs(totals["ttft_work_sum"] - 10.0) < 1e-6
+    assert totals["ttft_work_sum"] / totals["ttft_work_n"] == 5.0  # 均值 = 5.0（不是 33.3）
+
+
+def test_tool_call_count_counts_each_invocation_not_results():
+    """工具调用数 = history 里 `tool_call` 行数（逐调用落账，并行批次一行一条）。
+
+    顶部六格用它替代"总步数"：一步（一次 LLM 交互）可以并行调多个工具，
+    `工具调用 / LLM 调用` 的比值就是并行度。`tool_result`、`usage` 等其它
+    kind 一概不算。
+    """
+    history = [
+        {"kind": "tool_call", "detail": "read_file({...})"},
+        {"kind": "tool_result", "detail": "read_file -> ..."},
+        {"kind": "tool_call", "detail": "glob_files({...})"},
+        {"kind": "tool_call", "detail": "search_files({...})"},
+        {"kind": "llm_call", "detail": "[working] prompt=1 cached=0 miss=1 completion=1 ttft=1.0s"},
+        {"kind": "usage", "detail": "[managed] steps=1"},
+    ]
+    assert serve.tool_call_count(history) == 3
+    assert serve.tool_call_count(None) == 0
+    assert serve.tool_call_count([]) == 0
+
+
 def _fake_task() -> dict:
     return {
         "id": "s1", "goal": "测试目标", "status": "in_progress",
@@ -68,7 +116,20 @@ def _fake_task() -> dict:
                                "completion=800 缓存命中 29,000 tok 未命中 1,000 tok"},
                     {"kind": "usage", "time": "t4",
                      "detail": "[managed] steps=2 context=70,000 prompt=20,000 "
-                               "completion=300 缓存命中 19,000 tok 未命中 1,000 tok"}],
+                               "completion=300 缓存命中 19,000 tok 未命中 1,000 tok"},
+                    # 维护批量调用：输入巨大、首字必然慢（实测一条 123.3s）——
+                    # 顶部六格的 TTFT 均值必须**只**算干活轮，不能把它平均进去
+                    {"kind": "llm_call", "time": "t5",
+                     "detail": "[organization] prompt=83,000 cached=0 miss=83,000 "
+                               "completion=10,000 ttft=123.3s dur=147.4s finish=tool_calls"},
+                    # 工具调用：`tool_call` 行**逐调用**落账（并行批次也一行一条），
+                    # `tool_result` 不算调用（顶部六格"工具调用"数它）
+                    {"kind": "tool_call", "time": "t6",
+                     "detail": "read_file({\"path\": \"a.py\"})"},
+                    {"kind": "tool_result", "time": "t7",
+                     "detail": "read_file -> print(1)"},
+                    {"kind": "tool_call", "time": "t8",
+                     "detail": "glob_files({\"pattern\": \"*\"})"}],
         "rounds": [
             {"seq": 1, "user_input": {"original": "干活"}, "end_state": "completed",
              "org_state": "done", "org_generation": 1, "steps_used": 7,
@@ -90,7 +151,8 @@ def test_session_summary_derives_org_and_usage():
     assert s["goal"] == "测试目标" and s["rounds"] == 2
     assert s["org"] == {"done": 1, "pending": 0, "failed": 0, "raw": 1}
     assert s["escalations"] == 1 and s["todo_milestone"] == "大步一"
-    assert s["usage"]["calls"] == 1 and s["usage"]["prompt"] == 100
+    assert s["usage"]["calls"] == 2 and s["usage"]["prompt"] == 100 + 83000
+    assert s["tools"] == 2                     # 工具调用次数（tool_result 不算）
     assert s["last_round"] == {"seq": 2, "events": 0, "end_state": "open"}
 
 
@@ -583,13 +645,19 @@ def test_http_plan_carries_live_kpis(server):
     assert code == 200
     assert body["todo"]["milestone"]["goal"] == "大步一"
     u = body["usage"]
-    assert u["calls"] == 1 and u["prompt"] == 100 and u["cached"] == 90
-    assert u["miss"] == 10 and u["completion"] == 5 and abs(u["ttft_sum"] - 1.0) < 1e-6
+    assert u["calls"] == 2 and u["prompt"] == 100 + 83000 and u["cached"] == 90
+    assert u["miss"] == 10 + 83000 and u["completion"] == 5 + 10000
+    assert abs(u["ttft_sum"] - (1.0 + 123.3)) < 1e-6
+    # **TTFT 均值只认干活轮样本**（2026-09-15 用户报"虚大"）：维护那 123.3s 不进
+    assert u["ttft_work_n"] == 1 and abs(u["ttft_work_sum"] - 1.0) < 1e-6
+    assert body["tools"] == 2                  # 工具调用次数（按步更新，含并行批次）
     # 与 `session_meta` **同源同口径**（同一次口径两处读，数字必须一致）
     _, meta = _get(server + "/api/sessions/s1")
     assert body["rounds"] == len(meta["round_list"])
     assert body["steps"] == sum((r.get("steps_used") or 0)
                                 for r in meta["round_list"])
+    # /plan 与 session_meta 的工具调用数同源同口径
+    assert body["tools"] == meta["tools"]
     code, body = _get(server + "/api/sessions/nope/plan")
     assert code == 404
 

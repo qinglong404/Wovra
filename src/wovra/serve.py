@@ -746,10 +746,29 @@ def parse_llm_call(detail: str) -> dict | None:
     return out
 
 
+def tool_call_count(history: list[dict] | None) -> int:
+    """工具调用次数（history 里 `tool_call` 行**逐调用**落账，含并行批次）。
+
+    顶部六格用它替代原来的"总步数"（2026-09-15 用户口径）：一步（= 一次
+    LLM 交互）可以并行调多个工具，`工具调用 / LLM 调用` 的比值就是并行度；
+    另外"步"与"LLM 调用"本来就基本一致（一次交互算一步），两格重复。
+    """
+    return sum(1 for h in history or [] if h.get("kind") == "tool_call")
+
+
 def usage_totals(history: list[dict] | None) -> dict:
-    """从 history 的 llm_call 行汇总用量，并保留逐行序列（前端画图用）。"""
+    """从 history 的 llm_call 行汇总用量，并保留逐行序列（前端画图用）。
+
+    `ttft_work_sum` / `ttft_work_n` = **干活轮**的 TTFT 有效样本（均值用）。
+    为什么要单列（2026-09-15 用户报"TTFT 虚大"）：整理/分裂的批量调用输入
+    8–20 万 tok，首字延迟本来就有 15–123s（实测 orgtest 一条 organization
+    ttft=123.3s），和干活轮的 ~4s 平均在一起会把均值抬飞——那个数该回答
+    "我这轮等多久"，不是"后台批量整理需要多久"。没有首字的调用（`nofirst=1`）
+    不是延迟样本，一并不计。
+    """
     totals: dict = {"calls": 0, "prompt": 0, "cached": 0, "miss": 0,
-                    "completion": 0, "ttft_sum": 0.0, "finish": {}, "rows": []}
+                    "completion": 0, "ttft_sum": 0.0, "finish": {}, "rows": [],
+                    "ttft_work_sum": 0.0, "ttft_work_n": 0, "nofirst": 0}
     for h in history or []:
         if h.get("kind") != "llm_call":
             continue
@@ -759,7 +778,13 @@ def usage_totals(history: list[dict] | None) -> dict:
         totals["calls"] += 1
         for k in _USAGE_KEYS:
             totals[k] += row.get(k, 0)
-        totals["ttft_sum"] += row.get("ttft", 0.0)
+        if row.get("nofirst"):
+            totals["nofirst"] += 1
+        else:
+            totals["ttft_sum"] += row.get("ttft", 0.0)
+            if row.get("purpose") == "working":
+                totals["ttft_work_sum"] += row.get("ttft", 0.0)
+                totals["ttft_work_n"] += 1
         f = row.get("finish", "?")
         totals["finish"][f] = totals["finish"].get(f, 0) + 1
         totals["rows"].append({"time": h.get("time", ""), **row})
@@ -836,6 +861,7 @@ def session_summary(task_id: str, data: dict) -> dict:
         "updated_at": data.get("updated_at", ""),
         "rounds": len(rounds),
         "steps": sum(r.get("steps_used") or 0 for r in rounds),
+        "tools": tool_call_count(data.get("history")),
         "org": org,
         "escalations": len(ts.get("escalations") or []),
         "experiments": len(ts.get("experiments") or []),
@@ -1575,9 +1601,12 @@ class _Handler(BaseHTTPRequestHandler):
                 # （`usage_totals(history)` + `Σsteps_used`），但**每 tick 现读**——
                 # 跑轮期间账本行逐调用落盘，前端拉到就能重画，不必等轮闭合。
                 "usage": {k: usage.get(k, 0) for k in (
-                    "calls", "prompt", "cached", "miss", "completion", "ttft_sum")},
+                    "calls", "prompt", "cached", "miss", "completion", "ttft_sum",
+                    # TTFT 均值只认干活轮样本（维护批量调用输入巨大，混进来会虚高）
+                    "ttft_work_sum", "ttft_work_n", "nofirst")},
                 "rounds": len(rounds),
                 "steps": sum(int(r.get("steps_used") or 0) for r in rounds),
+                "tools": tool_call_count(data.get("history")),
             })
         mtree = re.fullmatch(r"/api/sessions/([^/]+)/tree", path)
         if mtree:

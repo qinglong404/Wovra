@@ -1533,14 +1533,21 @@ class _CoreMixin:
         # 在用途分账与"整理 X tok"里单独体现，不混进步数
         if purpose == "working":
             self.last_stats["llm_calls"] += 1
-        start = time.monotonic()
         # **端点限流退避重试**（2026-09-15）：维护调用动辄 20 万 tok 的输入，
         # 与干活轮并发时端点会回"System protection triggered by request burst /
         # rate limit"（实测 2026-09-09 一批整理整批死在这上面）——一次失败就
         # 让整批白算。这里按 15s/30s/60s 退避重试（连接期错误，无副作用；
         # 流中途的错误仍走上层空响应护栏，不在这里重试）。
+        #
+        # 计时**按尝试**（2026-09-15 用户报"TTFT 虚大"）：`attempt_start` 放在
+        # 每次尝试内部，退避的 sleep 不再计进 ttft/dur——此前 start 在循环之外，
+        # 一次限流重试就把首字延迟抬高 15s（两次 45s），均值随之虚高。等待时间
+        # 不藏着：记进账本行（`retry=n wait=Ns`）与轮耗时。
         delay = 15.0
+        retries = 0
+        waited = 0.0
         for _throttle_try in range(4):
+            attempt_start = time.monotonic()
             try:
                 try:
                     stream = self.llm.chat(messages, tools=tools, stream=True,
@@ -1565,6 +1572,8 @@ class _CoreMixin:
                     f"端点限流（{str(_error)[:60]}）——{int(delay)}s 后自动重试"
                 )
                 time.sleep(delay)
+                waited += delay
+                retries += 1
                 delay *= 2
         content_parts: list[str] = []
         thinking_parts: list[str] = []
@@ -1636,8 +1645,14 @@ class _CoreMixin:
                 # 面孔（延迟乘数）靠它测量——与总耗时分开记
                 first_token_at = time.monotonic()
 
-        elapsed = time.monotonic() - start
-        ttft = (first_token_at - start) if first_token_at is not None else elapsed
+        elapsed = time.monotonic() - attempt_start
+        # 首字延迟：**成功那次尝试**的"发请求 → 第一个分片"。口径澄清
+        # （2026-09-15 实测，用户问"是不是把思考时间算进去了"）：不是。
+        # 思考是**流式**到达的（实测首个分片就是思考分片 1.5s，首个正文
+        # 分片 2.7s），所以 ttft = prefill + 排队，不含思考时长；限流退避的
+        # sleep 也不再算进来（见上）。
+        has_first = first_token_at is not None
+        ttft = (first_token_at - attempt_start) if has_first else 0.0
         self._last_finish_reason = finish_reason
         self._last_thinking = "".join(thinking_parts)
         if usage is not None:
@@ -1648,22 +1663,34 @@ class _CoreMixin:
             # provider 上报的可信度可直接用 TTFT 交叉验证
             if self.task is not None:
                 cached, _miss = cached_tokens_of(usage)
+                extra = ""
+                if retries:
+                    extra += f" retry={retries} wait={waited:.1f}s"
+                if not has_first:
+                    # 一个分片都没收到（空响应/被护栏切断）：**没有首字**，
+                    # 不是"首字延迟 = 全程耗时"。标出来，否则它会以一个大值
+                    # 混进 TTFT 均值（用户报的"虚大"来源之一）。
+                    extra += " nofirst=1"
                 self.task.record(
                     "llm_call",
                     f"[{purpose}] prompt={usage.prompt_tokens or 0:,} "
                     f"cached={cached:,} miss={(usage.prompt_tokens or 0) - cached:,} "
                     f"completion={usage.completion_tokens or 0:,} "
-                    f"ttft={ttft:.1f}s dur={elapsed:.1f}s finish={self._last_finish_reason or '未返回'}",
+                    f"ttft={ttft:.1f}s dur={elapsed:.1f}s "
+                    f"finish={self._last_finish_reason or '未返回'}{extra}",
                 )
         if purpose in _MAINTENANCE_PURPOSES:
             # 维护性开销异步执行、可能跨越轮次边界，混进 last_stats 会
             # 漏记（会话结束丢失）或错记进下一轮（实测教训）
             with self._maint_lock:
-                self._maint_usage[purpose]["seconds"] += elapsed
+                self._maint_usage[purpose]["seconds"] += elapsed + waited
         else:
-            self.last_stats["seconds"] += elapsed
-            self.last_stats["ttft_seconds"] += ttft
-            self.last_stats["ttft_max"] = max(self.last_stats["ttft_max"], ttft)
+            # 耗时按**墙上时间**算（含退避等待）：那段时间用户确实在等；
+            # 首字延迟只取成功尝试（不是同一件事，别混）。
+            self.last_stats["seconds"] += elapsed + waited
+            if has_first:      # 没收到首字的调用不是延迟样本，不进均值/峰值
+                self.last_stats["ttft_seconds"] += ttft
+                self.last_stats["ttft_max"] = max(self.last_stats["ttft_max"], ttft)
             self.last_stats["purpose"].setdefault(
                 purpose, {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0}
             )["seconds"] += elapsed

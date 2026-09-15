@@ -1187,9 +1187,15 @@ def test_stream_call_retries_on_endpoint_throttle(monkeypatch):
 
     实测 2026-09-09：一批整理整批死在 "System protection triggered by
     request burst" 上（当时没有任何重试）。
+
+    另钉住计时口径（2026-09-15 用户报"TTFT 虚大"）：退避的 sleep **不进**
+    ttft/dur——此前 start 在重试循环之外，一次重试就把首字延迟抬高 15s
+    （两次 45s），把六格的 TTFT 均值抬飞。
     """
     from wovra.agent import core as core_module
-    monkeypatch.setattr(core_module.time, "sleep", lambda _s: None)
+    waits: list[float] = []
+    monkeypatch.setattr(core_module.time, "sleep", lambda s: waits.append(s))
+    monkeypatch.setattr(core_module.time, "monotonic", lambda: 1_000.0)  # 冻结时钟
 
     class _ThrottleLLM:
         model = "stub"
@@ -1211,6 +1217,10 @@ def test_stream_call_retries_on_endpoint_throttle(monkeypatch):
     agent = Agent(llm=llm, tools=[], task=None)
     content, _tcs, _usage = agent._stream_call([{"role": "user", "content": "hi"}])
     assert content == "好" and llm.calls == 3          # 两次限流后成功
+    assert waits == [15.0, 30.0]                       # 退避 15s/30s（没真睡）
+    # 冻结时钟下：ttft/dur 只反映成功那次尝试（= 0s），不含 45s 的退避等待
+    assert agent.last_stats["ttft_max"] == 0.0
+    assert agent.last_stats["ttft_seconds"] == 0.0
 
     # 非限流错误：立刻抛，不许把真 bug 当限流吞掉
     llm2 = _ThrottleLLM(1, "ValueError: boom")
@@ -1220,6 +1230,7 @@ def test_stream_call_retries_on_endpoint_throttle(monkeypatch):
         raise AssertionError("非限流错误必须立刻抛")
     except RuntimeError as error:
         assert "boom" in str(error) and llm2.calls == 1
+        assert waits == [15.0, 30.0]                   # 非限流：一次都不退避
 
 
 def test_split_salvages_truncated_product():
