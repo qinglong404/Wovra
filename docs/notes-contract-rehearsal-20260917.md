@@ -146,3 +146,47 @@ R9：**无工具动作**（纯对话轮）——一句话只写谈了什么、�
 
 （R4/R5/R9 的事件里只有 `user + final_answer`，所以产物只可能谈"谈了什么、结论是什么"——
 硬门就是拿这条当判据。）
+
+
+---
+
+# v3：动作清单改分块（轮号独占一行，块间空行）
+
+**为什么改**：v2 的清单把"工具 / 文件 / 非零退出"塞进一条长行——R2 那条 400+ 字符，
+人看着是墙，模型也得自己在一行里找边界。而锚的全部作用就是**边界清楚**，轮号独占一行、
+块间空行更醒目（与提示词审查里"无小节标题的长文本，关键规则埋在中段"同一类问题）。
+
+**只改这里**：产物里模型写的句子**保持纯句子**，布局归代码（渲染时各自排版）——
+理由见 worklog §139。
+
+```
+（Runtime 从每轮事件里机械抽出；**只许据此写，不许跨轮借内容**）
+
+R1
+  工具：glob_files×1、list_agents×1、list_files×1、page_text×1、read_file×2、run_command×1、search_files×1、web_fetch×3、web_search×2
+  文件：读 README.md；读 AGENTS.md
+
+R2
+  工具：check_background×12、edit_file×12、list_files×1、run_background×4、run_command×98、stop_background×1、web_search×1、write_file×10
+  文件：写 gaia_bench/__init__.py；写 gaia_bench/data.py；写改 gaia_bench/evaluate.py；写 gaia_bench/worker.py；写改 gaia_bench/runner.py；写改 gaia_bench/report.py；写 gaia_bench/README.md；写改 gaia_bench/offline.py；写改 gaia_bench/rescore.py；写 output/gaia/FINDINGS.md
+  非零退出：{"task_id": "bg-2"}(exit=-9)
+
+R3
+  工具：check_background×2、edit_file×2、list_background×1、run_background×1、run_command×4、stop_background×1
+  文件：改 gaia_bench/runner.py
+```
+
+## v3 读数（前缀还热，几乎免费）
+
+| 项 | v1 | v2（带锚） | v3（分块锚） |
+|---|---|---|---|
+| usage | prompt 131,523 / cached 0 / miss 131,523 | prompt 132,102 / cached 131,072 / miss 1,030 | prompt 132,100 / cached 131,200 / **miss 900** |
+| completion | 27,690 | 13,638（推理 11,555） | **8,020（推理 6,527）** |
+| 零动作轮违例（硬门） | 6 条（R4/R5/R9） | 0 条 | 0 条 |
+
+v3 剩下 2 条软告警，都是同一类误报（简称）：R2 的 `FINDINGS.md` 是 `output/gaia/FINDINGS.md`
+的简称、R3 的 `web_search` 指检索通道而非一次工具调用。
+
+completion 三次递减（27,690 → 13,638 → 8,020，推理 25.7K → 11.6K → 6.5K）**不是受控对照**
+（模型随机性未排除），只作观察记录；若这条成立，它比"省输入"值钱得多——推理 token 才是成本主体
+（§137）。待办：同批材料重复 3 次取均值再下定论。

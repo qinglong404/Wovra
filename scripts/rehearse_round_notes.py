@@ -174,24 +174,32 @@ def _round_actions(r: dict) -> dict:
 
 
 def _actions_lines(batch: list[dict]) -> list[str]:
+    """每轮一个**独立块**：轮号独占一行当锚点，块内再分工具/文件/非零退出。
+
+    为什么分块而不是一行（2026-09-17）：锚的全部作用就是"边界清楚"，让轮号独占一行、
+    块间空行分隔，比把三段信息塞进一条长行更醒目；代价每轮两三个 token。
+    人性化那部分只在这里做——**产物里模型写的句子保持纯句子**，布局归代码。
+    """
     lines = ["\n[本轮动作清单]（Runtime 从每轮事件里机械抽出；**只许据此写，不许跨轮借内容**）"]
     for r in batch:
         a = _round_actions(r)
+        lines.append("")
+        lines.append(f"R{r['seq']}")
         if not a["tools"]:
             lines.append(
-                f"R{r['seq']}：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，"
-                "不得出现文件路径或工具动作。"
+                "  无工具动作（纯对话轮）——一句话只写谈了什么、结论是什么，"
+                "不得出现文件路径或工具动作"
             )
             continue
-        line = (f"R{r['seq']}：工具 "
-                + "、".join(f"{k}×{v}" for k, v in sorted(a["tools"].items())))
+        lines.append("  工具：" + "、".join(
+            f"{k}×{v}" for k, v in sorted(a["tools"].items())
+        ))
         if a["files"]:
-            line += "｜文件 " + "、".join(
-                f"{v}:{k}" for k, v in list(a["files"].items())[:12]
-            )
+            lines.append("  文件：" + "；".join(
+                f"{v} {k}" for k, v in list(a["files"].items())[:12]
+            ))
         if a["nonzero"]:
-            line += "｜非零退出 " + "；".join(a["nonzero"][:3])
-        lines.append(line)
+            lines.append("  非零退出：" + "；".join(a["nonzero"][:3]))
     return lines
 
 
