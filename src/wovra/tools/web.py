@@ -16,6 +16,7 @@ DDG 遇 TLS 抖动、Bing 对中文长查询返无关页，再叠一层词面过
 import ipaddress
 import json
 import os
+import random
 import re
 import time
 import urllib.error
@@ -471,11 +472,44 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
     except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
         return f"抓取失败: {error!r}"
     text = _html_to_text(raw, ctype) if ("html" in ctype or not ctype) else _decode_body(raw, ctype)
+    # Firecrawl 兜底（2026-09-16）：自己的抽取拿不到像样正文时（典型是 JS 渲染站、
+    # 或正文全在脚本里），用 Firecrawl 换一份干净的 Markdown。它按次计费，所以只在
+    # "确实没抽到东西"时用——普通页面不惊动它（用户口径：搜索 API 找 URL、Firecrawl
+    # 取内容；这里把它接在**同一次** web_fetch 里，agent 不必自己串两步）。
+    if len(text.strip()) < _FIRECRAWL_MIN_CHARS:
+        rich = _firecrawl_markdown(url)
+        if rich:
+            meta = (f"[{url}] Firecrawl 提取（本地抽取只得 {len(text.strip())} 字符，"
+                    f"判为 JS 渲染或正文在脚本里）")
+            _fetch_cache_put(url, meta, rich)
+            return _render_fetch(url, meta, rich, budget)
     if not text.strip():
         return f"URL 无文本内容（Content-Type: {ctype}）。"
     meta = f"[{url}] Content-Type: {ctype or '未知'}，抓取 {len(raw)} 字节"
     _fetch_cache_put(url, meta, text)
     return _render_fetch(url, meta, text, budget)
+
+
+def _firecrawl_markdown(url: str) -> str | None:
+    """用 Firecrawl 把单页转成干净 Markdown；没配密钥或失败都返回 None（静默降级）。
+
+    Firecrawl 严格说不是搜索服务而是**内容提取**服务（scrape/crawl/map/extract），
+    与检索 API 是搭档关系：搜到 URL 之后用它取正文。故它同时出现在两个位置——
+    `web_search` 的 `/v2/search`，以及这里的 `/v2/scrape`。
+    """
+    key = _search_key("firecrawl")
+    if not key:
+        return None
+    try:
+        data = _http_json(
+            "https://api.firecrawl.dev/v2/scrape",
+            payload={"url": url, "formats": ["markdown"], "onlyMainContent": True},
+            headers={"Authorization": f"Bearer {key}"})
+    except Exception:  # noqa: BLE001——兜底通道，任何失败都当作"没这回事"
+        return None
+    payload = data.get("data") if isinstance(data.get("data"), dict) else {}
+    markdown = str(payload.get("markdown") or "").strip()
+    return markdown or None
 
 
 def _render_fetch(url: str, meta: str, body: str, budget: int,
@@ -613,32 +647,28 @@ def _format_results(query: str, engine: str, rows: list[tuple[str, str, str]],
 
 
 def _search_ddg(query: str, max_results: int) -> tuple[list, int, str] | str:
-    """DDG 检索（lite 端点优先，html 端点兜底）；返回 (结果行, 剔除数, 提示) 或失败文本。
+    """本地兜底通道：**只**打 DDG lite 一个端点；返回 (结果行, 剔除数, 提示) 或失败文本。
 
-    2026-09-16 起这是**本地兜底通道**（web_search 只在没配 API 或 API 失败时用它）；
-    Bing 裸抓已删除——它对中文长查询返回无关页，是噪声的主要来源。
+    2026-09-16 改成单端点 + 短超时（`WOVRA_LOCAL_SEARCH_TIMEOUT`，默认 5s，最坏
+    约 10 秒——urllib 的 timeout 实测按连接/读取各算一次）。原先 lite/html 两端点
+    各 30s，DDG 抖动时一次失败要 **120s**；这条通道只是兜底，为它付两分钟是错的。
+    html 端点此前已被反爬拿下（HTTP 202 + 空壳页，零结果节点），留着只会多一段等待。
 
-    2026-09-15：主端点 `html.duckduckgo.com` 已被反爬拿下——实测对请求
-    返回 **HTTP 202 + 空壳页**（14KB、零个结果节点），旧解析器于是永远报
-    "无结果或被限流"，把检索能力整条让给 Bing（而 Bing 对中文长查询给的是
-    无关噪声，见 §2）。`lite.duckduckgo.com` 同源、结构更简单且实测可用，
-    故改成 lite 优先。
+    2026-09-15 的历史：主端点 `html.duckduckgo.com` 被反爬拿下后，旧解析器永远
+    报"无结果或被限流"，把检索能力整条让给 Bing（而 Bing 对中文长查询给的是
+    无关噪声）。lite 同源、结构更简单，故改为 lite。
     """
-    for endpoint in ("https://lite.duckduckgo.com/lite/",
-                     "https://html.duckduckgo.com/html/"):
-        url = endpoint + "?q=" + urllib.parse.quote_plus(query)
-        request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
-        try:
-            with urllib.request.urlopen(request, timeout=30) as resp:
-                html = resp.read(1_000_000).decode("utf-8", errors="replace")
-        except Exception as error:  # noqa: BLE001——换端点再试
-            last = f"duckduckgo 失败: {error!r}"
-            continue
-        rows = _parse_ddg(html)
-        if rows:
-            return _screen_local(query, rows, max_results)
-        last = "duckduckgo 无结果或被限流。"
-    return last
+    url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote_plus(query)
+    request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
+    try:
+        with urllib.request.urlopen(request, timeout=_LOCAL_SEARCH_TIMEOUT) as resp:
+            html = resp.read(1_000_000).decode("utf-8", errors="replace")
+    except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
+        return f"duckduckgo 失败: {error!r}"
+    rows = _parse_ddg(html)
+    if not rows:
+        return "duckduckgo 无结果或被限流。"
+    return _screen_local(query, rows, max_results)
 
 
 def _parse_ddg(html: str) -> list[tuple[str, str, str]]:
@@ -687,31 +717,51 @@ def _ddg_target(href: str) -> str:
 
 # ---- 检索 API（专业后端，2026-09-16，用户口径"检索走专业 API"）-------------
 #
-# 四家一起支持：都只要一个密钥、都是 JSON over HTTPS，stdlib urllib 就够，
+# 六家支持：都只要一个密钥、都是 JSON over HTTPS，stdlib urllib 就够，
 # **不引入新依赖**（项目口径：6 个直接依赖、网络层零依赖）。
-#   brave  GET  api.search.brave.com/res/v1/web/search   X-Subscription-Token
-#   tavily POST api.tavily.com/search                     body.api_key + Bearer
-#   serper POST google.serper.dev/search                  X-API-KEY
-#   exa    POST api.exa.ai/search                         x-api-key
+#   tavily    POST api.tavily.com/search          body.api_key + Bearer
+#   serper    POST google.serper.dev/search       X-API-KEY
+#   exa       POST api.exa.ai/search              x-api-key
+#   bocha     POST api.bochaai.com/v1/web-search  Bearer（中文检索）
+#   serpapi   GET  serpapi.com/search             api_key 查询参数（供应商约定）
+#   firecrawl POST api.firecrawl.dev/v2/search    Bearer
 # 供应商给的排序就是结论，**不再做词面相关性过滤**——那是本地兜底才需要的补丁。
+#
+# 默认**随机**挑一家先试，失败换下一家，全都不行才本地兜底（用户口径
+# 2026-09-16："其它默认随机选一个，如果失败换下一个。最后由本地保底"）。
+# 随机的意义是把调用摊到各家额度上——免费档都不大，不该只烧第一家。
+# 用 `Wovra_SEARCH_PROVIDER` 可以把某家钉在第一位（它挂了仍会往后轮）。
 
 _SEARCH_KEY_VARS: dict[str, tuple[str, ...]] = {
-    "brave": ("Wovra_SEARCH_KEY", "Wovra_BRAVE_KEY", "BRAVE_API_KEY",
-              "BRAVE_SEARCH_API_KEY"),
-    "tavily": ("Wovra_SEARCH_KEY", "Wovra_TAVILY_KEY", "TAVILY_API_KEY"),
-    "serper": ("Wovra_SEARCH_KEY", "Wovra_SERPER_KEY", "SERPER_API_KEY"),
-    "exa": ("Wovra_SEARCH_KEY", "Wovra_EXA_KEY", "EXA_API_KEY"),
+    "tavily": ("Wovra_SEARCH_KEY", "Wovra_Tavily", "TAVILY_API_KEY"),
+    "serper": ("Wovra_SEARCH_KEY", "Wovra_Serper", "SERPER_API_KEY"),
+    "exa": ("Wovra_SEARCH_KEY", "Wovra_Exa", "EXA_API_KEY"),
+    "bocha": ("Wovra_SEARCH_KEY", "Wovra_Bocha", "BOCHA_API_KEY"),
+    "serpapi": ("Wovra_SEARCH_KEY", "Wovra_SerpAPI", "Wovra_Serpapi",
+                "SERPAPI_API_KEY"),
+    "firecrawl": ("Wovra_SEARCH_KEY", "Wovra_Firecrawl", "FIRECRAWL_API_KEY"),
 }
-_SEARCH_PROVIDER_ORDER = ("brave", "tavily", "serper", "exa")
 _SEARCH_TIMEOUT = int(os.environ.get("WOVRA_SEARCH_TIMEOUT", "30"))
+# 本地兜底通道的超时。实测 urllib 的 timeout 会被算**两次**（连接与读取各一次，
+# 本机代理路径下抓包确认：timeout=10 → 实测 20.0s），所以这里取 5s，最坏约 10 秒
+# 就有结论——兜底通道不该让人等两分钟（改前的 lite+html 双端点各 30s 实测 120s）。
+_LOCAL_SEARCH_TIMEOUT = int(os.environ.get("WOVRA_LOCAL_SEARCH_TIMEOUT", "5"))
+
+# 自己的正文抽取少于这么多字符，就判为"没抽到东西"，改问 Firecrawl 要 Markdown
+# （它按次计费，普通页面不惊动它）
+_FIRECRAWL_MIN_CHARS = int(os.environ.get("WOVRA_FIRECRAWL_MIN_CHARS", "200"))
 _dotenv_loaded = False
 
 
 def _ensure_dotenv() -> None:
-    """懒加载仓库根 .env（与 llm.py 同路径、同幂等语义）。
+    """懒加载仓库根 .env（与 llm.py 同一个文件、同幂等语义）。
 
     工具读的是**调用期**环境变量，而 .env 由 llm.py 在导入期加载；脚本或测试
     直接调 web_search 时那条路径可能还没跑过，密钥就白配了。
+
+    路径按**向上找 pyproject.toml**定位，不写死层数：本文件在
+    `src/wovra/tools/` 下，比 `llm.py` 深一层，写死 `parents[2]` 会指到
+    `src/`（实测踩到：密钥全读不到，检索静默退回本地兜底）。
     """
     global _dotenv_loaded
     if _dotenv_loaded:
@@ -719,25 +769,42 @@ def _ensure_dotenv() -> None:
     _dotenv_loaded = True
     try:
         from dotenv import load_dotenv
-        load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
+        here = Path(__file__).resolve()
+        root = next((parent for parent in here.parents
+                     if (parent / "pyproject.toml").exists()),
+                    here.parents[1])
+        load_dotenv(dotenv_path=root / ".env")
     except Exception:  # noqa: BLE001——缺 dotenv 或缺 .env 都不该让检索挂掉
         pass
 
 
 def search_provider() -> str:
-    """当前要用的检索供应商名；未配置任何密钥时返回空串（走本地兜底）。
+    """本次实际要用的检索供应商（**只用于展示**，真跑用 `_search_order`）。
 
-    `Wovra_SEARCH_PROVIDER` 显式指定即以它为准（哪怕没配密钥——那是配置错误，
-    要报出来，不能悄悄换一家）；否则按注册表顺序取第一个配了密钥的。
+    `Wovra_SEARCH_PROVIDER` 显式指定即以它为准；否则给出已配密钥里的第一家
+    （这里的"第一"按注册表顺序，是确定性的，方便探针脚本打印口径一致）。
     """
     _ensure_dotenv()
     picked = (os.environ.get("Wovra_SEARCH_PROVIDER") or "").strip().lower()
     if picked:
         return picked
-    for name in _SEARCH_PROVIDER_ORDER:
-        if _search_key(name):
-            return name
-    return ""
+    configured = [name for name in _SEARCH_KEY_VARS if _search_key(name)]
+    return configured[0] if configured else ""
+
+
+def _search_order() -> list[str]:
+    """本次要依次尝试的供应商：显式指定的排第一，其余已配密钥的**随机**排后。
+
+    随机的意义（用户口径 2026-09-16）：把调用摊到各家额度上——免费档都不大，
+    只烧第一家既浪费额度也把风险集中在一家。失败就换下一家，全试完才本地兜底。
+    """
+    _ensure_dotenv()
+    configured = [name for name in _SEARCH_KEY_VARS if _search_key(name)]
+    random.shuffle(configured)
+    explicit = (os.environ.get("Wovra_SEARCH_PROVIDER") or "").strip().lower()
+    if explicit:
+        configured = [explicit] + [name for name in configured if name != explicit]
+    return configured
 
 
 def _search_key(provider: str) -> str:
@@ -770,16 +837,26 @@ def _api_rows(provider: str, data: dict) -> list[tuple[str, str, str]]:
     def _clean(value) -> str:
         return _visible_text(unescape(str(value or "")))[:300]
 
-    if provider == "brave":
-        raw = (data.get("web") or {}).get("results") or []
-        return [(_clean(r.get("title")), r.get("url") or "", _clean(r.get("description")))
-                for r in raw]
     if provider == "tavily":
         return [(_clean(r.get("title")), r.get("url") or "", _clean(r.get("content")))
                 for r in data.get("results") or []]
     if provider == "serper":
         return [(_clean(r.get("title")), r.get("link") or "", _clean(r.get("snippet")))
                 for r in data.get("organic") or []]
+    if provider == "serpapi":
+        return [(_clean(r.get("title")), r.get("link") or "", _clean(r.get("snippet")))
+                for r in data.get("organic_results") or []]
+    if provider == "bocha":
+        # 博查把内容套在 data 里（也可能直接给顶层），两种都认
+        payload = data.get("data") if isinstance(data.get("data"), dict) else data
+        raw = ((payload.get("webPages") or {}).get("value")) or []
+        return [(_clean(r.get("name")), r.get("url") or "",
+                 _clean(r.get("summary") or r.get("snippet"))) for r in raw]
+    if provider == "firecrawl":
+        payload = data.get("data")
+        raw = payload.get("web") if isinstance(payload, dict) else payload
+        return [(_clean(r.get("title")), r.get("url") or "",
+                 _clean(r.get("description"))) for r in raw or []]
     if provider == "exa":
         rows = []
         for r in data.get("results") or []:
@@ -791,9 +868,9 @@ def _api_rows(provider: str, data: dict) -> list[tuple[str, str, str]]:
 
 def _api_search(provider: str, query: str, max_results: int) -> list | str:
     """调供应商检索：成功返回结果行，失败返回可读文本（由调用方决定是否兜底）。"""
-    if provider not in _SEARCH_PROVIDER_ORDER:
+    if provider not in _SEARCH_KEY_VARS:
         return (f"未知检索供应商 {provider!r}：Wovra_SEARCH_PROVIDER 只支持 "
-                f"{'/'.join(_SEARCH_PROVIDER_ORDER)}。")
+                f"{'/'.join(_SEARCH_KEY_VARS)}。")
     key = _search_key(provider)
     if not key:
         last_var = _SEARCH_KEY_VARS.get(provider, ("Wovra_SEARCH_KEY",))[-1]
@@ -801,12 +878,7 @@ def _api_search(provider: str, query: str, max_results: int) -> list | str:
                 f"参考 .env.example。")
     quoted = urllib.parse.quote_plus(query)
     try:
-        if provider == "brave":
-            data = _http_json(
-                "https://api.search.brave.com/res/v1/web/search"
-                f"?q={quoted}&count={max_results}",
-                headers={"X-Subscription-Token": key})
-        elif provider == "tavily":
+        if provider == "tavily":
             data = _http_json(
                 "https://api.tavily.com/search",
                 payload={"api_key": key, "query": query, "max_results": max_results,
@@ -817,6 +889,23 @@ def _api_search(provider: str, query: str, max_results: int) -> list | str:
                 "https://google.serper.dev/search",
                 payload={"q": query, "num": max_results},
                 headers={"X-API-KEY": key})
+        elif provider == "serpapi":
+            # SerpAPI 的约定就是把密钥放**查询参数**（不是我们的选择）。它是唯一
+            # 这样的后端；结果渲染只取标题/链接/摘要，不回显请求 URL，故密钥不会
+            # 进给模型的文本。
+            data = _http_json(
+                "https://serpapi.com/search"
+                f"?engine=google&q={quoted}&num={max_results}&api_key={key}")
+        elif provider == "bocha":
+            data = _http_json(
+                "https://api.bochaai.com/v1/web-search",
+                payload={"query": query, "count": max_results, "summary": True},
+                headers={"Authorization": f"Bearer {key}"})
+        elif provider == "firecrawl":
+            data = _http_json(
+                "https://api.firecrawl.dev/v2/search",
+                payload={"query": query, "limit": max_results},
+                headers={"Authorization": f"Bearer {key}"})
         else:                                   # exa
             data = _http_json(
                 "https://api.exa.ai/search",
@@ -865,36 +954,39 @@ def _screen_local(query: str, rows: list[tuple[str, str, str]],
 def web_search(query: str, max_results: int = 8) -> str:
     """网页搜索，返回标题、链接与摘要。用于查技术文档与解决方案。
 
-    配了检索 API（Wovra_SEARCH_PROVIDER + Wovra_SEARCH_KEY，见 .env.example）
-    就走供应商接口：排序即结论，不做词面过滤。没配或 API 失败时退回本地抓取，
-    结果会标注"本地兜底"并声明"没有相关性保证"——那种结果只能当参考，**不能**
-    用来判定"网上没有资料"。结果缓存 output/cache/（TTL 默认 1h）；只缓存成功
-    结果，失败不缓存（否则一次限流会被记一小时）。
+    配了检索 API（`.env` 里 `Wovra_Tavily` / `Wovra_Serper` / `Wovra_Exa` /
+    `Wovra_Bocha` / `Wovra_SerpAPI` / `Wovra_Firecrawl` 任一，见 .env.example）
+    就轮流调那几家接口：每次随机挑一家先试，失败换下一家。返回的排序即结论，
+    不做词面过滤。全都不行、或一家都没配时才退回本地抓取，结果会标注"本地兜底"
+    并声明"没有相关性保证"——那种结果只能当参考，**不能**用来判定"网上没有资料"。
+    结果缓存 output/cache/（TTL 默认 1h）；只缓存成功结果，失败不缓存（否则
+    一次限流会被记一小时）。
     """
     safety._audit(f"[web_search] {query}")
     max_results = max(1, min(int(max_results), 20))
-    provider = search_provider()
-    # 缓存键 = 版本 + 后端名 + query：换供应商后不该再命中上一家留下的结果，
-    # 解析/过滤口径一变旧条目也自然失效（旧版只带版本，实测踩到过回显噪声）
-    cache_key = f"{_CACHE_VERSION}:{provider or 'local'}:{query}"
+    order = _search_order()
+    # 缓存键 = 版本 + 通道类型 + query：随机轮换下具体是哪家服务的不进键
+    # （换了家也还是"API 检索结果"，否则同一 query 会为每家各存一份）；
+    # 解析/过滤口径一变旧条目自然失效（旧版只带版本，实测踩到过回显噪声）
+    cache_key = f"{_CACHE_VERSION}:{'api' if order else 'local'}:{query}"
     cached = _cache_get("search", cache_key)
     if cached is not None:
         return f"[缓存命中] {cached}"
     signals: list[str] = []
-    if provider:
+    for provider in order:
         outcome = _api_search(provider, query, max_results)
         if not isinstance(outcome, str):
             out = _format_results(query, provider, outcome)
             _cache_put("search", cache_key, out)
             return out
-        signals.append(outcome)
+        signals.append(outcome)             # 这家失败：记下原因，换下一家
     local = _search_ddg(query, max_results)
     if isinstance(local, str):
         signals.append(local)
     else:
         rows, dropped, note = local
         if rows:
-            engine = ("ddg 本地兜底（API 不可用）" if provider
+            engine = ("ddg 本地兜底（API 都不可用）" if order
                       else "ddg（本地，未配置检索 API）")
             if signals:                 # API 挂在哪一步要让用户看见（否则以为兜底是常态）
                 note = signals[0] + (("\n" + note) if note else "")
@@ -902,17 +994,17 @@ def web_search(query: str, max_results: int = 8) -> str:
             _cache_put("search", cache_key, out)
             return out
         signals.append("本地兜底只拿到广告位/引擎壳页，已全部剔除。")
-    return _no_result_text(provider, signals)
+    return _no_result_text(bool(order), signals)
 
 
-def _no_result_text(provider: str, signals: list[str]) -> str:
-    """所有通道都没内容时的说明（未配 API 时顺带告诉用户怎么配）。"""
+def _no_result_text(has_api: bool, signals: list[str]) -> str:
+    """所有通道都没内容时的说明（一家都没配时顺带告诉用户怎么配）。"""
     head = ("检索失败：配置的 API 与本地兜底都没拿到内容。"
-            if provider else
+            if has_api else
             "未配置检索 API，本地兜底通道也没拿到内容。")
     tail = "可换更短的查询词重试，或用 web_fetch 直接抓已知网址（比如厂商官网页）。"
-    if not provider:
-        tail = (f"在 .env 里配置检索 API 会稳得多：Wovra_SEARCH_PROVIDER="
-                f"{'/'.join(_SEARCH_PROVIDER_ORDER)} 之一 + Wovra_SEARCH_KEY"
-                f"（见 .env.example）。{tail}")
+    if not has_api:
+        tail = ("在 .env 里配置检索 API 会稳得多：Wovra_Tavily / Wovra_Serper / "
+                "Wovra_Exa / Wovra_Bocha / Wovra_SerpAPI / Wovra_Firecrawl 任填其一"
+                f"即可自动生效（见 .env.example）。{tail}")
     return head + "\n" + "\n".join(signals) + "\n" + tail

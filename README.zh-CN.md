@@ -374,12 +374,15 @@ WOVRA_TASKS_ROOT=/tmp/demo wovra serve   # 用另一份数据目录起演示实�
   预览 + 原文体量 + 落盘路径（`output/spill/`），随时可以 `read_file` 取回——**不丢文本**。
 * **`tasks/` 是禁写区**：会话数据是 Runtime 的真相来源，工具层对它**拒写放读**，而且
   **不可授权**（越界访问可以授权一次，禁写区不行）。
-* **网页检索走专业 API**：填 `Wovra_SEARCH_PROVIDER`（或者直接用各家自己的环境变量名：
-  `BRAVE_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY`）加 `Wovra_SEARCH_KEY`，
-  `web_search` 就直接调那家接口——供应商的排序即结论，不再叠一层词面相关性过滤。没配密钥、
-  或 API 失败时退回**单一**本地抓取通道（DDG lite），并在结果里**标注"本地兜底、没有相关性
-  保证"**：因为一句光秃秃的"未找到相关结果"会被模型读成"网上没有这个东西"——GAIA 实测里
-  正是这个错误结论让 agent 放弃了整题。
+* **网页检索走专业 API**：`Wovra_Tavily`、`Wovra_Serper`、`Wovra_Exa`、`Wovra_Bocha`、
+  `Wovra_SerpAPI`、`Wovra_Firecrawl` 填哪几家都行（各家惯用名 `*_API_KEY` 与通用的
+  `Wovra_SEARCH_KEY` 也认）。每次检索**随机**挑一家先试，失败就换下一家——把调用摊到各家
+  免费额度上，而不是只烧第一家；`Wovra_SEARCH_PROVIDER` 可以把某家钉在第一位。返回的排序
+  即结论，不再叠一层词面相关性过滤。一家都没配、或全部失败时，退回**单一**本地抓取通道
+  （DDG lite，10 秒预算），并在结果里**标注"本地兜底、没有相关性保证"**：因为一句光秃秃的
+  "未找到相关结果"会被模型读成"网上没有这个东西"——GAIA 实测里正是这个错误结论让 agent
+  放弃了整题。（Firecrawl 同时还接在 `web_fetch` 上：自己抽不出正文时（典型是 JS 渲染站）
+  改问它要干净的 Markdown。）
 * **附件原生解析**：`read_file` 自动识别 `.csv`/`.tsv`（带 GBK 回退，并把实际编码写在表头）、
   `.docx`/`.xlsx`/`.pptx`（ZIP + XML）与 PDF 文本层——全部 stdlib，依旧零新依赖。此前 agent
   得自己装解析库：GAIA 实测里一道音频题的工作区留下 392MB 的 venv 加 1.9GB 的 HuggingFace

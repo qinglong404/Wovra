@@ -207,9 +207,13 @@ def test_bing_redirect_shell_is_unwrapped(monkeypatch):
 
 
 _SEARCH_KEY_VARS_FOR_TEST = (
-    "Wovra_SEARCH_PROVIDER", "Wovra_SEARCH_KEY", "Wovra_BRAVE_KEY", "BRAVE_API_KEY",
-    "BRAVE_SEARCH_API_KEY", "Wovra_TAVILY_KEY", "TAVILY_API_KEY", "Wovra_SERPER_KEY",
-    "SERPER_API_KEY", "Wovra_EXA_KEY", "EXA_API_KEY",
+    "Wovra_SEARCH_PROVIDER", "Wovra_SEARCH_KEY",
+    "Wovra_Tavily", "TAVILY_API_KEY",
+    "Wovra_Serper", "SERPER_API_KEY",
+    "Wovra_Exa", "EXA_API_KEY",
+    "Wovra_Bocha", "BOCHA_API_KEY",
+    "Wovra_SerpAPI", "Wovra_Serpapi", "SERPAPI_API_KEY",
+    "Wovra_Firecrawl", "FIRECRAWL_API_KEY",
 )
 
 
@@ -223,37 +227,92 @@ def _clean_search_env(monkeypatch):
 
 
 def test_search_provider_selection(monkeypatch):
-    """后端选择：显式指定优先；否则取注册表里第一个配了密钥的；都没有则空（本地）。"""
+    """后端选择：显式指定优先；否则取注册表里第一个配了密钥的；都没有则空（本地）。
+
+    密钥变量名两套都认：`Wovra_<家>`（用户 .env 里的写法）与各家惯用名。
+    """
     from wovra import tools as tools_module
 
     web = tools_module.web
     _clean_search_env(monkeypatch)
     assert web.search_provider() == ""
-    monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
-    assert web.search_provider() == "tavily"
-    monkeypatch.setenv("BRAVE_API_KEY", "brv-x")
-    assert web.search_provider() == "brave"          # 注册表顺序：brave 在前
-    monkeypatch.setenv("Wovra_SEARCH_PROVIDER", "serper")
-    assert web.search_provider() == "serper"         # 显式指定压过自动探测
+    monkeypatch.setenv("FIRECRAWL_API_KEY", "fc-x")
+    assert web.search_provider() == "firecrawl"
+    monkeypatch.setenv("Wovra_Bocha", "bocha-x")
+    assert web.search_provider() == "bocha"          # 注册表顺序：bocha 在 firecrawl 前
+    monkeypatch.setenv("Wovra_SEARCH_PROVIDER", "serpapi")
+    assert web.search_provider() == "serpapi"        # 显式指定压过自动探测
     monkeypatch.setenv("Wovra_SEARCH_KEY", "generic")  # 通用键对每一家都算配了
-    assert web._search_key("exa") == "generic"
+    assert web._search_key("serper") == "generic"
 
 
-def test_api_rows_adapts_each_vendor_schema():
-    """四家的字段名各不相同，_api_rows 各归各位；缺字段/未知供应商不抛。"""
+def test_search_order_is_random_but_explicit_goes_first(monkeypatch):
+    """默认随机挑一家先试（把调用摊到各家额度上）；显式指定的排第一，但**不是**
+    唯一候选——它挂了仍要往后轮（用户口径："失败换下一个"）。"""
     from wovra import tools as tools_module
 
     web = tools_module.web
-    assert web._api_rows("brave", {"web": {"results": [
-        {"title": "T", "url": "https://a.example", "description": "D"}]}}) == [
-        ("T", "https://a.example", "D")]
+    _clean_search_env(monkeypatch)
+    assert web._search_order() == []
+    for name in ("Wovra_Tavily", "Wovra_Serper", "Wovra_Exa"):
+        monkeypatch.setenv(name, "k")
+    orders = {tuple(web._search_order()) for _ in range(40)}
+    assert all(set(order) == {"tavily", "serper", "exa"} for order in orders)
+    assert len(orders) > 1                            # 确实在打乱
+    monkeypatch.setenv("Wovra_SEARCH_PROVIDER", "exa")
+    for _ in range(10):
+        order = web._search_order()
+        assert order[0] == "exa" and len(order) == 3
+
+
+def test_ensure_dotenv_points_at_repo_root(monkeypatch):
+    """回归 2026-09-16：`.env` 路径不能写死 parents[N]。
+
+    本文件在 `src/wovra/tools/` 下，比 `llm.py` 深一层；写死 `parents[2]` 会
+    指到 `src/.env`（不存在）——实测症状是**密钥一个都读不到**，检索静默退回
+    本地兜底，用户以为"配了没用"。
+    """
+    from pathlib import Path as _Path
+
+    import dotenv as dotenv_module
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    seen: dict = {}
+    monkeypatch.setattr(dotenv_module, "load_dotenv",
+                        lambda dotenv_path=None, **kwargs: seen.setdefault(
+                            "path", dotenv_path))
+    monkeypatch.setattr(web, "_dotenv_loaded", False)
+    web._ensure_dotenv()
+    assert seen["path"] is not None and seen["path"].name == ".env"
+    # 判据是"仓库根"，也就是含有 pyproject.toml 的那一层——不是某个固定层数
+    assert (seen["path"].parent / "pyproject.toml").exists()
+
+
+def test_api_rows_adapts_each_vendor_schema():
+    """六家的字段名各不相同，_api_rows 各归各位；缺字段/未知供应商不抛。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
     assert web._api_rows("tavily", {"results": [
-        {"title": "T", "url": "https://b.example", "content": "C"}]})[0][1] == "https://b.example"
+        {"title": "T", "url": "https://b.example", "content": "C"}]}) == [
+        ("T", "https://b.example", "C")]
     assert web._api_rows("serper", {"organic": [
         {"title": "T", "link": "https://c.example", "snippet": "S"}]})[0][2] == "S"
+    assert web._api_rows("serpapi", {"organic_results": [
+        {"title": "T", "link": "https://e.example", "snippet": "S"}]})[0][1] == "https://e.example"
+    assert web._api_rows("bocha", {"webPages": {"value": [
+        {"name": "T", "url": "https://f.example", "summary": "SM"}]}}) == [
+        ("T", "https://f.example", "SM")]
+    # 博查也可能把内容套在 data 里；summary 缺失时退到 snippet
+    assert web._api_rows("bocha", {"data": {"webPages": {"value": [
+        {"name": "T", "url": "https://g.example", "snippet": "SN"}]}}})[0][2] == "SN"
+    assert web._api_rows("firecrawl", {"data": {"web": [
+        {"title": "T", "url": "https://h.example", "description": "D"}]}}) == [
+        ("T", "https://h.example", "D")]
     assert web._api_rows("exa", {"results": [
         {"title": "T", "url": "https://d.example", "highlights": ["H1", "H2"]}]})[0][2] == "H1 H2"
-    assert web._api_rows("brave", {}) == []
+    assert web._api_rows("tavily", {}) == []
     assert web._api_rows("nope", {"results": [{"title": "T", "url": "u"}]}) == []
 
 
@@ -264,7 +323,7 @@ def test_api_search_failures_are_readable(monkeypatch):
 
     web = tools_module.web
     _clean_search_env(monkeypatch)
-    assert "Wovra_SEARCH_KEY" in web._api_search("brave", "q", 3)
+    assert "Wovra_SEARCH_KEY" in web._api_search("tavily", "q", 3)
     assert "只支持" in web._api_search("bing-scrape", "q", 3)
 
     def boom(*args, **kwargs):
@@ -272,18 +331,18 @@ def test_api_search_failures_are_readable(monkeypatch):
 
     monkeypatch.setenv("Wovra_SEARCH_KEY", "k")
     monkeypatch.setattr(web, "_http_json", boom)
-    out = web._api_search("brave", "q", 3)
+    out = web._api_search("tavily", "q", 3)
     assert "429" in out and "限流" in out
 
     def dns_boom(*args, **kwargs):
         raise OSError("dns boom")
 
     monkeypatch.setattr(web, "_http_json", dns_boom)
-    assert "API 失败" in web._api_search("brave", "q", 3)
+    assert "API 失败" in web._api_search("tavily", "q", 3)
 
 
 def test_api_search_keeps_key_out_of_url_and_result(monkeypatch):
-    """密钥只进请求头：不进 URL、不进给模型的文本、不进审计行。"""
+    """密钥只进请求头与约定的 body 字段：不进 URL、不进给模型的文本。"""
     from wovra import tools as tools_module
 
     web = tools_module.web
@@ -293,19 +352,26 @@ def test_api_search_keeps_key_out_of_url_and_result(monkeypatch):
 
     def fake_json(url, payload=None, headers=None):
         seen.update(url=url, payload=payload, headers=headers or {})
-        return {"web": {"results": [{"title": "T", "url": "https://a.example",
-                                     "description": "D"}]}}
+        return {"organic": [{"title": "T", "link": "https://a.example",
+                             "snippet": "D"}]}
 
     monkeypatch.setattr(web, "_http_json", fake_json)
-    rows = web._api_search("brave", "q", 3)
+    rows = web._api_search("serper", "q", 3)
     assert rows[0][1] == "https://a.example"
-    assert seen["headers"].get("X-Subscription-Token") == "SECRET-KEY-123"
+    assert seen["headers"].get("X-API-KEY") == "SECRET-KEY-123"
     assert "SECRET-KEY-123" not in seen["url"]
     assert "SECRET-KEY-123" not in repr(rows)
+    # tavily 走 body.api_key（它的接口约定），也同样不能出现在结果里
+    monkeypatch.setattr(web, "_http_json",
+                        lambda url, payload=None, headers=None: {
+                            "results": [{"title": "T", "url": "https://b.example",
+                                         "content": "C"}]})
+    rows = web._api_search("tavily", "q", 3)
+    assert rows[0][1] == "https://b.example" and "SECRET-KEY-123" not in repr(rows)
 
 
 def test_web_search_prefers_api_then_falls_back_to_local(monkeypatch):
-    """链路：API 成功不碰本地；API 失败退本地并标注"兜底（API 不可用）"；
+    """链路：API 成功不碰本地；API 失败退本地并标注"兜底（API 都不可用）"；
     两路都空时报两路各自的失败原因。"""
     from wovra import tools as tools_module
 
@@ -313,7 +379,7 @@ def test_web_search_prefers_api_then_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
     monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
     monkeypatch.setattr(web, "_cache_put", lambda k, t, v: None)
-    monkeypatch.setattr(web, "search_provider", lambda: "brave")
+    monkeypatch.setattr(web, "_search_order", lambda: ["tavily"])
     called = {"local": 0}
 
     def local_rows(query, n):
@@ -324,17 +390,107 @@ def test_web_search_prefers_api_then_falls_back_to_local(monkeypatch):
     monkeypatch.setattr(web, "_api_search", lambda p, q, n: [
         ("API 标题", "https://api.example", "API 摘要")])
     out = tools_module.web_search("q")
-    assert "API 标题" in out and "引擎: brave" in out and called["local"] == 0
+    assert "API 标题" in out and "引擎: tavily" in out and called["local"] == 0
 
     monkeypatch.setattr(
         web, "_api_search",
-        lambda p, q, n: "brave API 失败（HTTP 401：密钥无效或未授权）。")
+        lambda p, q, n: "tavily API 失败（HTTP 401：密钥无效或未授权）。")
     out = tools_module.web_search("q")
-    assert "本地标题" in out and "本地兜底（API 不可用）" in out and "401" in out
+    assert "本地标题" in out and "本地兜底（API 都不可用）" in out and "401" in out
 
     monkeypatch.setattr(web, "_search_ddg", lambda q, n: "duckduckgo 失败: 限流")
     out = tools_module.web_search("q")
     assert "检索失败" in out and "401" in out and "限流" in out
+
+
+def test_web_search_tries_next_provider_on_failure(monkeypatch):
+    """一家失败就换下一家（用户口径："如果失败换下一个"），第三个成功就收工。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
+    monkeypatch.setattr(web, "_cache_put", lambda k, t, v: None)
+    monkeypatch.setattr(web, "_search_order", lambda: ["bocha", "serpapi", "exa"])
+
+    def no_local(*args, **kwargs):
+        raise AssertionError("三家还有一家没试，不该走到本地兜底")
+
+    monkeypatch.setattr(web, "_search_ddg", no_local)
+    seen: list = []
+
+    def fake_api(provider, query, n):
+        seen.append(provider)
+        if provider == "bocha":
+            return "bocha API 失败（HTTP 429：配额用尽或被限流）。"
+        if provider == "serpapi":
+            return "serpapi API 失败（HTTP 500：接口报错）。"
+        return [("第三个才成功", "https://exa.example", "摘要")]
+
+    monkeypatch.setattr(web, "_api_search", fake_api)
+    out = tools_module.web_search("q")
+    assert seen == ["bocha", "serpapi", "exa"]
+    assert "第三个才成功" in out and "引擎: exa" in out
+
+
+class _FakeResp:
+    """最小响应替身：`_open_url` 的返回被当作上下文管理器用。"""
+
+    def __init__(self, body: bytes, ctype: str = "text/html"):
+        self._body = body
+        self.headers = {"Content-Type": ctype}
+
+    def read(self, n=None):
+        return self._body[:n] if n else self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def test_web_fetch_falls_back_to_firecrawl_instead_of_a_blank_page(monkeypatch, tmp_path):
+    """JS 渲染站的兜底：自己只抽到几个字符时问 Firecrawl 要 Markdown。
+
+    用户口径里的"搜索 API 找 URL、Firecrawl 取内容"接在**同一跳**里完成——
+    agent 不必自己串两步，也不必为此写脚本。
+    """
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "_assert_public_url", lambda url: None)
+    monkeypatch.setattr(web, "_llms_txt_url", lambda url: None)
+    monkeypatch.setattr(web, "_fetch_with_accept", lambda u, timeout=30: None)
+    monkeypatch.setattr(
+        web, "_open_url",
+        lambda url, timeout=30, max_hops=5: (
+            _FakeResp(b"<html><body><script>var app=1;</script></body></html>"), None))
+    monkeypatch.setattr(web, "_firecrawl_markdown",
+                        lambda url: "# 干净正文\n\n来自 Firecrawl 的 Markdown。")
+    out = web.web_fetch("https://spa.example.com/page")
+    assert "Firecrawl 提取" in out and "干净正文" in out
+
+    # 没配 Firecrawl（或它失败）时回到原路径：明说没有文本内容，不编
+    monkeypatch.setattr(web, "_firecrawl_markdown", lambda url: None)
+    out = web.web_fetch("https://spa.example.com/page2")
+    assert "无文本内容" in out
+
+
+def test_firecrawl_markdown_returns_none_without_key(monkeypatch):
+    """没配 Firecrawl 时静默降级（返回 None），不抛、不发请求。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    _clean_search_env(monkeypatch)
+
+    def no_http(*args, **kwargs):
+        raise AssertionError("没配密钥不该发请求")
+
+    monkeypatch.setattr(web, "_http_json", no_http)
+    assert web._firecrawl_markdown("https://example.com/") is None
 
 
 def test_web_search_without_api_says_how_to_configure(monkeypatch):
@@ -345,10 +501,10 @@ def test_web_search_without_api_says_how_to_configure(monkeypatch):
     monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
     monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
     monkeypatch.setattr(web, "_cache_put", lambda k, t, v: None)
-    monkeypatch.setattr(web, "search_provider", lambda: "")
+    monkeypatch.setattr(web, "_search_order", lambda: [])
     monkeypatch.setattr(web, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
     out = tools_module.web_search("q")
-    assert "未配置检索 API" in out and "Wovra_SEARCH_KEY" in out and ".env.example" in out
+    assert "未配置检索 API" in out and ".env.example" in out and "本地兜底" in out
 
 
 def test_web_search_caches_success_but_not_failure(monkeypatch):
@@ -360,7 +516,7 @@ def test_web_search_caches_success_but_not_failure(monkeypatch):
     puts: list = []
     monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
     monkeypatch.setattr(web, "_cache_put", lambda k, t, v: puts.append(k))
-    monkeypatch.setattr(web, "search_provider", lambda: "")
+    monkeypatch.setattr(web, "_search_order", lambda: [])
     monkeypatch.setattr(web, "_search_ddg", lambda q, n: "duckduckgo 失败: 限流")
     tools_module.web_search("q")
     assert puts == []

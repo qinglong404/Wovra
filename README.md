@@ -388,13 +388,17 @@ safety mode.
 * **`tasks/` is write-protected**: session data is the Runtime's source of truth, so the tool
   layer refuses writes and allows reads — and this rule **cannot be authorized** (out-of-workspace
   access can be authorized once; this cannot).
-* **Web search through a professional API**: set `Wovra_SEARCH_PROVIDER` (or just the vendor's own
-  variable: `BRAVE_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY`) plus
-  `Wovra_SEARCH_KEY` and `web_search` calls that vendor directly — the vendor's ranking is the
-  answer, no keyword-overlap filtering on top. With no key configured, or when the API fails, it
-  falls back to a **single** local scraping channel (DuckDuckGo lite) and **labels the result
-  "local fallback, no relevance guarantee"**, because a bare "no results" reads to a model as
-  "this doesn't exist online" — the wrong conclusion, measured on the GAIA run.
+* **Web search through a professional API**: fill in any of `Wovra_Tavily`, `Wovra_Serper`,
+  `Wovra_Exa`, `Wovra_Bocha`, `Wovra_SerpAPI`, `Wovra_Firecrawl` (the vendor-standard
+  `*_API_KEY` names and the generic `Wovra_SEARCH_KEY` also work). Each search asks a randomly
+  chosen backend first and moves to the next one if it fails, so the free quotas are spread
+  across vendors rather than burnt on one; `Wovra_SEARCH_PROVIDER` pins one to the front. The
+  vendor's ranking is the answer — no keyword-overlap filtering on top. With no key configured,
+  or when every API fails, it falls back to a **single** local scraping channel (DuckDuckGo lite,
+  10s budget) and **labels the result "local fallback, no relevance guarantee"**, because a bare
+  "no results" reads to a model as "this doesn't exist online" — the wrong conclusion, measured on
+  the GAIA run. (Firecrawl is also wired into `web_fetch`: when our own extraction comes back
+  with almost nothing — JS-rendered pages — it asks Firecrawl for clean Markdown.)
 * **Attachments are parsed natively**: `read_file` auto-detects `.csv`/`.tsv` (with GBK fallback
   and the encoding named in the header), `.docx`/`.xlsx`/`.pptx` (ZIP + XML) and PDF text layers —
   all stdlib, still zero new dependencies. Previously an agent had to install its own parsers: one
