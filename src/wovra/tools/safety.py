@@ -479,6 +479,16 @@ def _has_root_slash_target(masked: str) -> bool:
         if m.end() < len(masked) and not masked[m.end()].isspace():
             continue  # 非孤立（后面还有内容）：交给绝对路径通道
         head = masked[:m.start()]
+        # 左侧是引号操作数（`d / "cli" / "prompt.py"`）→ 这是**路径拼接运算符**，
+        # 不是根目录目标（2026-09-16，提示词审阅 §7 实测）：heredoc 里的 Python
+        # 代码 `Path(d) / "cli"` 曾被判成"访问工作区之外的绝对路径（/）"，整条命令
+        # 被驳，模型只能改写命令绕开。判据是"左侧紧邻引号"——`ls /`（左邻是命令词）
+        # 与 `find / -name x` 照旧命中。注意**边界**：引号内的绝对路径本就不扫
+        # （引号文本按数据掩码，这是既有设计），所以 `python3 - <<'PY'` 正文里
+        # `open("/etc/x")` 那条路历史上就不拦（已实测：改动前后一致，非本次引入）；
+        # `-c/-e` 代码段是白名单例外，那里的路径照旧扫。
+        if head.rstrip().endswith(("'", '"')):
+            continue
         prev = re.search(r"([^\s'\"|;&<>=()$`]+)\s*$", head)
         if not prev:
             return True  # 行首就是 /（如 `find /` 无前 token 时，前面其实有命令）

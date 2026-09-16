@@ -79,20 +79,101 @@ def test_system_prompt_splits_user_intent_into_three_classes():
 
 
 def test_system_prompt_forbids_ack_on_runtime_injection():
-    """系统提示词要求模型对运行时注入（非用户输入）不做确认性回复。
+    """运行时注入（非用户输入）：不确认，**也不解释这条通知本身**。
 
-    用户拍板（2026-09-11）：收到 <runtime-reminder> 信封或 [运行时] 开头
-    的新轮消息这类机制注入时，不要回"收到/明白/好的"这类无意义确认——
-    它们不是问题、不需要应答。两模式都要带这条约束。
+    用户拍板（2026-09-11）起是"不要做确认性回复"；2026-09-16 提示词审阅 §3 补了
+    另一半——实测那一轮跑完两次输出都在**解释运行时通知本身**（比"收到/明白"更啰嗦）。
+    识别线索也换掉了：旧文写的"以 [运行时] 开头"这个字面量在源码里出现 0 处，是条
+    失效线索；改成按 `<runtime-reminder>` 信封结构识别。
     """
     from wovra.agent import MODE_BASELINE, MODE_MANAGED
     from wovra.cli import _system_prompt
 
     for mode in (MODE_MANAGED, MODE_BASELINE):
         prompt = _system_prompt(mode)
-        assert "不要做确认性回复" in prompt
-        assert "收到" in prompt or "不是问题、不需要应答" in prompt
+        assert "也不解释或点评这条通知本身" in prompt
+        assert "收到/明白/好的" in prompt
         assert "直接继续既有工作或保持静默" in prompt
+        assert "[运行时]" not in prompt          # 失效线索不得留下
+        assert "<runtime-reminder>" in prompt
+
+
+def test_system_prompt_identity_is_self_not_an_external_platform():
+    """身份（2026-09-16 提示词审阅 §1，P0）：你就是 Wovra，不是"跑在它上面的助手"。
+
+    实测代价：旧首句"你是 Wovra 的执行助手" + 两处第三人称（"Wovra 运行时注入"、
+    "由 Runtime 管理"）合起来被读成"Wovra 是外面的平台"，于是"测 Wovra"变成了
+    "搭 harness 去测那个平台"——本仓库那次最大的方向性错误。
+    """
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    for mode in (MODE_MANAGED, MODE_BASELINE):
+        prompt = _system_prompt(mode)
+        assert "你就是 Wovra" in prompt
+        assert "不存在另一个需要你去查看或测试的「Wovra 系统」" in prompt
+        for third_person in ("执行助手", "Wovra 运行时", "由 Runtime", "多模态模型"):
+            assert third_person not in prompt
+
+
+def test_system_prompt_has_stop_signal_and_scope_ceiling():
+    """范围只许在"已定范围"内做完，不许擅自扩大；停止信号是终局指令。
+
+    2026-09-16 提示词审阅 §2（P0）：旧文只有"不许缩小"单边约束（"一次做完…不要
+    中途自作主张缩小范围"），实测三连犯同一动作——把一句话解读成它能承载的最大
+    工作量，其中一次是**已收到"就停止"之后仍新起了一轮评测**。
+    """
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    for mode in (MODE_MANAGED, MODE_BASELINE):
+        prompt = _system_prompt(mode)
+        assert "停止信号是终局指令" in prompt
+        assert "不新起任何执行、不追加验证" in prompt
+        assert "已启动的后台任务要停掉并报告" in prompt
+        assert "不得擅自扩大范围" in prompt
+        assert "先走便宜的那条" in prompt
+        # 单边约束仍在（"一次做完"是已定范围内的纪律，不是扩大范围的理由）
+        assert "哪怕一百条" in prompt and "做完再汇报" in prompt
+
+
+def test_system_prompt_wording_hygiene():
+    """措辞规范：不写"用户说…"式转述、不留"本项目"这种指代不明的说法。
+
+    用户口径（2026-09-16）：提示词里不要出现"用户说……"这类啰嗦、身份错位的描述。
+    "本项目"在工作区不是 Wovra 仓库时会把包读成"工作区之外另一个 wovra 项目"，
+    与身份问题叠加（审阅 §5）——改成"本工作区"。
+    """
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    for mode in (MODE_MANAGED, MODE_BASELINE):
+        prompt = _system_prompt(mode)
+        assert "用户说" not in prompt
+        assert "本项目" not in prompt
+        assert "本工作区" in prompt
+        # 运行环境单独成节，不再混在正文里
+        assert "## 运行环境" in prompt
+        for section in ("## 身份", "## 工作区与环境", "## 工具使用", "## 交互纪律"):
+            assert section in prompt
+
+
+def test_system_prompt_names_the_assembled_web_and_orchestration_tools():
+    """已装配的工具要提名（2026-09-16 提示词审阅 §4）。
+
+    实测缺口：`web_automate`（专为"必须真交互的页面"新增）在提示词里从没出现过，
+    遇到 SPA 时模型不会想到它；`todo`/`update_responsibility`/`notify`/`join_with`
+    也只有 schema 描述，而 schema 在长上下文里优先级低于系统提示词。
+    """
+    from wovra.agent import MODE_BASELINE, MODE_MANAGED
+    from wovra.cli import _system_prompt
+
+    managed = _system_prompt(MODE_MANAGED)
+    assert "web_automate" in managed and "不自动降级" in managed
+    for name in ("todo", "update_responsibility", "notify", "join_with"):
+        assert name in managed, name
+    # baseline 模式没有这些编排工具，不许预告（写实原则）
+    assert "join_with" not in _system_prompt(MODE_BASELINE)
 
 
 def test_workspace_instructions_injected_from_agents_md(monkeypatch, tmp_path):

@@ -312,6 +312,37 @@ def test_outside_absolute_paths_helper(workspace):
     assert tools_module.safety._outside_absolute_paths("find / -name x") == ["/"]
 
 
+def test_root_slash_operator_between_quoted_operands_is_not_a_target():
+    """回归（2026-09-16，提示词审阅 §7）：代码里的 `/` 运算符不是"根目录目标"。
+
+    实测现场：heredoc 里的 `Path(d) / "cli" / "prompt.py"` 被判成"访问工作区之外的
+    绝对路径（/）"，整条命令被驳，模型只能改写命令绕开（报告里那次多花一步）。
+    真实根目标（`ls /`、`find / -name x`）与真路径（`cat /etc/passwd`）必须照旧命中。
+    """
+    from wovra import tools as tools_module
+
+    escape = tools_module.safety._outside_absolute_paths
+    heredoc = (
+        "uv run python - <<'PYEOF'\n"
+        "import os, wovra\n"
+        "from pathlib import Path\n"
+        "d = Path(os.path.dirname(wovra.__file__))\n"
+        'p = d / "cli" / "prompt.py"\n'
+        "print(p)\n"
+        "PYEOF"
+    )
+    assert escape(heredoc) == []
+    assert tools_module.safety._command_escape(heredoc) is None
+    # 边界不变：真的根目标/真路径照拦
+    assert escape("ls /") == ["/"]
+    assert escape("find / -name x") == ["/"]
+    assert escape("cat /etc/passwd") == ["/etc/passwd"]
+    # `-c` 代码段是白名单例外：那里的绝对路径必须继续被检出
+    assert escape("python3 -c \"open('/etc/passwd')\"") == ["/etc/passwd"]
+    # 已知边界（非本次引入，改动前后一致）：heredoc **正文引号内**的路径不扫
+    assert escape("python3 - <<'PY'\nopen(\"/etc/passwd\").read()\nPY") == []
+
+
 def test_run_command_blocks_symlink_to_outside(workspace):
     """界内链接指向界外 → shell 顺着读到界外（`cat escape.txt`）。
 
