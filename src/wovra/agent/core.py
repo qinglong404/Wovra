@@ -26,16 +26,21 @@ from .support import (
     MODE_MANAGED,
     _DEFAULT_CONTEXT_LIMIT,
     _DEFAULT_MAX_TURNS,
+    _IMAGE_VIEW_HARD,
+    _IMAGE_VIEW_SOFT,
     _MAINTENANCE_PURPOSES,
     _ORG_COOLDOWN_ROUNDS_DEFAULT,
     _ORG_GRACE_ROUNDS_DEFAULT,
     _ORG_MAINT_TIMEOUT_DEFAULT,
     _ORG_WATERMARK_DEFAULT,
     _READ_ONLY_TOOLS,
+    _VISION_TOOLS,
     _action_word,
     _runtime_reminder,
     _sanitize_json_strings,
     _schema_of,
+    image_budget_refusal,
+    image_converge_note,
 )
 from .prompts import (
     _CONSULT_SCHEMA,
@@ -404,6 +409,9 @@ class _CoreMixin:
             # 本回合已转交次数（route_to 跳数上限的落点，随轮持久化——
             # `\c` 续跑不会把上限重置掉，见 support._MAX_ROUTE_HOPS）
             "route_hops": 0,
+            # 本回合已"看图"次数（view_image 预算的落点，同样随轮持久化——
+            # 防视觉题反复裁图空转，见 support._IMAGE_VIEW_SOFT/HARD）
+            "image_views": 0,
         }
         self.rounds.append(self.current_round)
         self.messages = []
@@ -1494,6 +1502,10 @@ class _CoreMixin:
         blocked = tools_module.run_pre_hook(name, parsed)
         if blocked:
             return blocked
+        # 看图预算（2026-09-16，GAIA §2）：到硬上限就不再执行——不注入新图、
+        # 不产生新开销，让模型就地收口，而不是靠超时把整轮掐死
+        if name in _VISION_TOOLS and self._image_view_count() >= _IMAGE_VIEW_HARD:
+            return image_budget_refusal(self._image_view_count(), _IMAGE_VIEW_HARD)
         try:
             # 文件权限守卫**按调用作用域**生效（不是构造时一绑到底）：粘性绑定
             # 会在 Agent 收工后继续拦别人（脚本/CLI 直接调文件工具、同进程里
@@ -1513,7 +1525,27 @@ class _CoreMixin:
         feedback = tools_module.run_post_hook(name, parsed, result)
         if feedback:
             result = f"{result}\n[hooks 反馈] {feedback}"
-        return sanitize_surrogates(result)
+        result = sanitize_surrogates(result)
+        if name in _VISION_TOOLS:               # 记账 + 软线收敛提示
+            result = self._count_image_view(result)
+        return result
+
+    def _image_view_count(self) -> int:
+        """本回合已看图次数（没有 round 时按 0 计——脚本/测试直调的场景）。"""
+        return int((self.current_round or {}).get("image_views") or 0)
+
+    def _count_image_view(self, result: str) -> str:
+        """看图计数，并在**恰好**到软线时把"该收敛了"写进结果。
+
+        只提示一次：到硬线还有一次拒绝（见 `_invoke_tool`），中间每次都贴
+        会白烧 token。计数落在 round 上，随轮持久化。
+        """
+        count = self._image_view_count() + 1
+        if self.current_round is not None:
+            self.current_round["image_views"] = count
+        if count == _IMAGE_VIEW_SOFT and count < _IMAGE_VIEW_HARD:
+            return f"{result}\n{image_converge_note(count, _IMAGE_VIEW_HARD)}"
+        return result
 
     def _execute(self, call_id: str, name: str, arguments: str) -> None:
         """执行单个工具调用，并把结果作为 tool 消息追加到当前 Round。"""

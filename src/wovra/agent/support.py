@@ -53,6 +53,34 @@ _ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 # （宁可让用户看到"没人认领"，也不要烧一整个回合的空转）。
 _MAX_ROUTE_HOPS = int(os.environ.get("WOVRA_ROUTE_HOPS", "3"))
 
+# 一个用户回合内允许"看图"（view_image）的次数（2026-09-16，GAIA 实测）。
+# 视觉题没有收敛策略时 agent 会反复裁图重看：实测两题各烧满 900s 超时
+# （output/gaia/FINDINGS.md §2：棋盘图求最佳着法、多边形面积图），工作区里
+# 堆了几十个自己写的裁剪脚本。故设两道线——到软线把"该收敛了"写进工具结果，
+# 到硬线直接拒绝本次调用（不注入新图）。宁可要一个带犹豫的答案，也不要空转。
+# 计数记在 round 上（同 route_hops），`\c` 续跑不会把预算重置掉。
+_IMAGE_VIEW_SOFT = int(os.environ.get("WOVRA_IMAGE_VIEWS", "6"))
+_IMAGE_VIEW_HARD = int(os.environ.get("WOVRA_IMAGE_VIEWS_MAX", "12"))
+
+# 会**消耗视觉模型**的工具。`screenshot` 只往盘上写 PNG、本身不注入图像
+# （要看到还得再 view_image），所以它不在预算里——挡它挡不住看图循环。
+_VISION_TOOLS = frozenset({"view_image"})
+
+
+def image_converge_note(count: int, hard: int) -> str:
+    """软线提示：把"该下结论了"写进工具结果（模型看得见，且随轮落盘）。"""
+    return (f"[看图预算] 本回合 view_image 已调用 {count} 次（硬上限 {hard}）。"
+            f"反复裁剪/放大同一张图的边际收益很低——现在应基于**已看过的**图像"
+            f"下结论并标注不确定处，或改走文本路线（page_text / read_file / search_files）。")
+
+
+def image_budget_refusal(count: int, hard: int) -> str:
+    """硬线拒绝：本次调用不执行（不注入新图），要求就地收口。"""
+    return (f"[看图预算用尽] 本回合 view_image 已调用 {count} 次（上限 {hard}），"
+            f"本次**未执行**、没有新图像注入。请基于已看过的图像给出结论："
+            f"最有把握的答案 + 明确标注不确定的部分；确需再看图的，改用文本工具"
+            f"（page_text / read_file / search_files），或把问题交回用户。")
+
 # 任务状态渲染的字符预算（2026-09-11 机制评审）：TaskState 的 7 个列表
 # 各有 200 条上限（STATE_LIST_CAP），理论最坏 1400 条；它是**每轮都进
 # 上下文**的（信封尾部），不设预算就是一条无界常驻负担。实测当前 36 条

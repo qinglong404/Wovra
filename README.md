@@ -267,9 +267,11 @@ src/wovra/
     safety.py       workspace root, audit hook, path guards, command-escape checks,
                     confirm gate, write-protected zones, device read-only allow-list
     files.py        read/write/edit/delete/move/restore, search, checkpoints
+    documents.py    native parsing of docx/xlsx/pptx/pdf/csv (stdlib only, no new deps)
     shell.py        run_command, process-tree kill
     background.py   background task registry and lifecycle (flags "exit 0 but looks like an error")
-    web.py          web_search / web_fetch (SSRF guard, readability extraction, cache)
+    web.py          web_search (Brave/Tavily/Serper/Exa API, local fallback) / web_fetch
+                    (SSRF guard, readability extraction, cache)
     eyes.py         eyes: screenshot / view_image / page_text (image caps, "not injected" notice)
     interaction.py  ask_user, user hooks, current time
     limits.py       unified output caps + spill-to-disk for oversized results
@@ -386,11 +388,27 @@ safety mode.
 * **`tasks/` is write-protected**: session data is the Runtime's source of truth, so the tool
   layer refuses writes and allows reads — and this rule **cannot be authorized** (out-of-workspace
   access can be authorized once; this cannot).
+* **Web search through a professional API**: set `Wovra_SEARCH_PROVIDER` (or just the vendor's own
+  variable: `BRAVE_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY`) plus
+  `Wovra_SEARCH_KEY` and `web_search` calls that vendor directly — the vendor's ranking is the
+  answer, no keyword-overlap filtering on top. With no key configured, or when the API fails, it
+  falls back to a **single** local scraping channel (DuckDuckGo lite) and **labels the result
+  "local fallback, no relevance guarantee"**, because a bare "no results" reads to a model as
+  "this doesn't exist online" — the wrong conclusion, measured on the GAIA run.
+* **Attachments are parsed natively**: `read_file` auto-detects `.csv`/`.tsv` (with GBK fallback
+  and the encoding named in the header), `.docx`/`.xlsx`/`.pptx` (ZIP + XML) and PDF text layers —
+  all stdlib, still zero new dependencies. Previously an agent had to install its own parsers: one
+  audio task in the GAIA run left a 392MB venv plus a 1.9GB HuggingFace cache in its workspace.
+  When a document cannot be parsed the reply says so and suggests the next step — it never hands
+  back mojibake.
 * **Image caps**: an image the model can "see" is at most **3000px** per side
   (`WOVRA_IMAGE_MAX_SIDE`, to save tokens), and the provider's hard limit is **8192px**
   (`WOVRA_IMAGE_HARD_MAX_SIDE`, measured: 8192 accepted, 8193 rejected). Oversized images are
   **not injected**, and the next reply tells the model plainly "you did not see this image"
-  rather than letting it improvise.
+  rather than letting it improvise. A per-turn view budget (`WOVRA_IMAGE_VIEWS`, default 6) nudges
+  the model to conclude from the images it has seen, and at the hard ceiling
+  (`WOVRA_IMAGE_VIEWS_MAX`, default 12) further `view_image` calls are **refused** — two visual
+  GAIA tasks had burned their full 900s re-cropping the same picture.
 * **Boundaries and confirmations**: commands stay inside the workspace; crossing out of it needs
   a one-time authorization recorded in `.wovra/authorized-paths.json`; destructive operations
   (`rm -r`, `git push/reset/…`) go through a **confirm gate** (y/N, with an "always this kind"

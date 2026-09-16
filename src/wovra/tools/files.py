@@ -16,7 +16,7 @@ import re
 import time
 from pathlib import Path
 
-from . import limits, permissions, safety
+from . import documents, limits, permissions, safety
 
 
 # 搜索时跳过的噪声目录（依赖、缓存、运行时数据——搜索它们只有噪音）
@@ -159,7 +159,8 @@ def list_files(directory: str = ".") -> list[str]:
 
 def read_file(path: str, start_line: int = 1, num_lines: int = 200,
               pattern: str = "") -> str:
-    """按行读取项目内一个文本文件的内容片段。要通读整个文件时，直接把
+    """按行读取项目内一个文件的内容片段。csv/tsv 表格与 docx/xlsx/pptx/pdf
+    附件会自动解析成文本（不必自己写脚本或装解析库）。要通读整个文件时，直接把
     num_lines 放大一次读完（单次上限 20,000 行），不要用小段反复读同一个文件。
 
     文件很大而只要一个结果时（典型场景：工具输出落盘后的长日志），传
@@ -191,8 +192,17 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
         )
     try:
         text = target.read_text(encoding="utf-8")
+        origin = ""
     except UnicodeDecodeError:
-        return f"{path} 不是 UTF-8 文本文件（可能是二进制文件），无法按文本读取"
+        # 附件原生解析（2026-09-16，GAIA FINDINGS §3）：docx/xlsx/pptx/pdf/csv
+        # 零依赖解成文本，省掉 agent 自己装库写脚本（实测一题堆出 2.3G 自造轮子）。
+        # 解不出来才回退到原提示——绝不给乱码。
+        parsed = documents.extract(target)
+        if parsed is None:
+            return (f"{path} 不是 UTF-8 文本文件，无法按文本读取。"
+                    f"{documents.binary_hint(target)}")
+        origin, text = parsed
+    label = f"{origin}，" if origin else ""
     _observe_file(target)  # 记录观察时的状态，供 edit/write 的过期保护比对
     lines = text.splitlines()
     total = len(lines)
@@ -220,7 +230,7 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
         )
         first = hits[0][0]
         return (
-            f"{path}（共 {total} 行，匹配 {len(hits)} 行）\n{shown}{more}\n"
+            f"{path}（{label}共 {total} 行，匹配 {len(hits)} 行）\n{shown}{more}\n"
             f"...（取上下文：read_file('{path}', start_line={max(1, first - 10)}, "
             f"num_lines=40)；要全文：不带 pattern 读）"
         )
@@ -232,7 +242,7 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
     # 控制（默认一次可读 20,000 行），超长内容再由字符爆阀兜底落盘。
     end = min(total, start + min(max(1, num_lines), _READ_MAX_LINES) - 1)
     body = "\n".join(lines[start - 1:end])
-    header = f"{path}（共 {total} 行，以下为第 {start}-{end} 行）"
+    header = f"{path}（{label}共 {total} 行，以下为第 {start}-{end} 行）"
     if end < total:
         body += f"\n...（后续还有 {total - end} 行，用 start_line={end + 1} 继续读取）"
     # 原文就在磁盘上：超限时只给预览与体量，取回路径是原文件本身（不落副本）

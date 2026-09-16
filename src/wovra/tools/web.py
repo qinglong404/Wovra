@@ -1,10 +1,16 @@
-"""网络工具：web_search（引擎注册表 + 回退）与 web_fetch（含 SSRF 防护）。
+"""网络工具：web_search（检索 API 优先，本地单通道兜底）与 web_fetch（SSRF 防护）。
 
-2026-09-14 一步到位升级（参考 crawl4ai 的"干净文本"思路，零依赖）：
+2026-09-14 升级（参考 crawl4ai 的"干净文本"思路，零依赖）：
 * 正文提取改为启发式密度打分（去导航/页脚，crawl4ai 的 clean-Markdown 思路）
 * 结果缓存 output/cache/（URL→正文、query→搜索，TTL 控制）
 * 内容协商：抓取前探 Accept: text/markdown 与 /llms.txt（crawl4ai 同款）
-* 搜索引擎注册表化：DDG → Bing → 备用引擎，失败自动降级
+
+2026-09-16 检索改走专业 API（用户口径："检索好好写，走专业 API，本地的只保留
+简单稳定功能"）：GAIA 评测（output/gaia/FINDINGS.md §1）证明自研抓取两头都烧——
+DDG 遇 TLS 抖动、Bing 对中文长查询返无关页，再叠一层词面过滤后模型会收到
+"网上没有资料"这种**错误结论**。现在：配了密钥只走供应商接口（排序交给供应商，
+不再做词面相关性过滤）；没配或 API 挂了才退回单通道本地抓取，并把"可能有噪声"
+显式写给模型。**Bing 裸抓已删除**——它是无关页的主要来源。
 """
 
 import ipaddress
@@ -524,8 +530,12 @@ _CJK_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 _ASCII_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.+-]{1,}")
 
 # 判相关性的门（TOOLING_REVIEW.md §2）：2 个查询词命中即算相关——一个常见词
-# 偶然命中不足以判相关，而真实相关的条目标题/摘要里往往有一串词。宁可漏报
-# 让**所有**引擎结果都被判无关（返回"未找到相关结果"）也不错报成噪声。
+# 偶然命中不足以判相关，而真实相关的条目标题/摘要里往往有一串词。
+#
+# 2026-09-16 改口径：这个门**不再当硬闸**用。GAIA 实测（FINDINGS.md §1）里
+# Bing 的 10 条候选被它全滤掉，于是返回"未找到相关结果"，模型据此判定"查不到"
+# 而放弃——把"我的词面判据太糙"读成了"网上没有"。现在它只用来**标注**本地兜底
+# 结果的可信度（见 _screen_local），硬剔除只留给广告/引擎壳页。
 _MIN_HITS = 2
 
 
@@ -537,19 +547,32 @@ def _query_terms(query: str) -> tuple[set[str], set[str]]:
     return cjk, ascii_words
 
 
-# 广告/推广行的 host 特征（2026-09-15 实测）：DDG 的广告是
+# 广告/推广行的特征（2026-09-15 实测）：DDG 的广告是
 # `duckduckgo.com/y.js?ad_domain=…`（点进去才跳外部站），Bing 是 `bing.com/aclick`。
 # 它们是**买来的位置**，不是检索结果——混在结果里比无关结果更坏（看起来最相关）。
-_AD_HOSTS = (
+_AD_MARKERS = (
     "duckduckgo.com/y.js", "bing.com/aclick", "bing.com/ck/a?!&&p=",
+    "googleadservices.com", "doubleclick.net",
+    # 引擎自家的推广/帮助壳页（2026-09-16 实测）：DDG 把广告位伪装成
+    # `duckduckgo.com/duckduckgo-help-pages/company/ads-by-microsoft-…`，
+    # 正文是广告词且含查询词，路径名单认不全 → 补上。
+    "duckduckgo.com/duckduckgo-help-pages", "duckduckgo.com/about",
+)
+# 引擎自家域：检索引擎站内的页面**本来就不该**是检索答案（是壳页或导航页）。
+# 这条是上面路径名单的兜底——对方换一个 help 路径就绕过了。
+_AD_HOSTNAMES = (
+    "duckduckgo.com", "bing.com", "google.com",
     "googleadservices.com", "doubleclick.net",
 )
 
 
 def _is_ad(link: str) -> bool:
-    """结果链接是否是广告/推广（不是自然结果）。"""
+    """结果链接是否是广告/推广或引擎自家壳页（都不是自然结果）。"""
     low = (link or "").lower()
-    return any(marker in low for marker in _AD_HOSTS)
+    if any(marker in low for marker in _AD_MARKERS):
+        return True
+    host = urllib.parse.urlparse(low).hostname or ""
+    return any(host == h or host.endswith("." + h) for h in _AD_HOSTNAMES)
 
 
 def _relevant(query: str, title: str, snippet: str, url: str = "") -> bool:
@@ -577,20 +600,23 @@ def _relevant(query: str, title: str, snippet: str, url: str = "") -> bool:
 
 
 def _format_results(query: str, engine: str, rows: list[tuple[str, str, str]],
-                    filtered: int = 0) -> str:
-    """结果行 → 给模型看的文本（含被相关性过滤掉几条的说明）。"""
+                    filtered: int = 0, note: str = "") -> str:
+    """结果行 → 给模型看的文本（可选一条前置提示 note）。"""
     lines = []
     for i, (title, link, snippet) in enumerate(rows, start=1):
         lines.append(f"{i}. {title}\n   {link}" + (f"\n   {snippet}" if snippet else ""))
     head = f"（引擎: {engine}）搜索 {query!r} 的结果（前 {len(lines)} 条"
     if filtered:
-        head += f"，另有 {filtered} 条判定为无关已过滤"
+        head += f"，另有 {filtered} 条广告/壳页已剔除"
     head += "）：\n\n"
-    return head + "\n\n".join(lines)
+    return (f"⚠ {note}\n\n" if note else "") + head + "\n\n".join(lines)
 
 
-def _search_ddg(query: str, max_results: int) -> tuple[list, int] | str:
-    """DDG 检索（lite 端点优先，html 端点兜底）；返回 (结果行, 过滤条数) 或失败文本。
+def _search_ddg(query: str, max_results: int) -> tuple[list, int, str] | str:
+    """DDG 检索（lite 端点优先，html 端点兜底）；返回 (结果行, 剔除数, 提示) 或失败文本。
+
+    2026-09-16 起这是**本地兜底通道**（web_search 只在没配 API 或 API 失败时用它）；
+    Bing 裸抓已删除——它对中文长查询返回无关页，是噪声的主要来源。
 
     2026-09-15：主端点 `html.duckduckgo.com` 已被反爬拿下——实测对请求
     返回 **HTTP 202 + 空壳页**（14KB、零个结果节点），旧解析器于是永远报
@@ -610,7 +636,7 @@ def _search_ddg(query: str, max_results: int) -> tuple[list, int] | str:
             continue
         rows = _parse_ddg(html)
         if rows:
-            return _screen(query, rows, max_results)
+            return _screen_local(query, rows, max_results)
         last = "duckduckgo 无结果或被限流。"
     return last
 
@@ -659,100 +685,234 @@ def _ddg_target(href: str) -> str:
     return _unwrap_redirect(href)
 
 
-def _search_bing(query: str, max_results: int) -> tuple[list, int] | str:
-    """Bing 检索；返回 (结果行, 过滤条数) 或失败文本。
+# ---- 检索 API（专业后端，2026-09-16，用户口径"检索走专业 API"）-------------
+#
+# 四家一起支持：都只要一个密钥、都是 JSON over HTTPS，stdlib urllib 就够，
+# **不引入新依赖**（项目口径：6 个直接依赖、网络层零依赖）。
+#   brave  GET  api.search.brave.com/res/v1/web/search   X-Subscription-Token
+#   tavily POST api.tavily.com/search                     body.api_key + Bearer
+#   serper POST google.serper.dev/search                  X-API-KEY
+#   exa    POST api.exa.ai/search                         x-api-key
+# 供应商给的排序就是结论，**不再做词面相关性过滤**——那是本地兜底才需要的补丁。
 
-    无结果页要能认出来：Bing 在查无结果时会返回 `b_no` 提示块（旧实现只
-    找 `b_algo`，会把提示块里的 `b_algo` 片段当成结果节出来）。故：
-    有 `b_no` 标记 → 直接报"无结果"，不再解析。
+_SEARCH_KEY_VARS: dict[str, tuple[str, ...]] = {
+    "brave": ("Wovra_SEARCH_KEY", "Wovra_BRAVE_KEY", "BRAVE_API_KEY",
+              "BRAVE_SEARCH_API_KEY"),
+    "tavily": ("Wovra_SEARCH_KEY", "Wovra_TAVILY_KEY", "TAVILY_API_KEY"),
+    "serper": ("Wovra_SEARCH_KEY", "Wovra_SERPER_KEY", "SERPER_API_KEY"),
+    "exa": ("Wovra_SEARCH_KEY", "Wovra_EXA_KEY", "EXA_API_KEY"),
+}
+_SEARCH_PROVIDER_ORDER = ("brave", "tavily", "serper", "exa")
+_SEARCH_TIMEOUT = int(os.environ.get("WOVRA_SEARCH_TIMEOUT", "30"))
+_dotenv_loaded = False
+
+
+def _ensure_dotenv() -> None:
+    """懒加载仓库根 .env（与 llm.py 同路径、同幂等语义）。
+
+    工具读的是**调用期**环境变量，而 .env 由 llm.py 在导入期加载；脚本或测试
+    直接调 web_search 时那条路径可能还没跑过，密钥就白配了。
     """
-    url = ("https://www.bing.com/search?q=" + urllib.parse.quote_plus(query)
-           + "&setlang=zh-hans")
-    request = urllib.request.Request(url, headers={
-        "User-Agent": _WEB_UA, "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8"})
+    global _dotenv_loaded
+    if _dotenv_loaded:
+        return
+    _dotenv_loaded = True
     try:
-        with urllib.request.urlopen(request, timeout=30) as resp:
-            html = resp.read(1_000_000).decode("utf-8", errors="replace")
-    except Exception as error:  # noqa: BLE001
-        return f"bing 失败: {error!r}"
-    if 'class="b_no"' in html or "b_no " in html:
-        return "bing 无结果（查询词未命中任何索引页）。"
-    rows: list[tuple[str, str, str]] = []
-    for chunk in html.split('<li class="b_algo"')[1:]:
-        m = re.search(r'<h2[^>]*><a[^>]+href="([^"]+)"[^>]*>(.*?)</a>', chunk, re.S | re.I)
-        if not m:
-            continue
-        link = _unwrap_redirect(m.group(1))
-        title = _visible_text(m.group(2))
-        p = re.search(r"<p[^>]*>(.*?)</p>", chunk, re.S | re.I)
-        snippet = _visible_text(p.group(1))[:200] if p else ""
-        if title:
-            rows.append((title, link, snippet))
-    if not rows:
-        return "bing 无结果或返回了无法解析的页面。"
-    return _screen(query, rows, max_results)
+        from dotenv import load_dotenv
+        load_dotenv(dotenv_path=Path(__file__).resolve().parents[2] / ".env")
+    except Exception:  # noqa: BLE001——缺 dotenv 或缺 .env 都不该让检索挂掉
+        pass
 
 
-def _screen(query: str, rows: list[tuple[str, str, str]],
-            max_results: int) -> tuple[list, int] | str:
-    """相关性过滤 + 截断条数；全被滤掉时返回"未找到相关结果"（宁缺毋滥）。
+def search_provider() -> str:
+    """当前要用的检索供应商名；未配置任何密钥时返回空串（走本地兜底）。
 
-    TOOLING_REVIEW.md §2 的改进建议 3：**宁缺毋滥**——没有相关结果就明说，
-    不拿无关内容充数，因为"搜过了但没有"是模型做后续决策的依据。
+    `Wovra_SEARCH_PROVIDER` 显式指定即以它为准（哪怕没配密钥——那是配置错误，
+    要报出来，不能悄悄换一家）；否则按注册表顺序取第一个配了密钥的。
     """
-    kept, filtered = [], 0
+    _ensure_dotenv()
+    picked = (os.environ.get("Wovra_SEARCH_PROVIDER") or "").strip().lower()
+    if picked:
+        return picked
+    for name in _SEARCH_PROVIDER_ORDER:
+        if _search_key(name):
+            return name
+    return ""
+
+
+def _search_key(provider: str) -> str:
+    """取某供应商的密钥（永不写进审计行或结果文本）。"""
+    _ensure_dotenv()
+    for var in _SEARCH_KEY_VARS.get(provider, ()):
+        value = (os.environ.get(var) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _http_json(url: str, *, payload: dict | None = None,
+               headers: dict | None = None) -> dict:
+    """发一次 JSON 请求（无 payload 走 GET，有则 POST）；HTTP 错误交给调用方翻译。"""
+    head = {"User-Agent": _WEB_UA, "Accept": "application/json"}
+    head.update(headers or {})
+    data = None
+    if payload is not None:
+        data = json.dumps(payload).encode("utf-8")
+        head["Content-Type"] = "application/json"
+    request = urllib.request.Request(url, data=data, headers=head)
+    with urllib.request.urlopen(request, timeout=_SEARCH_TIMEOUT) as resp:
+        body = resp.read(2_000_000).decode("utf-8", errors="replace")
+    return json.loads(body or "{}")
+
+
+def _api_rows(provider: str, data: dict) -> list[tuple[str, str, str]]:
+    """供应商响应 → (标题, 链接, 摘要)。各家字段名不同，只在这一处适配。"""
+    def _clean(value) -> str:
+        return _visible_text(unescape(str(value or "")))[:300]
+
+    if provider == "brave":
+        raw = (data.get("web") or {}).get("results") or []
+        return [(_clean(r.get("title")), r.get("url") or "", _clean(r.get("description")))
+                for r in raw]
+    if provider == "tavily":
+        return [(_clean(r.get("title")), r.get("url") or "", _clean(r.get("content")))
+                for r in data.get("results") or []]
+    if provider == "serper":
+        return [(_clean(r.get("title")), r.get("link") or "", _clean(r.get("snippet")))
+                for r in data.get("organic") or []]
+    if provider == "exa":
+        rows = []
+        for r in data.get("results") or []:
+            snippet = r.get("text") or " ".join(r.get("highlights") or [])
+            rows.append((_clean(r.get("title")), r.get("url") or "", _clean(snippet)))
+        return rows
+    return []
+
+
+def _api_search(provider: str, query: str, max_results: int) -> list | str:
+    """调供应商检索：成功返回结果行，失败返回可读文本（由调用方决定是否兜底）。"""
+    if provider not in _SEARCH_PROVIDER_ORDER:
+        return (f"未知检索供应商 {provider!r}：Wovra_SEARCH_PROVIDER 只支持 "
+                f"{'/'.join(_SEARCH_PROVIDER_ORDER)}。")
+    key = _search_key(provider)
+    if not key:
+        last_var = _SEARCH_KEY_VARS.get(provider, ("Wovra_SEARCH_KEY",))[-1]
+        return (f"{provider} 没配密钥：在 .env 里填 Wovra_SEARCH_KEY（或 {last_var}），"
+                f"参考 .env.example。")
+    quoted = urllib.parse.quote_plus(query)
+    try:
+        if provider == "brave":
+            data = _http_json(
+                "https://api.search.brave.com/res/v1/web/search"
+                f"?q={quoted}&count={max_results}",
+                headers={"X-Subscription-Token": key})
+        elif provider == "tavily":
+            data = _http_json(
+                "https://api.tavily.com/search",
+                payload={"api_key": key, "query": query, "max_results": max_results,
+                         "search_depth": "basic", "include_answer": False},
+                headers={"Authorization": f"Bearer {key}"})
+        elif provider == "serper":
+            data = _http_json(
+                "https://google.serper.dev/search",
+                payload={"q": query, "num": max_results},
+                headers={"X-API-KEY": key})
+        else:                                   # exa
+            data = _http_json(
+                "https://api.exa.ai/search",
+                payload={"query": query, "numResults": max_results,
+                         "contents": {"text": {"maxCharacters": 300}}},
+                headers={"x-api-key": key})
+    except urllib.error.HTTPError as error:
+        hint = {401: "密钥无效或未授权", 403: "密钥无权访问该接口",
+                429: "配额用尽或被限流"}.get(error.code, "接口报错")
+        return f"{provider} API 失败（HTTP {error.code}：{hint}）。"
+    except Exception as error:  # noqa: BLE001——网络/JSON 异常都回传给模型自行调整
+        return f"{provider} API 失败: {error!r}"
+    rows = [row for row in _api_rows(provider, data) if row[0] and row[1]]
+    if not rows:
+        return f"{provider} API 返回了 0 条结果。"
+    return rows[:max_results]
+
+
+def _screen_local(query: str, rows: list[tuple[str, str, str]],
+                  max_results: int) -> tuple[list, int, str]:
+    """本地抓取的结果筛选：(结果行, 剔除条数, 给模型的提示)。
+
+    硬动作只留一件：**剔广告与引擎壳页**（买来的位置、导航页冒充答案，比无关页更坏）。
+    词面相关性降级为**标注**——GAIA 实测（FINDINGS.md §1）证明把它当硬闸会让模型
+    得出"网上没有资料"的错误结论：Bing 的 10 条候选被全滤掉后，那句"未找到相关
+    结果"读起来就是"查过了，没有"。现在不够相关的行照给，但配一条显式警告，把
+    判断权交回模型。
+    """
+    kept, ads, off_topic = [], 0, 0
     for title, link, snippet in rows:
-        if _relevant(query, title, snippet, link):
+        if _is_ad(link):
+            ads += 1
+            continue
+        if not _relevant(query, title, snippet, link):
+            off_topic += 1
+        if len(kept) < max_results:
             kept.append((title, link, snippet))
-        else:
-            filtered += 1
-        if len(kept) >= max_results:
-            break
-    if not kept:
-        return (f"未找到相关结果（{len(rows)} 条候选与查询词无词面重叠，已全部过滤）。"
-                f"可换更短的查询词，或直接用 web_fetch 抓已知网址。")
-    return kept, filtered
-
-
-def _search_engine(query: str, max_results: int, engine: str):
-    """按引擎名分发。失败返回可识别文本；成功返回 (结果行, 过滤条数)。"""
-    if engine == "ddg":
-        return _search_ddg(query, max_results)
-    if engine == "bing":
-        return _search_bing(query, max_results)
-    return f"{engine} 未知引擎"
+    note = ""
+    if kept and off_topic >= len(kept):
+        note = (f"本地抓取**没做相关性保证**（{off_topic} 条与查询词无词面重叠，可能是"
+                f"噪声）；**不要据此判定「网上没有资料」**。要更稳请在 .env 里配置"
+                f"检索 API（见 .env.example）。")
+    return kept, ads, note
 
 
 def web_search(query: str, max_results: int = 8) -> str:
     """网页搜索，返回标题、链接与摘要。用于查技术文档与解决方案。
 
-    引擎按注册表顺序尝试（DDG → Bing），失败或**结果全被相关性过滤**时
-    自动降级到下一个；全部无果时明说"未找到相关结果"，不拿无关内容充数
-    （2026-09-15，TOOLING_REVIEW.md §2）。结果缓存 output/cache/（TTL 默认
-    1h）：同一 query 短时间重复搜直接命中缓存，不再打网络。
+    配了检索 API（Wovra_SEARCH_PROVIDER + Wovra_SEARCH_KEY，见 .env.example）
+    就走供应商接口：排序即结论，不做词面过滤。没配或 API 失败时退回本地抓取，
+    结果会标注"本地兜底"并声明"没有相关性保证"——那种结果只能当参考，**不能**
+    用来判定"网上没有资料"。结果缓存 output/cache/（TTL 默认 1h）；只缓存成功
+    结果，失败不缓存（否则一次限流会被记一小时）。
     """
     safety._audit(f"[web_search] {query}")
     max_results = max(1, min(int(max_results), 20))
-    # 缓存键带版本（同 fetch）：解析器/过滤口径一变，旧条目就不可用——
-    # 否则"再搜一次"拿到的是上一版代码留下的噪声（实测踩到：修完解析器
-    # 仍回显旧的无关结果，把修复盖住了）
-    cache_key = f"{_CACHE_VERSION}:{query}"
+    provider = search_provider()
+    # 缓存键 = 版本 + 后端名 + query：换供应商后不该再命中上一家留下的结果，
+    # 解析/过滤口径一变旧条目也自然失效（旧版只带版本，实测踩到过回显噪声）
+    cache_key = f"{_CACHE_VERSION}:{provider or 'local'}:{query}"
     cached = _cache_get("search", cache_key)
     if cached is not None:
         return f"[缓存命中] {cached}"
-    signals = []
-    for engine in ("ddg", "bing"):
-        outcome = _search_engine(query, max_results, engine)
-        if isinstance(outcome, str):            # 失败/无结果：记下原因换下一家
-            signals.append(outcome)
-            continue
-        rows, filtered = outcome
-        out = _format_results(query, engine, rows, filtered)
-        _cache_put("search", cache_key, out)
-        return out
-    out = ("未找到相关结果：所有搜索通道都没给出与查询词相关的内容。\n"
-           + "\n".join(signals)
-           + "\n可换更短的查询词重试，或用 web_fetch 直接抓已知网址"
-             "（比如厂商官网页）。")
-    _cache_put("search", cache_key, out)
-    return out
+    signals: list[str] = []
+    if provider:
+        outcome = _api_search(provider, query, max_results)
+        if not isinstance(outcome, str):
+            out = _format_results(query, provider, outcome)
+            _cache_put("search", cache_key, out)
+            return out
+        signals.append(outcome)
+    local = _search_ddg(query, max_results)
+    if isinstance(local, str):
+        signals.append(local)
+    else:
+        rows, dropped, note = local
+        if rows:
+            engine = ("ddg 本地兜底（API 不可用）" if provider
+                      else "ddg（本地，未配置检索 API）")
+            if signals:                 # API 挂在哪一步要让用户看见（否则以为兜底是常态）
+                note = signals[0] + (("\n" + note) if note else "")
+            out = _format_results(query, engine, rows, dropped, note)
+            _cache_put("search", cache_key, out)
+            return out
+        signals.append("本地兜底只拿到广告位/引擎壳页，已全部剔除。")
+    return _no_result_text(provider, signals)
+
+
+def _no_result_text(provider: str, signals: list[str]) -> str:
+    """所有通道都没内容时的说明（未配 API 时顺带告诉用户怎么配）。"""
+    head = ("检索失败：配置的 API 与本地兜底都没拿到内容。"
+            if provider else
+            "未配置检索 API，本地兜底通道也没拿到内容。")
+    tail = "可换更短的查询词重试，或用 web_fetch 直接抓已知网址（比如厂商官网页）。"
+    if not provider:
+        tail = (f"在 .env 里配置检索 API 会稳得多：Wovra_SEARCH_PROVIDER="
+                f"{'/'.join(_SEARCH_PROVIDER_ORDER)} 之一 + Wovra_SEARCH_KEY"
+                f"（见 .env.example）。{tail}")
+    return head + "\n" + "\n".join(signals) + "\n" + tail

@@ -266,9 +266,11 @@ src/wovra/
   tools/          内置工具箱
     safety.py       工作区属主、审计挂钩、路径防护、命令越界判定、确认门、禁写区、设备只读白名单
     files.py        读/写/改/删/移/回滚、搜索、检查点
+    documents.py    附件原生解析：docx/xlsx/pptx/pdf/csv（纯 stdlib，零新依赖）
     shell.py        run_command、进程树强杀
     background.py   后台任务注册表与生命周期（含"退出码 0 但输出像报错"标注）
-    web.py          web_search / web_fetch（含 SSRF 防护、正文提取、结果缓存）
+    web.py          web_search（Brave/Tavily/Serper/Exa API + 本地兜底）/ web_fetch
+                    （含 SSRF 防护、正文提取、结果缓存）
     eyes.py         眼睛：screenshot / view_image / page_text（含图片尺寸上限与"未注入"说明）
     interaction.py  ask_user、用户 Hooks、当前时间
     limits.py       工具输出的统一上限与超限落盘（output/spill/）
@@ -372,9 +374,22 @@ WOVRA_TASKS_ROOT=/tmp/demo wovra serve   # 用另一份数据目录起演示实�
   预览 + 原文体量 + 落盘路径（`output/spill/`），随时可以 `read_file` 取回——**不丢文本**。
 * **`tasks/` 是禁写区**：会话数据是 Runtime 的真相来源，工具层对它**拒写放读**，而且
   **不可授权**（越界访问可以授权一次，禁写区不行）。
+* **网页检索走专业 API**：填 `Wovra_SEARCH_PROVIDER`（或者直接用各家自己的环境变量名：
+  `BRAVE_API_KEY` / `TAVILY_API_KEY` / `SERPER_API_KEY` / `EXA_API_KEY`）加 `Wovra_SEARCH_KEY`，
+  `web_search` 就直接调那家接口——供应商的排序即结论，不再叠一层词面相关性过滤。没配密钥、
+  或 API 失败时退回**单一**本地抓取通道（DDG lite），并在结果里**标注"本地兜底、没有相关性
+  保证"**：因为一句光秃秃的"未找到相关结果"会被模型读成"网上没有这个东西"——GAIA 实测里
+  正是这个错误结论让 agent 放弃了整题。
+* **附件原生解析**：`read_file` 自动识别 `.csv`/`.tsv`（带 GBK 回退，并把实际编码写在表头）、
+  `.docx`/`.xlsx`/`.pptx`（ZIP + XML）与 PDF 文本层——全部 stdlib，依旧零新依赖。此前 agent
+  得自己装解析库：GAIA 实测里一道音频题的工作区留下 392MB 的 venv 加 1.9GB 的 HuggingFace
+  缓存。解析不出来时直接说明并给下一步建议——**绝不返回乱码**。
 * **图片上限**：模型能"看见"的图每边 ≤ **3000px**（`WOVRA_IMAGE_MAX_SIDE`，省 token），
   服务端硬上限 **8192px**（`WOVRA_IMAGE_HARD_MAX_SIDE`，实测裁定：8192 收、8193 拒）；
   超限的图**不注入**，并在下一次回复里明确告诉模型"这张图你没看到"（而不是让它编）。
+  另有每回合看图预算（`WOVRA_IMAGE_VIEWS`，默认 6）提示模型基于已看过的图收口，到硬上限
+  （`WOVRA_IMAGE_VIEWS_MAX`，默认 12）后续 `view_image` **直接拒绝执行**——GAIA 里两道视觉题
+  就是反复裁同一张图把 900s 烧完的。
 * **越界与确认**：命令默认限定在工作区内；跨工作区访问需**授权一次**并记入
   `.wovra/authorized-paths.json`；`rm -r`、`git push/reset/…` 等破坏性操作走**确认门**
   （y/N，可"以后同类"）；设备只读白名单（`/dev/tty*`、`/sys/bus/usb/devices` 等）允许

@@ -66,17 +66,16 @@ def test_fake_ip_ipv6_artifact_not_blocked(monkeypatch):
 
 
 def test_search_engines_parse_canned_html(monkeypatch):
-    """两个搜索引擎的解析器：对罐头 HTML 提取标题/链接/摘要。"""
-    import sys as _sys
-
+    """本地兜底通道的解析器：对罐头 HTML 提取标题/链接/摘要（含 lite 端点形态）。"""
     from wovra import tools as tools_module
 
     ddg = ('<div><a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com">'
            'Docs <b>Home</b></a><a class="result__snippet">All about docs</a></div>')
     monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeUrllib._Resp(ddg))
-    rows, filtered = tools_module.web._search_ddg("docs home", 5)
+    rows, dropped, note = tools_module.web._search_ddg("docs home", 5)
     assert rows[0][1] == "https://docs.example.com" and "Docs Home" in rows[0][0]
+    assert dropped == 0 and note == ""
 
     # lite 端点形态（单引号 + rel=nofollow + 协议相对跳转壳）也必须解出目标 URL
     lite = ('<td><a rel="nofollow" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fdocs.example.com'
@@ -84,22 +83,17 @@ def test_search_engines_parse_canned_html(monkeypatch):
             '<td class=\'result-snippet\'>Lite snippet</td>')
     monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
                         lambda req, timeout=None: _FakeUrllib._Resp(lite))
-    rows, _ = tools_module.web._search_ddg("docs guide", 5)
+    rows, _, _ = tools_module.web._search_ddg("docs guide", 5)
     assert rows[0][1] == "https://docs.example.com/guide" and "Lite snippet" in rows[0][2]
 
-    bing = ('<li class="b_algo"><h2><a href="https://bing.example.com/x">Bing Result</a></h2>'
-            '<p>Bing snippet</p></li>')
-    monkeypatch.setattr(tools_module.web.urllib.request, "urlopen",
-                        lambda req, timeout=None: _FakeUrllib._Resp(bing))
-    rows, _ = tools_module.web._search_bing("bing result", 5)
-    assert rows[0][0] == "Bing Result" and rows[0][2] == "Bing snippet"
 
+def test_search_relevance_is_advisory_not_a_gate(monkeypatch):
+    """相关性降级为**标注**（2026-09-16 改口径）。
 
-def test_search_relevance_filter_drops_unrelated(monkeypatch):
-    """§2 的 P1 缺陷：与查询词零重叠的结果**不呈现**，宁缺毋滥。
-
-    实测现象（2026-09-15 复现）：中文长查询经 Bing 返回日本汉字字典页，
-    旧实现把它当合法结果交给模型。现在两条真实相关的过、两条无关的被滤。
+    旧口径（TOOLING_REVIEW.md §2"宁缺毋滥"）把词面相关性当硬闸，GAIA 实测
+    （output/gaia/FINDINGS.md §1）证明它会造成**错误结论**：Bing 的 10 条候选
+    全被滤掉后返回"未找到相关结果"，模型据此判定"网上没有资料"并放弃。
+    现在不够相关的行照给，但必须带一条"没有相关性保证"的显式警告。
     """
     from wovra import tools as tools_module
 
@@ -111,35 +105,48 @@ def test_search_relevance_filter_drops_unrelated(monkeypatch):
                  "智は、ちえ / さといなどの意味を持つ漢字です。")
     assert tools_module.web._relevant(query, *relevant) is True
     assert tools_module.web._relevant(query, *unrelated) is False
-    # 全被滤掉 → 明说"未找到相关结果"，不拿噪声充数
-    out = tools_module.web._screen(query, [unrelated], 5)
-    assert isinstance(out, str) and "未找到相关结果" in out
-    kept, filtered = tools_module.web._screen(query, [unrelated, relevant], 5)
-    assert len(kept) == 1 and filtered == 1
+
+    # 全不相关：**不返回**"未找到相关结果"，而是给出结果 + 警告
+    kept, dropped, note = tools_module.web._screen_local(query, [unrelated], 5)
+    assert len(kept) == 1 and dropped == 0
+    assert "没做相关性保证" in note and "网上没有资料" in note
+    # 部分相关：不贴警告（有相关行垫底）
+    kept, dropped, note = tools_module.web._screen_local(query, [unrelated, relevant], 5)
+    assert len(kept) == 2 and dropped == 0 and note == ""
 
 
-def test_search_ads_are_filtered_out(monkeypatch):
-    """广告行按 host 滤掉（2026-09-15 实测混入的那条）。
+def test_search_ads_and_engine_shell_pages_are_dropped(monkeypatch):
+    """广告行与引擎自家壳页按 host 滤掉。
 
     DDG 的广告是 `duckduckgo.com/y.js?ad_domain=…`，标题/摘要**与查询高度重合**
     （买来的位置当然贴合关键词）——只靠词面重叠判不出来，故按 host 单独判。
-    它比无关结果更坏：看起来最相关。
+    2026-09-16 补第二类：DDG 把广告位伪装成自家 help 页
+    （`/duckduckgo-help-pages/company/ads-by-microsoft-…`），正文是广告词且含查询词。
+    实测那次连查 `Wikipedia Tower Bridge` 都只回这两条壳页——路径名单认不全，
+    故改为"引擎自家域一律不当检索答案"。它比无关结果更坏：看起来最相关。
     """
     from wovra import tools as tools_module
 
     assert tools_module.web._is_ad("https://duckduckgo.com/y.js?ad_domain=udemy.com")
     assert tools_module.web._is_ad("https://www.bing.com/aclick?ld=xyz")
+    assert tools_module.web._is_ad(
+        "https://duckduckgo.com/duckduckgo-help-pages/company/"
+        "ads-by-microsoft-on-duckduckgo-private-search/")
+    assert tools_module.web._is_ad("https://www.bing.com/search?q=x")
     assert not tools_module.web._is_ad("https://docs.python.org/3/library/zlib.html")
 
     query = "how to parse PNG header in pure python"
-    ad = ("Udemy™ Official Site - Learn Python Online",
-          "Learn advanced python features, like the collections module",
-          "https://duckduckgo.com/y.js?ad_domain=udemy.com")
+    ad = ("more info",
+          "https://duckduckgo.com/duckduckgo-help-pages/company/ads-by-microsoft-x/",
+          "Explore Tower Bridge's Sightseeing Tours.")
     good = ("Pure Python PNG parsing — zlib and struct",
             "https://example.org/png-header",
             "Parse the PNG header with struct.unpack and decompress IDAT with zlib")
     assert tools_module.web._relevant(query, *ad) is False     # 广告直接被判无关
     assert tools_module.web._relevant(query, *good) is True
+    kept, dropped, _ = tools_module.web._screen_local(query, [ad, good], 5)
+    assert [row[1] for row in kept] == ["https://example.org/png-header"]
+    assert dropped == 1
 
 
 def test_redirect_to_internal_is_blocked(monkeypatch):
@@ -199,22 +206,168 @@ def test_bing_redirect_shell_is_unwrapped(monkeypatch):
         "https://www.bing.com/ck/a")
 
 
-def test_web_search_falls_back_to_second_engine(monkeypatch):
-    """DDG 失败自动换 Bing；全失败时回传各引擎原因（禁用缓存，聚焦回退）。"""
+_SEARCH_KEY_VARS_FOR_TEST = (
+    "Wovra_SEARCH_PROVIDER", "Wovra_SEARCH_KEY", "Wovra_BRAVE_KEY", "BRAVE_API_KEY",
+    "BRAVE_SEARCH_API_KEY", "Wovra_TAVILY_KEY", "TAVILY_API_KEY", "Wovra_SERPER_KEY",
+    "SERPER_API_KEY", "Wovra_EXA_KEY", "EXA_API_KEY",
+)
+
+
+def _clean_search_env(monkeypatch):
+    """隔离真实 .env（本机可能真配了检索密钥）：不读它、清掉相关变量。"""
     from wovra import tools as tools_module
 
-    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
-    # 缓存是新关注点，本测试禁用以免命中绕过引擎回退
-    monkeypatch.setattr(tools_module.web, "_cache_get", lambda k, t: None)
-    monkeypatch.setattr(tools_module.web, "_cache_put", lambda k, t, v: None)
-    monkeypatch.setattr(tools_module.web, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
-    monkeypatch.setattr(tools_module.web, "_search_bing",
-                        lambda q, n: ([("命中标题", "https://x.example.com", "")], 0))
-    assert "命中" in tools_module.web_search("q")
+    monkeypatch.setattr(tools_module.web, "_ensure_dotenv", lambda: None)
+    for var in _SEARCH_KEY_VARS_FOR_TEST:
+        monkeypatch.delenv(var, raising=False)
 
-    monkeypatch.setattr(tools_module.web, "_search_bing", lambda q, n: "bing 失败: 限流")
-    result = tools_module.web_search("q")
-    assert "未找到相关结果" in result and "bing 失败" in result
+
+def test_search_provider_selection(monkeypatch):
+    """后端选择：显式指定优先；否则取注册表里第一个配了密钥的；都没有则空（本地）。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    _clean_search_env(monkeypatch)
+    assert web.search_provider() == ""
+    monkeypatch.setenv("TAVILY_API_KEY", "tvly-x")
+    assert web.search_provider() == "tavily"
+    monkeypatch.setenv("BRAVE_API_KEY", "brv-x")
+    assert web.search_provider() == "brave"          # 注册表顺序：brave 在前
+    monkeypatch.setenv("Wovra_SEARCH_PROVIDER", "serper")
+    assert web.search_provider() == "serper"         # 显式指定压过自动探测
+    monkeypatch.setenv("Wovra_SEARCH_KEY", "generic")  # 通用键对每一家都算配了
+    assert web._search_key("exa") == "generic"
+
+
+def test_api_rows_adapts_each_vendor_schema():
+    """四家的字段名各不相同，_api_rows 各归各位；缺字段/未知供应商不抛。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    assert web._api_rows("brave", {"web": {"results": [
+        {"title": "T", "url": "https://a.example", "description": "D"}]}}) == [
+        ("T", "https://a.example", "D")]
+    assert web._api_rows("tavily", {"results": [
+        {"title": "T", "url": "https://b.example", "content": "C"}]})[0][1] == "https://b.example"
+    assert web._api_rows("serper", {"organic": [
+        {"title": "T", "link": "https://c.example", "snippet": "S"}]})[0][2] == "S"
+    assert web._api_rows("exa", {"results": [
+        {"title": "T", "url": "https://d.example", "highlights": ["H1", "H2"]}]})[0][2] == "H1 H2"
+    assert web._api_rows("brave", {}) == []
+    assert web._api_rows("nope", {"results": [{"title": "T", "url": "u"}]}) == []
+
+
+def test_api_search_failures_are_readable(monkeypatch):
+    """API 层的失败都要变成可读文本（模型据此决定兜底还是换路），不许抛异常。"""
+    import urllib.error
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    _clean_search_env(monkeypatch)
+    assert "Wovra_SEARCH_KEY" in web._api_search("brave", "q", 3)
+    assert "只支持" in web._api_search("bing-scrape", "q", 3)
+
+    def boom(*args, **kwargs):
+        raise urllib.error.HTTPError("https://api.x/", 429, "Too Many", {}, None)
+
+    monkeypatch.setenv("Wovra_SEARCH_KEY", "k")
+    monkeypatch.setattr(web, "_http_json", boom)
+    out = web._api_search("brave", "q", 3)
+    assert "429" in out and "限流" in out
+
+    def dns_boom(*args, **kwargs):
+        raise OSError("dns boom")
+
+    monkeypatch.setattr(web, "_http_json", dns_boom)
+    assert "API 失败" in web._api_search("brave", "q", 3)
+
+
+def test_api_search_keeps_key_out_of_url_and_result(monkeypatch):
+    """密钥只进请求头：不进 URL、不进给模型的文本、不进审计行。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    _clean_search_env(monkeypatch)
+    monkeypatch.setenv("Wovra_SEARCH_KEY", "SECRET-KEY-123")
+    seen: dict = {}
+
+    def fake_json(url, payload=None, headers=None):
+        seen.update(url=url, payload=payload, headers=headers or {})
+        return {"web": {"results": [{"title": "T", "url": "https://a.example",
+                                     "description": "D"}]}}
+
+    monkeypatch.setattr(web, "_http_json", fake_json)
+    rows = web._api_search("brave", "q", 3)
+    assert rows[0][1] == "https://a.example"
+    assert seen["headers"].get("X-Subscription-Token") == "SECRET-KEY-123"
+    assert "SECRET-KEY-123" not in seen["url"]
+    assert "SECRET-KEY-123" not in repr(rows)
+
+
+def test_web_search_prefers_api_then_falls_back_to_local(monkeypatch):
+    """链路：API 成功不碰本地；API 失败退本地并标注"兜底（API 不可用）"；
+    两路都空时报两路各自的失败原因。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
+    monkeypatch.setattr(web, "_cache_put", lambda k, t, v: None)
+    monkeypatch.setattr(web, "search_provider", lambda: "brave")
+    called = {"local": 0}
+
+    def local_rows(query, n):
+        called["local"] += 1
+        return ([("本地标题", "https://local.example", "本地摘要")], 0, "")
+
+    monkeypatch.setattr(web, "_search_ddg", local_rows)
+    monkeypatch.setattr(web, "_api_search", lambda p, q, n: [
+        ("API 标题", "https://api.example", "API 摘要")])
+    out = tools_module.web_search("q")
+    assert "API 标题" in out and "引擎: brave" in out and called["local"] == 0
+
+    monkeypatch.setattr(
+        web, "_api_search",
+        lambda p, q, n: "brave API 失败（HTTP 401：密钥无效或未授权）。")
+    out = tools_module.web_search("q")
+    assert "本地标题" in out and "本地兜底（API 不可用）" in out and "401" in out
+
+    monkeypatch.setattr(web, "_search_ddg", lambda q, n: "duckduckgo 失败: 限流")
+    out = tools_module.web_search("q")
+    assert "检索失败" in out and "401" in out and "限流" in out
+
+
+def test_web_search_without_api_says_how_to_configure(monkeypatch):
+    """没配 API 时，失败信息要给出配置方式（否则用户不知道为何只有本地兜底）。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
+    monkeypatch.setattr(web, "_cache_put", lambda k, t, v: None)
+    monkeypatch.setattr(web, "search_provider", lambda: "")
+    monkeypatch.setattr(web, "_search_ddg", lambda q, n: "duckduckgo 无结果或被限流。")
+    out = tools_module.web_search("q")
+    assert "未配置检索 API" in out and "Wovra_SEARCH_KEY" in out and ".env.example" in out
+
+
+def test_web_search_caches_success_but_not_failure(monkeypatch):
+    """失败不落缓存：一次 429 不该被记一小时，让后续重试永远拿到旧结论。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    puts: list = []
+    monkeypatch.setattr(web, "_cache_get", lambda k, t: None)
+    monkeypatch.setattr(web, "_cache_put", lambda k, t, v: puts.append(k))
+    monkeypatch.setattr(web, "search_provider", lambda: "")
+    monkeypatch.setattr(web, "_search_ddg", lambda q, n: "duckduckgo 失败: 限流")
+    tools_module.web_search("q")
+    assert puts == []
+    monkeypatch.setattr(web, "_search_ddg",
+                        lambda q, n: ([("T", "https://t.example", "")], 0, ""))
+    tools_module.web_search("q")
+    assert len(puts) == 1
 
 
 def test_web_fetch_cache_hit_skips_network(monkeypatch, tmp_path):
