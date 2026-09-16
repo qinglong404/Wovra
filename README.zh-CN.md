@@ -514,6 +514,7 @@ Wovra 不打算取代现有的编码智能体或工具运行时。
 | 文档 | 内容 |
 |---|---|
 | [docs/context-management-v3.md](docs/context-management-v3.md) | 机制定稿 V3（实验修正版，当前基线） |
+| [docs/context-management-v4-intent.md](docs/context-management-v4-intent.md) | **V4 讨论稿**：取消重组——共享的每轮一段叙事 + 文件归属（待拍板，未实现） |
 | [docs/context-management-explained.md](docs/context-management-explained.md) | 机制通俗详解 |
 | [docs/context-runtime-v2.md](docs/context-runtime-v2.md) | V2 设计定稿（历史，含修订记录） |
 | [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | 观察性对照数据 |

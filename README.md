@@ -550,6 +550,7 @@ Full data and derivation:
 | Doc | Content |
 |---|---|
 | [docs/context-management-v3.md](docs/context-management-v3.md) | Mechanism baseline V3 (experiment-corrected, current) |
+| [docs/context-management-v4-intent.md](docs/context-management-v4-intent.md) | **V4 draft**: drop reassembly — one shared per-round narrative + file ownership (discussion draft, pending sign-off) |
 | [docs/context-management-explained.md](docs/context-management-explained.md) | Mechanisms explained (plain-language) |
 | [docs/context-runtime-v2.md](docs/context-runtime-v2.md) | V2 design spec (historical, with revisions) |
 | [docs/managed-vs-baseline-11rounds.md](docs/managed-vs-baseline-11rounds.md) | Observational comparison data |
