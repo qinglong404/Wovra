@@ -36,6 +36,7 @@ from wovra.cli import _build_agent                 # noqa: E402
 from wovra.llm import LLM                          # noqa: E402
 
 REHEARSAL_ROOT = Path("/tmp/wovra-notes-rehearsal/tasks")
+_PLAIN = False          # --plain：只给动作清单（不喂失败候选与结论草稿），用于对照
 
 # ---------------------------------------------------------------- 新契约（提示词）
 _CONTRACT = (
@@ -46,8 +47,12 @@ _CONTRACT = (
     "    **只写这一轮动作清单里的事**：清单里没有的文件、没调过的工具，一个字都不要提"
     "（跨轮借内容会被机械校验抓出来，整批退回重写）。\n"
     "2. 一句话里**不要用英文双引号**（会截断 JSON），需要引用用「」。\n"
-    "3. **失败与坑**：本轮只要有命令非零退出、越界拦截、路径不存在、方案被推翻，"
-    "必须逐条写进 failures；没有就给空数组。这一档**免裁剪**——原文折叠后就再也找不回来。\n"
+    "3. **失败与坑**：以【失败候选】为底逐条核对——候选里有的必须写（同类可合并），"
+    "候选里没有但你知道的照样要写；没有就给空数组。这一档**免裁剪**——原文折叠后就再也"
+    "找不回来。\n"
+    "6. 每条是**这一轮自己的交班记录**，不是这一批的总述。验收标准：把某一条单独拿给"
+    "一个没看过会话的人，他能说清这轮发生了什么（**轮号是他唯一的坐标**）。\n"
+    "7. 一句话 **80–250 字符**（信息量小的轮可更短，但不得空话）。\n"
     "4. **账本增量**：只写**新增**条目，不要重复账本里已有的。标量（现状/目标）不用你写，"
     "Runtime 从最新一轮取。\n"
     "5. 一轮一条、一个不落、与上面的轮号一一对应。\n\n"
@@ -173,12 +178,80 @@ def _round_actions(r: dict) -> dict:
     return {"tools": tools, "files": files, "nonzero": nonzero}
 
 
+# 失败候选的机械特征（label, 正则）——把"回忆失败"降级成"核对候选"
+_FAIL_SIGNS = (
+    ("越界拦截", re.compile(r"路径越界|只允许访问项目目录|安全层")),
+    ("不存在", re.compile(r"文件不存在|不存在|No such file|is not a file")),
+    ("HTTP 错误", re.compile(r"HTTP\s*[45]\d\d|返回 HTTP|status[ =:]+[45]\d\d")),
+    ("工具报错", re.compile(r"工具执行出错|Traceback|请求失败|连接失败")),
+    ("被中止", re.compile(r"exit_code=-9|已被用户中止|中止本轮")),
+    ("空/占位", re.compile(r"未找到|没有找到|占位|placeholder")),
+)
+
+
+# 只扫"执行/抓取/检索"类工具的返回：纯读类工具（read_file/page_text…）的返回是**文件正文**，
+# 正文里出现"不存在""工具执行出错"这类字样全是假阳性（v4 实测：R2 的候选里大半是这么来的）。
+_READ_LIKE = {
+    "read_file", "page_text", "list_files", "glob_files", "search_files",
+}
+
+
+def _failure_hints(r: dict, limit: int = 6) -> list[tuple[str, str]]:
+    """本轮工具结果里带错误特征的片段（机械扫；模型据此**核对**而不是回忆）。
+
+    返回 (事件 ID, 候选文本)——带来源指针，产物里的失败项可一键 `expand_history` 回原文。
+    """
+    out: list[tuple[str, str]] = []
+    calls: dict[str, str] = {}
+    for e in r.get("events") or []:
+        m = e.get("message") or {}
+        for c in m.get("tool_calls") or []:
+            calls[str(c.get("id") or "")] = str((c.get("function") or {}).get("name") or "")
+        if m.get("role") != "tool":
+            continue
+        name = calls.get(str(m.get("tool_call_id") or ""), "")
+        if name in _READ_LIKE:
+            continue
+        text = str(m.get("content") or "")
+        # 执行类工具只在**真失败**时才扫：exit_code=0 的输出里 cat 出来的文档正文会把
+        # "不存在""工具执行出错"这类字样全带进来（v4 实测：R2 的候选大半是这么来的）。
+        if name.startswith(("run_command", "run_background")):
+            code = re.search(r"exit_code=(-?\d+)", text)
+            if not code or code.group(1) == "0":
+                continue
+        text = text.replace("\n", " ")
+        for label, pat in _FAIL_SIGNS:
+            hit = pat.search(text)
+            if not hit:
+                continue
+            start = max(0, hit.start() - 20)
+            snippet = text[start:hit.end() + 50].strip()
+            item = (str(e.get("id") or ""), f"{label}：{snippet}")
+            if item[1][:40] not in {x[1][:40] for x in out}:
+                out.append(item)
+            break
+    return out[:limit]
+
+
+def _conclusion_draft(r: dict, limit: int = 320) -> str:
+    """本轮最终回答的首段（结论草稿）——模型把它改写成一句话，不必再从历史里找结论。"""
+    for e in reversed(r.get("events") or []):
+        if e.get("type") == "final_answer":
+            text = str((e.get("message") or {}).get("content") or "").replace("\n", " ").strip()
+            return text[:limit] + ("…" if len(text) > limit else "")
+    return ""
+
+
 def _actions_lines(batch: list[dict]) -> list[str]:
-    """每轮一个**独立块**：轮号独占一行当锚点，块内再分工具/文件/非零退出。
+    """每轮一个**独立块**：轮号独占一行当锚点，块内分工具/文件/非零退出/失败候选/结论草稿。
 
     为什么分块而不是一行（2026-09-17）：锚的全部作用就是"边界清楚"，让轮号独占一行、
     块间空行分隔，比把三段信息塞进一条长行更醒目；代价每轮两三个 token。
     人性化那部分只在这里做——**产物里模型写的句子保持纯句子**，布局归代码。
+
+    为什么给"失败候选"与"结论草稿"（同日）：这两样原本要模型自己从上百 K 的工具结果里
+    找回来（R2 的失败信息埋在 101,796 字符里），是纯回忆；机械扫出来喂给它，任务就从
+    "读历史做总结"退化成"核对 + 改写"——**拿便宜的新增输入换昂贵的推理 token**。
     """
     lines = ["\n[本轮动作清单]（Runtime 从每轮事件里机械抽出；**只许据此写，不许跨轮借内容**）"]
     for r in batch:
@@ -187,43 +260,82 @@ def _actions_lines(batch: list[dict]) -> list[str]:
         lines.append(f"R{r['seq']}")
         if not a["tools"]:
             lines.append(
-                "  无工具动作（纯对话轮）——一句话只写谈了什么、结论是什么，"
-                "不得出现文件路径或工具动作"
+                "  无工具动作（纯对话轮）——只写谈了什么、结论是什么；"
+                "草稿里出现的文件路径与工具名不要照抄"
             )
-            continue
-        lines.append("  工具：" + "、".join(
-            f"{k}×{v}" for k, v in sorted(a["tools"].items())
-        ))
-        if a["files"]:
-            lines.append("  文件：" + "；".join(
-                f"{v} {k}" for k, v in list(a["files"].items())[:12]
+        else:
+            lines.append("  工具：" + "、".join(
+                f"{k}×{v}" for k, v in sorted(a["tools"].items())
             ))
-        if a["nonzero"]:
-            lines.append("  非零退出：" + "；".join(a["nonzero"][:3]))
+            if a["files"]:
+                lines.append("  文件：" + "；".join(
+                    f"{v} {k}" for k, v in list(a["files"].items())[:12]
+                ))
+            if a["nonzero"]:
+                lines.append("  非零退出：" + "；".join(a["nonzero"][:3]))
+            hints = [] if _PLAIN else _failure_hints(r)
+            if hints:
+                lines.append("  失败候选（逐条核对，同类可合并；〔〕里是事件 ID，可回原文）：")
+                lines += [f"    - 〔{eid}〕{text}" for eid, text in hints]
+        draft = "" if _PLAIN else _conclusion_draft(r)
+        if draft:
+            lines.append(f"  结论草稿（改写成一句话，别照抄）：{draft}")
     return lines
 
 
-def _check_alignment(notes: dict, batch: list[dict]) -> list[str]:
-    """机械校验：产物里提到的路径/工具必须在本轮自己出现过（跨轮借内容当场抓）。"""
+def _check_alignment(notes: dict, batch: list[dict]) -> dict[str, list[str]]:
+    """机械校验：产物里提到的路径/工具必须在本轮自己出现过（跨轮借内容当场抓）。
+
+    两档（2026-09-17）：
+    * **硬门**：路径（做了后缀匹配——`FINDINGS.md` 是 `output/gaia/FINDINGS.md` 的合法简称，
+      不算跨轮；这一档无歧义、无假阳性，违者带诊断重发）；工具名只在**零工具动作轮**上
+      算硬门——那种轮根本不可能是"提到某个通道"，只能是错位（R3 的 `web_search` 指的是
+      检索通道，属软档）。
+    * **软提示**：其余情况只留痕，人工或后续版本再判。
+    """
     all_tools = {t for r in batch for t in _round_actions(r)["tools"]}
-    defects: list[str] = []
+    hard: list[str] = []
+    soft: list[str] = []
     for r in batch:
         n = notes.get(int(r["seq"]))
         if not n:
             continue
         text = str(n.get("sentence") or "") + " " + " ".join(n.get("failures") or [])
         own = _round_actions(r)
+        zero_action = not own["tools"]
         allowed_paths = {
             m.group(0)
             for m in _PATH_RE.finditer(json.dumps(r.get("events") or [], ensure_ascii=False))
         }
         for p in {m.group(0) for m in _PATH_RE.finditer(text)}:
-            if p not in allowed_paths:
-                defects.append(f"R{r['seq']}: 提到本轮从没出现过的路径 `{p}`")
+            frags = p.split("/")
+            def _allowed(tok: str) -> bool:
+                return any(a == tok or a.endswith("/" + tok) for a in allowed_paths)
+            if _allowed(p) or all(_allowed(f) for f in frags if f):
+                continue
+            hard.append(f"R{r['seq']}: 提到本轮从没出现过的路径 `{p}`")
         for t in all_tools:
             if t in text and t not in own["tools"]:
-                defects.append(f"R{r['seq']}: 提到本轮没调用的工具 `{t}`")
-    return defects
+                line = f"R{r['seq']}: 提到本轮没调用的工具 `{t}`"
+                (hard if zero_action else soft).append(line)
+    return {"hard": hard, "soft": soft}
+
+
+def _hint_coverage(notes: dict, batch: list[dict]) -> tuple[int, int]:
+    """失败候选的覆盖率：候选里有多少条能在产物里找到落点（按强特征 token 匹配）。"""
+    strong = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]{1,6}\b|\b[45]\d\d\b|越界|不存在|超时|中止|占位")
+    matched = total = 0
+    for r in batch:
+        n = notes.get(int(r["seq"])) or {}
+        text = " ".join([str(n.get("sentence") or "")] + list(n.get("failures") or []))
+        for _eid, h in _failure_hints(r):
+            tokens = set(strong.findall(h))
+            if not tokens:
+                continue
+            total += 1
+            if any(t in text for t in tokens):
+                matched += 1
+    return matched, total
 
 
 def _instruction(rounds: list[dict]) -> str:
@@ -241,7 +353,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="新整理契约练兵（写：每轮一句话 + 账本增量）")
     ap.add_argument("session_id")
     ap.add_argument("--dry", action="store_true", help="只打输入与指令，不调 LLM")
+    ap.add_argument("--plain", action="store_true",
+                    help="对照档：只给动作清单，不喂失败候选/结论草稿")
     args = ap.parse_args()
+    global _PLAIN
+    _PLAIN = bool(args.plain)
 
     dst = _stage_copy(args.session_id)
     task_module.TASKS_ROOT = dst.parent
@@ -329,13 +445,17 @@ def main() -> int:
         for f in n.get("failures") or []:
             print(f"      ⚠ {f}")
 
-    defects = _check_alignment(notes, batch)
+    check = _check_alignment(notes, batch)
     print("\n── 机械校验（跨轮借内容）──")
-    if defects:
-        for d in defects:
-            print(f"  ✗ {d}")
-    else:
+    for d in check["hard"]:
+        print(f"  ✗ 硬门 {d}")
+    for d in check["soft"]:
+        print(f"  · 软提示 {d}")
+    if not check["hard"] and not check["soft"]:
         print("  ✓ 干净：产物提到的路径与工具，都在本轮自己出现过")
+    hit, tot = _hint_coverage(notes, batch)
+    print(f"  失败候选覆盖率：{hit}/{tot}"
+          + ("（候选都写进了 failures）" if tot and hit == tot else ""))
 
     ledger = product.get("ledger_append") or {}
     print("\n── 产物：账本增量 ──")
