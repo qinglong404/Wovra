@@ -99,21 +99,24 @@ def test_system_prompt_forbids_ack_on_runtime_injection():
 
 
 def test_system_prompt_identity_is_self_not_an_external_platform():
-    """身份（2026-09-16 提示词审阅 §1，P0）：你就是 Wovra，不是"跑在它上面的助手"。
+    """身份（2026-09-16 提示词审阅 §1，P0）：**你是 Wovra**，不是"跑在它上面的助手"。
 
     实测代价：旧首句"你是 Wovra 的执行助手" + 两处第三人称（"Wovra 运行时注入"、
     "由 Runtime 管理"）合起来被读成"Wovra 是外面的平台"，于是"测 Wovra"变成了
-    "搭 harness 去测那个平台"——本仓库那次最大的方向性错误。
+    "搭 harness 去测那个平台"。
+
+    写法口径（用户 2026-09-16）：正常叙述准则即可——不要写成"不是 X，而是 Y"或
+    "不存在另一个…"这种**对着某个旧错误解释**的句子，那本身就是生成痕迹。
     """
     from wovra.agent import MODE_BASELINE, MODE_MANAGED
     from wovra.cli import _system_prompt
 
     for mode in (MODE_MANAGED, MODE_BASELINE):
         prompt = _system_prompt(mode)
-        assert "你就是 Wovra" in prompt
-        assert "不存在另一个需要你去查看或测试的「Wovra 系统」" in prompt
-        for third_person in ("执行助手", "Wovra 运行时", "由 Runtime", "多模态模型"):
-            assert third_person not in prompt
+        assert "你是 Wovra" in prompt
+        for tell in ("执行助手", "Wovra 运行时", "由 Runtime", "多模态模型",
+                     "不存在另一个", "这是设计，不是缺失"):
+            assert tell not in prompt, tell
 
 
 def test_system_prompt_has_stop_signal_and_scope_ceiling():
@@ -137,20 +140,24 @@ def test_system_prompt_has_stop_signal_and_scope_ceiling():
         assert "哪怕一百条" in prompt and "做完再汇报" in prompt
 
 
-def test_system_prompt_wording_hygiene():
-    """措辞规范：不写"用户说…"式转述、不留"本项目"这种指代不明的说法。
+def test_system_prompt_wording_is_plain_normative_prose():
+    """措辞规范（用户口径 2026-09-16）：正常叙述准则，不留"生成痕迹"。
 
-    用户口径（2026-09-16）：提示词里不要出现"用户说……"这类啰嗦、身份错位的描述。
-    "本项目"在工作区不是 Wovra 仓库时会把包读成"工作区之外另一个 wovra 项目"，
-    与身份问题叠加（审阅 §5）——改成"本工作区"。
+    两类要清掉：
+    * "用户说…"/"用户之前说过…" 这类转述——读起来像有人对着旧对话记录补规则；
+    * "不是 X，而是 Y""不存在另一个…""这是设计，不是缺失" 这类**对着旧错误解释**的
+      句子——它们是为纠正某个历史误读而写，不是准则本身。
+    另外"本项目"在工作区不是 Wovra 仓库时会把包读成"工作区之外另一个 wovra 项目"，
+    与身份问题叠加（审阅 §5）——统一作"本工作区"。
     """
     from wovra.agent import MODE_BASELINE, MODE_MANAGED
     from wovra.cli import _system_prompt
 
     for mode in (MODE_MANAGED, MODE_BASELINE):
         prompt = _system_prompt(mode)
-        assert "用户说" not in prompt
-        assert "本项目" not in prompt
+        for tell in ("用户说", "用户之前", "本项目", "不存在另一个",
+                     "这是设计，不是缺失", "原来的错误"):
+            assert tell not in prompt, tell
         assert "本工作区" in prompt
         # 运行环境单独成节，不再混在正文里
         assert "## 运行环境" in prompt
