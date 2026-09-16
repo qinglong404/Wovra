@@ -95,3 +95,54 @@ usage: prompt=131,523 cached=0 miss=131,523 completion=27,690
   待决：
     - 是否把「用户要的是观点还是产物」这条判据补进提示词——本会话由观察得出，报告现有版本未覆盖
 
+
+
+---
+
+# v2：补上"动作清单"（锚）后重跑
+
+**为什么重跑**：v1 的产物张冠李戴——5 个纯对话轮（事件里零工具调用）中有 3 条的产物在描述
+工具工作（"启动 4 题重测跑"、"停掉 bg-1（exit_code=-9，进程树强杀，list_background 确认）"、
+"逐行审查 `prompt.py` 并交付 349 行报告"），而那些工作在别的轮。根因：为把产物压到 1.8K，
+删掉分块地图时把它的**位置锚**一起删了。修法：锚由**代码**给。
+
+## 锚长这样（指令里新增的一节，逐字）
+
+```
+[本轮动作清单]（Runtime 从每轮事件里机械抽出；**只许据此写，不许跨轮借内容**）
+R1：工具 glob_files×1、list_agents×1、list_files×1、page_text×1、read_file×2、run_command×1、search_files×1、web_fetch×3、web_search×2｜文件 读:README.md、读:AGENTS.md
+R2：工具 check_background×12、edit_file×12、list_files×1、run_background×4、run_command×98、stop_background×1、web_search×1、write_file×10｜文件 写:gaia_bench/__init__.py、写:gaia_bench/data.py、写改:gaia_bench/evaluate.py、写:gaia_bench/worker.py、写改:gaia_bench/runner.py、写改:gaia_bench/report.py、写:gaia_bench/README.md、写改:gaia_bench/offline.py、写改:gaia_bench/rescore.py、写:output/gaia/FINDINGS.md｜非零退出 {"task_id": "bg-2"}(exit=-9)
+R3：工具 check_background×2、edit_file×2、list_background×1、run_background×1、run_command×4、stop_background×1｜文件 改:gaia_bench/runner.py｜非零退出 {"task_id": "bg-1"}(exit=-9)；{}(exit=-9)
+R4：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，不得出现文件路径或工具动作。
+R5：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，不得出现文件路径或工具动作。
+R6：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，不得出现文件路径或工具动作。
+R7：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，不得出现文件路径或工具动作。
+R8：工具 list_agents×1、run_command×15、search_files×1、write_file×2｜文件 写:docs/prompt-review-2026-09-16.md
+R9：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，不得出现文件路径或工具动作。
+```
+
+## 重跑读数
+
+| 项 | v1（无锚） | v2（带锚） |
+|---|---|---|
+| usage | `prompt 131,523 / cached 0 / miss 131,523`（冷） | `prompt 132,102 / cached 131,072 / miss 1,030` |
+| completion | 27,690 | 13,638（含推理 11,555） |
+| 机械校验全部告警 | 13 条 | 3 条（均为粗规则误报） |
+| **零动作轮上的违例（硬门）** | **6 条（R4/R5/R9）** | **0 条** |
+
+三条剩余告警的成因（都不算错位）：`README.md/AGENTS.md` 被正则当成一条路径、`runner.py`
+是 `gaia_bench/runner.py` 的简称、`web_search` 指"检索通道"而非一次工具调用。
+
+## v2 产物（R4/R5/R9 —— v1 里张冠李戴的三轮）
+
+```
+[R4] 👤 你先介绍一下你自己，我看看。
+      ▸ 介绍自己在会话里的角色与能力边界，说明会先区分用户是在问、在表达想法还是让动手，并承认此前擅自超出授权范围那次失误。
+[R5] 👤 对啊，你就是Wovra，我让你测试wovra，你不在自己这里测试，你跑别的地方测试干嘛？
+      ▸ 认同自己就是 Wovra 本身的活实例，此前把 Wovra 当外部系统去搭副本测试属于舍近求远；验证它的正确做法是直接当面解题、由用户亲眼看到卡在哪，而批量评测所需的隔离是另一件事。
+[R9] 👤 那你从站在你的角度，或者说你这几轮的观察下，感觉wovra这个agent用着有哪些不顺手？
+      ▸ 给出用起来不顺手的八条体感：最伤的是不知道自己就是 Wovra（身份歧义叠加源码在工作区外、提示词又拿 wovra 举例）；其余为范围规则缺「不得擅自扩大范围」与「停止是终局指令」、运行时信封描述与实际不符且静默规则未禁点评通知本身、13 个已装配工具未被提名、「本项目」指代不明且缺就地做还是搭基建的判据、长段落里后半句强指令压过前半句、可见范围与被测对象错位、缺要观点还是要产物的判据。
+```
+
+（R4/R5/R9 的事件里只有 `user + final_answer`，所以产物只可能谈"谈了什么、结论是什么"——
+硬门就是拿这条当判据。）

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import sys
 from pathlib import Path
@@ -42,6 +43,8 @@ _CONTRACT = (
     "1. **每轮一句话**：这轮做了什么、结论是什么。关键数字（行数/条数/次数）、文件路径、"
     "命令名原样保留。**不要复述用户要什么**——用户原话由 Runtime 逐字保留，你只写对这轮"
     "要求的响应。\n"
+    "    **只写这一轮动作清单里的事**：清单里没有的文件、没调过的工具，一个字都不要提"
+    "（跨轮借内容会被机械校验抓出来，整批退回重写）。\n"
     "2. 一句话里**不要用英文双引号**（会截断 JSON），需要引用用「」。\n"
     "3. **失败与坑**：本轮只要有命令非零退出、越界拦截、路径不存在、方案被推翻，"
     "必须逐条写进 failures；没有就给空数组。这一档**免裁剪**——原文折叠后就再也找不回来。\n"
@@ -129,12 +132,100 @@ def _round_files(r: dict) -> list[str]:
     return out
 
 
+# 像文件路径的 token（含命令输出里出现的）——机械校验用
+_PATH_RE = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]{1,6}\b")
+
+
+def _round_actions(r: dict) -> dict:
+    """本轮的动作清单（代码从事件里机械抽出）——**锚**。
+
+    2026-09-17 实测教训：把分块地图删掉之后，"每轮一句话"开始张冠李戴——5 个纯对话轮
+    （零工具调用）里有 3 条产物在描述工具工作（R4 写"启动 4 题重测"、R5 写"停掉 bg-1
+    exit_code=-9"、R9 写"逐行审查 prompt.py 并交付 349 行报告"，那些工作在别的轮）。
+    旧契约里"块 ID 与内容必须严格一一对应"那句不是啰嗦，它是**位置锚**。锚由代码给，
+    不要指望模型自觉。
+    """
+    tools: dict[str, int] = {}
+    files: dict[str, str] = {}
+    nonzero: list[str] = []
+    pending: dict[str, str] = {}
+    for e in r.get("events") or []:
+        m = e.get("message") or {}
+        for c in m.get("tool_calls") or []:
+            fn = c.get("function") or {}
+            name = str(fn.get("name") or "")
+            if name:
+                tools[name] = tools.get(name, 0) + 1
+            pending[str(c.get("id") or "")] = str(fn.get("arguments") or "")
+        if m.get("role") == "tool":
+            args = pending.get(str(m.get("tool_call_id") or ""), "")
+            code = re.search(r"exit_code=(-?\d+)", str(m.get("content") or ""))
+            if code and code.group(1) != "0":
+                cmd = re.search(r'"command"\s*:\s*"([^"]{0,50})', args)
+                nonzero.append(f"{cmd.group(1) if cmd else args[:30]}(exit={code.group(1)})")
+    for b in blocks_module.segment_round_by_file(r):
+        if b.get("kind") == "file" and b.get("file"):
+            ops = {str(o.get("op")) for o in (b.get("ops") or [])}
+            mark = "".join(sorted({
+                "write": "写", "edit": "改", "read": "读", "delete": "删",
+            }.get(o, "") for o in ops)) or "动"
+            files[str(b["file"])] = mark
+    return {"tools": tools, "files": files, "nonzero": nonzero}
+
+
+def _actions_lines(batch: list[dict]) -> list[str]:
+    lines = ["\n[本轮动作清单]（Runtime 从每轮事件里机械抽出；**只许据此写，不许跨轮借内容**）"]
+    for r in batch:
+        a = _round_actions(r)
+        if not a["tools"]:
+            lines.append(
+                f"R{r['seq']}：**无工具动作**（纯对话轮）——一句话只写谈了什么、结论是什么，"
+                "不得出现文件路径或工具动作。"
+            )
+            continue
+        line = (f"R{r['seq']}：工具 "
+                + "、".join(f"{k}×{v}" for k, v in sorted(a["tools"].items())))
+        if a["files"]:
+            line += "｜文件 " + "、".join(
+                f"{v}:{k}" for k, v in list(a["files"].items())[:12]
+            )
+        if a["nonzero"]:
+            line += "｜非零退出 " + "；".join(a["nonzero"][:3])
+        lines.append(line)
+    return lines
+
+
+def _check_alignment(notes: dict, batch: list[dict]) -> list[str]:
+    """机械校验：产物里提到的路径/工具必须在本轮自己出现过（跨轮借内容当场抓）。"""
+    all_tools = {t for r in batch for t in _round_actions(r)["tools"]}
+    defects: list[str] = []
+    for r in batch:
+        n = notes.get(int(r["seq"]))
+        if not n:
+            continue
+        text = str(n.get("sentence") or "") + " " + " ".join(n.get("failures") or [])
+        own = _round_actions(r)
+        allowed_paths = {
+            m.group(0)
+            for m in _PATH_RE.finditer(json.dumps(r.get("events") or [], ensure_ascii=False))
+        }
+        for p in {m.group(0) for m in _PATH_RE.finditer(text)}:
+            if p not in allowed_paths:
+                defects.append(f"R{r['seq']}: 提到本轮从没出现过的路径 `{p}`")
+        for t in all_tools:
+            if t in text and t not in own["tools"]:
+                defects.append(f"R{r['seq']}: 提到本轮没调用的工具 `{t}`")
+    return defects
+
+
 def _instruction(rounds: list[dict]) -> str:
     seqs = "、R".join(str(r["seq"]) for r in rounds)
     return (
         "[整理指令]\n"
         "以上是本会话的完整上下文。请把下列轮次各压缩成**一句话**，并给出账本增量："
-        f"R{seqs}。\n" + _CONTRACT
+        f"R{seqs}。\n"
+        + "\n".join(_actions_lines(rounds)) + "\n"
+        + _CONTRACT
     )
 
 
@@ -229,6 +320,14 @@ def main() -> int:
         print(f"      ▸ {n.get('sentence')}")
         for f in n.get("failures") or []:
             print(f"      ⚠ {f}")
+
+    defects = _check_alignment(notes, batch)
+    print("\n── 机械校验（跨轮借内容）──")
+    if defects:
+        for d in defects:
+            print(f"  ✗ {d}")
+    else:
+        print("  ✓ 干净：产物提到的路径与工具，都在本轮自己出现过")
 
     ledger = product.get("ledger_append") or {}
     print("\n── 产物：账本增量 ──")
