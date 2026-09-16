@@ -25,7 +25,7 @@ import urllib.request
 from html import unescape
 from pathlib import Path
 
-from . import limits, safety
+from . import abort, limits, safety
 
 
 # ---- 结果缓存（磁盘，output/cache/）-----------------------------------------
@@ -423,7 +423,8 @@ def _llms_txt_url(url: str) -> str | None:
 
 
 def web_fetch(url: str, max_chars: int = 0) -> str:
-    """抓取一个 http(s) 网页，去除 HTML 标签后返回正文文本。
+    """抓取一个 http(s) 网页，去除 HTML 标签后返回正文文本。JS 渲染站（自己
+    抽不到正文时）会自动换用外部抓取服务，结果里会标明正文来自谁。
 
     适合查 API 文档、技术资料。仅 http/https，拒绝内网地址（防 SSRF），
     30 秒超时。正文默认全量返回（2026-09-11 放开，worklog §25：原先
@@ -472,14 +473,18 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
     except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
         return f"抓取失败: {error!r}"
     text = _html_to_text(raw, ctype) if ("html" in ctype or not ctype) else _decode_body(raw, ctype)
-    # Firecrawl 兜底（2026-09-16）：自己的抽取拿不到像样正文时（典型是 JS 渲染站、
-    # 或正文全在脚本里），用 Firecrawl 换一份干净的 Markdown。它按次计费，所以只在
-    # "确实没抽到东西"时用——普通页面不惊动它（用户口径：搜索 API 找 URL、Firecrawl
-    # 取内容；这里把它接在**同一次** web_fetch 里，agent 不必自己串两步）。
+    # 渲染兜底（2026-09-16）：自己的抽取拿不到像样正文时（典型是 JS 渲染站、或正文全在
+    # 脚本里），按顺序问两个外部服务要 Markdown——**TinyFish Fetch 优先**（免费、150
+    # URL/分、能渲染 JS），没配或失败才落到 Firecrawl（按次计费）。这个顺序的意义就是把
+    # 付费那条降成最后手段。用户口径：搜索 API 找 URL、抓取服务取内容——接在**同一次**
+    # web_fetch 里，agent 不必自己串两步。
     if len(text.strip()) < _FIRECRAWL_MIN_CHARS:
-        rich = _firecrawl_markdown(url)
+        thin = len(text.strip())
+        rich, source = _tinyfish_fetch(url), "TinyFish Fetch"
+        if rich is None:
+            rich, source = _firecrawl_markdown(url), "Firecrawl"
         if rich:
-            meta = (f"[{url}] Firecrawl 提取（本地抽取只得 {len(text.strip())} 字符，"
+            meta = (f"[{url}] {source} 提取（本地抽取只得 {thin} 字符，"
                     f"判为 JS 渲染或正文在脚本里）")
             _fetch_cache_put(url, meta, rich)
             return _render_fetch(url, meta, rich, budget)
@@ -488,6 +493,30 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
     meta = f"[{url}] Content-Type: {ctype or '未知'}，抓取 {len(raw)} 字节"
     _fetch_cache_put(url, meta, text)
     return _render_fetch(url, meta, text, budget)
+
+
+def _tinyfish_fetch(url: str) -> str | None:
+    """用 TinyFish Fetch 抓单页 Markdown（**免费**，能渲染 JS）；失败/没配返回 None。
+
+    与 Firecrawl 是同类角色（内容提取），但按文档 "Fetch never draws from your
+    wallet"（任何余额下都免费），限流 150 URL/分按 key 计、单次最多 10 个 URL，
+    `ttl=0` 表示不吃缓存。所以它排在同一位置的**前面**——付费那条降成最后手段。
+    """
+    key = _search_key("tinyfish")
+    if not key:
+        return None
+    try:
+        data = _http_json(
+            "https://api.fetch.tinyfish.ai",
+            payload={"urls": [url], "format": "markdown", "ttl": 0},
+            headers={"X-API-Key": key})
+    except Exception:  # noqa: BLE001——兜底通道，任何失败都当作"没这回事"
+        return None
+    results = data.get("results") or []
+    if not results:
+        return None
+    text = str((results[0] or {}).get("text") or "").strip()
+    return text or None
 
 
 def _firecrawl_markdown(url: str) -> str | None:
@@ -725,6 +754,7 @@ def _ddg_target(href: str) -> str:
 #   bocha     POST api.bochaai.com/v1/web-search  Bearer（中文检索）
 #   serpapi   GET  serpapi.com/search             api_key 查询参数（供应商约定）
 #   firecrawl POST api.firecrawl.dev/v2/search    Bearer
+#   tinyfish  GET  api.search.tinyfish.ai         X-API-Key（**免费**，30 次/分）
 # 供应商给的排序就是结论，**不再做词面相关性过滤**——那是本地兜底才需要的补丁。
 #
 # 默认**随机**挑一家先试，失败换下一家，全都不行才本地兜底（用户口径
@@ -740,6 +770,8 @@ _SEARCH_KEY_VARS: dict[str, tuple[str, ...]] = {
     "serpapi": ("Wovra_SEARCH_KEY", "Wovra_SerpAPI", "Wovra_Serpapi",
                 "SERPAPI_API_KEY"),
     "firecrawl": ("Wovra_SEARCH_KEY", "Wovra_Firecrawl", "FIRECRAWL_API_KEY"),
+    "tinyfish": ("Wovra_SEARCH_KEY", "Wovra_TinyFish", "Wovra_Tinyfish",
+                 "TINYFISH_API_KEY"),
 }
 _SEARCH_TIMEOUT = int(os.environ.get("WOVRA_SEARCH_TIMEOUT", "30"))
 # 本地兜底通道的超时。实测 urllib 的 timeout 会被算**两次**（连接与读取各一次，
@@ -857,6 +889,9 @@ def _api_rows(provider: str, data: dict) -> list[tuple[str, str, str]]:
         raw = payload.get("web") if isinstance(payload, dict) else payload
         return [(_clean(r.get("title")), r.get("url") or "",
                  _clean(r.get("description"))) for r in raw or []]
+    if provider == "tinyfish":
+        return [(_clean(r.get("title")), r.get("url") or "", _clean(r.get("snippet")))
+                for r in data.get("results") or []]
     if provider == "exa":
         rows = []
         for r in data.get("results") or []:
@@ -906,6 +941,14 @@ def _api_search(provider: str, query: str, max_results: int) -> list | str:
                 "https://api.firecrawl.dev/v2/search",
                 payload={"query": query, "limit": max_results},
                 headers={"Authorization": f"Bearer {key}"})
+        elif provider == "tinyfish":
+            # 免费通道（30 请求/分，按 key 计）。它还有 domain_type/recency_minutes/
+            # include_domains 这些专属过滤（论文按 pub_year 筛），暂未接到工具签名上
+            # ——签名一变就是一次前缀冷启，等真有需求再开。
+            data = _http_json(
+                "https://api.search.tinyfish.ai"
+                f"?query={quoted}&result_limit={max_results}",
+                headers={"X-API-Key": key})
         else:                                   # exa
             data = _http_json(
                 "https://api.exa.ai/search",
@@ -955,8 +998,9 @@ def web_search(query: str, max_results: int = 8) -> str:
     """网页搜索，返回标题、链接与摘要。用于查技术文档与解决方案。
 
     配了检索 API（`.env` 里 `Wovra_Tavily` / `Wovra_Serper` / `Wovra_Exa` /
-    `Wovra_Bocha` / `Wovra_SerpAPI` / `Wovra_Firecrawl` 任一，见 .env.example）
-    就轮流调那几家接口：每次随机挑一家先试，失败换下一家。返回的排序即结论，
+    `Wovra_Bocha` / `Wovra_SerpAPI` / `Wovra_Firecrawl` / `Wovra_TinyFish` 任一，
+    见 .env.example）就轮流调那几家接口：每次随机挑一家先试，失败换下一家。
+    返回的排序即结论，
     不做词面过滤。全都不行、或一家都没配时才退回本地抓取，结果会标注"本地兜底"
     并声明"没有相关性保证"——那种结果只能当参考，**不能**用来判定"网上没有资料"。
     结果缓存 output/cache/（TTL 默认 1h）；只缓存成功结果，失败不缓存（否则
@@ -1008,3 +1052,118 @@ def _no_result_text(has_api: bool, signals: list[str]) -> str:
                 "Wovra_Exa / Wovra_Bocha / Wovra_SerpAPI / Wovra_Firecrawl 任填其一"
                 f"即可自动生效（见 .env.example）。{tail}")
     return head + "\n" + "\n".join(signals) + "\n" + tail
+
+
+# ---- 云浏览器自动化（TinyFish Agent API，2026-09-16）------------------------
+#
+# 与上面两条的区别：search/fetch 是"取信息"，这个是"让浏览器替你操作"——按自然语言
+# 目标点页面、翻页、填表、读 SPA 渲染出来的东西。**它要花钱**（$0.016/步，走 TinyFish
+# wallet），所以不做任何自动轮换/降级，只在你或 agent 显式调用时跑。
+# 端点三选一（/run 同步、/run-async 起后轮询、/run-sse 流式），这里用流式：能拿到
+# 逐步轨迹（进账本），也能在"停止本轮"时立刻断开。
+
+_AGENT_ENDPOINT = "https://agent.tinyfish.ai/v1/automation/run-sse"
+# 读流时单次 socket 等待上限：服务端有 HEARTBEAT，正常远小于它
+_AGENT_READ_TIMEOUT = int(os.environ.get("WOVRA_AGENT_TIMEOUT", "60"))
+_AGENT_MAX_SECONDS = 1800
+
+
+def _sse_events(resp):
+    """从 SSE 响应里逐行解出 `data:` 事件（非 JSON 行直接跳过，心跳也不占内存）。"""
+    for raw in resp:
+        line = raw.decode("utf-8", errors="replace").strip()
+        if not line.startswith("data:"):
+            continue
+        try:
+            event = json.loads(line[5:].strip())
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def _render_automation(url: str, goal: str, event: dict, trail: list[str],
+                       elapsed: float) -> str:
+    """把 COMPLETE 事件渲染成给模型看的文本（轨迹 + 结果，或失败原因 + 需要用户做什么）。"""
+    status = str(event.get("status") or "未知")
+    result = event.get("result")
+    if isinstance(result, dict) and "result" in result:
+        result = result.get("result")
+    lines = [
+        f"TinyFish 浏览器自动化：{status}（耗时 {elapsed:.0f}s，{len(trail)} 步）",
+        f"目标：{goal}",
+        f"页面：{url}",
+    ]
+    if trail:
+        lines.append("执行轨迹：\n  - " + "\n  - ".join(trail[-12:]))
+    if status == "COMPLETED":
+        lines.append("结果：\n" + (str(result).strip() if result else "（接口没给结果文本）"))
+    else:
+        lines.append(f"失败原因：{str(event.get('error') or '').strip() or '（未提供）'}")
+        hint = event.get("profile_hint")
+        if isinstance(hint, dict) and hint.get("message"):
+            lines.append("需要你操作：" + str(hint["message"])
+                         + (f"（{hint.get('setup_url')}）" if hint.get("setup_url") else ""))
+    return "\n".join(lines)
+
+
+def web_automate(url: str, goal: str, max_duration_seconds: int = 300) -> str:
+    """用云浏览器按自然语言目标完成一次网页操作（TinyFish，**按步计费**）。
+
+    适用场景：页面必须真交互才拿得到东西——登录后翻页、点筛选/展开、填表提交、
+    读 SPA 渲染出来的数据、必须真实浏览器才成立的流程。纯静态取正文别用它，用
+    web_fetch（更快、更省，也不花钱）。
+
+    目标是自然语言，写清"要看什么/要做什么"；`max_duration_seconds` 是墙上时间
+    上限（默认 300 秒，最大 1800）。它跑在对方的云浏览器上，所以：**停止本轮会直接
+    断开这条流**；页面内容会经过对方基础设施（涉密页面不要用）；失败时会说明原因，
+    需要你登录的站点会给出提示而不是硬试。
+    """
+    safety._audit(f"[web_automate] {url} :: {goal[:120]}")
+    blocked = _assert_public_url(url)
+    if blocked:
+        return blocked
+    if not goal.strip():
+        return "缺少 goal：请用自然语言说明要在这个页面上做什么。"
+    key = _search_key("tinyfish")
+    if not key:
+        return ("web_automate 需要 TinyFish 密钥：在 .env 里填 Wovra_TinyFish"
+                "（或 TINYFISH_API_KEY），见 .env.example。只要页面的静态正文用 "
+                "web_fetch 即可，那条不需要密钥。")
+    seconds = max(30, min(int(max_duration_seconds), _AGENT_MAX_SECONDS))
+    payload = {"url": url, "goal": goal,
+               "agent_config": {"max_duration_seconds": seconds}}
+    request = urllib.request.Request(
+        _AGENT_ENDPOINT, data=json.dumps(payload).encode("utf-8"),
+        headers={"X-API-Key": key, "Content-Type": "application/json",
+                 "Accept": "text/event-stream", "User-Agent": _WEB_UA})
+    trail: list[str] = []
+    started = time.monotonic()
+    try:
+        with urllib.request.urlopen(request, timeout=_AGENT_READ_TIMEOUT) as resp:
+            for event in _sse_events(resp):
+                if abort.abort_requested():          # 停止本轮：断开这条流
+                    walked = " / ".join(trail[-6:]) or "（无）"
+                    return (f"已中止（用户停止本轮）：TinyFish 运行已断开"
+                            f"（run_id={event.get('run_id') or '未知'}，"
+                            f"已走 {len(trail)} 步：{walked}）。")
+                kind = str(event.get("type") or "")
+                if kind == "PROGRESS":
+                    step = str(event.get("purpose") or "").strip()
+                    if step:
+                        trail.append(step)
+                        safety._audit(f"[web_automate][progress] {step[:120]}")
+                elif kind == "COMPLETE":
+                    return _render_automation(url, goal, event, trail,
+                                              time.monotonic() - started)
+    except urllib.error.HTTPError as error:
+        hint = {401: "密钥无效", 402: "余额不足（它按步计费，$0.016/步）",
+                403: "账号未开通该能力（capture_config / max_steps 都要 beta）",
+                404: "运行不存在或接口不可用",
+                429: "限流"}.get(error.code, "接口报错")
+        return f"TinyFish 自动化失败（HTTP {error.code}：{hint}）。"
+    except Exception as error:  # noqa: BLE001——网络/流异常都回传给模型
+        return f"TinyFish 自动化失败: {error!r}"
+    return (f"TinyFish 自动化流已结束但没等到 COMPLETE（等了 "
+            f"{time.monotonic() - started:.0f}s）。已走轨迹："
+            f"{' / '.join(trail[-6:]) or '（无）'}")

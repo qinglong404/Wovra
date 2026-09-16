@@ -2,6 +2,8 @@
 
 本模块：test_web。"""
 
+import json
+
 from wovra.tools import web_fetch
 
 # 共享夹具/工具（_helpers.py 是原文件的公共头部）
@@ -214,6 +216,7 @@ _SEARCH_KEY_VARS_FOR_TEST = (
     "Wovra_Bocha", "BOCHA_API_KEY",
     "Wovra_SerpAPI", "Wovra_Serpapi", "SERPAPI_API_KEY",
     "Wovra_Firecrawl", "FIRECRAWL_API_KEY",
+    "Wovra_TinyFish", "Wovra_Tinyfish", "TINYFISH_API_KEY",
 )
 
 
@@ -290,7 +293,7 @@ def test_ensure_dotenv_points_at_repo_root(monkeypatch):
 
 
 def test_api_rows_adapts_each_vendor_schema():
-    """六家的字段名各不相同，_api_rows 各归各位；缺字段/未知供应商不抛。"""
+    """七家的字段名各不相同，_api_rows 各归各位；缺字段/未知供应商不抛。"""
     from wovra import tools as tools_module
 
     web = tools_module.web
@@ -310,6 +313,9 @@ def test_api_rows_adapts_each_vendor_schema():
     assert web._api_rows("firecrawl", {"data": {"web": [
         {"title": "T", "url": "https://h.example", "description": "D"}]}}) == [
         ("T", "https://h.example", "D")]
+    assert web._api_rows("tinyfish", {"results": [
+        {"position": 1, "title": "T", "url": "https://i.example",
+         "snippet": "SN"}]}) == [("T", "https://i.example", "SN")]
     assert web._api_rows("exa", {"results": [
         {"title": "T", "url": "https://d.example", "highlights": ["H1", "H2"]}]})[0][2] == "H1 H2"
     assert web._api_rows("tavily", {}) == []
@@ -524,6 +530,188 @@ def test_web_search_caches_success_but_not_failure(monkeypatch):
                         lambda q, n: ([("T", "https://t.example", "")], 0, ""))
     tools_module.web_search("q")
     assert len(puts) == 1
+
+
+# ---- TinyFish（2026-09-16）：免费检索/抓取 + 付费云浏览器自动化 ----------------
+
+class _FakeSSE:
+    """TinyFish 的 SSE 响应替身：逐行产出 `data: {…}`，可挂钩子模拟"流到一半"。"""
+
+    def __init__(self, events: list[dict], on_yield=None):
+        self._lines = [b"data: " + json.dumps(event).encode("utf-8") + b"\n"
+                       for event in events]
+        self._on_yield = on_yield
+
+    def __iter__(self):
+        for index, line in enumerate(self._lines):
+            yield line
+            if self._on_yield:
+                self._on_yield(index)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _tinyfish_env(monkeypatch):
+    from wovra import tools as tools_module
+
+    _clean_search_env(monkeypatch)
+    monkeypatch.setenv("Wovra_TinyFish", "tf-key")
+    monkeypatch.setattr(tools_module.web, "_assert_public_url", lambda url: None)
+    return tools_module.web
+
+
+def test_tinyfish_search_is_a_normal_backend(monkeypatch):
+    """TinyFish Search 就是普通后端一家（免费，30 次/分）；字段适配见 _api_rows。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    _tinyfish_env(monkeypatch)
+    seen: dict = {}
+
+    def fake_json(url, payload=None, headers=None):
+        seen.update(url=url, headers=headers or {})
+        return {"results": [{"title": "T", "url": "https://i.example",
+                             "snippet": "SN"}]}
+
+    monkeypatch.setattr(web, "_http_json", fake_json)
+    rows = web._api_search("tinyfish", "q", 3)
+    assert rows == [("T", "https://i.example", "SN")]
+    assert seen["url"].startswith("https://api.search.tinyfish.ai?query=q")
+    assert seen["headers"].get("X-API-Key") == "tf-key"
+    assert web.search_provider() == "tinyfish"       # 只有它配了密钥时就是它
+
+
+def test_tinyfish_fetch_sends_markdown_request(monkeypatch):
+    """Fetch API：一次一个 URL、要 markdown、ttl=0（不吃缓存），取 results[0].text。"""
+    web = _tinyfish_env(monkeypatch)
+    seen: dict = {}
+
+    def fake_json(url, payload=None, headers=None):
+        seen.update(url=url, payload=payload, headers=headers or {})
+        return {"results": [{"url": "https://x", "format": "markdown",
+                             "text": "# 干净正文"}], "errors": []}
+
+    monkeypatch.setattr(web, "_http_json", fake_json)
+    assert web._tinyfish_fetch("https://x") == "# 干净正文"
+    assert seen["url"] == "https://api.fetch.tinyfish.ai"
+    assert seen["payload"] == {"urls": ["https://x"], "format": "markdown", "ttl": 0}
+    assert seen["headers"].get("X-API-Key") == "tf-key"
+    # 没配密钥 / 空结果都返回 None（静默降级，不抛）
+    _clean_search_env(monkeypatch)
+    assert web._tinyfish_fetch("https://x") is None
+    monkeypatch.setenv("Wovra_TinyFish", "tf-key")
+    monkeypatch.setattr(web, "_http_json", lambda *a, **k: {"results": []})
+    assert web._tinyfish_fetch("https://x") is None
+
+
+def test_web_fetch_prefers_free_tinyfish_over_paid_firecrawl(monkeypatch, tmp_path):
+    """JS 渲染站的兜底顺序：免费的 TinyFish Fetch 在前，付费 Firecrawl 只当最后手段。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    monkeypatch.setattr(web, "_assert_public_url", lambda url: None)
+    monkeypatch.setattr(web, "_llms_txt_url", lambda url: None)
+    monkeypatch.setattr(web, "_fetch_with_accept", lambda u, timeout=30: None)
+    monkeypatch.setattr(
+        web, "_open_url",
+        lambda url, timeout=30, max_hops=5: (
+            _FakeResp(b"<html><body><script>var app=1;</script></body></html>"), None))
+    calls = {"firecrawl": 0}
+
+    def firecrawl(url):
+        calls["firecrawl"] += 1
+        return "# Firecrawl 正文"
+
+    monkeypatch.setattr(web, "_firecrawl_markdown", firecrawl)
+    monkeypatch.setattr(web, "_tinyfish_fetch", lambda url: "# TinyFish 正文")
+    out = web.web_fetch("https://spa.example.com/a")
+    assert "TinyFish Fetch 提取" in out and "TinyFish 正文" in out
+    assert calls["firecrawl"] == 0                   # 免费那条成了就不惊动付费的
+
+    monkeypatch.setattr(web, "_tinyfish_fetch", lambda url: None)
+    out = web.web_fetch("https://spa.example.com/b")
+    assert "Firecrawl 提取" in out and calls["firecrawl"] == 1
+
+
+def test_web_automate_streams_progress_and_returns_result(monkeypatch):
+    """成功路径：SSE 里的 PROGRESS 进轨迹与审计，COMPLETE 的 result 作为答案返回。"""
+    from wovra import tools as tools_module
+
+    web = _tinyfish_env(monkeypatch)
+    audited: list = []
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: audited.append(detail))
+    events = [
+        {"type": "STARTED", "run_id": "r1"},
+        {"type": "PROGRESS", "purpose": "打开首页"},
+        {"type": "HEARTBEAT"},
+        {"type": "PROGRESS", "purpose": "读出第一条"},
+        {"type": "COMPLETE", "status": "COMPLETED", "run_id": "r1",
+         "result": {"result": "头条是「X」"}},
+    ]
+    monkeypatch.setattr(web.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeSSE(events))
+    out = tools_module.web_automate("https://news.ycombinator.com/", "读出头条")
+    assert "COMPLETED" in out and "头条是「X」" in out
+    assert "打开首页" in out and "读出第一条" in out
+    assert any("progress" in line for line in audited)   # 轨迹进审计（可追溯）
+
+
+def test_web_automate_reports_failure_and_needs_user_action(monkeypatch):
+    """失败路径：把 error 与被墙原因（profile_hint）都告诉模型，别硬试。"""
+    from wovra import tools as tools_module
+
+    web = _tinyfish_env(monkeypatch)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    events = [{"type": "COMPLETE", "status": "FAILED", "error": "login wall",
+               "profile_hint": {"message": "该站需要先登录，请在浏览器里完成一次",
+                                "setup_url": "https://app.tinyfish.ai/profiles"}}]
+    monkeypatch.setattr(web.urllib.request, "urlopen",
+                        lambda req, timeout=None: _FakeSSE(events))
+    out = tools_module.web_automate("https://example.com/private", "看订单")
+    assert "FAILED" in out and "login wall" in out
+    assert "需要你操作" in out and "profiles" in out
+
+
+def test_web_automate_aborts_when_stop_is_requested(monkeypatch):
+    """停止本轮：流到一半就断开，不再等它跑完（同 run_command 的中断语义）。"""
+    from wovra import tools as tools_module
+    from wovra.tools import abort as abort_module
+
+    web = _tinyfish_env(monkeypatch)
+    monkeypatch.setattr(tools_module.safety, "_audit", lambda detail: None)
+    flag = {"stop": False}
+    events = [{"type": "PROGRESS", "purpose": "第一步"},
+              {"type": "PROGRESS", "purpose": "第二步"},
+              {"type": "COMPLETE", "status": "COMPLETED", "result": "不该拿到"}]
+    fake = _FakeSSE(events, on_yield=lambda i: flag.__setitem__("stop", True) if i == 0 else None)
+    monkeypatch.setattr(web.urllib.request, "urlopen", lambda req, timeout=None: fake)
+    with abort_module.abort_scope(lambda: flag["stop"]):
+        out = tools_module.web_automate("https://example.com/", "读标题")
+    assert "已中止" in out and "停止本轮" in out
+    assert "不该拿到" not in out
+    assert "第一步" in out                            # 已走的那步照样报出来
+
+
+def test_web_automate_refuses_internal_url_and_missing_key(monkeypatch):
+    """两道前置检查：内网地址（防 SSRF）与没配密钥时都给可行动的说明。"""
+    from wovra import tools as tools_module
+
+    web = tools_module.web
+    _clean_search_env(monkeypatch)
+    out = tools_module.web_automate("http://169.254.169.254/latest/meta-data/", "读元数据")
+    assert "拒绝访问内网" in out                      # 未配密钥也先拦内网（不泄配置）
+    out = tools_module.web_automate("https://example.com/", "读标题")
+    assert "Wovra_TinyFish" in out and ".env.example" in out and "web_fetch" in out
+    assert tools_module.web_automate("https://example.com/", "   ") != ""  # 空目标不炸
+    monkeypatch.setenv("Wovra_TinyFish", "tf-key")
+    monkeypatch.setattr(web, "_assert_public_url", lambda url: None)
+    assert "缺少 goal" in tools_module.web_automate("https://example.com/", "  ")
 
 
 def test_web_fetch_cache_hit_skips_network(monkeypatch, tmp_path):

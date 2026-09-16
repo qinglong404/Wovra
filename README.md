@@ -389,8 +389,8 @@ safety mode.
   layer refuses writes and allows reads — and this rule **cannot be authorized** (out-of-workspace
   access can be authorized once; this cannot).
 * **Web search through a professional API**: fill in any of `Wovra_Tavily`, `Wovra_Serper`,
-  `Wovra_Exa`, `Wovra_Bocha`, `Wovra_SerpAPI`, `Wovra_Firecrawl` (the vendor-standard
-  `*_API_KEY` names and the generic `Wovra_SEARCH_KEY` also work). Each search asks a randomly
+  `Wovra_Exa`, `Wovra_Bocha`, `Wovra_SerpAPI`, `Wovra_Firecrawl`, `Wovra_TinyFish` (the
+  vendor-standard `*_API_KEY` names and the generic `Wovra_SEARCH_KEY` also work). Each search asks a randomly
   chosen backend first and moves to the next one if it fails, so the free quotas are spread
   across vendors rather than burnt on one; `Wovra_SEARCH_PROVIDER` pins one to the front. The
   vendor's ranking is the answer — no keyword-overlap filtering on top. With no key configured,
@@ -399,6 +399,13 @@ safety mode.
   "no results" reads to a model as "this doesn't exist online" — the wrong conclusion, measured on
   the GAIA run. (Firecrawl is also wired into `web_fetch`: when our own extraction comes back
   with almost nothing — JS-rendered pages — it asks Firecrawl for clean Markdown.)
+* **A cloud browser on demand**: `web_automate(url, goal)` hands a natural-language goal to a
+  cloud browser (TinyFish Agent API, SSE): the progress trail lands in the ledger, the result comes
+  back as text, and stopping the round **disconnects the stream** instead of waiting. Pages that
+  need real interaction (login walls, filters, SPA-rendered data) are what it is for. It is billed
+  per step, so it is **never** an automatic fallback — while the same vendor's **Search and Fetch
+  APIs are free**, which is why `web_fetch` asks TinyFish Fetch for rendered Markdown before it
+  ever reaches the paid Firecrawl.
 * **Attachments are parsed natively**: `read_file` auto-detects `.csv`/`.tsv` (with GBK fallback
   and the encoding named in the header), `.docx`/`.xlsx`/`.pptx` (ZIP + XML) and PDF text layers —
   all stdlib, still zero new dependencies. Previously an agent had to install its own parsers: one
@@ -492,7 +499,7 @@ This makes it possible to experiment with different underlying agents without ch
 > `webui/`, see [Web UI](#web-ui)). Next: real long-task validation and
 > independent task evaluation.
 
-* [x] Minimal agent runtime (**32** tools in managed mode, **22** in baseline: files / commands / background tasks / web / **eyes (screenshot · view_image · page_text)** / interactive confirmation / plan ledger / history expansion / routing / notify-consult / join / responsibility / **organization & split submission**)
+* [x] Minimal agent runtime (**33** tools in managed mode, **23** in baseline: files / commands / background tasks / web (search · fetch · **cloud-browser automation**) / **eyes (screenshot · view_image · page_text)** / interactive confirmation / plan ledger / history expansion / routing / notify-consult / join / responsibility / **organization & split submission**)
 * [x] Task representation and persistent task state (Task / TaskState / report.md / workspace-bound sessions)
 * [x] Context management V3: zero truncation during execution, window guard, file map, anchor self-healing
 * [x] Watermark-triggered batch organization → split (**serial two-stage append pipeline**; the product takes effect **at the round-close boundary**, with "next round open" as the fallback for late async maintenance; older views folded by current file state)

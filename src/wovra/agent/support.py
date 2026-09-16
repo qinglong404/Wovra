@@ -138,6 +138,7 @@ _ACTION_WORDS = {
     "glob_files": "按模式找文件",
     "web_fetch": "抓取网页",
     "web_search": "网页搜索",
+    "web_automate": "云浏览器自动化（TinyFish）",
     "ask_user": "询问用户",
     "list_background": "列出后台任务",
 }

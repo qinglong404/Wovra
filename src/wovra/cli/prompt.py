@@ -26,6 +26,7 @@ from ..tools import (
     search_files,
     screenshot,
     stop_background,
+    web_automate,
     web_fetch,
     view_image,
     web_search,
@@ -240,6 +241,9 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
             list_background,
             web_fetch,
             web_search,
+            # 云浏览器自动化（2026-09-16）：页面必须真交互才拿得到东西时用它
+            # （登录后翻页、点筛选、SPA 渲染、填表）。按步计费，故不做自动降级。
+            web_automate,
             ask_user,
         ],
         task=task,

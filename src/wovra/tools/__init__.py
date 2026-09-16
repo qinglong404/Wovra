@@ -90,7 +90,7 @@ from .background import (  # noqa: E402
     stop_background,
     stop_session_backgrounds,
 )
-from .web import web_fetch, web_search  # noqa: E402
+from .web import web_automate, web_fetch, web_search  # noqa: E402
 from .interaction import (  # noqa: E402
     ask_user,
     get_current_time,
