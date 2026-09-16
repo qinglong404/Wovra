@@ -49,13 +49,15 @@ _CONTRACT = (
     "2. 一句话里**不要用英文双引号**（会截断 JSON），需要引用用「」。\n"
     "3. **失败与坑**：以【失败候选】为底逐条核对——候选里有的必须写（同类可合并），"
     "候选里没有但你知道的照样要写；没有就给空数组。这一档**免裁剪**——原文折叠后就再也"
-    "找不回来。\n"
+    "找不回来。尽量带 `evidence`（候选〔〕里的事件 ID），ID 必须真实存在，编造会被硬门拦下。\n"
+    "4. **账本增量**：只写**新增**条目（[账本已有条目] 里有的别再写）。标量（现状/目标）"
+    "不用你写，Runtime 从最新一轮取。\n"
+    "5. **要引用别的轮就写明轮号**（如「见 R8」「见〔R8-E49〕」）——写明即合法引用，"
+    "不算借内容；不写轮号地借用会被记软档。\n"
     "6. 每条是**这一轮自己的交班记录**，不是这一批的总述。验收标准：把某一条单独拿给"
     "一个没看过会话的人，他能说清这轮发生了什么（**轮号是他唯一的坐标**）。\n"
     "7. 一句话 **80–250 字符**（信息量小的轮可更短，但不得空话）。\n"
-    "4. **账本增量**：只写**新增**条目，不要重复账本里已有的。标量（现状/目标）不用你写，"
-    "Runtime 从最新一轮取。\n"
-    "5. 一轮一条、一个不落、与上面的轮号一一对应。\n\n"
+    "8. 一轮一条、一个不落、与上面的轮号一一对应。\n\n"
     "完成后调用 submit_round_notes 提交（唯一出口，不要在正文输出 JSON）。"
 )
 
@@ -86,11 +88,25 @@ _SCHEMA = {
                             },
                             "failures": {
                                 "type": "array",
-                                "items": {"type": "string"},
                                 "description": (
                                     "失败与坑：非零退出/越界拦截/路径不存在/方案被推翻。"
                                     "没有给空数组。免裁剪档"
                                 ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {"type": "string",
+                                                 "description": "失败/坑的一句话"},
+                                        "evidence": {
+                                            "type": "string",
+                                            "description": (
+                                                "证据事件 ID（如 R2-E174），取自失败候选的"
+                                                "〔〕；没有就留空字符串"
+                                            ),
+                                        },
+                                    },
+                                    "required": ["text"],
+                                },
                             },
                         },
                         "required": ["seq", "sentence", "failures"],
@@ -242,6 +258,28 @@ def _conclusion_draft(r: dict, limit: int = 320) -> str:
     return ""
 
 
+def _ledger_lines(task) -> list[str]:
+    """账本里**已有**的条目摘要（摆在指令里让模型去重）。
+
+    为什么不靠模型自己去比：账本在尾部信封里（离指令很远），而"只写新增"要求它跨距离
+    比对——这与"机械能给的别让它回忆"是同一条纪律（§140）。
+    """
+    if task is None:
+        return []
+    state = task.get_state()
+    labels = (("constraints", "约束"), ("decisions", "决策"),
+              ("known_issues", "已知问题"), ("open_questions", "待决"))
+    lines: list[str] = []
+    for key, label in labels:
+        items = [str(x) for x in (getattr(state, key, None) or [])]
+        if not items:
+            continue
+        shown = "；".join(x[:60] for x in items[:10])
+        more = f"…（另 {len(items) - 10} 条）" if len(items) > 10 else ""
+        lines.append(f"  {label}：{shown}{more}")
+    return lines
+
+
 def _actions_lines(batch: list[dict]) -> list[str]:
     """每轮一个**独立块**：轮号独占一行当锚点，块内分工具/文件/非零退出/失败候选/结论草稿。
 
@@ -283,6 +321,13 @@ def _actions_lines(batch: list[dict]) -> list[str]:
     return lines
 
 
+_REF_RE = re.compile(r"见\s*〔?R\d+")
+
+
+def _fail_text(f) -> str:
+    return str(f.get("text") or "") if isinstance(f, dict) else str(f)
+
+
 def _check_alignment(notes: dict, batch: list[dict]) -> dict[str, list[str]]:
     """机械校验：产物里提到的路径/工具必须在本轮自己出现过（跨轮借内容当场抓）。
 
@@ -300,9 +345,16 @@ def _check_alignment(notes: dict, batch: list[dict]) -> dict[str, list[str]]:
         n = notes.get(int(r["seq"]))
         if not n:
             continue
-        text = str(n.get("sentence") or "") + " " + " ".join(n.get("failures") or [])
+        fails = n.get("failures") or []
+        text = str(n.get("sentence") or "") + " " + " ".join(_fail_text(f) for f in fails)
         own = _round_actions(r)
         zero_action = not own["tools"]
+        ids = {str(e.get("id") or "") for e in r.get("events") or []}
+        for f in fails:
+            ev = str((f or {}).get("evidence") or "") if isinstance(f, dict) else ""
+            if ev and ev not in ids:
+                hard.append(f"R{r['seq']}: 失败项证据 ID 不存在于本轮 `{ev}`")
+        explicit = bool(_REF_RE.search(text))    # 写明「见 R8」= 合法引用，不算借内容
         allowed_paths = {
             m.group(0)
             for m in _PATH_RE.finditer(json.dumps(r.get("events") or [], ensure_ascii=False))
@@ -313,7 +365,8 @@ def _check_alignment(notes: dict, batch: list[dict]) -> dict[str, list[str]]:
                 return any(a == tok or a.endswith("/" + tok) for a in allowed_paths)
             if _allowed(p) or all(_allowed(f) for f in frags if f):
                 continue
-            hard.append(f"R{r['seq']}: 提到本轮从没出现过的路径 `{p}`")
+            line = f"R{r['seq']}: 提到本轮从没出现过的路径 `{p}`"
+            (soft if explicit else hard).append(line)
         for t in all_tools:
             if t in text and t not in own["tools"]:
                 line = f"R{r['seq']}: 提到本轮没调用的工具 `{t}`"
@@ -321,30 +374,49 @@ def _check_alignment(notes: dict, batch: list[dict]) -> dict[str, list[str]]:
     return {"hard": hard, "soft": soft}
 
 
-def _hint_coverage(notes: dict, batch: list[dict]) -> tuple[int, int]:
+def _evidence_rate(notes: dict, batch: list[dict]) -> tuple[int, int]:
+    """失败项里带**真实存在**的证据 ID 的比例。"""
+    good = total = 0
+    for r in batch:
+        ids = {str(e.get("id") or "") for e in r.get("events") or []}
+        for f in (notes.get(int(r["seq"])) or {}).get("failures") or []:
+            total += 1
+            if str((f or {}).get("evidence") or "") in ids:
+                good += 1
+    return good, total
+
+
+def _hint_coverage(notes: dict, batch: list[dict]) -> tuple[int, int, list[str]]:
     """失败候选的覆盖率：候选里有多少条能在产物里找到落点（按强特征 token 匹配）。"""
     strong = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]{1,6}\b|\b[45]\d\d\b|越界|不存在|超时|中止|占位")
     matched = total = 0
+    missed: list[str] = []
     for r in batch:
         n = notes.get(int(r["seq"])) or {}
-        text = " ".join([str(n.get("sentence") or "")] + list(n.get("failures") or []))
-        for _eid, h in _failure_hints(r):
+        text = " ".join([str(n.get("sentence") or "")]
+                        + [_fail_text(f) for f in (n.get("failures") or [])])
+        for eid, h in _failure_hints(r):
             tokens = set(strong.findall(h))
             if not tokens:
                 continue
             total += 1
             if any(t in text for t in tokens):
                 matched += 1
-    return matched, total
+            else:
+                missed.append(f"R{r['seq']}/{eid}: {h[:70]}")
+    return matched, total, missed
 
 
-def _instruction(rounds: list[dict]) -> str:
+def _instruction(rounds: list[dict], task=None) -> str:
     seqs = "、R".join(str(r["seq"]) for r in rounds)
+    ledger = _ledger_lines(task)
     return (
         "[整理指令]\n"
         "以上是本会话的完整上下文。请把下列轮次各压缩成**一句话**，并给出账本增量："
         f"R{seqs}。\n"
         + "\n".join(_actions_lines(rounds)) + "\n"
+        + ("\n[账本已有条目]（**不要重复写这些**；只写新增）\n"
+           + "\n".join(ledger) + "\n" if ledger else "")
         + _CONTRACT
     )
 
@@ -353,6 +425,8 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="新整理契约练兵（写：每轮一句话 + 账本增量）")
     ap.add_argument("session_id")
     ap.add_argument("--dry", action="store_true", help="只打输入与指令，不调 LLM")
+    ap.add_argument("--keep-ledger", action="store_true",
+                    help="保留已有账本（真实形态：看模型会不会重复写已有条目）")
     ap.add_argument("--plain", action="store_true",
                     help="对照档：只给动作清单，不喂失败候选/结论草稿")
     args = ap.parse_args()
@@ -370,12 +444,13 @@ def main() -> int:
         r["org_state"] = ""
         r.pop("pending_org", None)
         r["blocks"] = blocks_module.segment_round_by_file(r)
-    # 账本也清空，让这一次调用必须自己产出增量（展示最大信息量那一档）
-    for field in ("goal", "current_status", "completed", "decisions",
-                  "known_issues", "open_questions", "escalations",
-                  "experiments", "constraints"):
-        if hasattr(task.get_state(), field):
-            setattr(task.get_state(), field, [] if field != "current_status" else "")
+    # 账本默认清空（练"第一次整理全部轮"这一档）；--keep-ledger 走真实形态
+    if not args.keep_ledger:
+        for field in ("goal", "current_status", "completed", "decisions",
+                      "known_issues", "open_questions", "escalations",
+                      "experiments", "constraints"):
+            if hasattr(task.get_state(), field):
+                setattr(task.get_state(), field, [] if field != "current_status" else "")
 
     agent = _build_agent(task, mode=task.mode or MODE_MANAGED, async_organization=False)
     agent.rounds = task.rounds
@@ -396,7 +471,7 @@ def main() -> int:
             head = str(content or "")[:60].replace("\n", " ")
         print(f"  {m.get('role'):<9} {len(str(content or '')):>7} 字符  {head}")
 
-    instruction = _instruction(batch)
+    instruction = _instruction(batch, task)
     print("\n── 尾部追加的指令（逐字）──")
     print(instruction)
     if args.dry:
@@ -443,7 +518,8 @@ def main() -> int:
             continue
         print(f"      ▸ {n.get('sentence')}")
         for f in n.get("failures") or []:
-            print(f"      ⚠ {f}")
+            ev = str((f or {}).get("evidence") or "") if isinstance(f, dict) else ""
+            print(f"      ⚠ {_fail_text(f)}" + (f"　〔{ev}〕" if ev else ""))
 
     check = _check_alignment(notes, batch)
     print("\n── 机械校验（跨轮借内容）──")
@@ -453,9 +529,12 @@ def main() -> int:
         print(f"  · 软提示 {d}")
     if not check["hard"] and not check["soft"]:
         print("  ✓ 干净：产物提到的路径与工具，都在本轮自己出现过")
-    hit, tot = _hint_coverage(notes, batch)
-    print(f"  失败候选覆盖率：{hit}/{tot}"
-          + ("（候选都写进了 failures）" if tot and hit == tot else ""))
+    hit, tot, missed = _hint_coverage(notes, batch)
+    print(f"  候选核对率：{hit}/{tot}（对不上的逐条列出，人工判是漏写还是我的假候选）")
+    for m in missed:
+        print(f"    ? {m}")
+    good, allf = _evidence_rate(notes, batch)
+    print(f"  失败项带有效证据 ID：{good}/{allf}")
 
     ledger = product.get("ledger_append") or {}
     print("\n── 产物：账本增量 ──")
