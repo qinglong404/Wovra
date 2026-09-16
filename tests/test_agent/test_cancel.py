@@ -27,6 +27,39 @@ def test_cancel_check_may_flip_midway():
     assert agent.cancel_check() is False
 
 
+def test_invoke_tool_binds_cancel_check_for_blocking_tools():
+    """停止本轮要能在**工具执行中**被看见（2026-09-16 用户实测的卡住问题）。
+
+    实测症状：命令跑着时点停止，界面一直"停止中"，非得等命令自己跑完。
+    因为 cancel_check 原先只在**步骤之间**被查。现在每次工具调用都把它绑进
+    工具层（`tools.abort`），阻塞等待的工具可以轮询它。
+    """
+    from wovra import tools as tools_module
+
+    seen: list = []
+
+    def probe() -> str:
+        """探针工具（测试替身）：报告此刻工具层看到的中断状态。"""
+        seen.append(tools_module.abort.abort_requested())
+        return "ok"
+
+    agent = Agent(llm=_StubLLM(), tools=[probe])
+
+    agent.cancel_check = lambda: True
+    assert agent._invoke_tool("probe", "{}") == "ok"
+    assert seen[-1] is True
+
+    agent.cancel_check = lambda: False
+    assert agent._invoke_tool("probe", "{}") == "ok"
+    assert seen[-1] is False
+
+    # 没设检查函数（脚本/测试直调路径）时，工具层恒为 False，不误杀
+    agent.cancel_check = None
+    assert agent._invoke_tool("probe", "{}") == "ok"
+    assert seen[-1] is False
+    assert tools_module.abort.abort_requested() is False      # 出栈已还原
+
+
 def test_dangling_tool_call_tail_gets_synthetic_results(monkeypatch, tmp_path):
     """工具卡即时落盘的伴生保护：开放轮尾部挂着未应答的 tool_calls 时，
     装配补合成 tool 结果，严格端点不再 400。"""

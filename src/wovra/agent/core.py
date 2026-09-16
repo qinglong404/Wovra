@@ -1511,7 +1511,8 @@ class _CoreMixin:
             # 会在 Agent 收工后继续拦别人（脚本/CLI 直接调文件工具、同进程里
             # 换会话），也会让测试互相污染。作用域内绑定 = "谁在干活就按谁的
             # 权限"，出栈即还原。
-            with tools_module.permissions.guard_scope(self._file_guard_object()):
+            with tools_module.permissions.guard_scope(self._file_guard_object()), \
+                    tools_module.abort.abort_scope(self.cancel_check):
                 result = fn(**parsed)
         except TypeError as error:
             # 参数名/数量不对时**给出正确参数名**（TOOLING_REVIEW.md §4.4）：

@@ -8,10 +8,12 @@ import subprocess
 import tempfile
 import time
 
-from . import limits, safety
+from . import abort, limits, safety
 
 
 _COMMAND_TIMEOUT = 60  # 秒
+# 等待子进程时的轮询间隔：够短（停止基本立刻生效），又不至于空转烧 CPU
+_ABORT_POLL_SECONDS = 0.2
 
 def _kill_process_tree(pid: int) -> None:
     """强杀 pid 及其全部后代进程。
@@ -179,15 +181,32 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0
             ),
         )
-        try:
-            proc.wait(timeout=wait)
-        except subprocess.TimeoutExpired:
-            _kill_process_tree(proc.pid)
+        # 停止本轮要能**立刻**生效（2026-09-16 用户实测：命令跑着时点停止，界面
+        # 一直"停止中"，非得等命令自己跑完）。所以不再一把 `wait(wait)` 到底，而是
+        # 短轮询：每轮问一次工具层的协作式中断标记，置真就整树强杀收摊。
+        deadline = time.monotonic() + wait
+        while True:
+            if abort.abort_requested():
+                _kill_process_tree(proc.pid)
+                try:
+                    proc.wait(timeout=5)  # 整树已灭，这只是兜底限时
+                except subprocess.TimeoutExpired:
+                    pass
+                return (f"命令已被中止（用户停止本轮，整树已强杀）：{command[:200]}\n"
+                        f"输出未回显；需要重跑请在新的一轮里再发起。")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _kill_process_tree(proc.pid)
+                try:
+                    proc.wait(timeout=5)  # 整树已灭，这只是兜底限时
+                except subprocess.TimeoutExpired:
+                    pass
+                return f"命令执行失败（超时 {wait} 秒被强制终止）：{command[:200]}"
             try:
-                proc.wait(timeout=5)  # 整树已灭，这只是兜底限时
+                proc.wait(timeout=min(_ABORT_POLL_SECONDS, remaining))
+                break
             except subprocess.TimeoutExpired:
-                pass
-            return f"命令执行失败（超时 {wait} 秒被强制终止）：{command[:200]}"
+                continue
 
         out_f.seek(0)
         err_f.seek(0)

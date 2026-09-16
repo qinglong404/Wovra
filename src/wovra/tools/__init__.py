@@ -45,6 +45,7 @@ from . import limits
 from . import permissions  # noqa: E402——文件权限守卫（工具层强制）
 from . import safety, files, shell, background, web, interaction  # noqa: F401,E402
 from . import status  # noqa: E402,F401——工具结果成败判定的唯一权威口径
+from . import abort  # noqa: E402,F401——协作式中断（停止本轮对阻塞中的工具立刻生效）
 
 # ---- 公开 API 再导出 ---------------------------------------------------------
 # cli/prompt.py 与 agent/core.py 的工具注册清单、实验探针的
