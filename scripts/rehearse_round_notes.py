@@ -228,8 +228,12 @@ def _failure_hints(r: dict, limit: int = 6) -> list[tuple[str, str]]:
         if m.get("role") != "tool":
             continue
         name = calls.get(str(m.get("tool_call_id") or ""), "")
+        # 读类工具：内容里全是文件正文，"不存在/占位"这类词全是假阳性 → 只留**拦截/报错**两类；
+        # 但**越界拦截必须留**（2026-09-17 实测漏网：search_files 被安全层拒的那条没进候选）。
         if name in _READ_LIKE:
-            continue
+            text0 = str(m.get("content") or "")
+            if not re.search(r"路径越界|只允许访问|工具执行出错|被拒绝|被驳回", text0):
+                continue
         text = str(m.get("content") or "")
         # 执行类工具只在**真失败**时才扫：exit_code=0 的输出里 cat 出来的文档正文会把
         # "不存在""工具执行出错"这类字样全带进来（v4 实测：R2 的候选大半是这么来的）。
