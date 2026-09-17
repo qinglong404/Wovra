@@ -10,6 +10,7 @@ from .. import routing as routing_module
 from .. import tokens as tokens
 from .. import truncate as truncate
 from .. import views as views_module
+from .. import attachments as attachments_module
 from ..task import _MODEL_SIDE_SECTIONS
 from ..tools import eyes as eyes_module
 from . import note as note_module
@@ -255,6 +256,11 @@ class _AssemblyMixin:
             # <runtime-reminder> 信封注入，与用户发言语义分离——模型
             # 分得清"用户要的"和"机制给的"（系统提示词里声明该约定）
             msgs.append(_runtime_reminder("\n\n".join(block)))
+        attach = self._attachment_message()
+        if attach is not None:
+            # 用户粘贴的附件（内容已展开）摆在图片之前：两者都在绝对尾部，
+            # 但附件是"用户说的话"，图片是"上一眼看到的东西"。
+            msgs.append(attach)
         eye = self._eye_image_message()
         if eye is not None:
             # 图片放在**绝对尾部**（在运行时信封之后）：信封每轮变，图片
@@ -457,6 +463,9 @@ class _AssemblyMixin:
             # 本域账本/职责表每步都可能变），放最后 = 变一次只作废它自己。
             msgs.append(envelope)
         # 图片注入：必须最后一条（协议缝与转交说明都已就位），见 `_eye_image_message`
+        attach = self._attachment_message()
+        if attach is not None:
+            msgs.append(attach)
         eye = self._eye_image_message()
         if eye is not None:
             msgs.append(eye)
@@ -764,6 +773,47 @@ class _AssemblyMixin:
         （而不是先注入再让服务端拒），view_image 会改成指路 page_text。
         """
         return self._vision_ok
+
+    def _attachment_message(self) -> Optional[dict]:
+        """当前轮用户粘贴/上传的附件 → 一条尾部 user 消息（内容已展开）。
+
+        用户口径（2026-09-17）：附件的粒度与 `read_file` 相同，但**不再调一次
+        工具**——模型读到用户消息时内容就在眼前。历史轮只留 `【附件】path=…`
+        一行引用（存档里不放原文），需要细节时自己 read_file。
+
+        扫描面 = 当前轮的轮首输入 + 轮内用户追加发言（后者是同一轮里的补充，
+        同样可能带附件）。
+        """
+        if self.current_round is None:
+            return None
+        texts = [str((self.current_round.get("user_input") or {}).get("original") or "")]
+        for event in self.current_round.get("events") or []:
+            if event.get("type") != "user":
+                continue
+            msg = event.get("message") or {}
+            if msg.get("role") == "user":
+                texts.append(str(msg.get("content") or ""))
+        blob = "\n".join(texts)
+        if attachments_module.ATTACH_MARKER_RE.search(blob) is None:
+            return None
+        parts, skipped = attachments_module.load_parts(blob)
+        if not parts and not skipped:
+            return None
+        if not self._vision_ok:
+            # 不支持视觉的模型：图片附件不发（发了也被拒），只保留文本部分
+            parts = [p for p in parts if p.get("type") != "image_url"]
+        images = sum(1 for p in parts if p.get("type") == "image_url")
+        lines: list[str] = []
+        if parts:
+            lines.append(
+                f"[附件]（用户本轮发来的材料已随本消息载入{('，含 %d 张图' % images) if images else ''}——"
+                f"不必再调 read_file；要改就直接编辑该路径。历史轮只留路径引用。）"
+            )
+        if skipped:
+            lines.append("⚠ 以下附件**未能载入**：" + "；".join(skipped))
+        if not parts:
+            return {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}]}
+        return {"role": "user", "content": [{"type": "text", "text": "\n".join(lines)}] + parts}
 
     def _eye_image_message(self) -> Optional[dict]:
         """当前轮 view_image 引用的图片 → 一条尾部 user 消息（parts 列表）。

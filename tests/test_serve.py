@@ -1,5 +1,6 @@
 """wovra serve 的契约测试：派生函数 + HTTP 冒烟（本机回环，零模型）。"""
 
+import base64
 import json
 import sys
 import threading
@@ -660,6 +661,52 @@ def test_http_plan_carries_live_kpis(server):
     assert body["tools"] == meta["tools"]
     code, body = _get(server + "/api/sessions/nope/plan")
     assert code == 404
+
+
+def test_http_attach_endpoint(server, tmp_path):
+    """粘贴附件落盘 + 换回引用行（2026-09-17）。
+
+    契约：用户消息里只带 `【附件】path=…` 一行，内容由装配期展开注入——
+    服务端这一步只负责把材料安全地放进工作区并把引用行给前端。
+    """
+    task_file = tmp_path / "tasks" / "s1" / "task.json"
+    data = json.loads(task_file.read_text(encoding="utf-8"))
+    data["workspace"] = str(tmp_path)          # fixture 里是假路径 C:/x/proj
+    task_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    code, body = _get(server + "/api/sessions/s1/attach", method="POST",
+                      body={"name": "pasted.py", "text": "print(1)\n"})
+    assert code == 200
+    assert body["path"].startswith("wovra-attachments/")\
+        and body["path"].endswith("-pasted.py")
+    assert body["marker"] == f"【附件】path={body['path']}"
+    assert (tmp_path / body["path"]).read_text(encoding="utf-8") == "print(1)\n"
+
+    # 图片：data URL 走字节路径（粘贴截图）
+    png = "data:image/png;base64," + base64.b64encode(b"\x89PNG\r\n\x1a\n").decode()
+    code, body = _get(server + "/api/sessions/s1/attach", method="POST",
+                      body={"name": "shot.png", "data_url": png})
+    assert code == 200 and body["path"].endswith("-shot.png")
+
+    # 什么都没有 → 400；会话不存在 → 404
+    code, _ = _get(server + "/api/sessions/s1/attach", method="POST",
+                   body={"name": "a.txt"})
+    assert code == 400
+    code, _ = _get(server + "/api/sessions/nope/attach", method="POST",
+                   body={"text": "x"})
+    assert code == 404
+
+
+def test_http_attach_without_workspace_is_refused(server, tmp_path):
+    """没有工作目录的会话：明确拒绝（附件必须落在工具能读到的地方）。"""
+    task_file = tmp_path / "tasks" / "s1" / "task.json"
+    data = json.loads(task_file.read_text(encoding="utf-8"))
+    data["workspace"] = ""
+    task_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    code, body = _get(server + "/api/sessions/s1/attach", method="POST",
+                      body={"name": "a.txt", "text": "x"})
+    assert code == 400 and "工作目录" in body["error"]
 
 
 def test_http_sessions_endpoint(server):

@@ -308,6 +308,13 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 #openbar .ob-go:hover{background:#332b1a}
 #composer{display:none;gap:10px;padding:10px max(var(--pad-x),calc((100% - var(--read-max))/2));border-top:1px solid var(--line);background:var(--bg1)}
 #composer.show{display:flex}
+/* 附件条（2026-09-17）：粘贴/拖入的材料先落在这里，可单个删除；发送时上传。 */
+#attachbar{display:none;gap:8px;flex-wrap:wrap;padding:9px max(var(--pad-x),calc((100% - var(--read-max))/2)) 0}
+#attachbar.show{display:flex}
+#attachbar .att{display:flex;align-items:center;gap:7px;font-size:12px;font-family:var(--mono);color:var(--tx);background:var(--bg2);border:1px solid var(--line2);border-radius:8px;padding:5px 9px}
+#attachbar .att .sz{color:var(--tx3)}
+#attachbar .att .x{color:var(--tx3);cursor:pointer;font-size:13px}
+#attachbar .att .x:hover{color:var(--red)}
 #compose{flex:1;resize:none;background:var(--bg2);border:1px solid var(--line2);border-radius:10px;color:var(--tx);font-family:var(--sans);font-size:13.5px;padding:10px 13px;outline:none;min-height:44px;max-height:160px;line-height:1.5}
 #compose:focus{border-color:var(--acc-dim)}
 #stop{padding:0 16px;background:transparent;border:1px solid #6b3440;border-radius:10px;color:#ff98a6;font-size:13px;cursor:pointer;transition:background .15s}
@@ -445,8 +452,9 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
   <div id="pending-bar"></div>
   <div id="maintbar"></div>
   <div id="openbar"></div>
+  <div id="attachbar"></div>
   <div id="composer">
-    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 或 \c 续跑开放轮）"></textarea>
+    <textarea id="compose" placeholder="输入消息（Enter 发送 · Shift+Enter 换行 · /c 或 \c 续跑开放轮 · 可粘贴图片/文件，大段文本自动转为附件）"></textarea>
     <button id="stop" onclick="stopTurn()" style="display:none;background:#5a2a33">⏹ 终止本轮</button>
     <button id="send" onclick="send()">发送</button>
   </div>
@@ -2480,10 +2488,88 @@ setInterval(async()=>{
 $('#compose').addEventListener('keydown',e=>{
   if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send()}
 });
+/* ---- 附件（2026-09-17 用户口径）----
+   粘贴/拖入的图片、文件，以及**大段文本**：不按用户消息原文进上下文，而是先落盘
+   到工作区 attachments/，用户消息里只留一行引用【附件】path=…；内容由装配期展开
+   注入，模型读到用户消息时内容就在眼前，不必再调一次 read_file。
+
+   大段粘贴为什么要转文件：用户输入是全量保留的，一次粘贴几万行日志会把此后每轮
+   装配的原文撑大，而这类内容本来的去处就是文件（还能被 read_file/edit_file 继续用）。
+   阈值以下的短粘贴照常按原文走——那才是"用户说的话"。
+   ---- */
+const PASTE_FILE_CHARS=1500;
+let ATTACH=[];
+function attName(text){
+  const s=text.trim();
+  if(/^[{\[]/.test(s)){try{JSON.parse(s);return 'pasted.json'}catch(e){}}
+  if(/^\s*<(!DOCTYPE|html|\?xml)/i.test(s))return 'pasted.html';
+  if(/^\s*(def |class |import |from .+ import )/m.test(s))return 'pasted.py';
+  if(/^\s*(SELECT|INSERT|CREATE TABLE|UPDATE)\b/im.test(s))return 'pasted.sql';
+  if(/\bfunction\b|\bconst\s+\w+\s*=|=>\s*\{/.test(s))return 'pasted.js';
+  return 'pasted.txt';
+}
+function addAttachText(text){
+  if(!String(text||'').trim())return;
+  const body=String(text);
+  ATTACH.push({name:attName(body),text:body,lines:body.split('\n').length});
+  renderAttach();
+}
+function addAttachFile(file){
+  const r=new FileReader();
+  r.onload=()=>{
+    ATTACH.push({name:file.name||'pasted.bin',dataURL:String(r.result),size:file.size||0});
+    renderAttach();
+  };
+  r.readAsDataURL(file);
+}
+function renderAttach(){
+  const bar=$('#attachbar');if(!bar)return;
+  bar.classList.toggle('show',ATTACH.length>0);
+  bar.innerHTML=ATTACH.map((a,i)=>{
+    const info=a.text!=null?`${a.lines} 行`:`${fmtBytes(a.size)}`;
+    return `<span class="att">📎 ${esc(a.name)} <span class="sz">${info}</span><span class="x" data-i="${i}" title="移除">✕</span></span>`;
+  }).join('');
+  bar.querySelectorAll('.x').forEach(el=>el.addEventListener('click',()=>{
+    ATTACH.splice(+el.dataset.i,1);renderAttach();
+  }));
+}
+async function flushAttach(){
+  const rows=ATTACH.slice();ATTACH=[];renderAttach();
+  const out=[];
+  for(const a of rows){
+    try{
+      const r=await fetch(`/api/sessions/${CUR}/attach`,{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(a.text!=null?{name:a.name,text:a.text}:{name:a.name,data_url:a.dataURL})});
+      const j=await r.json();
+      out.push(j.marker||`（附件 ${a.name} 未上传：${j.error||'未知原因'}）`);
+    }catch(e){out.push(`（附件 ${a.name} 未上传：${e.message}）`)}
+  }
+  return out;
+}
+function bindAttach(){
+  const box=$('#compose');if(!box)return;
+  box.addEventListener('paste',ev=>{
+    const dt=ev.clipboardData;if(!dt)return;
+    const files=[].slice.call(dt.files||[]);
+    if(files.length){ev.preventDefault();files.forEach(addAttachFile);return}
+    const text=dt.getData('text/plain')||'';
+    if(text.length>=PASTE_FILE_CHARS){ev.preventDefault();addAttachText(text)}
+  });
+  box.addEventListener('dragover',ev=>ev.preventDefault());
+  box.addEventListener('drop',ev=>{
+    const dt=ev.dataTransfer;if(!dt)return;
+    const files=[].slice.call(dt.files||[]);
+    if(!files.length)return;
+    ev.preventDefault();files.forEach(addAttachFile);
+  });
+}
+bindAttach();
+
 async function send(){
   const box=$('#compose');
   const t=box.value.trim();
-  if(!t||!CUR)return;
+  if((!t&&!ATTACH.length)||!CUR)return;
   box.value='';
   let url=`/api/sessions/${CUR}/turn`,body={content:t},resume=false;
   const prefix=String.fromCharCode(92);   // 反斜杠（源码零字面反斜杠）
@@ -2507,10 +2593,18 @@ async function send(){
   }
   $('#send').disabled=true;
   const c=$('#content');
+  // 带附件时不能走"/c 续跑"（那条路不注入新消息，附件会白上传）——本轮按新消息发
+  if(resume&&ATTACH.length){url=`/api/sessions/${CUR}/turn`;body={content:t};resume=false}
+  // 附件先上传换引用行，再拼进用户消息（原文里不放大段内容——由装配期展开注入）
+  const markers=await flushAttach();
+  if(markers.length){
+    body={...body,content:[body.content,markers.join('\n')].filter(Boolean).join('\n\n')};
+  }
   if(!resume){
+    const att=markers.length?`<div class="sysline">📎 附件 ${markers.length} 个（已落盘，内容直接送入本轮）</div>`:'';
     c.insertAdjacentHTML('beforeend',
       `<div class="crow user" id="pend-u"><div class="avatar" style="background:linear-gradient(135deg,#5a6fd6,#3d4f8f)">你</div>
-       <div class="ccol"><div class="cname">你</div><div class="bub">${esc(t)}</div></div></div>
+       <div class="ccol"><div class="cname">你</div><div class="bub">${esc(t)}</div></div></div>${att}
        <div class="sysline" id="pend-run">⏳ 轮执行中…（完成后此屏自动更新）</div>`);
   }
   // 起轮与收尾走共用路径（startTurn）——续跑按钮（开放轮条）与 /c 完全同一条服务端接口

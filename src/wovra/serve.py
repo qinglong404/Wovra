@@ -1790,6 +1790,9 @@ class _Handler(BaseHTTPRequestHandler):
             threading.Timer(0.3, lambda: (self.server.shutdown(),
                                           self.server.server_close())).start()
             return self._json({"ok": True})
+        m = re.fullmatch(r"/api/sessions/([^/]+)/attach", path)
+        if m:
+            return self._save_attachment(m.group(1), body)
         m = re.fullmatch(r"/api/sessions/([^/]+)/turn", path)
         if m:
             return self._start_turn(m.group(1), str(body.get("content") or ""))
@@ -1945,6 +1948,37 @@ class _Handler(BaseHTTPRequestHandler):
         """删除会话目录；有运行中作业或 CLI 持锁时拒绝。"""
         code, payload = self._try_delete(task_id)
         self._json(payload, code)
+
+    def _save_attachment(self, task_id: str, body: dict) -> None:
+        """用户粘贴/上传的附件落盘到工作区 `attachments/`，返回引用行。
+
+        原文不进 task.json（会话存档已 MB 级）：前端拿到 `marker` 后拼进用户
+        消息，内容由装配期展开注入。落盘目录必须在工作区内——工具与装配
+        都按工作区相对路径找它。
+        """
+        try:
+            task = task_module.Task.load(task_id)
+        except (OSError, ValueError, json.JSONDecodeError):
+            return self._json({"error": "session not found"}, 404)
+        workspace = str(task.workspace or "")
+        if not workspace:
+            return self._json(
+                {"error": "本会话没有工作目录，无法接收附件（先设工作目录）"}, 400)
+        from . import attachments as attachments_module
+        from .tools import safety as _safety
+        _safety.bind_workspace(workspace)
+        name = str(body.get("name") or "pasted.txt")
+        try:
+            if body.get("data_url"):
+                rel = attachments_module.save_data_url(str(body["data_url"]), name)
+            elif body.get("text") is not None:
+                rel = attachments_module.save_text(str(body["text"]), name)
+            else:
+                return self._json({"error": "text 或 data_url 必填"}, 400)
+        except (OSError, ValueError) as error:
+            return self._json({"error": f"附件落盘失败：{error}"}, 500)
+        return self._json({"ok": True, "path": rel,
+                           "marker": attachments_module.marker(rel)})
 
     def _start_turn(self, task_id: str, content: str) -> None:
         """追加一轮对话：三道互斥（进程内单飞 / CLI 会话锁 / 任务级去重）。"""

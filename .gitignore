@@ -90,3 +90,8 @@ docs/讨论v2.md
 webui/vr*.png
 tasks/**/task.json.bak-*
 *.bak-agentids-*
+
+# 用户粘贴/上传的附件（2026-09-17：前端把大段粘贴与文件转成附件落盘在工作区，
+# 工作区就是本仓库时不该弄脏 git status）。名字带前缀，避免与项目自有的
+# attachments/ 之类目录撞名。
+wovra-attachments/
