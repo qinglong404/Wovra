@@ -44,6 +44,14 @@ _INSTRUCTION = """[分裂指令]
    写满三件：①干什么 + 产出什么（点出关键文件）；②边界——什么不归我；③什么信号落到我这里。
 3. 树要**覆盖全部活性文件**：每个文件都得能被某个节点的路径匹配到，别漏。
 4. **不要管用户发言、环境准备、闲聊、临时脚本**——只按文件本身的组织结构分。
+5. **什么时候不该单独成域**（2026-09-17 用户口径：`output/gaia/FINDINGS.md` 被单列成域是
+   "过分分裂"）——判据是"**这个域能不能独立接活**"，不是"这个文件在不在单独的目录里"：
+   * `docs/`、`output/` 这类**目录名不是职责**；
+   * 一个文件的**产出工作属于谁，它就归谁**：写 `output/gaia/FINDINGS.md` 要读 GAIA 的全部
+     内容、是跑完评测后的汇总 → 它属于 GAIA 那个域，**不要单独成域**；反过来，
+     `docs/prompt-review-*.md` 是由**另一条线**独立产出的，才单独成域。
+   * 自查一句：**这个域要干活时，是不是得频繁去读别的域的文件、或频繁问别的域？** 是 → 别拆。
+   * **顶层域一般是"一个有产出的工作线"，不是一个文件**；把产出与它所服务的工作放在一起。
 
 完成后调用 submit_live_tree 提交（唯一出口，不要在正文输出 JSON）。"""
 
@@ -186,6 +194,33 @@ def main() -> int:
     print("\n=== 代码机械绑定（最深的 path 前缀）===")
     for name, group in sorted(owners.items()):
         print(f"  {name}（{len(group)}）：{'、'.join(group[:6])}")
+    # 耦合检查（零 LLM）：同一轮里一起被碰过的文件，是"同一域"的证据——
+    # 单文件顶层域若与别的域共享轮次，就是过度分裂（本场 output/gaia/FINDINGS.md 即此例）。
+    touched: dict[int, set] = {}
+    for r in task.rounds or []:
+        paths = set()
+        for b in blocks_module.segment_round_by_file(r):
+            if b.get("kind") == "file" and b.get("file"):
+                paths.add(str(b["file"]))
+        if paths:
+            touched[int(r["seq"])] = paths
+    print("\n=== 耦合检查（同一轮共现 → 疑似同一域）===")
+    names = [n for n in owners if n != "（没人认领）"]
+    bad = 0
+    for i, left in enumerate(names):
+        for right in names[i + 1:]:
+            both = [seq for seq, paths in touched.items()
+                    if set(owners[left]) & paths and set(owners[right]) & paths]
+            if both:
+                bad += 1
+                print(f"  ⚠ 「{left}」与「{right}」在 {'、'.join('R%d' % x for x in both)}"
+                      f" 里被一起碰过 → 疑似应合并成一个域")
+    if not bad:
+        print("  ✓ 各域的文件没有跨域共现")
+    single = [n for n in names if len(owners[n]) == 1]
+    if single:
+        print(f"  单文件域（核对独立性）：{'、'.join(single)}")
+
     missing = owners.get("（没人认领）") or []
     print(f"\n覆盖率：{len(files) - len(missing)}/{len(files)}"
           + (f"　⚠ 未认领 {len(missing)} 个：{'、'.join(missing[:6])}" if missing else "　✓"))
