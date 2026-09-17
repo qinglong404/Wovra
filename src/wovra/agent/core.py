@@ -34,6 +34,7 @@ from .support import (
     _NOTE_TIMEOUT_DEFAULT,
     _FOLD_KEEP_ROUNDS_DEFAULT,
     _FOLD_TARGET_DEFAULT,
+    v4_enabled,
     _ORG_MAINT_TIMEOUT_DEFAULT,
     _ORG_WATERMARK_DEFAULT,
     _READ_ONLY_TOOLS,
@@ -747,6 +748,10 @@ class _CoreMixin:
         路由可走，注入纯属噪声（还会白占一段前缀）。分裂之后才注入。
         """
         if self.task is None or self.current_round is None:
+            return False
+        if v4_enabled():
+            # V4：这份地图（追加进历史那条）与"段落 ＋ 尾部职责表"重复，且它一变就是
+            # 一次历史追加（前缀变化）——停用。
             return False
         subs = [e for e in (self.task.registry or [])
                 if isinstance(e, dict) and e.get("name")

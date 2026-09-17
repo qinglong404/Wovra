@@ -72,6 +72,10 @@ class _AssemblyMixin:
         不更新 `last_context_estimate`：水位触发判定继续用"本轮真实装配体量"，
         维护输入口径不参与水位判定（两个口径不可混用，见 worklog §44.3-6）。
         """
+        if v4_enabled():
+            # 视图分化关掉之后，`_assemble_messages()` 与 force_full 版本**字节等价**
+            # （同一段代码、同一个分支）——合并成"算一次、两处用"，省一次装配（纯 CPU）。
+            return self._assemble_messages()
         return self._assemble_messages_impl(force_full=True)
 
     def _assemble_messages_impl(self, *, force_full: bool = False) -> list[dict]:
@@ -215,7 +219,9 @@ class _AssemblyMixin:
         block = []
         if state_render:
             block.append(state_render)
-        file_map = self._file_map_lines(organized_rounds)
+        # V4：不注入文件地图——它要回答的"有哪些文件、碰过几次"已由"段落 ＋ 检索窗口
+        # ＋ 尾部职责表（按域列文件）"覆盖，而它随文件变动会作废信封（180~1,000 tok/次）。
+        file_map = [] if v4_enabled() else self._file_map_lines(organized_rounds)
         if file_map:
             block.append(
                 "[历史涉及文件]（这些轮次的原文已整理收纳，修改前先 read_file "
