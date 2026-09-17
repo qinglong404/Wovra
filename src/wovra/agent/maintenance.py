@@ -26,6 +26,7 @@ from .support import (
     _COMPRESS_THRESHOLD,
     _FOLD_KEEP_ROUNDS_DEFAULT,
     _FOLD_TARGET_DEFAULT,
+    _NOTE_BATCH_MAX_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _clip_quote,
     maint_tools,
@@ -44,7 +45,7 @@ _ORG_SUBMIT_TOOL = "submit_organization"
 
 _SPLIT_SUBMIT_TOOL = "submit_domains"
 
-_ROUND_NOTE_SUBMIT = "submit_round_note"
+_ROUND_NOTE_SUBMIT = "submit_round_notes"
 
 
 
@@ -326,8 +327,10 @@ class _MaintenanceMixin:
             # R7/R8 闭合被连挡，压缩迟迟不开始）。
             return  # 两次维护之间至少安静 _org_cooldown 轮，防高频
         if v4_enabled():
-            # V4：叙事已由每轮一段话承担（``_settle_round_note``），水位只驱动
-            # **结构树**——不再跑整理那一路（org 那套成为历史）。
+            # V4：写＝水位处**攒批结算**（一批轮一次调用，§6.1），水位只驱动这两件事
+            # ＋ 结构树——不再跑整理那一路（org 那套成为历史）。换档在同一次轮闭合里
+            # 由 `close_round` 的 `_advance_fold_line` 接手，读的就是刚写下的产物。
+            self._settle_round_notes()
             self._maybe_split_v4()
             return
         unorganized = self._unorganized_rounds()
@@ -392,6 +395,13 @@ class _MaintenanceMixin:
             # 故不复制一份条件，直接委托——两处口径不可能再走岔。
             self._maybe_organize_batch()
             return
+        if v4_enabled():
+            # V4 收尾：绕开水位闸门，把还没结算的轮一次补齐 ＋ 补一次分裂分析。
+            # 仍走追加式调用（不动历史字节、不断前缀）。
+            self._settle_round_notes()
+            self._maybe_split_v4()
+            self._settle_after_maintenance()
+            return
         try:
             while True:
                 unorganized = self._unorganized_rounds()
@@ -442,33 +452,71 @@ class _MaintenanceMixin:
         )
 
     def _note_failed(self, round_: dict, why: str) -> None:
-        """结算失败：只留痕，不重发、不跨轮、不动历史字节（§155）。"""
+        """结算失败：只留痕，不重发、不跨轮、不动历史字节（§155）。
+
+        产物没落地的那一轮**不折档**（原文继续顶着），下一批结算自然再收它一次
+        ——它从没进过上下文，所以后来的覆盖不算"改写已读内容"（§6.3）。
+        """
         round_["note_state"] = "failed"
         if self.task is not None:
             self.task.record("note", f"R{round_.get('seq')} 结算失败：{why}（不重发，原文继续顶着）")
 
-    def _settle_round_note(self, round_: dict) -> None:
-        """轮闭合处的**同步**结算：产出"本轮的一段话"（一句话 ＋ 失败 ＋ 账本增量）。
+    def _note_pending_rounds(self) -> list[dict]:
+        """已闭合、还没有产物的轮（结算批次候选，按轮号正序）。
 
-        形态：**尾部追加调用**——装配快照（与工作调用同一序列）＋ 尾部结算指令，
-        tools 数组与工作调用同一序列化（骑满前缀缓存，实测只付"指令＋产物"）。
-        **不改装配、不改归因**：产物只落 `round["note"]` 与账本，装配仍走整理链路。
+        `failed` 也收——它从没进过上下文（只在留痕里），下一批再收它一次
+        不构成"改写已读内容"（§6.3）。
+        """
+        return [
+            r for r in self.rounds
+            if str(r.get("end_state")) == "completed"
+            and str(r.get("note_state") or "") != "done"
+            and int(r["seq"]) not in self._org_inflight
+        ]
+
+    def _settle_round_notes(self) -> None:
+        """水位处的**攒批结算**：一批轮一次调用，产出"这批每轮一句话 ＋ 账本增量"。
+
+        节奏（§6.1，2026-09-17 用户口径："攒着一次性整理……比每轮整理省了重复的输入"）：
+        触发沿用同一套水位闸门（由 `_maybe_organize_batch` 判定），到了就**一次给完**
+        ——每批只付一次"重读整段"（`h×C`），逐轮各发一次要付 N 次（实测 N=9 约 3 倍）。
+
+        单批上限 `_note_batch_max` 轮：超了切几次调用（切出来的每次前缀都还在缓存里，
+        只多付尾部与产物）——防单次产出过长顶到超时，让整批反复拿不到产物。
+        """
+        if not self._round_note_enabled():
+            return
+        pending = self._note_pending_rounds()
+        if not pending:
+            return
+        cap = max(1, int(getattr(self, "_note_batch_max", _NOTE_BATCH_MAX_DEFAULT)))
+        for start in range(0, len(pending), cap):
+            self._settle_note_batch(pending[start:start + cap])
+        self._persist_rounds()
+
+    def _settle_note_batch(self, batch: list[dict]) -> None:
+        """一批（≤上限轮）一次调用：装配快照 ＋ 尾部结算指令 → `submit_round_notes`。
+
+        形态与工作调用同序列化（tools 数组不因结算收窄），前缀缓存骑满，只付
+        "指令 ＋ 锚 ＋ 产物"。**不改装配、不改归因**：产物只落 `round["note"]` 与账本。
 
         纪律（§154/§155）：产物一律落地；校验只留痕；失败不重试、不跨轮、不生成骨架段；
         历史字节一字不动。执行者由**代码**盖章（不让模型自报身份）。
         """
-        if not self._round_note_enabled():
+        if not batch:
             return
-        round_["note_state"] = "pending"
+        for r in batch:
+            r["note_state"] = "pending"
         snapshot = self._maint_snapshot()
         if snapshot is None:
-            self._note_failed(round_, "装配快照不可用（尾部协议不完整）")
+            for r in batch:
+                self._note_failed(r, "装配快照不可用（尾部协议不完整）")
             return
         messages = list(snapshot)
         messages.append({
             "role": "user",
             "content": _ROUND_NOTE_INSTRUCTION + "\n\n[锚]\n"
-                       + "\n".join(note_module.anchor_lines(round_)),
+                       + "\n".join(note_module.batch_anchor_lines(batch)),
         })
         tools = maint_tools(self._schemas, _ROUND_NOTE_SUBMIT)
         box: dict = {}
@@ -486,38 +534,54 @@ class _MaintenanceMixin:
         thread.start()
         thread.join(self._note_timeout)
         if thread.is_alive():
-            self._note_failed(round_, f"结算超时（{self._note_timeout:.0f}s）")
+            for r in batch:
+                self._note_failed(r, f"结算超时（{self._note_timeout:.0f}s）")
             return
         if "error" in box:
-            self._note_failed(round_, f"结算调用异常：{box['error']}")
+            for r in batch:
+                self._note_failed(r, f"结算调用异常：{box['error']}")
             return
         out = box.get("out")
         if not out:
-            self._note_failed(round_, "结算调用没有返回")
+            for r in batch:
+                self._note_failed(r, "结算调用没有返回")
             return
         _content, ordered, _usage = out
-        product, why = note_module.parse_note(ordered, round_)
-        if product is None:
-            self._note_failed(round_, why)
-            return
-        round_["note"] = product
-        round_["note_state"] = "done"
-        # 账本增量：**带来源戳**（谁在哪个轮加的）＋ 按正文去重 ＋ 结案带越界保护
+        products, defects = note_module.parse_notes(ordered, batch)
+        landed: dict[int, dict] = {int(p["seq"]): p for p in products}
+        for seq, product in landed.items():
+            for r in batch:
+                if int(r["seq"]) == seq:
+                    r["note"] = product
+                    r["note_state"] = "done"
+        missing = "；".join(defects) if defects else "产物里没有这一轮"
+        for r in batch:
+            if int(r["seq"]) not in landed:
+                self._note_failed(r, missing)
+        # 账本增量：**整批一次**（谁都能维护）。来源戳写这批的**末轮**——批次就是
+        # 写下它的时刻；同一个戳也让"结案只结更早批次"的越界保护自动成立。
+        last = batch[-1]
         patch, ledger_notes = note_module.build_ledger_patch(
-            product.get("ledger_append") or {}, int(round_.get("seq") or 0),
-            str(product.get("executor") or "Main"),
+            next(iter(landed.values()), {}).get("ledger_append") or {},
+            int(last.get("seq") or 0),
+            str(last.get("active_view") or "Main"),
             {f: (getattr(self.task.get_state(), f) or []) for f in note_module._LEDGER_FIELDS},
         )
         report = self.task.apply_state_patch(patch) if patch else {}
         self._persist_rounds()
         if self.task is None:
             return
-        defects = note_module.soft_defects(product, round_)
-        detail = (f"R{round_.get('seq')} 结算完成：{len(product['sentence'])} 字，"
-                  f"{len(product['failures'])} 条失败"
+        soft: list[str] = []
+        for seq, product in landed.items():
+            for r in batch:
+                if int(r["seq"]) == seq:
+                    soft += [f"R{seq} {x}" for x in note_module.soft_defects(product, r)]
+        detail = (f"{note_module.seq_span([int(r['seq']) for r in batch])} 结算完成："
+                  f"{len(landed)}/{len(batch)} 条，"
+                  f"{sum(len(p['failures']) for p in landed.values())} 条失败"
                   + ("；账本 " + "；".join(ledger_notes) if ledger_notes else "；账本无变化"))
-        if defects:
-            detail += f"；软档 {len(defects)} 条（只留痕）：{'；'.join(defects[:3])}"
+        if soft:
+            detail += f"；软档 {len(soft)} 条（只留痕）：{'；'.join(soft[:3])}"
         self.task.record("note", detail)
         closed = (report or {}).get("closed") or []
         if closed:

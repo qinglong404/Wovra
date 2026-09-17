@@ -345,42 +345,57 @@ _ORG_TAG_INSTRUCTIONS = (
 _ROUND_NOTE_SCHEMA: dict = {
     "type": "function",
     "function": {
-        "name": "submit_round_note",
+        "name": "submit_round_notes",
         "description": (
-            "提交本轮的一段话（每轮一条）。仅限轮闭合时的结算调用；"
+            "提交这批**每一轮**的一段话 ＋ 账本增量。仅限水位处的结算调用；"
             "工作对话中调用无效，只返回说明文本。"
         ),
         "parameters": {
             "type": "object",
             "properties": {
-                "seq": {"type": "integer", "description": "轮次号，等于本轮"},
-                "sentence": {
-                    "type": "string",
-                    "description": (
-                        "一句话：这轮做了什么、结论是什么。关键数字（行数/条数/次数）、"
-                        "文件路径、命令名原样保留；不复述用户输入"
-                    ),
-                },
-                "failures": {
+                "notes": {
                     "type": "array",
                     "description": (
-                        "失败与坑：非零退出/越界拦截/路径不存在/方案被推翻。没有就给空数组"
+                        "与锚里的轮**一一对应**，一个不落、顺序一致（每条 seq 写它自己的轮号）"
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "text": {"type": "string"},
-                            "evidence": {
+                            "seq": {"type": "integer", "description": "轮次号"},
+                            "sentence": {
                                 "type": "string",
-                                "description": "证据事件 ID（如 R2-E174），取自失败候选；没有留空",
+                                "description": (
+                                    "一句话：这一轮做了什么、结论是什么。关键数字（行数/条数/"
+                                    "次数）、文件路径、命令名原样保留；不复述用户输入"
+                                ),
+                            },
+                            "failures": {
+                                "type": "array",
+                                "description": (
+                                    "失败与坑：非零退出/越界拦截/路径不存在/方案被推翻。"
+                                    "没有就给空数组"
+                                ),
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "text": {"type": "string"},
+                                        "evidence": {
+                                            "type": "string",
+                                            "description": (
+                                                "证据事件 ID（如 R2-E174），取自失败候选；没有留空"
+                                            ),
+                                        },
+                                    },
+                                    "required": ["text"],
+                                },
                             },
                         },
-                        "required": ["text"],
+                        "required": ["seq", "sentence", "failures"],
                     },
                 },
                 "ledger_append": {
                     "type": "object",
-                    "description": "本轮新增的账本条目（只增不减；已有的不要重复写）",
+                    "description": "这批新增的账本条目（整批写一次；只增不减，已有的不要重复写）",
                     "properties": {
                         "constraints": {"type": "array", "items": {"type": "string"}},
                         "decisions": {"type": "array", "items": {"type": "string"}},
@@ -391,7 +406,7 @@ _ROUND_NOTE_SCHEMA: dict = {
                             "description": (
                                 "结案：把**已经过时**的旧条目移出账本。每条给 field 与 match"
                                 "（该条里的一小段原文，20-40 字，须在账本里唯一）。"
-                                "只能结**更早轮次**留下的条目"
+                                "只能结**更早批次**留下的条目"
                             ),
                             "items": {
                                 "type": "object",
@@ -405,22 +420,23 @@ _ROUND_NOTE_SCHEMA: dict = {
                     },
                 },
             },
-            "required": ["seq", "sentence", "failures"],
+            "required": ["notes", "ledger_append"],
         },
     },
 }
 
 _ROUND_NOTE_INSTRUCTION = (
     "[结算指令]\n"
-    "上面的锚是本轮的机械事实（用户发言、工具与文件、失败候选、结论草稿）。"
-    "请只写**本轮**的一段话：不重写、不复述、不合并别的轮。\n"
-    "1. 一句话：这轮做了什么、结论是什么；关键数字与路径原样保留。\n"
-    "2. 失败与坑：以失败候选为底逐条核对（同类可合并），候选里没有但你知道的照样写；"
+    "锚里逐轮列出这批的机械事实（用户发言、工具与文件、失败候选、结论草稿）。"
+    "请给锚里的**每一轮**各写一段话，一个不落、与轮号一一对应。\n"
+    "1. 一句话：这一轮做了什么、结论是什么；关键数字与路径原样保留。**只写这一轮锚里的事**，"
+    "其余不用你写（用户原话与文件清单由代码补）。\n"
+    "2. 失败与坑：每轮以失败候选为底逐条核对（同类可合并），候选里没有但你知道的照样写；"
     "没有就给空数组。尽量带 evidence（候选〔〕里的事件 ID）。\n"
-    "3. 账本增量：只写新增条目；标量（现状/目标）不用你写。**账本谁都能维护**——"
+    "3. 账本增量：整批写一次，只写新增条目；标量（现状/目标）不用你写。**账本谁都能维护**——"
     "过时的旧条目用 ledger_append.closed 结案（field ＋ 该条里一小段唯一原文），"
-    "只能结更早轮次留下的。\n"
-    "完成后调用 submit_round_note 提交（唯一出口）。"
+    "只能结更早批次留下的。\n"
+    "完成后调用 submit_round_notes 提交（唯一出口）。"
 )
 
 _ORG_DOMAINS_SCHEMA: dict = {

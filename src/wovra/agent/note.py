@@ -1,7 +1,8 @@
 """每轮一段话：锚（机械材料）、解析与校验（V4 §3.2，第一步）。
 
-这一步只做"写"：轮闭合时同步产出一条**每轮一段话**（一句话 ＋ 失败 ＋ 账本增量）。
-**不改装配、不改归因**——产物先只落盘与进账本，装配仍走原来的整理链路。
+这一步只做"写"：**水位处攒批**，一批轮一次调用，产出这批每轮一条
+**每轮一段话**（一句话 ＋ 失败 ＋ 账本增量）。**不改装配、不改归因**——
+产物先只落盘与进账本，装配只在折档那一刻读它。
 
 分工（§3.2）：
 * **代码给锚**：轮内用户发言、动作清单（工具×次数、读写删过的文件、非零退出）、失败候选
@@ -9,7 +10,7 @@
 * **模型写一句话**：只写这一轮自己那份交班记录；
 * **代码盖章**：执行者（该轮 `active_view`，不让模型自报身份）。
 
-校验分两档（§154/§155）：**硬门只剩结构**（有产物 / seq 对得上 / 句子非空），
+校验分两档（§154/§155）：**硬门只剩结构**（有产物 / seq 落在批次里 / 句子非空），
 **内容正确性一律软档**（只留痕）；**产物一律落地**，失败只留痕、不重发、不跨轮。
 """
 from __future__ import annotations
@@ -19,6 +20,9 @@ import re
 
 from .. import blocks as blocks_module
 from .. import tokens as tokens_module
+
+# 结算的提交出口（模型侧工具名；守卫在 ledger.py）
+_SUBMIT_TOOL = "submit_round_notes"
 
 # 只扫"执行/抓取/检索"类工具的返回：读类工具的正文里"不存在/占位"全是假阳性，
 # 但**拦截/报错**必须留（越界拦截就发生在读类工具上）。
@@ -160,43 +164,85 @@ def anchor_lines(round_: dict) -> list[str]:
     return lines
 
 
-def parse_note(ordered: list, round_: dict) -> tuple[dict | None, str]:
-    """从响应里取产物并归一化；返回 (note, 失败原因)。硬门只判结构。"""
+def seq_span(seqs: list[int]) -> str:
+    """轮号区间的人读写法：`R1–R8` / `R1、R3、R5`。"""
+    if not seqs:
+        return "（空批）"
+    if len(seqs) == 1:
+        return f"R{seqs[0]}"
+    if seqs == list(range(seqs[0], seqs[-1] + 1)):
+        return f"R{seqs[0]}–R{seqs[-1]}"
+    return "、".join(f"R{s}" for s in seqs)
+
+
+def batch_anchor_lines(batch: list[dict]) -> list[str]:
+    """一批要写的轮的锚：**逐轮**列出（轮号 ＋ 执行者 ＋ 机械事实）。"""
+    lines = [f"这批 {len(batch)} 轮：{seq_span([int(r.get('seq') or 0) for r in batch])}"]
+    for r in batch:
+        lines.append("")
+        lines += anchor_lines(r)
+    return lines
+
+
+def parse_notes(ordered: list, batch: list[dict]) -> tuple[list[dict], list[str]]:
+    """从响应里取产物并按 seq 对上批次；返回 (产物, 诊断行)。硬门只判结构。
+
+    "条数与轮号一一对应"由条目自己保证：没对上的轮**没有产物**，由调用方按
+    "没有产出"处理（原文继续顶着，下一批再收它）。诊断行只留痕。
+    """
     raw = None
     for call in ordered or []:
-        if str(call.get("name") or "") != "submit_round_note":
+        if str(call.get("name") or "") != _SUBMIT_TOOL:
             continue
         try:
             raw = json.loads(call.get("arguments") or "")
         except (TypeError, ValueError):
-            return None, "产物不是合法 JSON"
+            return [], ["产物不是合法 JSON"]
         break
     if not isinstance(raw, dict):
-        return None, "没有调用 submit_round_note（没有产出）"
-    sentence = str(raw.get("sentence") or "").strip()
-    if not sentence:
-        return None, "句子为空"
-    try:
-        seq = int(raw.get("seq"))
-    except (TypeError, ValueError):
-        return None, "seq 不是整数"
-    if seq != int(round_.get("seq") or 0):
-        return None, f"seq 对不上（产物 R{seq}，本轮 R{round_.get('seq')}）"
-    failures: list[dict] = []
-    for item in raw.get("failures") or []:
-        if isinstance(item, dict):
-            text = str(item.get("text") or "").strip()
-            evidence = str(item.get("evidence") or "").strip()
-        else:
-            text, evidence = str(item).strip(), ""
-        if text:
-            failures.append({"text": text, "evidence": evidence})
+        return [], [f"没有调用 {_SUBMIT_TOOL}（没有产出）"]
+    items = raw.get("notes")
+    if not isinstance(items, list):
+        return [], ["notes 不是数组"]
     ledger = raw.get("ledger_append") if isinstance(raw.get("ledger_append"), dict) else {}
-    return (
-        {"seq": seq, "sentence": sentence, "failures": failures,
-         "ledger_append": ledger, "executor": round_.get("active_view") or "Main"},
-        "",
-    )
+    by_seq = {int(r.get("seq") or 0): r for r in batch}
+    out: list[dict] = []
+    defects: list[str] = []
+    seen: set[int] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            defects.append("有一条产物不是对象")
+            continue
+        try:
+            seq = int(item.get("seq"))
+        except (TypeError, ValueError):
+            defects.append("有条产物的 seq 不是整数")
+            continue
+        round_ = by_seq.get(seq)
+        if round_ is None:
+            defects.append(f"产物里的 R{seq} 不在这批轮里")
+            continue
+        if seq in seen:
+            defects.append(f"R{seq} 有两条产物，取第一条")
+            continue
+        sentence = str(item.get("sentence") or "").strip()
+        if not sentence:
+            defects.append(f"R{seq} 句子为空")
+            continue
+        seen.add(seq)
+        failures: list[dict] = []
+        for entry in item.get("failures") or []:
+            if isinstance(entry, dict):
+                text = str(entry.get("text") or "").strip()
+                evidence = str(entry.get("evidence") or "").strip()
+            else:
+                text, evidence = str(entry).strip(), ""
+            if text:
+                failures.append({"text": text, "evidence": evidence})
+        out.append({"seq": seq, "sentence": sentence, "failures": failures,
+                    "ledger_append": ledger,
+                    "executor": round_.get("active_view") or "Main"})
+    return out, defects
 
 
 # 账本条目的来源戳：`（R14·A）`——谁在哪一轮加的一目了然；去重与匹配都按**去掉戳的正文**比。

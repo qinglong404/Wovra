@@ -1,7 +1,8 @@
 """V4 成品验证：在会话副本上**真跑一轮**，打印这条新链路做了什么。
 
-验的是四件事：① 每轮一段话（结算）；② 换档（水位到了把超龄轮换成段落）；
-③ 分裂按活性文件（只有需要时才跑）；④ 装配里确实是"段落档 ＋ 近期原文"。
+验的是四件事：① 水位处**攒批结算**（一批轮一次调用，未到水位不结算）；② 换档
+（水位到了把超龄轮换成段落）；③ 分裂按活性文件（只有需要时才跑）；④ 装配里确实是
+"段落档 ＋ 近期原文"。
 
 用法（项目根执行）：
 
@@ -27,10 +28,10 @@ ROOT = Path("/tmp/wovra-v4-probe/tasks")
 
 
 def _fresh(args) -> int:
-    """空会话真跑 N 轮：每轮一段话 → 换档 → 装配里出现段落档。"""
+    """空会话真跑 N 轮：到水位攒批结算 → 换档 → 装配里出现段落档。"""
     ROOT.mkdir(parents=True, exist_ok=True)
     task_module.TASKS_ROOT = ROOT
-    task = task_module.Task.create(goal="验证 V4：每轮一段话与换档")
+    task = task_module.Task.create(goal="验证 V4：攒批结算与换档")
     agent = _build_agent(task, mode=MODE_MANAGED, async_organization=False)
     agent._org_watermark = args.watermark
     agent._org_grace = 0
@@ -43,6 +44,10 @@ def _fresh(args) -> int:
         print(f"R{i}: note_state={round_.get('note_state')!r} folded={bool(round_.get('folded'))}"
               f"　一句话：{str((round_.get('note') or {}).get('sentence'))[:80]}")
         print(f"     答：{str(text)[:60]}")
+    notes = [r["seq"] for r in task.rounds if r.get("note_state") == "done"]
+    calls = [h for h in task.history if h.get("kind") == "llm_call"
+             and "[note]" in str(h.get("detail"))]
+    print(f"\n结算调用 {len(calls)} 次，覆盖轮：{notes}（水位 {args.watermark:,}）")
     print("\n--- 装配里各轮的形态 ---")
     for m in agent._assemble_messages()[-6:]:
         body = str(m.get("content") or "").replace("\n", " ")

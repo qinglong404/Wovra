@@ -20,9 +20,11 @@ _DEFAULT_CONTEXT_LIMIT = int(os.environ.get("WOVRA_CONTEXT_LIMIT", "1000000"))
 
 _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 
-_MAINTENANCE_PURPOSES = ("organization", "compaction", "split"
-    "note",
-)
+# 维护性调用的 purpose 集合：这些调用的成本与延迟**不摊给任何一轮**
+# （它们异步/在轮边界跑，混进轮账会漏记或错记）。
+# 2026-09-17 修正：`"split" "note"` 少了个逗号被隐式拼成 `"splitnote"`，
+# 于是分裂与结算的 tok/延迟一直被算进工作轮账（`working=` 里混着结算）。
+_MAINTENANCE_PURPOSES = ("organization", "compaction", "split", "note")
 
 _READ_ONLY_TOOLS = frozenset(
     {"read_file", "search_files", "list_files", "get_current_time",
@@ -35,11 +37,18 @@ _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "
 
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 
-# 每轮一段话的同步结算硬上限（V4 §3.2 第一步；超时按失败处理、只留痕）。
-# 取 180s，与工作调用的读超时同档：结算的输入是**整段装配**，冷前缀（新会话第一轮、
+# 一批结算（水位处攒批，V4 §6.1）的硬上限；超时按失败处理、只留痕。
+# 取 180s，与工作调用的读超时同档：结算的输入是**整段装配**，冷前缀（新会话第一批、
 # 缓存被驱逐）时预填本身可能几十秒。（2026-09-17 那次"60s 超时"的实测原因是
 # 端点 429 触发了 `_stream_call` 的退避重试，不是预填慢——归因更正。）
 _NOTE_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_NOTE_TIMEOUT", "180"))
+
+
+# 一批结算最多写多少轮的产物（V4 §6.1）。超了切几次调用——切出来的每次装配前缀
+# 都还在缓存里，多付的只是尾部与产物。设上限的理由是**产出长度**：一批几十轮的产物
+# 会把单次 completion 拉到上万 tok，撞上超时就是整批拿不到产物（失败后下一批更大 →
+# 更容易再超时）。取 12：实测 9 轮一批的产物约 2K tok。
+_NOTE_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_NOTE_BATCH_MAX", "12"))
 
 
 def v4_enabled() -> bool:

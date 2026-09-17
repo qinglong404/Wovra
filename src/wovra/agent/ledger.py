@@ -22,10 +22,10 @@ _ACTION_ALIASES = {
 
 
 class _LedgerMixin:
-    def submit_round_note(self, **_: object) -> str:
+    def submit_round_notes(self, **_: object) -> str:
         """[守卫] 每轮一段话的提交工具；方法体只在工作对话误调用时跑到。"""
         return (
-            "submit_round_note 仅由轮闭合时的结算调用消费（结算阶段捕获其调用参数，"
+            "submit_round_notes 仅由水位处的结算调用消费（结算阶段捕获其调用参数，"
             "不经过工具执行）。当前处于工作对话，本次调用被忽略，无副作用。"
         )
 

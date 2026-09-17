@@ -31,6 +31,7 @@ from .support import (
     _MAINTENANCE_PURPOSES,
     _ORG_COOLDOWN_ROUNDS_DEFAULT,
     _ORG_GRACE_ROUNDS_DEFAULT,
+    _NOTE_BATCH_MAX_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _FOLD_KEEP_ROUNDS_DEFAULT,
     _FOLD_TARGET_DEFAULT,
@@ -187,8 +188,9 @@ class _CoreMixin:
         self._org_maint_timeout = (
             _ORG_MAINT_TIMEOUT_DEFAULT if org_maint_timeout is None else org_maint_timeout
         )
-        # 每轮一段话的同步结算硬上限（V4 §3.2 第一步；超时按失败处理、只留痕）
+        # 结算（水位处攒批，V4 §6.1）的硬上限与单批轮数上限；超时按失败处理、只留痕
         self._note_timeout = _NOTE_TIMEOUT_DEFAULT
+        self._note_batch_max = _NOTE_BATCH_MAX_DEFAULT
         # 换档后保留原文的最近轮数（§3.8/§3.9 的"近 50 轮"）与折到水位的比例
         self._fold_keep = _FOLD_KEEP_ROUNDS_DEFAULT
         self._fold_target = _FOLD_TARGET_DEFAULT
@@ -269,6 +271,7 @@ class _CoreMixin:
             "organization": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
             "compaction": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
             "split": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
+            "note": {"prompt": 0, "completion": 0, "total": 0, "seconds": 0.0},
         }
         self._maint_lock = threading.Lock()
         self.last_maint: dict = {}
@@ -300,8 +303,8 @@ class _CoreMixin:
         if self.context_mode == MODE_MANAGED:
             self.register(self.expand_history)
             # 每轮一段话的出口（V4 §3.2）：常驻注册，tools 数组恒定；
-            # 工作期误调用由方法体守卫拒绝（见 ledger.submit_round_note）
-            self.register(self.submit_round_note, schema=_ROUND_NOTE_SCHEMA)
+            # 工作期误调用由方法体守卫拒绝（见 ledger.submit_round_notes）
+            self.register(self.submit_round_notes, schema=_ROUND_NOTE_SCHEMA)
             # 整理提交工具常驻：所有请求的 tools 数组恒定（工作对话与整理
             # 调用同序列化），前缀缓存才不会在 tools 区分叉。工作期误调用
             # 由方法体守卫拒绝（见 submit_organization / submit_domains）。
@@ -1175,14 +1178,9 @@ class _CoreMixin:
         self.current_round["blocks"] = blocks_module.segment_round_by_file(
             self.current_round
         )
-        # 每轮一段话：**轮闭合处同步**做完（§3.2 第一步；产物只落盘与账本，
-        # 不改装配、不改归因）。失败只留痕，绝不阻塞闭合。
-        try:
-            self._settle_round_note(self.current_round)
-        except Exception as error:  # noqa: BLE001——结算绝不能拖垮轮闭合
-            self._note_failed(
-                self.current_round, f"结算异常：{type(error).__name__}: {str(error)[:120]}"
-            )
+        # 每轮一段话：**水位处攒批**结算（§6.1）——落在下面的
+        # `_maybe_organize_batch`（V4 分支），不在这里逐轮发。产物只落盘与账本，
+        # 不改装配、不改归因；失败只留痕，绝不阻塞闭合。
         # 阶段锚点回填（§53）：块切分完成才能说清"这次阶段验收落在哪个块"。
         self._backfill_stage_anchors()
         self.current_round = None
@@ -1947,6 +1945,8 @@ class _CoreMixin:
             f"working={grew_purpose('working'):,} "
             f"org={maint['organization']['total']:,} "
             f"compaction={maint['compaction']['total']:,} "
+            f"split={maint['split']['total']:,} "
+            f"note={maint['note']['total']:,} "
             f"prompt={prompt:,} completion={grew('completion_tokens'):,} "
             f"total={grew('total_tokens'):,}（思考 {grew('reasoning_tokens'):,}）"
             f"{cache_info}{ttft_info}{suffix}"
