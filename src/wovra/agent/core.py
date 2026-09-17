@@ -1205,20 +1205,7 @@ class _CoreMixin:
         self.current_round = None
         self._persist_rounds()
         if self.context_mode == MODE_MANAGED and self.task is not None:
-            # **维护出岔子也不能吞掉落账与换档**（2026-09-17 实测）：R8 那次闭合
-            # 之后既没有 usage 行、也没有换档记录，而 R7（可折、96.8K 原文）就
-            # 一直挂在上下文里超水位——闭合尾部的这段是同一件事的三个步骤，
-            # 前一步抛异常会让后两步静默消失。故：异常照记（留痕，看得见），
-            # 换档与落账照走。
-            try:
-                self._maybe_organize_batch()
-            except Exception as error:  # noqa: BLE001——维护失败不吞掉换档与落账
-                if self.task is not None:
-                    self.task.record(
-                        "maintenance",
-                        f"轮闭合处的维护异常：{type(error).__name__}: {str(error)[:150]}"
-                        "（换档与落账继续）",
-                    )
+            self._maybe_organize_batch()
             # 产物即时生效（§50）：同步维护已跑完 → 此刻（无开放轮）落地；
             # 异步维护还没产物 → 空转，由维护线程跑完时自行结算。
             self._settle_after_maintenance()
