@@ -32,12 +32,7 @@ def archived(workspace: Path, rel: str) -> list[Path]:
 
 # 两种归属的措辞（用户口径 2026-09-17：外部改动**不预判对错**——可能是加错一个符号导致的
 # 报错、可能是误删，**也可能是高质量修改**；只陈述事实 + 让人自己判断）
-_ATTRIB = {
-    "tool": "这条改动来自工具写入（某个 agent 改的）",
-    "user": ("**这是用户操作，不是工具写的**——可能是有意的高质量修改，也可能是不小心的"
-             "（例如多加一个符号导致报错、误删了一段）；**不要当成权威版本，也不要当成错误**，"
-             "先看差异再决定：顺着它改、改回去、还是先问一句"),
-}
+_ATTRIB = {"tool": "工具写入", "user": "用户操作"}
 
 
 def notice(workspace: Path, rel: str, lines: int = 14, observed: str = "",
@@ -61,17 +56,15 @@ def notice(workspace: Path, rel: str, lines: int = 14, observed: str = "",
     diff = list(difflib.unified_diff(old, new, n=1, lineterm=""))
     added = sum(1 for x in diff if x.startswith("+") and not x.startswith("+++"))
     removed = sum(1 for x in diff if x.startswith("-") and not x.startswith("---"))
-    head = (f"[文件变更·{'用户操作' if attrib == 'user' else '工具'} ] {rel}（{source}）\n"
-            f"  改动：+{added} −{removed} 行（{len(old)} → {len(new)} 行）\n"
-            f"  {_ATTRIB.get(attrib, _ATTRIB['tool'])}")
+    head = (f"[文件变更·{_ATTRIB.get(attrib, _ATTRIB['tool'])}] {rel}"
+            f"（你的观察版本：{source}）\n"
+            f"  +{added} −{removed} 行（{len(old)} → {len(new)} 行）")
     body = diff[2:2 + lines]                       # 去掉 ---/+++ 两行头
     more = max(0, len(diff) - 2 - lines)
     tail = []
     if more:
         tail.append(f"（还有 {more} 行差异未显示）")
-    if len(versions) > 1:
-        tail.append(f"（该文件共 {len(versions)} 份历史版本，更早的改动可能也影响你手里的内容）")
-    tail.append("（只要改动处就够用，别整文件重读；要全文再 read_file）")
+    tail.append("按差异更新你手里的内容；别整文件重读，要全文再 read_file。")
     return head + "\n" + "\n".join(body) + "\n" + "\n".join(tail)
 
 

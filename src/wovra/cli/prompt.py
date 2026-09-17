@@ -155,7 +155,7 @@ def _system_prompt(mode: str) -> str:
             "② `ids=\"R3-E02\" around=\"关键字\"` 只看该处窗口（可 chars/offset 调）；"
             "③ `ids=\"R3\"` 给该轮的地图（summary 块视图 / truncated 事件索引）。"
             "范围可用 scope 收（`R3-R8` 或 `file:路径`），来源可用 source 收"
-            "（result/assistant/call/user）。**整轮原文不再一次性倒出**。"
+            "（result/assistant/call/user）。"
             "上下文还按**职责域分化**：你只拿到自己名下那份历史，"
             "别人的工作不在你的上下文里。全局职责表在尾部——它是跨 agent 的唯一公共"
             "信息。\n"

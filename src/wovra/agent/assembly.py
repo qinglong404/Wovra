@@ -991,7 +991,7 @@ class _AssemblyMixin:
         ③ `ids` 给轮号 + `level=summary/truncated` → 该轮的块视图 / 事件索引（先看地图）。
         `scope` 限范围：`R3-R8` 或 `file:gaia_bench/runner.py`（只在该文件被读写过的事件里找）；
         `source` 限来源：result（工具结果）/ assistant（模型正文）/ call（工具调用）/ user（用户发言）。
-        `level=full` 对**事件/块**仍给原文；**轮级整轮展开已退役**（改用 ①② 精确取）。
+        `level=full` 只对**事件/块**给原文。
         """
         text = (ids or "").strip() if isinstance(ids, str) else ",".join(ids)
         level = (level or "summary").strip().lower()
@@ -999,7 +999,7 @@ class _AssemblyMixin:
             return self._history_find(pattern, scope, source, offset, chars)
         if not text:
             return ("[历史] 用法：pattern=\"正则\" 检索；ids=\"R3-E05\" around=\"关键字\" 看窗口；"
-                    "ids=\"R3\" level=summary 看该轮地图。整轮原文不再一次性倒出。")
+                    "ids=\"R3\" level=summary 看该轮地图。")
         if level not in ("truncated", "summary", "full"):
             return f"未知级别: {level}，可选 truncated / summary / full"
         id_list = [x.strip() for x in text.split(",") if x.strip()]
@@ -1091,8 +1091,7 @@ class _AssemblyMixin:
                 + (f"　来源={wanted}" if wanted else "")
                 + f"　命中 {len(hits)} 处")
         if not hits:
-            out = head + ("\n（无匹配。**这不等于「历史里没有这回事」**——换个词、放宽正则，"
-                          "或去掉 scope/source 再试一次。）")
+            out = head + "\n（无匹配。换词、放宽正则，或去掉 scope/source 再试一次。）"
             self._note_expand("find", f"/{pattern}/", 0, out)
             return out
         window = int(chars or self._HISTORY_SNIPPET)
@@ -1189,7 +1188,7 @@ class _AssemblyMixin:
                 len(x) for e in r["events"] for _s, x in self._event_parts(e)
             )
             return (
-                f"[R{seq}] **整轮展开已退役**（本轮 {len(r['events'])} 个事件 / {total:,} 字符）。"
+                f"[R{seq}] 本轮 {len(r['events'])} 个事件 / {total:,} 字符。"
                 f"\n取细节：expand_history(pattern=\"关键词\", scope=\"R{seq}\") 检索；"
                 f"或 expand_history(ids=\"R{seq}-E05\", around=\"关键词\") 看某处窗口；"
                 f"\n先看地图：expand_history(ids=\"R{seq}\", level=summary)。"

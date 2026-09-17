@@ -485,7 +485,7 @@ def test_expand_round_summary_shows_block_view():
     assert "R1-B1: 创建 a.txt：测试写入" in out
     # 轮级 full 已退役（2026-09-17）：只给指引与检索入口，不整轮倒出
     full = agent.expand_history("R1", level="full")
-    assert "整轮展开已退役" in full and "pattern=" in full
+    assert "个事件" in full and "pattern=" in full
     assert "写文件" not in full
 
 
@@ -526,7 +526,7 @@ def test_expand_merged_group_anchor_expands_all_members():
     agent.rounds = [r1, r2]
 
     out = agent.expand_history("R1-2", level="full")     # 轮级 full 退役：逐轮给指引
-    assert out.count("整轮展开已退役") == 2
+    assert out.count("个事件") == 2
     out_summary = agent.expand_history("R1-2", level="summary")
     assert "甲问题" in out_summary and "乙问题" in out_summary
 
@@ -546,7 +546,7 @@ def test_expand_levels_are_distinct_for_organized_round():
     assert "块视图" not in trunc and "[R1-E01]" in trunc      # 最粗：索引行
     assert "块视图" in summ and "创建 a.txt" in summ          # 中：块视图
     # 轮级 full 退役（2026-09-17）：不整轮倒出，只给检索/窗口入口
-    assert "整轮展开已退役" in full and "写好了" not in full
+    assert "个事件" in full and "写好了" not in full
     # 三档内容互不相同
     assert len({trunc, summ, full}) == 3
 
@@ -732,10 +732,10 @@ def _history_agent(rounds: list) -> Agent:
 
 
 def test_expand_round_full_retired_gives_pointers_only():
-    """轮级 full 退役：给事件数/体量与检索入口，不把原文倒出来。"""
+    """轮级 full：只给事件数/体量与检索入口，不把原文倒出来。"""
     agent = _history_agent([_round_with_tools(1, "跑测试", "跑完了", "断言失败：越界拦截")])
     out = agent.expand_history("R1", level="full")
-    assert "整轮展开已退役" in out and "4 个事件" in out
+    assert "个事件" in out and "pattern=" in out
     assert "断言失败" not in out
     assert "pattern=" in out and "level=summary" in out
 
@@ -796,11 +796,11 @@ def test_history_show_returns_window_and_continue_hint():
     assert "没有" in missing and "pattern" in missing
 
 
-def test_history_find_zero_hits_warns_not_absence():
-    """0 命中必须说清"不等于历史里没有"，防"网上没资料"式的错误结论。"""
+def test_history_find_zero_hits_gives_next_step():
+    """0 命中给"下一步怎么做"（换词/放宽正则/去 scope），不解释、不断言历史里没有。"""
     agent = _history_agent([_round_with_tools(1, "问", "答", "结果")])
     out = agent.expand_history(pattern="绝不存在的词")
-    assert "命中 0 处" in out and "不等于" in out
+    assert "命中 0 处" in out and "换词" in out
 
 
 def test_history_records_usage_for_later_tuning():

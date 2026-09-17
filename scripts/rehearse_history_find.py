@@ -67,7 +67,7 @@ def find(rounds: list[dict], pattern: str, limit: int = 5, window: int = 120,
     head = (f"[历史检索] pattern=/{pattern}/  范围={'R%d–R%d' % (lo, hi) if scope else '全部轮'}"
             f"  命中 {len(hits)} 处（{len({h[1] for h in hits})} 个事件）")
     if not hits:
-        return head + "\n（无匹配。**这不等于'历史里没有这回事'**——换个词或放宽正则再试一次。）"
+        return head + "\n（无匹配。换词或放宽正则再试一次。）"
     lines = [head]
     for i, (seq, eid, etype, idx) in enumerate(hits[:limit], 1):
         e = next(e for r in rounds if int(r["seq"]) == seq for e in r["events"] if e["id"] == eid)
