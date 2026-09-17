@@ -516,20 +516,23 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
 # 重新 read_file，防止模型按过期的上下文内容覆盖用户的新修改。
 # 本进程从未观察过的文件无从判断，保持原行为（write_file 有完整留底）。
 
-_file_registry: dict[Path, tuple[int, int]] = {}
+# 键是 **(agent, path)**：V4 分流后同一进程里多个 agent 各自观察（进程级全局那份会让
+# B 的写入刷新 A 的记录 → A 的过期写入检测漏报，2026-09-17 修）。
+_file_registry: dict[tuple[str, Path], tuple[int, int]] = {}
 
 
 def _observe_file(path: Path) -> None:
+    key = (safety.current_agent(), path)
     try:
         st = path.stat()
-        _file_registry[path] = (st.st_mtime_ns, st.st_size)
+        _file_registry[key] = (st.st_mtime_ns, st.st_size)
     except OSError:
-        _file_registry.pop(path, None)
+        _file_registry.pop(key, None)
 
 
 def _stale_error(path: Path) -> str | None:
-    """文件在观察后被外部修改 → 返回拒绝原因；否则 None。"""
-    observed = _file_registry.get(path)
+    """文件在观察后被外部修改 → 返回拒绝原因；否则 None（**按当前 agent 的记录判**）。"""
+    observed = _file_registry.get((safety.current_agent(), path))
     if observed is None:
         return None
     try:
@@ -662,7 +665,7 @@ def delete_file(path: str) -> str:
         dangling = not target.exists()
         _archive_version(target) if not dangling else None
         target.unlink()  # unlink 作用于链接名本身，不触碰目标
-        _file_registry.pop(target, None)
+        _file_registry.pop((safety.current_agent(), target), None)
         safety._audit(f"[delete_file] {path} → {link_to}（仅删链接）")
         # 文案避开"不存在"——lifecycle/blocks 用子串判定操作失败
         # （读/删"没真发生"才是失败）。删悬空链接是**成功**的删除，
@@ -678,7 +681,7 @@ def delete_file(path: str) -> str:
         return "用户拒绝了删除操作。请换一种做法或向用户说明原因。"
     _archive_version(target)
     target.unlink()
-    _file_registry.pop(target, None)
+    _file_registry.pop((safety.current_agent(), target), None)
     safety._audit(f"[delete_file] {path}")
     return f"已删除 {path}（删除前内容已归档，restore_file 可回滚）"
 
@@ -723,13 +726,13 @@ def move_file(path: str, new_path: str) -> str:
         # 悬空链接：可以移动（移动的是链接名），但要说清
         dst.parent.mkdir(parents=True, exist_ok=True)
         src.rename(dst)
-        _file_registry.pop(src, None)
+        _file_registry.pop((safety.current_agent(), src), None)
         safety._audit(f"[move_file] {path} → {new_path}（悬空链接）")
         # 同样避开"不存在"：移动悬空链接是成功的（见 delete_file 注释）
         return f"已移动悬空符号链接 {path} → {new_path}（该链接原本已失效）"
     dst.parent.mkdir(parents=True, exist_ok=True)
     src.rename(dst)
-    _file_registry.pop(src, None)
+    _file_registry.pop((safety.current_agent(), src), None)
     _observe_file(dst)
     safety._audit(f"[move_file] {path} → {new_path}")
     return f"已移动 {path} → {new_path}"

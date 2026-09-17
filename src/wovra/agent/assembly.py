@@ -3,6 +3,7 @@ expand_history（检索/看窗口/看地图）、紧急折叠。
 """
 import json
 import re
+from pathlib import Path
 from typing import Optional
 from .. import blocks as blocks_module
 from .. import lifecycle as lifecycle_module
@@ -11,8 +12,10 @@ from .. import tokens as tokens
 from .. import truncate as truncate
 from .. import views as views_module
 from .. import attachments as attachments_module
+from .. import observed as observed_module
 from ..task import _MODEL_SIDE_SECTIONS
 from ..tools import eyes as eyes_module
+from ..tools import safety as tools_module
 from . import note as note_module
 from .support import (
     MODE_BASELINE,
@@ -237,6 +240,7 @@ class _AssemblyMixin:
         # 当前轮与上一已整理轮之间的同一处补缝（检查点把 tool_call 留在
         # 上轮、结果落在本轮开头的形态）
         cur_msgs = self._current_round_messages()
+        cur_msgs = self._with_file_change_notice(cur_msgs)
         if (prev_was_compact and cur_msgs
                 and cur_msgs[0].get("role") == "tool"):
             if prev_compact_tail is not None:
@@ -470,6 +474,30 @@ class _AssemblyMixin:
         if eye is not None:
             msgs.append(eye)
         return msgs
+
+    def _with_file_change_notice(self, cur_msgs: list[dict]) -> list[dict]:
+        """轮首插一条 `<runtime-reminder>[文件变更]…</runtime-reminder>`（V4 §3.7）。
+
+        位置：**当前轮消息之前 = 用户发言上面**——那一段本来就是追加区，不动任何已有前缀。
+        **轮内冻结**：同一轮里只算一次、后面每步复用同一份文本（否则轮中部改字节，撞
+        AGENTS.md §2）；变化只发生在下一次开轮。
+        """
+        notice = getattr(self, "_file_notice", None)
+        seq = int((self.current_round or {}).get("seq") or 0)
+        if notice is None or int(getattr(self, "_file_notice_seq", -1)) != seq:
+            notice = ""
+            if self.task is not None and self.current_round is not None:
+                try:
+                    notice = observed_module.notice_text(
+                        Path(tools_module.workspace_root()), self._active_view()
+                    )
+                except Exception:  # noqa: BLE001——通知失败绝不影响装配
+                    notice = ""
+            self._file_notice = notice
+            self._file_notice_seq = seq
+        if not notice:
+            return cur_msgs
+        return [_runtime_reminder(notice)] + list(cur_msgs)
 
     def _strip_router_steps(
         self, msgs: list[dict]

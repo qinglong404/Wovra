@@ -65,6 +65,19 @@ if _env_ws:
 # 整理/分裂要走工作区读文件），用 `workspace_bound_target` 把父线程那份带进去。
 _WORKSPACE = threading.local()
 
+# 当前正在执行工具的 agent（视图名）。观察记录（读过什么、内容快照）要**按 agent 分开**：
+# 进程级全局那份会让 B 的写入把 A 手里那份的"新鲜度"刷新掉，于是 A 的过期写入检测漏报
+# （V4 §3.7 顺手查出的真缺陷）。绑定时机＝工具调用前后（`core._invoke_tool`）。
+_AGENT = threading.local()
+
+
+def bind_agent(name: str) -> None:
+    _AGENT.name = str(name or "")
+
+
+def current_agent() -> str:
+    return str(getattr(_AGENT, "name", "") or "")
+
 
 def workspace_root() -> Path:
     """当前线程的有效工作区：线程绑定优先，进程默认兜底。"""

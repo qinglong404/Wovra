@@ -293,7 +293,7 @@
 `scripts/resplit_session.py`：`--keep-agents` 就是验这条（保留注册表、只清 `split_state`）；
 默认的全量重置只用于取证（看形状），正常流程不走它。
 
-### 3.7 读过的文件变了：把行级差异注入到轮首（**提案**，原料已齐）
+### 3.7 读过的文件变了：把行级差异注入到轮首（**已实现**，2026-09-17）
 
 用户口径（2026-09-17）："读文件后，如果发生改变，下次输入指令时，将其当作提示，注入到用户内容
 上面，告诉其之前读过的文件进行了修改，修改了哪些行。方便其快速少量的更新。"
@@ -350,6 +350,10 @@ V4 分流后同进程里多个 agent 共用它 → **B 写文件会刷新这份�
 -    if args.offline_only:
 +    if args.offline_only
 ```
+
+
+
+**实现落点**（2026-09-17）：`src/wovra/observed.py`——观察快照（内容寻址 `.wovra/observed/<view>/<路径__>/<hash>.txt`）＋ 写入日志（`writes.json`）＋ 行级差异渲染，全零 LLM；`Agent._observe_tool_effect`（挂在 `_finish_tool_result`：读记快照、写记快照＋写入日志，轮内同文件只记一次）；`assembly._with_file_change_notice`（轮首算一次、**轮内冻结**、插在用户发言之前）。顺手修掉本节点名的真缺陷：`_file_registry` 从**进程级全局**改成**按 (agent, path)**（`safety.bind_agent` 在工具调用前后绑）。回归：`tests/test_agent/test_file_notice.py`。
 
 **注入位置（已定）**：**轮首、单列一条 `<runtime-reminder>[文件变更]</runtime-reminder>`**，
 不塞进尾部的文件地图节。三条理由：① **生命周期不同**——尾部信封是"每步都可能变的状态"

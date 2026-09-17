@@ -7,12 +7,14 @@ assembly.py；水位维护管线在 maintenance.py——四者由 __init__.py �
 import copy
 import inspect
 import json
+from pathlib import Path
 import queue
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Optional
 from .. import blocks as blocks_module
+from .. import observed as observed_module
 from .. import registry as registry_module
 from .. import tools as tools_module
 from .. import tokens as tokens
@@ -241,6 +243,8 @@ class _CoreMixin:
         self._schemas: list[dict] = []
         # 本轮冻结的 tools 数组（None ＝ 未开轮，用当前阶段算）；见 `_stage_schemas`
         self._round_schemas: Optional[list[dict]] = None
+        # 本轮已记过观察的 (相对路径, 是否写) —— 同一轮同一个文件只存一份快照（§3.7）
+        self._observed_this_round: set[tuple[str, bool]] = set()
         for fn in tools:
             self.register(fn)
 
@@ -440,6 +444,7 @@ class _CoreMixin:
         """
         with self._view_lock:
             self._round_schemas = self._compute_stage_schemas()   # 轮内冻结（见 _stage_schemas）
+            self._observed_this_round = set()
             return self._open_or_reuse_round_locked(user_input)
 
     def _open_or_reuse_round_locked(self, user_input: str) -> bool:
@@ -1597,6 +1602,8 @@ class _CoreMixin:
         fn = self.tools.get(name)
         if fn is None:
             return f"未知工具: {name}，可用工具: {list(self.tools)}"
+        # 观察记录按 agent 分开（§3.7）：工具层读 `safety.current_agent()` 当键的一段。
+        tools_module.safety.bind_agent(self._active_view())
         # 用户钩子（zcode-borrowings.md 1.4）：前置可拦截（理由回传模型），
         # 后置可附反馈——扩展者的规则与观测不进 Wovra 代码
         blocked = tools_module.run_pre_hook(name, parsed)
@@ -1656,10 +1663,55 @@ class _CoreMixin:
             call_id, name, arguments, self._invoke_tool(name, arguments)
         )
 
+    # 观察类工具（读过/写过谁）——用于"文件变更"通知（§3.7）。读记快照，写记快照 ＋ 写入日志。
+    _READ_TOOLS = ("read_file", "search_files", "page_text")
+    _WRITE_TOOLS = ("write_file", "edit_file", "replace_lines", "restore_file")
+
+    def _observe_tool_effect(self, name: str, arguments: str, result: str) -> None:
+        """把"这次工具让 agent 看到了/改了哪个文件"记进观察快照（零 LLM，§3.7）。
+
+        轮内每个文件只记一次（`self._observed_this_round`）——同一步里连读三次不必存三份。
+        """
+        if name not in self._READ_TOOLS + self._WRITE_TOOLS:
+            return
+        if self.task is None or self.current_round is None:
+            return
+        text = str(result or "")
+        if text.startswith("权限拒绝") or text.startswith("未知工具"):
+            return
+        try:
+            parsed = json.loads(arguments or "{}")
+        except json.JSONDecodeError:
+            return
+        rel = str(parsed.get("path") or parsed.get("directory") or "").strip()
+        if not rel or parsed.get("directory"):
+            return                      # 目录级搜索不进观察（它不构成"你手里那份内容"）
+        rel = self._rel_path(rel)
+        if not rel or rel.startswith(".wovra") or rel.startswith(".."):
+            return
+        key = (rel, name in self._WRITE_TOOLS)
+        if key in self._observed_this_round:
+            return
+        self._observed_this_round.add(key)
+        workspace = Path(tools_module.safety.workspace_root())
+        target = workspace / rel
+        try:
+            content = target.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return
+        view = self._active_view()
+        if name in self._WRITE_TOOLS:
+            observed_module.note_write(workspace, view, rel,
+                                       int((self.current_round or {}).get("seq") or 0))
+            observed_module.record(workspace, view, rel, content, by="edit")
+        else:
+            observed_module.record(workspace, view, rel, content, by="read")
+
     def _finish_tool_result(self, call_id: str, name: str,
                             arguments: str, result: str) -> None:
         if self.on_tool_result:
             self.on_tool_result(name, result)
+        self._observe_tool_effect(name, arguments, result)
 
         event = self._record_event(
             "tool_result", {"role": "tool", "tool_call_id": call_id, "content": result},
