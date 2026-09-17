@@ -861,8 +861,13 @@ class _MaintenanceMixin:
         target = int(self._org_watermark * self._fold_target_ratio())
         size = int(self.last_context_estimate or 0)
         window_cut = current - self._fold_keep_rounds()
+        # **范围就是这批**（2026-09-17 用户口径更正）：触发那一刻"过线的批次"是
+        # R1–R7（含刚闭合的那一轮），整理就该把它整批压掉——**最近一轮不是特权**。
+        # 此前这里写的是 `closed[:-1]`（"最后一轮永不折"，我加的，与用户规则相反）：
+        # 实测代价 R7 一轮 96,820 tok 原文顶着 92% 的上下文，折完 R1–R6 仍 103.5K >
+        # 水位 100K，于是**每轮闭合都在线上触发维护**（R8 那次白跑一遭分裂）。
         staged: list[dict] = []
-        for r in closed[:-1]:                     # 最老的先；**最后一轮永不折**（工作集）
+        for r in closed:                          # 最老的先；折到目标线以下为止
             over_window = int(r["seq"]) <= window_cut
             if not over_window and size <= target:
                 break                             # 窗口内的都留着，且已经折到目标以下了
@@ -2300,6 +2305,26 @@ class _MaintenanceMixin:
             _check(unassigned.get("block_ids"), "unassigned.block_ids")
         return defects
 
+    @staticmethod
+    def _round_edited_files(round_: dict) -> list[str]:
+        """这一轮里被**改过**的文件（写入/编辑/删除）。
+
+        **只读不算**（2026-09-17 修）：读文件说明不了归属——任何 agent 都可能读任何
+        文件。实测教训：R8 只是 `read_file`/`grep` 了 `serve.py`，却因此把「现场投影」
+        标成有一条独占轮，从而**阻止**了它和「附件通道」合并（那本是同一条活）。
+        """
+        out: list[str] = []
+        for block in blocks_module.segment_round_by_file(round_):
+            if block.get("kind") != "file" or not block.get("file"):
+                continue
+            ops = {str(o.get("op")) for o in (block.get("ops") or [])}
+            if not ops & {"write", "edit", "delete"}:
+                continue
+            path = str(block["file"])
+            if path not in out:
+                out.append(path)
+        return out
+
     def _live_cooccurrence_lines(self, rounds: list[dict]) -> list[str]:
         """**同轮共现**的机械事实：哪些活性文件在同一轮里一起被动过。
 
@@ -2311,13 +2336,7 @@ class _MaintenanceMixin:
         live = set(self._live_files())
         lines: list[str] = []
         for r in rounds[-12:]:                     # 最多看最近 12 轮，别把输入撑大
-            paths: list[str] = []
-            for block in blocks_module.segment_round_by_file(r):
-                if block.get("kind") != "file" or not block.get("file"):
-                    continue
-                path = str(block["file"])
-                if path in live and path not in paths:
-                    paths.append(path)
+            paths = [p for p in self._round_edited_files(r) if p in live]
             if len(paths) >= 2:                    # 单个文件谈不上"共现"
                 lines.append(f"R{r.get('seq')}：{'、'.join(paths[:8])}")
         return lines
@@ -2326,7 +2345,7 @@ class _MaintenanceMixin:
         """**从未分开过的两个顶层域 → 合成一个**（零 LLM 兜底，原地改 domains）。
 
         判据（机械、保守）：两个顶层节点各自的活跃轮集合（按它们名下的文件在哪些轮
-        被碰过算）**互相包含且都非空**——也就是说，从没有哪一轮只动了其中一个。
+        被**改过**算，只读不算）**互相包含且都非空**——也就是说，从没有哪一轮只动了其中一个。
         "从没单独出现过"的两摊活不是两条工作线，是一条。只有一轮证据时也算（这正是
         本次实测的形状：附件的两个文件只出现在 R7，而 R7 里它们一起出现）。
         返回留痕。
@@ -2337,23 +2356,27 @@ class _MaintenanceMixin:
                 and not d.get("main_agent") and not d.get("runtime_auto")]
         if len(tops) < 2:
             return []
-        touched: dict[int, set] = {}
-        for r in rounds:
-            paths = {str(b["file"]) for b in blocks_module.segment_round_by_file(r)
-                     if b.get("kind") == "file" and b.get("file")}
-            if paths:
-                touched[int(r.get("seq") or 0)] = paths
-        active: dict[str, set[int]] = {}
+        touched: dict[int, set] = {
+            int(r.get("seq") or 0): set(self._round_edited_files(r))
+            for r in rounds
+        }
+        touched = {seq: paths for seq, paths in touched.items() if paths}
+        # 活跃轮按**位置**索引：合并会改名（名字拼起来），拿名字当键会在下一次
+        # 迭代里扑空（实测 KeyError：'附件与装配＋前端'）。
+        active: list[set[int]] = []
         for node in tops:
             files = {str(f) for f in (node.get("files") or [])}
-            active[str(node["name"])] = {
-                seq for seq, paths in touched.items() if files & paths
-            }
+            active.append({seq for seq, paths in touched.items() if files & paths})
         notes: list[str] = []
-        merged_into: dict[str, str] = {}
+        merged_into: set[int] = set()
         for i, a in enumerate(tops):
-            for b in tops[i + 1:]:
-                ra, rb = active[str(a["name"])], active[str(b["name"])]
+            if i in merged_into:
+                continue
+            for j in range(i + 1, len(tops)):
+                if j in merged_into:
+                    continue
+                b = tops[j]
+                ra, rb = active[i], active[j]
                 if not ra or not rb:
                     continue
                 # 判据（收紧，2026-09-17 实测踩过）：只认**证据够的**两条——
@@ -2364,6 +2387,7 @@ class _MaintenanceMixin:
                 shared = ra & rb
                 if not (len(shared) >= 2 and (ra <= rb or rb <= ra)) and ra != rb:
                     continue
+                gone_name = ""
                 # 留哪个名字：**文件多的那个**（它更像这条活的主名，如「附件」含 3 个
                 # 文件、「上下文装配」只有 1 个），其次看描述长短
                 keep, gone = sorted(
@@ -2371,18 +2395,24 @@ class _MaintenanceMixin:
                     key=lambda n: (-len(n.get("files") or []),
                                    -len(str(n.get("description") or ""))),
                 )
-                if str(gone["name"]) in merged_into:
-                    continue
+                # 并进来的一方不再参与后续配对（它已经不是一个域了）
+                merged_into.add(j if (keep is b) else i)
                 keep.setdefault("files", [])
                 for f in gone.get("files") or []:
                     if f not in keep["files"]:
                         keep["files"].append(f)
                 if not keep.get("description"):
                     keep["description"] = str(gone.get("description") or "")
+                # **名字也要如实**：合并后的节点名下多了原来那摊活，名字要跟着说清
+                # （名字是路由与执行者索引的身份，"前端页面"里揣着 attachments.py
+                # 会把人骗到）。拼不下（太长）就保留主名，留痕里说明。
+                keep_name, gone_name = str(keep.get("name") or ""), str(gone.get("name") or "")
+                composed = f"{keep_name}＋{gone_name}"
+                if len(composed) <= 30 and gone_name not in keep_name:
+                    keep["name"] = composed
                 domains.remove(gone)
-                merged_into[str(gone["name"])] = str(keep["name"])
                 notes.append(
-                    f"同轮从未分开的域合并：「{gone['name']}」→「{keep['name']}」"
+                    f"同轮从未分开的域合并：「{gone_name}」→「{keep.get('name')}」"
                     f"（活跃轮 {'、'.join('R%d' % s for s in sorted(ra | rb))}）"
                 )
         return notes

@@ -334,11 +334,13 @@ def test_batch_then_fold_in_the_same_close(monkeypatch, tmp_path):
     _trigger(agent)
     _fold(agent)
 
-    assert [bool(r.get("folded")) for r in task.rounds] == [True, True, False]
+    # 范围就是这批（含刚闭合那一轮）：R1–R3 全折
+    assert [bool(r.get("folded")) for r in task.rounds] == [True, True, True]
     assembled = _assembled(agent)
-    assert "第1轮结论" in assembled                  # 老轮成了段落
-    assert "👤 第 1 问" in assembled                 # 用户原话逐字仍在
-    assert "答一句" in assembled                     # 最近一轮仍是原文
+    for seq in (1, 2, 3):
+        assert f"第{seq}轮结论" in assembled          # 每轮成了段落
+        assert f"👤 第 {seq} 问" in assembled         # 用户原话逐字仍在
+    assert "答一句" not in assembled                 # 原文不再占位
     assert any(h.get("kind") == "fold" for h in task.history)
 
 
@@ -356,9 +358,10 @@ def test_round_without_note_stays_raw(monkeypatch, tmp_path):
     _fold(agent)
 
     assert task.rounds[0].get("note_state") == "failed"
-    assert not task.rounds[0].get("folded")          # 没产物 → 不折档
-    assert not task.rounds[1].get("folded")          # 最后一轮永不折
-    assert "答一句" in _assembled(agent)
+    assert not task.rounds[0].get("folded")          # 没产物 → 不折档（fail-safe）
+    assert task.rounds[1].get("folded")              # 有产物的照折（含刚闭合那轮）
+    assembled = _assembled(agent)
+    assert "第2轮结论" in assembled and "答一句" in assembled
 
 
 def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
@@ -390,22 +393,43 @@ def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
     assert "👤（轮内追加）含网络检索的先不做" in assembled
 
 
+def _big_round(seq: int, chars: int = 2400) -> dict:
+    """一个大轮（原文体量够撑起上下文）：一进一出 ＋ 一段长回答 ＋ 现成产物。"""
+    return {
+        "seq": seq,
+        "user_input": {"original": f"第 {seq} 问", "normalized": ""},
+        "events": [
+            make_event(f"R{seq}-E01", "user", {"role": "user", "content": f"第 {seq} 问"}),
+            make_event(f"R{seq}-E02", "final_answer",
+                       {"role": "assistant", "content": "结论" * (chars // 2)}),
+        ],
+        "refined_index": {}, "end_state": "completed", "org_state": "",
+        "note_state": "done",
+        "note": {"seq": seq, "sentence": f"第{seq}轮结论", "failures": [],
+                 "executor": "Main", "ledger_append": {}},
+    }
+
+
 def test_fold_line_stops_at_the_recent_window(monkeypatch, tmp_path):
     """原文窗口：最近 N 轮保持原文（窗口决定换档线推到哪，不决定何时换）。"""
-    agent, task = _agent(
-        monkeypatch, tmp_path,
-        [_plain(), _plain(), _batch_chunk([_note(1), _note(2)])],
-        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
-    )
+    agent, task = _agent(monkeypatch, tmp_path, [], org_grace_rounds=0)
+    r1, r2 = _big_round(1, chars=1700), _big_round(2, chars=1700)
+    task.rounds = [r1, r2]
+    agent.rounds = task.rounds
     agent._fold_keep = 1
-    _run(agent, 2)
-    _trigger(agent)
-    _fold(agent)
+    def raw(r):        # 与 `_advance_fold_line` 同一把尺子
+        return agent._estimate_messages(
+            [e.get("message") or {} for e in r.get("events") or []]
+        )
+
+    size = raw(r1) + raw(r2)
+    agent._org_watermark = int(size * 0.97)          # 到线；目标 ≈ 0.58×size
+    _fold(agent, size=size)
 
     assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
     assembled = _assembled(agent)
-    assert "第1轮结论" in assembled
-    assert "答一句" in assembled                   # 第 2 轮仍是原文档
+    assert "第1轮结论" in assembled                   # 第 1 轮折成段落
+    assert "第2轮结论" not in assembled              # 第 2 轮还留着原文
 
 
 def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path):
@@ -428,7 +452,6 @@ def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path)
 
     folded = [int(r["seq"]) for r in task.rounds if r.get("folded")]
     assert len(folded) > 1, f"一次要到水位以下，而不是只折一轮：{folded}"
-    assert 5 not in folded                           # 最后一轮永不折（工作集）
     detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
     assert "折到水位" in detail and "60%" in detail
 
