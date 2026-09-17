@@ -33,9 +33,11 @@ from ..tools import (
     write_file,
 )
 
-def _system_prompt(mode: str) -> str:
-    """按模式生成系统提示词：只写已实现的能力，并附带当前运行环境。
+def _system_prompt(mode: str, stage: str = "post") -> str:
+    """系统提示词。`stage="pre"` ＝ **还没分裂**（注册表里只有 Main）——按用户口径，
+    分裂前不写任何关于分裂/职责划分/路由的话，省掉"我该不该裂、职责表怎么说"这类思考。
 
+    按模式生成：只写已实现的能力，并附带当前运行环境。
     写实约束：模型会把提示词当成"已有能力清单"，写了没实现的功能
     它就会真的去调用——所以每个模式只描述自己实际的行为。
     环境信息（OS/Shell）防止在 Windows 上跑类 Unix 命令
@@ -145,7 +147,23 @@ def _system_prompt(mode: str) -> str:
         "直接修正即可（重截/换小图/改路径），把说明留在正常汇报里。若只是状态通知、"
         "没有可执行的工作，直接继续既有工作或保持静默。"
     )
-    if mode == MODE_MANAGED:
+    # **分裂前后提示词不一样**（2026-09-17 用户口径："第一次分裂前，不应该有关于分裂和职责划分
+    # 的提示词……可以只写公共系统提示词，在有身份后，再追加，这样防止分裂前的主 agent 老拉职责表
+    # 等额外思考"）。判据零成本：注册表里只有 Main ＝ 分裂前。
+    split_done = bool(stage and str(stage) != "pre")
+    if mode == MODE_MANAGED and not split_done:
+        extra = (
+            "\n\n## 上下文\n"
+            "上下文由你自身的运行时分层管理：未整理的轮次全量保留；已整理的轮次已折成"
+            "**一段话**，更早的也一样。需要细节时**不要凭记忆猜**，用 expand_history 三招取："
+            "① `pattern=\"正则\"` 在历史原文里检索（回命中清单 + 总数，可 offset 续取）；"
+            "② `ids=\"R3-E02\" around=\"关键字\"` 只看该处窗口（可 chars/offset 调）；"
+            "③ `ids=\"R3\"` 给该轮的地图（summary 块视图 / truncated 事件索引）。"
+            "范围可用 scope 收（`R3-R8` 或 `file:路径`），来源可用 source 收"
+            "（result/assistant/call/user）。\n"
+            "**这一摊活现在只有你一个 agent，直接干**——不用考虑分工、没有职责表要看。\n"
+        )
+    elif mode == MODE_MANAGED:
         extra = (
             "\n\n## 上下文（分层与职责域）\n"
             "上下文由你自身的运行时分层管理：未整理的轮次全量保留；已整理的轮次"
@@ -240,7 +258,14 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
     if workspace and Path(workspace).is_dir():
         safety_module.bind_workspace(workspace)
     return Agent(
-        system_prompt=_system_prompt(mode),
+        system_prompt=_system_prompt(
+            mode,
+            "post" if any(
+                str((e or {}).get("id") or "") not in ("", "Main")
+                for e in (getattr(task, "registry", None) or [])
+                if isinstance(e, dict)
+            ) else "pre",
+        ),
         tools=[
             get_current_time,
             list_files,

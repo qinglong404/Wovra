@@ -137,8 +137,12 @@ def test_batch_is_tail_append_with_per_round_anchor(monkeypatch, tmp_path):
     assert "R1（执行者：Main）" in tail["content"]      # 逐轮
     assert "R2（执行者：Main）" in tail["content"]
     call = _batches(agent)[-1]
-    assert len(call["tools"]) == len(agent._schemas)
+    assert len(call["tools"]) == len(agent._stage_schemas())     # 与工作调用同序列化
     assert any(t["function"]["name"] == "submit_round_notes" for t in call["tools"])
+    # 分裂前不广告身份类工具（没有别的 agent 可用；2026-09-17 用户口径）
+    names = {t["function"]["name"] for t in call["tools"]}
+    assert not names & {"route_to", "consult", "join_with", "notify",
+                        "list_agents", "update_responsibility"}
 
 
 def test_anchor_carries_user_turns_candidates_and_draft(monkeypatch, tmp_path):

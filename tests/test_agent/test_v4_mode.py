@@ -298,3 +298,70 @@ def test_owned_live_file_is_quiet(monkeypatch, tmp_path):
     task.registry = [{"id": "Main", "name": "主agent", "files": []},
                      {"id": "A", "name": "附件", "files": ["src/wovra/attachments.py"]}]
     assert agent._report_ownerless_live_files(task.registry) == []
+
+
+def test_identity_tools_only_advertised_after_split(monkeypatch, tmp_path):
+    """**分裂前不广告身份类工具**（转交/咨询/会合/通知/名册/改职责）——省掉"我是谁"的思考。
+
+    只影响"广告"（请求里的 tools 数组）；工具方法本身照旧注册着（直接调用可用）。
+    """
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    names = lambda a: {s["function"]["name"] for s in a._stage_schemas()}
+
+    pre = names(agent)
+    assert not pre & set(Agent._IDENTITY_TOOLS)
+    assert "submit_round_notes" in pre and "expand_history" in pre   # 常数/提交类常驻
+
+    task.registry.append({"id": "A", "name": "附件", "files": ["a.py"]})
+    post = names(agent)
+    assert set(Agent._IDENTITY_TOOLS) <= post
+    assert post - pre == set(Agent._IDENTITY_TOOLS)                  # 只多出身份类
+
+
+def test_system_prompt_is_staged_for_the_split(monkeypatch):
+    """提示词分期：分裂前不写职责域/路由那套；分裂后追加（用户口径）。"""
+    from wovra.cli.prompt import _system_prompt
+
+    pre = _system_prompt("managed", "pre")
+    post = _system_prompt("managed", "post")
+    for word in ("route_to", "join_with", "update_responsibility", "职责域"):
+        assert word not in pre, f"分裂前的提示词里不该出现 {word}"
+        assert word in post
+    assert "只有你一个 agent" in pre
+
+
+def test_main_cannot_read_others_files_after_split(monkeypatch, tmp_path):
+    """分裂后主 agent **连读也不干**：读别人文件 → 指路（交给主人，省一次读）。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    task.registry.append({"id": "A", "name": "附件", "files": ["src/wovra/attachments.py"]})
+    agent.current_round = {"seq": 1, "active_view": "Main"}
+    agent.rounds = [agent.current_round]
+
+    blocked = agent._file_permission("read", "src/wovra/attachments.py")
+    assert blocked and "读也算它的活" in blocked and "route_to" in blocked
+    # 自己的文件照读；分裂前（P4）也照读
+    assert agent._file_permission("read", "src/wovra/attachments.py") is not None
+    task.registry[:] = [{"id": "Main", "name": "主agent"}]
+    assert agent._file_permission("read", "src/wovra/attachments.py") is None
+
+
+def test_spawn_creates_an_agent_in_place(monkeypatch, tmp_path):
+    """**就地新建**（无主的活）：`route_to(agent="new")` 建一条空条目并把本回合交给它。
+
+    不跑分裂分析、不重排注册表；名字先给占位（身份证不能空）。
+    """
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    agent.context_mode = "managed"
+    round_ = {"seq": 9, "active_view": "Main", "events": [], "route_hops": 0}
+    agent.rounds = [round_]
+    agent.current_round = round_
+
+    out = agent.route_to(agent="new", reason="这摊没人认领的收尾活")
+    assert "就地新建" in out
+    entry = next(e for e in task.registry if e["id"] == "A")
+    assert entry["status"] == "active" and entry.get("name_provisional")
+    assert entry["spawned_at"] == 9
+    assert agent._pending_route == "A"                      # 本回合交给它
+    assert round_["route_handoff"]["to"] == "A"
+    assert any(h.get("kind") == "maintenance" and "就地新建 agent" in str(h.get("detail"))
+               for h in task.history)

@@ -5,8 +5,9 @@ route_to（回合内转交）、submit_organization / submit_domains
 from datetime import datetime
 from typing import Optional
 
+from .. import registry as registry_module
 from ..registry import MAIN_AGENT_ID
-from .support import _MAX_ROUTE_HOPS
+from .support import MODE_MANAGED, _MAX_ROUTE_HOPS
 
 # 动作名 v2（2026-09-12 用户口径，worklog §53）：大步→阶段、小步→工作项，
 # 让"步"专指执行步数（`steps_used`），不再与计划单位抢词。
@@ -393,6 +394,8 @@ class _LedgerMixin:
         """
         if self.task is None:
             return "route_to：当前无任务绑定。"
+        if str(agent or "").strip().lower() in ("new", "@new", "新", "新的"):
+            return self._spawn_agent(note_hint=str(reason or ""))
         entry = self._registry_entry(agent)
         if entry is None:
             known = "、".join(
@@ -435,6 +438,55 @@ class _LedgerMixin:
             f"已转交 {entry.get('id')}（{target}）：它在本回合内直接接手"
             "并把结果给用户。**就此停手**——不要再自己动手、不要复述用户的话、"
             "不要写方案或解释；下一步就是它干活。"
+        )
+
+    def _spawn_agent(self, note_hint: str = "") -> str:
+        """**就地新建一个 agent**（2026-09-17 用户口径：无主的活当场起一个）。
+
+        与"分裂"的区别：**不跑全量分裂分析**（那是一次 20–30 秒、重扫全部活性文件的调用），
+        也不重排注册表——只发一个新 id、建一条空条目，就把本回合交给它。它做完那一轮，
+        在整理里补上自己的职责与活性文件（新建/改过的文件按 F5 自动记在它名下）。
+
+        上下文从哪来：**当前这份公共历史就是它的基线**（V4 没有按域重组，所有 agent 共用
+        同一份字节），加上它自己的职责——职责由它自己补（提示词里点明）。
+        """
+        if self.context_mode != MODE_MANAGED or self.task is None:
+            return "route_to(new)：当前不是托管会话，无法新建 agent。"
+        # **名字先给个占位的**（取这一摊活的短描述，零 LLM）：名字是路由/账本/归属的唯一
+        # 身份，空名字会让 `owner_of_file` 直接跳过它（文件就成了"无人管"）。它做完这一轮
+        # 用 `update_responsibility` 换成正式职责时把名字一起换掉。
+        provisional = " ".join(str(note_hint or "").split())[:16]
+        entry = {
+            "id": registry_module.next_free_top_id(self.task.registry),
+            "name": provisional or f"新域{registry_module.next_free_top_id(self.task.registry)}",
+            "name_provisional": True,
+            "description": "",
+            "files": [],
+            "file_domains": [],
+            "history_files": [],
+            "status": "active",
+            "inbox": [],
+            "spawned_at": int((self.current_round or {}).get("seq") or 0),
+        }
+        self.task.registry.append(entry)
+        self._pending_route = entry["id"]
+        if self.current_round is not None:
+            self.current_round["route_handoff"] = {
+                "from": str((self.current_round.get("active_view") or "")).strip() or "主 agent",
+                "to": entry["id"],
+                "reason": note_hint or "（新活，当场新建）",
+            }
+        self.task.record(
+            "maintenance",
+            f"就地新建 agent：{entry['id']}（R{entry['spawned_at']} 起，职责待它自己补）",
+        )
+        self.task.save()
+        if self.on_progress:
+            self.on_progress(f"🆕 当场新建 {entry['id']}：这一摊没人认领，交给它")
+        return (
+            f"已就地新建 {entry['id']}（暂名「{entry['name']}」，占位用）——本回合由它接手。"
+            "**就此停手**，不要再自己动手；接手后干完这一轮，用 update_responsibility "
+            "写下自己的正式名与职责（你新建/改过的文件已记在你名下）。"
         )
 
     def update_responsibility(self, description: str = "", goal: str = "",

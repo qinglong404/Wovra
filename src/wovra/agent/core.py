@@ -384,6 +384,36 @@ class _CoreMixin:
         self.tools[fn.__name__] = fn
         self._schemas.append(schema or _schema_of(fn))
 
+    # **身份类工具**：只有存在别的 agent 才有意义（转交/咨询/会合/通知/看名册/改自己职责）。
+    _IDENTITY_TOOLS = ("route_to", "consult", "join_with", "notify",
+                       "list_agents", "update_responsibility")
+
+    def _has_sub_agents(self) -> bool:
+        """分裂落过地没有：注册表里出现过非 Main 的条目（与 `_note_per_round` 同一信号）。"""
+        if self.task is None:
+            return False
+        return any(
+            isinstance(e, dict) and str(e.get("id") or "") not in ("", "Main")
+            for e in (self.task.registry or [])
+        )
+
+    def _stage_schemas(self) -> list[dict]:
+        """按阶段给 tools 数组：**分裂前不广告身份类工具**（2026-09-17 用户口径）。
+
+        同一阶段内数组恒定（AGENTS §2 硬线）；分裂落地那一刻整段换一次——那本来就是
+        允许断前缀的断点，不额外付费。分裂前那 6 个工具一个都用不上（没有别的 agent
+        可转、可问），广告它们只会让模型去想"我是谁、该转给谁"。
+
+        注意：**只影响"广告"**（请求里的 tools 序列化），工具方法仍然注册着，直接调用
+        照旧可用（守卫与既有测试不受影响）。
+        """
+        if self._has_sub_agents():
+            return list(self._schemas)
+        return [
+            s for s in self._schemas
+            if str((s.get("function") or {}).get("name") or "") not in self._IDENTITY_TOOLS
+        ]
+
     def _open_or_reuse_round(self, user_input: str) -> bool:
         """开启新 Round，或续上未闭合的开放 Round（V2 闭合规则）。
 
@@ -648,19 +678,30 @@ class _CoreMixin:
         没有任何域认领**已存在**的文件 = 分裂/整理的缺陷（用户口径：不存在
         "未认领文件"）→ 拒绝并叫人，不静默吸进谁的桶。
         """
-        if self.task is None or op == "read":
+        if self.task is None:
             return None
         registry = [e for e in (self.task.registry or []) if isinstance(e, dict)]
         subs = [e for e in registry
                 if str(e.get("id") or "") != registry_module.MAIN_AGENT_ID]
         if not subs:
-            return None                       # P4
+            return None                       # P4：分裂前主 agent 全权
         rel = self._rel_path(path)
         view = self._active_view()
         mine = self._registry_entry_for(view)
         if mine is not None and registry_module.file_owned_by(mine, rel):
-            return None                       # P1
+            return None                       # P1：自己的文件，全权
         owner = registry_module.owner_of_file(registry, rel)
+        if op == "read":
+            # **分裂后主 agent 连读也不干**（2026-09-17 用户口径："主 agent 不可以干任何活，
+            # 除了路由，不然会污染上下文"；"有主的活，例如读，让对应 agent 来，也许可以节省
+            # 一次读呢"）——主人手里往往已经有那份内容。子 agent 之间读还是只读放行（P2）。
+            if str(view or "") == registry_module.MAIN_AGENT_ID and owner is not None:
+                return (
+                    f"权限拒绝：{path} 是 {owner} 的活——**读也算它的活**，它手里往往"
+                    f"已经有这份内容（还能省一次读）。用 route_to 把用户原话转给它；"
+                    f"没有主的新活就用 route_to(agent=\"new\") 就地起一个。"
+                )
+            return None                       # P2：别人的文件只读
         if owner is not None:
             who = str((mine or {}).get("name") or view or "你")
             return (
@@ -1372,7 +1413,7 @@ class _CoreMixin:
             try:
                 content, ordered, _usage = self._stream_call(
                     messages,
-                    tools=self._schemas or None,
+                    tools=self._stage_schemas() or None,
                     purpose="working",
                     on_thinking=on_thinking,
                     on_answer_delta=on_answer_delta,

@@ -154,6 +154,20 @@ def file_owned_by(entry: dict, rel: str) -> bool:
                for p in entry_prefixes(entry))
 
 
+def next_free_top_id(registry: Iterable[dict] | None) -> str:
+    """下一个没被占用的顶层字母 ID（`A`/`B`/…；零 LLM）。
+
+    给"就地新建"（spawn，2026-09-17 用户口径）用：无主的活当场起一个 agent 时，它需要
+    一个**稳定的身份**（名字可以后补，id 不能乱给——路由、账本、执行者索引都认它）。
+    """
+    used = {str(e.get("id")) for e in (registry or []) if isinstance(e, dict)}
+    for i in range(1, 1000):
+        candidate = top_id(i)
+        if candidate not in used:
+            return candidate
+    return top_id(len(used) + 1)
+
+
 def owner_of_file(
     registry: Iterable[dict] | None, rel: str
 ) -> Optional[str]:

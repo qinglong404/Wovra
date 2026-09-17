@@ -625,7 +625,7 @@ class _MaintenanceMixin:
             "role": "user",
             "content": _ROUND_NOTE_INSTRUCTION + "\n\n[锚]\n" + "\n".join(anchors),
         })
-        tools = maint_tools(self._schemas, _ROUND_NOTE_SUBMIT)
+        tools = maint_tools(self._stage_schemas(), _ROUND_NOTE_SUBMIT)
         box: dict = {}
 
         def run() -> None:
@@ -1493,7 +1493,7 @@ class _MaintenanceMixin:
         # 带诊断重发兜底；且当时工具已只剩一个出口，模型照样调了不存在的
         # 工具（幻觉），收窄并未真正防住。故改为恒定数组骑满缓存，
         # WOVRA_MAINT_NARROW_TOOLS=1 可切回收窄（见 support.maint_tools）。
-        org_tools = maint_tools(self._schemas, _ORG_SUBMIT_TOOL)
+        org_tools = maint_tools(self._stage_schemas(), _ORG_SUBMIT_TOOL)
         content, ordered, _usage = self._stream_call(
             messages, tools=org_tools, purpose="organization",
         )
@@ -1796,7 +1796,7 @@ class _MaintenanceMixin:
         # 与 org 同策略：恒定 tools 数组（缓存复议结论，见 org 处注释）。
         # 开思考（不传 thinking disabled）：语义判断需要推理，实测
         # 不开思考不调工具、质量低（用户拍板）。
-        split_tools = maint_tools(self._schemas, _SPLIT_SUBMIT_TOOL)
+        split_tools = maint_tools(self._stage_schemas(), _SPLIT_SUBMIT_TOOL)
         content, ordered, _usage = self._stream_call(
             messages, tools=split_tools, purpose="split",
         )
@@ -2401,13 +2401,15 @@ class _MaintenanceMixin:
                 ra, rb = active[i], active[j]
                 if not ra or not rb:
                     continue
-                # 判据（收紧，2026-09-17 实测踩过）：只认**证据够的**两条——
-                # ① 共现 ≥2 轮且一个的活跃轮被另一个包含（"从没单独出现过"）；
-                # ② 两者活跃轮完全相同。
-                # 不收"只共现过 1 轮"的：一个只在 R7 出现的域会被**任何**同轮域
-                # 包含，那样一晚上的活跃轮就把整棵树并成一个（实测并到只剩 2 个）。
+                # 判据（2026-09-17 用户口径："除非这个节点的活性文件，可以不查阅其它节点的
+                # 活性文件完成大部分工作"）：**自足度低就并**——
+                # ① 两者的活跃轮完全相同（谁都没单独出现过）；或
+                # ② 共现 ≥2 轮且共现占比 ≥60%（"大部分活都得跟对方一起干"）。
+                # 下限不能松：试过更松的"子集即并"，一个只在单轮出现的域会被**任何**同轮域
+                # 包含，5 个域当场并成 2 个。
                 shared = ra & rb
-                if not (len(shared) >= 2 and (ra <= rb or rb <= ra)) and ra != rb:
+                ratio = len(shared) / max(1, min(len(ra), len(rb)))
+                if ra != rb and not (len(shared) >= 2 and ratio >= 0.6):
                     continue
                 gone_name = ""
                 # 留哪个名字：**文件多的那个**（它更像这条活的主名，如「附件」含 3 个
