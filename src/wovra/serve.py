@@ -1246,8 +1246,10 @@ def _round_meta(r: dict, usage: dict | None = None,
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",
-        # V4：每轮一段话（note）＝ 给人看的叙事；folded = 该轮已折叠成段落进装配
+        # V4：每轮一段话（note）＝ 给人看的叙事；folded = 该轮已折叠成段落进装配。
+        # `note_segments` = 分裂后一轮多 agent 时的分段产物（每家一段，按事件顺序）。
         "note": r.get("note") or {},
+        "note_segments": r.get("note_segments") or [],
         "note_state": r.get("note_state") or "",
         "folded": bool(r.get("folded")),
         "stage": views_module.stage_index(r, plan or {}),

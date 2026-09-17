@@ -20,6 +20,7 @@ import re
 
 from .. import blocks as blocks_module
 from .. import tokens as tokens_module
+from .. import views as views_module
 
 # 结算的提交出口（模型侧工具名；守卫在 ledger.py）
 _SUBMIT_TOOL = "submit_round_notes"
@@ -42,34 +43,44 @@ _DRAFT_CHARS = 320     # 结论草稿取多少字符
 _HINT_CLIP = 90
 
 
-def user_turns(round_: dict) -> list[str]:
-    """本轮**全部**用户发言，逐字（轮头 ＋ 轮内追加），去重并排除 runtime 信封。
+def _user_turn_items(round_: dict) -> list[tuple[int, str]]:
+    """用户发言 ＋ 它在事件流里的位置（轮头记 `-1`），逐字、去重、排除 runtime 信封。
 
     轮内追加是用户中途的补充/修正（如"含网络检索的先不做"），属前提档：
     丢了它，"为什么这轮以被叫停收尾"就读不懂。
     """
-    out: list[str] = []
-    candidates = [str((round_.get("user_input") or {}).get("original") or "")]
-    candidates += [
-        str((e.get("message") or {}).get("content") or "")
-        for e in round_.get("events") or []
-        if e.get("type") == "user" and (e.get("message") or {}).get("role") == "user"
+    candidates: list[tuple[int, str]] = [
+        (-1, str((round_.get("user_input") or {}).get("original") or ""))
     ]
-    for text in candidates:
+    for i, e in enumerate(round_.get("events") or []):
+        if e.get("type") == "user" and (e.get("message") or {}).get("role") == "user":
+            candidates.append((i, str((e.get("message") or {}).get("content") or "")))
+    out: list[tuple[int, str]] = []
+    for index, text in candidates:
         t = text.strip()
-        if not t or t.startswith("<runtime-reminder>") or t in out:
+        if not t or t.startswith("<runtime-reminder>") or t in [x[1] for x in out]:
             continue
-        out.append(t)
+        out.append((index, t))
     return out
 
 
-def _round_actions(round_: dict) -> dict:
-    """本轮动作清单：工具名×次数、读过/写过/删过的文件、非零退出的命令。"""
+def user_turns(round_: dict) -> list[str]:
+    """本轮**全部**用户发言，逐字（轮头 ＋ 轮内追加）。"""
+    return [text for _index, text in _user_turn_items(round_)]
+
+
+def _actions(round_: dict, start: int = 0, end: int | None = None) -> dict:
+    """动作清单：工具名×次数、读过/写过/删过的文件、非零退出的命令。
+
+    `start`/`end` 是**事件切片**（一轮多 agent 时只算这一段干的活）。
+    """
+    events = round_.get("events") or []
+    end = len(events) if end is None else end
     tools: dict[str, int] = {}
     files: dict[str, str] = {}
     nonzero: list[str] = []
     pending: dict[str, str] = {}
-    for e in round_.get("events") or []:
+    for e in events[start:end]:
         message = e.get("message") or {}
         for call in message.get("tool_calls") or []:
             fn = call.get("function") or {}
@@ -86,6 +97,8 @@ def _round_actions(round_: dict) -> dict:
     for block in blocks_module.segment_round_by_file(round_):
         if block.get("kind") != "file" or not block.get("file"):
             continue
+        if int(block.get("start") or 0) >= end or int(block.get("end") or 0) <= start:
+            continue          # 块不与这一段相交
         ops = {str(o.get("op")) for o in (block.get("ops") or [])}
         mark = "".join(sorted({
             "write": "写", "edit": "改", "read": "读", "delete": "删",
@@ -94,11 +107,14 @@ def _round_actions(round_: dict) -> dict:
     return {"tools": tools, "files": files, "nonzero": nonzero}
 
 
-def failure_hints(round_: dict, limit: int = _MAX_HINT) -> list[tuple[str, str]]:
-    """失败候选（事件 ID, 文本）：把"回忆失败"降级成"核对候选"。"""
+def failure_hints(round_: dict, limit: int = _MAX_HINT,
+                  start: int = 0, end: int | None = None) -> list[tuple[str, str]]:
+    """失败候选（事件 ID, 文本）：把"回忆失败"降级成"核对候选"。切片同 `_actions`。"""
+    events = round_.get("events") or []
+    end = len(events) if end is None else end
     out: list[tuple[str, str]] = []
     calls: dict[str, str] = {}
-    for e in round_.get("events") or []:
+    for e in events[start:end]:
         message = e.get("message") or {}
         for call in message.get("tool_calls") or []:
             calls[str(call.get("id") or "")] = str((call.get("function") or {}).get("name") or "")
@@ -126,22 +142,63 @@ def failure_hints(round_: dict, limit: int = _MAX_HINT) -> list[tuple[str, str]]
     return out[:limit]
 
 
-def conclusion_draft(round_: dict, limit: int = _DRAFT_CHARS) -> str:
-    """结论草稿：本轮最终回答的首段（模型改写，不照抄）。"""
-    for e in reversed(round_.get("events") or []):
+def conclusion_draft(round_: dict, limit: int = _DRAFT_CHARS,
+                     start: int = 0, end: int | None = None) -> str:
+    """结论草稿：这一段里的最终回答首段（模型改写，不照抄）。"""
+    events = round_.get("events") or []
+    end = len(events) if end is None else end
+    for e in reversed(events[start:end]):
         if e.get("type") == "final_answer":
             text = str((e.get("message") or {}).get("content") or "").replace("\n", " ").strip()
             return text[:limit] + ("…" if len(text) > limit else "")
     return ""
 
 
-def anchor_lines(round_: dict) -> list[str]:
-    """给结算调用的锚（逐行，喂进指令尾部）。"""
+def executor_segments(round_: dict, lookup: dict | None = None) -> list[dict]:
+    """本轮的执行者分段（**机械派生**，判据复用 `views.event_owners`）。
+
+    一轮由多家执行时（`route_to` 换手），谁是哪一段由事件流本身给出——不必在轮上
+    另存交接锚点（§views）。返回 `[{executor, start, end, index, total}]`，
+    同一执行方连续的事件合成一段；换手前的那次 `route_to` 调用算前一段的。
+    """
+    owners = views_module.event_owners(round_, lookup or {})
+    out: list[dict] = []
+    for i, owner in enumerate(owners):
+        name = str(owner or "Main")
+        if out and out[-1]["executor"] == name:
+            out[-1]["end"] = i + 1
+        else:
+            out.append({"executor": name, "start": i, "end": i + 1})
+    total = len(out)
+    for i, seg in enumerate(out, 1):
+        seg["index"], seg["total"] = i, total
+    return out
+
+
+def anchor_lines(round_: dict, segment: dict | None = None) -> list[str]:
+    """给结算调用的锚（逐行，喂进指令尾部）。
+
+    `segment` 给定时只写**这一段**：动作清单、失败候选、结论草稿都只算这一段的事件
+    （一轮多 agent 时，每段各自的交班记录）。
+    """
     seq = int(round_.get("seq") or 0)
-    lines = [f"R{seq}（执行者：{round_.get('active_view') or 'Main'}）"]
-    for extra in user_turns(round_)[1:]:
+    events = round_.get("events") or []
+    start = int((segment or {}).get("start") or 0)
+    end = (segment or {}).get("end")
+    end = len(events) if end is None else int(end)
+    executor = str((segment or {}).get("executor") or round_.get("active_view") or "Main")
+    head = f"R{seq}（执行者：{executor}）"
+    if segment is not None and int(segment.get("total") or 1) > 1:
+        head += (f"　本回合第 {segment.get('index')}/{segment.get('total')} 段"
+                 f"（事件 {_event_span(events, start, end)}）——只写这一段")
+    lines = [head]
+    # 轮头那句用户原话不进锚（原话由代码逐字摆在装配里，写进来容易招复述）；
+    # 只给**轮内追加**——那是中途的补充/修正，按段落归位。
+    for index, extra in _user_turn_items(round_):
+        if index < 0 or (segment is not None and not (start <= index < end)):
+            continue
         lines.append(f"  轮内用户追加：{extra[:200]}")
-    actions = _round_actions(round_)
+    actions = _actions(round_, start, end)
     if not actions["tools"]:
         lines.append("  无工具动作（纯对话轮）——只写谈了什么、结论是什么")
     else:
@@ -154,14 +211,24 @@ def anchor_lines(round_: dict) -> list[str]:
             ))
         if actions["nonzero"]:
             lines.append("  非零退出：" + "；".join(actions["nonzero"][:3]))
-        hints = failure_hints(round_)
+        hints = failure_hints(round_, start=start, end=end)
         if hints:
             lines.append("  失败候选（逐条核对，同类可合并）：")
             lines += [f"    - 〔{eid}〕{text}" for eid, text in hints]
-    draft = conclusion_draft(round_)
+    draft = conclusion_draft(round_, start=start, end=end)
     if draft:
         lines.append(f"  结论草稿（改写成一句话，别照抄）：{draft}")
     return lines
+
+
+def _event_span(events: list, start: int, end: int) -> str:
+    """事件区间的 ID 写法（`R5-E12–R5-E20`）；空区间给"（无事件）"。"""
+    window = events[start:end]
+    if not window:
+        return "无事件"
+    first = str(window[0].get("id") or "")
+    last = str(window[-1].get("id") or "")
+    return first if first == last else f"{first}–{last}"
 
 
 def seq_span(seqs: list[int]) -> str:
@@ -176,7 +243,11 @@ def seq_span(seqs: list[int]) -> str:
 
 
 def batch_anchor_lines(batch: list[dict]) -> list[str]:
-    """一批要写的轮的锚：**逐轮**列出（轮号 ＋ 执行者 ＋ 机械事实）。"""
+    """**分裂前**的攒批锚：一批轮逐轮列出（轮号 ＋ 执行者 ＋ 机械事实）。
+
+    分裂后不再攒批——一轮一整理、一轮多 agent 就每段一条，锚由 `anchor_lines(r, seg)`
+    单条给出（见 `maintenance._settle_note_call`）。
+    """
     lines = [f"这批 {len(batch)} 轮：{seq_span([int(r.get('seq') or 0) for r in batch])}"]
     for r in batch:
         lines.append("")
@@ -184,11 +255,15 @@ def batch_anchor_lines(batch: list[dict]) -> list[str]:
     return lines
 
 
-def parse_notes(ordered: list, batch: list[dict]) -> tuple[list[dict], list[str]]:
+def parse_notes(ordered: list, batch: list[dict],
+                segments: dict[int, dict] | None = None) -> tuple[list[dict], list[str]]:
     """从响应里取产物并按 seq 对上批次；返回 (产物, 诊断行)。硬门只判结构。
 
     "条数与轮号一一对应"由条目自己保证：没对上的轮**没有产物**，由调用方按
     "没有产出"处理（原文继续顶着，下一批再收它）。诊断行只留痕。
+
+    `segments`（seq → 分段）用于**一轮多 agent**：执行者与事件区间由代码按分段盖章
+    （不让模型自报身份），产物里带上 `start`/`end` 便于分段归位。
     """
     raw = None
     for call in ordered or []:
@@ -239,9 +314,14 @@ def parse_notes(ordered: list, batch: list[dict]) -> tuple[list[dict], list[str]
                 text, evidence = str(entry).strip(), ""
             if text:
                 failures.append({"text": text, "evidence": evidence})
-        out.append({"seq": seq, "sentence": sentence, "failures": failures,
-                    "ledger_append": ledger,
-                    "executor": round_.get("active_view") or "Main"})
+        seg = (segments or {}).get(seq)
+        product = {"seq": seq, "sentence": sentence, "failures": failures,
+                   "ledger_append": ledger,
+                   "executor": str((seg or {}).get("executor")
+                                   or round_.get("active_view") or "Main")}
+        if seg is not None:
+            product["start"], product["end"] = int(seg["start"]), int(seg["end"])
+        out.append(product)
     return out, defects
 
 
@@ -332,17 +412,36 @@ def user_slot(round_: dict) -> str:
     return "\n".join(lines)
 
 
+def note_segments(round_: dict) -> list[dict]:
+    """该轮已落地的段落（按事件顺序）：一轮多 agent 时每家一段。
+
+    兼容两种形态：`note_segments`（分段落地，带 `start`/`end`）与早先的单条 `note`。
+    """
+    segs = round_.get("note_segments")
+    if isinstance(segs, list) and segs:
+        return sorted(
+            [s for s in segs if isinstance(s, dict) and str(s.get("sentence") or "").strip()],
+            key=lambda x: int(x.get("start") or 0),
+        )
+    note = round_.get("note")
+    return [note] if isinstance(note, dict) and str(note.get("sentence") or "").strip() else []
+
+
 def render_note(round_: dict) -> str:
-    """段落档：`[R{n}]〔执行者〕一句话` ＋ 失败行（执行者非 Main 才显示，见 §3.2）。"""
-    note = round_.get("note") or {}
-    head = f"[R{round_.get('seq')}]"
-    executor = str(note.get("executor") or "")
-    if executor and executor != "Main":
-        head += f"〔{executor}〕"
-    lines = [f"{head} {note.get('sentence') or ''}"]
-    for item in note.get("failures") or []:
-        evidence = str(item.get("evidence") or "")
-        lines.append(f"  ⚠ {item.get('text')}" + (f"　〔{evidence}〕" if evidence else ""))
+    """段落档：`[R{n}]〔执行者〕一句话` ＋ 失败行（执行者非 Main 才显示，见 §3.2）。
+
+    一轮多 agent 时**分段拼接**：每段一行，按事件顺序。
+    """
+    lines: list[str] = []
+    for seg in note_segments(round_):
+        head = f"[R{round_.get('seq')}]"
+        executor = str(seg.get("executor") or "")
+        if executor and executor != "Main":
+            head += f"〔{executor}〕"
+        lines.append(f"{head} {seg.get('sentence') or ''}")
+        for item in seg.get("failures") or []:
+            evidence = str(item.get("evidence") or "")
+            lines.append(f"  ⚠ {item.get('text')}" + (f"　〔{evidence}〕" if evidence else ""))
     return "\n".join(lines)
 
 
@@ -351,14 +450,17 @@ def est_note_tokens(round_: dict) -> int:
     return tokens_module.estimate(user_slot(round_)) + tokens_module.estimate(render_note(round_))
 
 
-def soft_defects(note: dict, round_: dict) -> list[str]:
-    """软档：内容正确性（只留痕，不拦）。提到本轮没出现过的路径/工具、证据 ID 不存在。"""
+def soft_defects(note: dict, round_: dict, segment: dict | None = None) -> list[str]:
+    """软档：内容正确性（只留痕，不拦）。提到这一段没出现过的路径/工具、证据 ID 不存在。"""
     out: list[str] = []
     text = note["sentence"] + " " + " ".join(f["text"] for f in note["failures"])
-    own = _round_actions(round_)
+    events = round_.get("events") or []
+    start = int(note.get("start", (segment or {}).get("start") or 0))
+    end = int(note.get("end", (segment or {}).get("end") or len(events)))
+    scope = events[start:end] if segment is not None or note.get("start") is not None else events
     allowed_paths = {
         m.group(0)
-        for m in _PATH_RE.finditer(json.dumps(round_.get("events") or [], ensure_ascii=False))
+        for m in _PATH_RE.finditer(json.dumps(scope, ensure_ascii=False))
     }
 
     def known_path(token: str) -> bool:
@@ -370,12 +472,12 @@ def soft_defects(note: dict, round_: dict) -> list[str]:
     for token in {m.group(0) for m in _PATH_RE.finditer(text)}:
         if not known_path(token):
             out.append(f"提到本轮没出现过的路径 `{token}`")
-    tools = {name for r in [round_] for name in _round_actions(r)["tools"]}
+    tools = set(_actions(round_, start, end)["tools"])
     for name in ("run_command", "write_file", "edit_file", "list_background",
                  "stop_background", "web_search", "search_files"):
         if name in text and name not in tools:
             out.append(f"提到本轮没调用的工具 `{name}`")
-    ids = {str(e.get("id") or "") for e in round_.get("events") or []}
+    ids = {str(e.get("id") or "") for e in scope}
     for item in note["failures"]:
         if item["evidence"] and item["evidence"] not in ids:
             out.append(f"证据 ID 不存在于本轮 `{item['evidence']}`")

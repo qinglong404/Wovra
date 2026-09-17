@@ -1178,9 +1178,14 @@ class _CoreMixin:
         self.current_round["blocks"] = blocks_module.segment_round_by_file(
             self.current_round
         )
-        # 每轮一段话：**水位处攒批**结算（§6.1）——落在下面的
-        # `_maybe_organize_batch`（V4 分支），不在这里逐轮发。产物只落盘与账本，
-        # 不改装配、不改归因；失败只留痕，绝不阻塞闭合。
+        # 每轮一段话：**分裂成多 agent 之后**在轮闭合处结算——一轮一条、一轮多 agent
+        # 就每段一条（§3.2/§6.1）；分裂前不在这里发，由水位处的攒批一次写完整批。
+        try:
+            self._settle_round_notes_of_round(self.current_round)
+        except Exception as error:  # noqa: BLE001——结算绝不能拖垮轮闭合
+            self._note_failed(
+                self.current_round, f"结算异常：{type(error).__name__}: {str(error)[:120]}"
+            )
         # 阶段锚点回填（§53）：块切分完成才能说清"这次阶段验收落在哪个块"。
         self._backfill_stage_anchors()
         self.current_round = None

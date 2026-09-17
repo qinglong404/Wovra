@@ -32,11 +32,51 @@ from wovra import task as task_module             # noqa: E402
 ROOT = Path("/tmp/wovra-round-note/tasks")
 
 
+def _split_round_at_middle(round_: dict, task) -> None:
+    """排练用：在一轮的事件流中间合成一次 `route_to` 交接（判据与真实换手一致）。
+
+    只动副本，且只在 `--multi` 下调用——真实会话里还没出现过"一轮多 agent"，
+    而分段结算的判据（`views.event_owners`）就认事件流里的 route_to 调用。
+    """
+    import json
+
+    events = list(round_.get("events") or [])
+    if len(events) < 3:
+        raise SystemExit(f"R{round_['seq']} 事件太少（{len(events)}），切不开两段")
+    target = next(
+        (str(e.get("id")) for e in (task.registry or [])
+         if isinstance(e, dict) and str(e.get("id") or "") != "Main"),
+        "A",
+    )
+    cut = max(1, len(events) // 2)
+    mark = f"R{round_['seq']}-EX1"
+    events.insert(cut, {
+        "id": mark + "-C", "type": "tool_call", "timestamp": "",
+        "message": {"role": "assistant", "content": "", "tool_calls": [{
+            "id": "rehearse", "type": "function",
+            "function": {"name": "route_to",
+                         "arguments": json.dumps({"agent": target, "message": "接手这一段"})},
+        }]},
+    })
+    events.insert(cut + 1, {
+        "id": mark + "-R", "type": "tool_result", "timestamp": "",
+        "message": {"role": "tool", "tool_call_id": "rehearse",
+                    "content": f"已转交 {target}"},
+        "tool_name": "route_to",
+    })
+    round_["events"] = events
+    round_["active_view"] = target
+    print(f"（排练）R{round_['seq']} 在第 {cut} 个事件处切开 → 两段：Main → {target}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="真跑一次水位处的攒批结算")
     ap.add_argument("session_id")
     ap.add_argument("--batch", type=int, default=0,
                     help="单批最多结算几轮（设的是 `_note_batch_max`；0 = 用默认 12）")
+    ap.add_argument("--multi", action="store_true",
+                    help="排练一轮多 agent：把最后一轮从中间切开（合成一次 route_to 交接），"
+                         "验**分段结算**（每段一次调用、各盖各的执行者）")
     args = ap.parse_args()
 
     src = task_module.TASKS_ROOT / args.session_id
@@ -61,6 +101,8 @@ def main() -> int:
     pending = agent._note_pending_rounds()
     if not pending:
         raise SystemExit("没有可结算的轮（都已有产物）")
+    if args.multi:
+        _split_round_at_middle(pending[-1], task)
     if args.batch:
         agent._note_batch_max = args.batch
     seqs = [int(r["seq"]) for r in pending]
@@ -80,15 +122,13 @@ def main() -> int:
     for line in calls:
         print(f"  {line}")
     for r in pending:
-        note = r.get("note") or {}
-        print(f"\n── R{r['seq']}　note_state={r.get('note_state')!r}")
-        if not note:
-            continue
-        print(f"   执行者（代码盖章）：{note.get('executor')}")
-        print(f"   一句话：{note.get('sentence')}")
-        for item in note.get("failures") or []:
-            ev = item.get("evidence") or ""
-            print(f"     ⚠ {item.get('text')}" + (f"　〔{ev}〕" if ev else ""))
+        segs = note_module.note_segments(r)
+        print(f"\n── R{r['seq']}　note_state={r.get('note_state')!r}　段数 {len(segs)}")
+        for seg in segs:
+            print(f"   [{seg.get('executor')}] {seg.get('sentence')}")
+            for item in seg.get("failures") or []:
+                ev = item.get("evidence") or ""
+                print(f"     ⚠ {item.get('text')}" + (f"　〔{ev}〕" if ev else ""))
     print("\n本次留痕与用量：")
     for h in (task.history or [])[before:]:
         kind = str(h.get("kind"))

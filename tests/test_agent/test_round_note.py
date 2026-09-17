@@ -11,6 +11,7 @@ import json
 
 from wovra import task as task_module
 from wovra.agent import Agent
+from wovra.agent import note as note_module
 from wovra.task import Task
 from wovra.truncate import make_event
 
@@ -435,3 +436,150 @@ def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path)
     agent.last_context_estimate = 3000
     agent._advance_fold_line()
     assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == folded
+
+
+# ---- 分裂成多 agent 之后：一轮一整理，一轮多 agent 就每段一整理 ----
+
+
+def _sub_agents(agent, *ids):
+    """把注册表改成长出子 agent 的样子（分裂落过地的机械信号）。"""
+    agent.task.registry = [{"id": "Main", "name": "主agent"}] + [
+        {"id": i, "name": i, "status": "active"} for i in ids
+    ]
+
+
+def _two_executor_round(agent) -> dict:
+    """一轮：主 agent 转交（route_to）→ A 干活回答。事件流自带交接锚点。"""
+    events = [
+        make_event("R1-E01", "user", {"role": "user", "content": "这个活你做"}),
+        make_event("R1-E02", "tool_call", {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": "c0", "type": "function",
+                            "function": {"name": "route_to",
+                                         "arguments": json.dumps({"agent": "A",
+                                                                  "message": "接手"})}}],
+        }),
+        make_event("R1-E03", "tool_result", {
+            "role": "tool", "tool_call_id": "c0", "content": "已转交 A"},
+            tool_name="route_to"),
+        make_event("R1-E04", "final_answer", {"role": "assistant", "content": "A 做完了"}),
+    ]
+    return {
+        "seq": 1, "user_input": {"original": "这个活你做", "normalized": ""},
+        "events": events, "refined_index": {}, "end_state": "completed",
+        "org_state": "", "active_view": "A", "route_hops": 1, "blocks": [],
+    }
+
+
+def test_per_round_close_after_split_settles_every_segment(monkeypatch, tmp_path):
+    """分裂后：轮闭合即结算；一轮多 agent → **每段一次**调用，各盖各的执行者。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_batch_chunk([_note(1, "主 agent 把活转给了 A")]),
+         _batch_chunk([_note(1, "A 接手并做完")])],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _sub_agents(agent, "A")
+    round_ = _two_executor_round(agent)
+    agent.rounds = [round_]
+    agent.current_round = round_
+    agent.close_round()
+
+    assert len(_batches(agent)) == 2                       # 两段 = 两次调用
+    assert round_["note_state"] == "done"
+    assert [(s["executor"], s["sentence"]) for s in round_["note_segments"]] == [
+        ("Main", "主 agent 把活转给了 A"), ("A", "A 接手并做完"),
+    ]
+    anchored = [_batches(agent)[0]["messages"][-1]["content"],
+                _batches(agent)[1]["messages"][-1]["content"]]
+    assert "第 1/2 段" in anchored[0] and "只写这一段" in anchored[0]
+    assert "第 2/2 段" in anchored[1]
+    assert "R1·Main第1/2段" in _records(task) and "R1·A第2/2段" in _records(task)
+    # 分段渲染：一行一段（执行者非 Main 才挂名字）
+    rendered = note_module.render_note(round_)
+    assert "[R1] 主 agent 把活转给了 A" in rendered
+    assert "[R1]〔A〕 A 接手并做完" in rendered
+
+
+def test_split_phase_does_not_wait_for_watermark(monkeypatch, tmp_path):
+    """分裂后不再攒批：水位远在天边也照写在轮闭合处（攒批只管分裂前那一段）。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _batch_chunk([_note(1)])],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _sub_agents(agent, "A")
+    _run(agent, 1)
+
+    assert [r["note_state"] for r in task.rounds] == ["done"]
+    assert len(_batches(agent)) == 1
+
+
+def test_partial_segment_failure_keeps_round_unfolded(monkeypatch, tmp_path):
+    """一段没写成 → 整轮不算齐（note_state 不是 done）→ 不折档，原文顶着。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_batch_chunk([_note(1, "主 agent 转交")]),
+         [_chunk(_delta(content="（没提交）"))]],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _sub_agents(agent, "A")
+    round_ = _two_executor_round(agent)
+    agent.rounds = [round_]
+    agent.current_round = round_
+    agent.close_round()
+
+    assert [s["executor"] for s in round_["note_segments"]] == ["Main"]   # 只落了第一段
+    assert round_["note_state"] == "failed"        # 没齐 → 不许折档
+    agent._fold_keep = 0
+    agent.last_context_estimate = _WATERMARK_OFF
+    agent._advance_fold_line()
+    assert not round_.get("folded")
+    # 补漏：下一批（水位处）只捡缺的那一段
+    assert [(r["seq"], seg["executor"]) for r, seg in agent._note_jobs([round_])] == [(1, "A")]
+
+
+def test_backlog_sweep_after_split_batches_whole_rounds(monkeypatch, tmp_path):
+    """分裂后补漏：**整轮一条都没写成的**合成一批补（补账不是运行节奏，攒着写）。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _batch_chunk([_note(1)]),        # 每轮：工作 + 轮闭合处的一次结算
+         _plain(), _batch_chunk([_note(2)]),
+         _plain(), _batch_chunk([_note(3)]),
+         _batch_chunk([_note(1), _note(2), _note(3)])],   # 水位处补漏：攒成一批
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _sub_agents(agent, "A")
+    _run(agent, 3)                                  # 分裂后的运行：每轮各一次（3 次）
+    assert len(_batches(agent)) == 3
+    for r in task.rounds:                           # 把三段产物抹掉，模拟"上一批没写成"
+        r.pop("note_segments", None)
+        r.pop("note", None)
+        r["note_state"] = "failed"
+    _trigger(agent)                                 # 水位处的补漏
+
+    assert len(_batches(agent)) == 4                # 3 轮积压 = **一批**（不是 3 次）
+    assert [r["note_state"] for r in task.rounds] == ["done"] * 3
+    assert "R1–R3 结算完成：3/3 条" in _records(task)
+
+
+def test_multi_executor_backlog_goes_segment_by_segment(monkeypatch, tmp_path):
+    """补漏时**一轮多 agent 的轮**按段补：不攒批（攒批会把两家写成一条、执行者挂错）。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_batch_chunk([_note(1, "主 agent 转交")]),
+         _batch_chunk([_note(1, "A 做完")])],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _sub_agents(agent, "A")
+    round_ = _two_executor_round(agent)
+    round_["note_state"] = "failed"          # 上批整轮没写成 → 进补漏
+    agent.rounds = [round_]
+    _trigger(agent)
+
+    assert len(_batches(agent)) == 2                      # 两段 = 两次（不是一批）
+    assert [(s["executor"], s["sentence"]) for s in round_["note_segments"]] == [
+        ("Main", "主 agent 转交"), ("A", "A 做完"),
+    ]
+    assert "note" not in round_                           # 整轮那条不会混进来
+    assert round_["note_state"] == "done"
