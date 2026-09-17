@@ -57,7 +57,9 @@ _CONTRACT = (
     "6. 每条是**这一轮自己的交班记录**，不是这一批的总述。验收标准：把某一条单独拿给"
     "一个没看过会话的人，他能说清这轮发生了什么（**轮号是他唯一的坐标**）。\n"
     "7. 一句话 **80–250 字符**（信息量小的轮可更短，但不得空话）。\n"
-    "8. 一轮一条、一个不落、与上面的轮号一一对应。\n\n"
+    "8. **轮内用户发言**（用户中途的补充/修正）由 Runtime 逐字保留，不必复述；但若本轮结论"
+    "**因它而改变**，在结论里点明因果（如「按用户中途要求只跑离线子集」）。\n"
+    "9. 一轮一条、一个不落、与上面的轮号一一对应。\n\n"
     "完成后调用 submit_round_notes 提交（唯一出口，不要在正文输出 JSON）。"
 )
 
@@ -258,6 +260,30 @@ def _conclusion_draft(r: dict, limit: int = 320) -> str:
     return ""
 
 
+def _user_turns(r: dict) -> list[str]:
+    """本轮**全部**用户发言，逐字返回（轮头 + 轮内追加），去重并排除 runtime 信封。
+
+    为什么必须有这一条（2026-09-17 用户报缺陷）：V4 契约写的是"用户原话由代码逐字承载"，
+    但实现只挂了轮头那一条——轮内追加在轮被折叠后就没了。本会话正是活标本：
+    R2 用户中途追加「含网络检索的先不做」，R3 追加「不是，你在干嘛？我不是说，测试完就停止吗」。
+    这两条是**前提档**：丢了它们，"为什么只跑离线子集""为什么这轮以'被叫停'收尾"都读不懂。
+    旧契约里"用户块：轮头之后的用户补充/修正输入，先保留补充原话"就是这一块，
+    删分块地图时被一起漏掉了。
+    """
+    out: list[str] = []
+    for text in [str((r.get("user_input") or {}).get("original") or "")] + [
+        str((e.get("message") or {}).get("content") or "")
+        for e in r.get("events") or []
+        if e.get("type") == "user"
+        and (e.get("message") or {}).get("role") == "user"
+    ]:
+        t = text.strip()
+        if not t or t.startswith("<runtime-reminder>") or t in out:
+            continue
+        out.append(t)
+    return out
+
+
 def _ledger_lines(task) -> list[str]:
     """账本里**已有**的条目摘要（摆在指令里让模型去重）。
 
@@ -296,6 +322,11 @@ def _actions_lines(batch: list[dict]) -> list[str]:
         a = _round_actions(r)
         lines.append("")
         lines.append(f"R{r['seq']}")
+        for extra in _user_turns(r)[1:]:
+            lines.append(
+                "  轮内用户（逐字保留，不必复述；**若本轮结论因它而改变，请在结论里点明因果**）："
+                + extra.replace("\n", " ")[:200]
+            )
         if not a["tools"]:
             lines.append(
                 "  无工具动作（纯对话轮）——只写谈了什么、结论是什么；"
@@ -393,10 +424,11 @@ def _hint_coverage(notes: dict, batch: list[dict]) -> tuple[int, int, list[str]]
     missed: list[str] = []
     for r in batch:
         n = notes.get(int(r["seq"])) or {}
-        text = " ".join([str(n.get("sentence") or "")]
-                        + [_fail_text(f) for f in (n.get("failures") or [])])
+        text = " ".join(_fail_text(f) for f in (n.get("failures") or []))
         for eid, h in _failure_hints(r):
-            tokens = set(strong.findall(h))
+            # **候选自己的事件 ID 就是最强落点**（产物常把候选改写成别的措辞，
+            # 只做词面匹配会误判成"漏写"——2026-09-17 实测 1/4 vs 4/4）
+            tokens = set(strong.findall(h)) | {eid}
             if not tokens:
                 continue
             total += 1
@@ -509,7 +541,11 @@ def main() -> int:
     for r in batch:
         n = notes.get(int(r["seq"]))
         total_chars += len(str((n or {}).get("sentence") or ""))
-        print(f"\n[R{r['seq']}] 👤 {str((r.get('user_input') or {}).get('original') or '')[:70]}")
+        turns = _user_turns(r)
+        for i, u in enumerate(turns):
+            tag = "" if i == 0 else "（轮内追加）"
+            head = f"\n[R{r['seq']}] 👤" if i == 0 else "     👤"
+            print(f"{head}{tag} {u[:70]}")
         files = _round_files(r)
         if files:
             print(f"      涉及文件：{'、'.join(files[:6])}" + ("…" if len(files) > 6 else ""))
@@ -530,7 +566,9 @@ def main() -> int:
     if not check["hard"] and not check["soft"]:
         print("  ✓ 干净：产物提到的路径与工具，都在本轮自己出现过")
     hit, tot, missed = _hint_coverage(notes, batch)
-    print(f"  候选核对率：{hit}/{tot}（对不上的逐条列出，人工判是漏写还是我的假候选）")
+    print(f"  候选落进 failures：{hit}/{tot}"
+          "（只算写进 failures 字段的——仅在句子里提一句不算；对不上的逐条列出，"
+          "人工判是漏写还是我的假候选）")
     for m in missed:
         print(f"    ? {m}")
     good, allf = _evidence_rate(notes, batch)
