@@ -39,7 +39,8 @@ _FAIL_SIGNS = (
 _PATH_RE = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]{1,6}\b")
 
 _MAX_HINT = 6          # 一次最多给几条失败候选
-_DRAFT_CHARS = 320     # 结论草稿取多少字符
+_DRAFT_CHARS = 320     # 结论草稿取多少字符（有执行动作的条：数字/路径都在里面）
+_DRAFT_CHARS_CHAT = 120  # 无工具动作的条：草稿给多了，改写就写成一张清单（实测）
 _HINT_CLIP = 90
 
 
@@ -200,7 +201,7 @@ def anchor_lines(round_: dict, segment: dict | None = None) -> list[str]:
         lines.append(f"  轮内用户追加：{extra[:200]}")
     actions = _actions(round_, start, end)
     if not actions["tools"]:
-        lines.append("  无工具动作（纯对话轮）——只写谈了什么、结论是什么")
+        lines.append("  无工具动作——一两句说完谈了什么、得出什么（不列清单、不抄草稿）")
     else:
         lines.append("  工具：" + "、".join(
             f"{name}×{count}" for name, count in sorted(actions["tools"].items())
@@ -215,7 +216,12 @@ def anchor_lines(round_: dict, segment: dict | None = None) -> list[str]:
         if hints:
             lines.append("  失败候选（逐条核对，同类可合并）：")
             lines += [f"    - 〔{eid}〕{text}" for eid, text in hints]
-    draft = conclusion_draft(round_, start=start, end=end)
+    # 草稿给多长，改写就写多长（实测：闲聊轮的 320 字草稿直接被铺成一张清单），
+    # 故无工具动作的条只给开头一截。
+    draft = conclusion_draft(
+        round_, limit=_DRAFT_CHARS if actions["tools"] else _DRAFT_CHARS_CHAT,
+        start=start, end=end,
+    )
     if draft:
         lines.append(f"  结论草稿（改写成一句话，别照抄）：{draft}")
     return lines

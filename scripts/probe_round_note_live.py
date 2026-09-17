@@ -74,6 +74,8 @@ def main() -> int:
     ap.add_argument("session_id")
     ap.add_argument("--batch", type=int, default=0,
                     help="单批最多结算几轮（设的是 `_note_batch_max`；0 = 用默认 12）")
+    ap.add_argument("--redo", type=int, default=0,
+                    help="重写指定轮的产物（措辞 A/B 用：副本上清掉该轮的 note 再结算）")
     ap.add_argument("--multi", action="store_true",
                     help="排练一轮多 agent：把最后一轮从中间切开（合成一次 route_to 交接），"
                          "验**分段结算**（每段一次调用、各盖各的执行者）")
@@ -98,6 +100,14 @@ def main() -> int:
     agent._org_grace = 0
     agent._org_cooldown = 0
 
+    if args.redo:
+        target = next((r for r in task.rounds if int(r["seq"]) == args.redo), None)
+        if target is None:
+            raise SystemExit(f"没有 R{args.redo}")
+        target.pop("note", None)
+        target.pop("note_segments", None)
+        target["note_state"] = ""
+        print(f"（重写）R{args.redo} 的产物已清掉（只动副本）")
     pending = agent._note_pending_rounds()
     if not pending:
         raise SystemExit("没有可结算的轮（都已有产物）")
