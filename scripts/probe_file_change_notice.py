@@ -30,21 +30,40 @@ def archived(workspace: Path, rel: str) -> list[Path]:
     return sorted(slot.glob("*.bak")) if slot.is_dir() else []
 
 
-def notice(workspace: Path, rel: str, lines: int = 14) -> str:
+# 两种归属的措辞（用户口径 2026-09-17：外部改动**不预判对错**——可能是加错一个符号导致的
+# 报错、可能是误删，**也可能是高质量修改**；只陈述事实 + 让人自己判断）
+_ATTRIB = {
+    "tool": "这条改动来自工具写入（某个 agent 改的）",
+    "user": ("**这是用户操作，不是工具写的**——可能是有意的高质量修改，也可能是不小心的"
+             "（例如多加一个符号导致报错、误删了一段）；**不要当成权威版本，也不要当成错误**，"
+             "先看差异再决定：顺着它改、改回去、还是先问一句"),
+}
+
+
+def notice(workspace: Path, rel: str, lines: int = 14, observed: str = "",
+           attrib: str = "tool") -> str:
     target = workspace / rel
     if not target.is_file():
-        return f"[文件变更] {rel}：现在不存在（可能被删/改名）——先 list_files 确认"
-    versions = archived(workspace, rel)
-    if not versions:
-        return (f"[文件变更] {rel}：内容变了，但**没有旧版本可比**（外部编辑，不是工具写的）"
-                f"——只能提示你重读，给不了行级差异")
-    old = versions[-1].read_text(encoding="utf-8", errors="replace").splitlines()
+        return f"[文件变更·{attrib}] {rel}：现在不存在（可能被删/改名）——先 list_files 确认"
+    versions: list[Path] = []
+    if observed and Path(observed).is_file():
+        old_text = Path(observed).read_text(encoding="utf-8", errors="replace")
+        source = f"你的观察副本 {Path(observed).name}"
+    else:
+        versions = archived(workspace, rel)
+        if not versions:
+            return (f"[文件变更·{attrib}] {rel}：内容变了，但你上次观察时的副本不在"
+                    f"——只能提示你重读，给不了行级差异")
+        old_text = versions[-1].read_text(encoding="utf-8", errors="replace")
+        source = f"你上次观察时的版本 {versions[-1].name}"
+    old = old_text.splitlines()
     new = target.read_text(encoding="utf-8", errors="replace").splitlines()
     diff = list(difflib.unified_diff(old, new, n=1, lineterm=""))
     added = sum(1 for x in diff if x.startswith("+") and not x.startswith("+++"))
     removed = sum(1 for x in diff if x.startswith("-") and not x.startswith("---"))
-    head = (f"[文件变更] {rel}　你在上次观察之后它被改过："
-            f"+{added} −{removed} 行（{len(old)} → {len(new)} 行）")
+    head = (f"[文件变更·{'用户操作' if attrib == 'user' else '工具'} ] {rel}（{source}）\n"
+            f"  改动：+{added} −{removed} 行（{len(old)} → {len(new)} 行）\n"
+            f"  {_ATTRIB.get(attrib, _ATTRIB['tool'])}")
     body = diff[2:2 + lines]                       # 去掉 ---/+++ 两行头
     more = max(0, len(diff) - 2 - lines)
     tail = []
@@ -61,8 +80,11 @@ def main() -> int:
     ap.add_argument("workspace")
     ap.add_argument("relpath")
     ap.add_argument("--lines", type=int, default=14)
+    ap.add_argument("--observed", default="", help="观察时的那份副本（不给则取最新归档版本）")
+    ap.add_argument("--attrib", default="tool", choices=("tool", "user"),
+                    help="改动归属：tool=某个 agent 写的；user=用户/外部改的")
     args = ap.parse_args()
-    print(notice(Path(args.workspace), args.relpath, args.lines))
+    print(notice(Path(args.workspace), args.relpath, args.lines, args.observed, args.attrib))
     return 0
 
 
