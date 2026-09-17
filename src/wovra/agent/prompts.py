@@ -324,6 +324,69 @@ _ORG_TAG_INSTRUCTIONS = (
     "   用户的承诺/交付口径完整写入。\n"
 )
 
+_ROUND_NOTE_SCHEMA: dict = {
+    "type": "function",
+    "function": {
+        "name": "submit_round_note",
+        "description": (
+            "提交本轮的一段话（每轮一条）。仅限轮闭合时的结算调用；"
+            "工作对话中调用无效，只返回说明文本。"
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "seq": {"type": "integer", "description": "轮次号，等于本轮"},
+                "sentence": {
+                    "type": "string",
+                    "description": (
+                        "一句话：这轮做了什么、结论是什么。关键数字（行数/条数/次数）、"
+                        "文件路径、命令名原样保留；不复述用户输入"
+                    ),
+                },
+                "failures": {
+                    "type": "array",
+                    "description": (
+                        "失败与坑：非零退出/越界拦截/路径不存在/方案被推翻。没有就给空数组"
+                    ),
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "text": {"type": "string"},
+                            "evidence": {
+                                "type": "string",
+                                "description": "证据事件 ID（如 R2-E174），取自失败候选；没有留空",
+                            },
+                        },
+                        "required": ["text"],
+                    },
+                },
+                "ledger_append": {
+                    "type": "object",
+                    "description": "本轮新增的账本条目（只增不减；已有的不要重复写）",
+                    "properties": {
+                        "constraints": {"type": "array", "items": {"type": "string"}},
+                        "decisions": {"type": "array", "items": {"type": "string"}},
+                        "known_issues": {"type": "array", "items": {"type": "string"}},
+                        "open_questions": {"type": "array", "items": {"type": "string"}},
+                    },
+                },
+            },
+            "required": ["seq", "sentence", "failures"],
+        },
+    },
+}
+
+_ROUND_NOTE_INSTRUCTION = (
+    "[结算指令]\n"
+    "上面的锚是本轮的机械事实（用户发言、工具与文件、失败候选、结论草稿）。"
+    "请只写**本轮**的一段话：不重写、不复述、不合并别的轮。\n"
+    "1. 一句话：这轮做了什么、结论是什么；关键数字与路径原样保留。\n"
+    "2. 失败与坑：以失败候选为底逐条核对（同类可合并），候选里没有但你知道的照样写；"
+    "没有就给空数组。尽量带 evidence（候选〔〕里的事件 ID）。\n"
+    "3. 账本增量：只写新增条目；标量（现状/目标）不用你写。\n"
+    "完成后调用 submit_round_note 提交（唯一出口）。"
+)
+
 _ORG_DOMAINS_SCHEMA: dict = {
     "type": "function",
     "function": {

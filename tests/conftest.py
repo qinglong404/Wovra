@@ -20,6 +20,17 @@ def _isolate_tasks_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _round_note_off_by_default(monkeypatch):
+    """默认关掉"每轮一段话"的同步结算。
+
+    它在**每次轮闭合**多打一次 LLM，而本套测试按老链路脚本化响应（多一次调用会
+    吃掉下一个脚本项、并改变成本/步数读数）。该功能由 `tests/test_agent/test_round_note.py`
+    显式开启并覆盖；生产默认开（`WOVRA_ROUND_NOTE`）。
+    """
+    monkeypatch.setenv("WOVRA_ROUND_NOTE", "0")
+
+
+@pytest.fixture(autouse=True)
 def _isolate_workspace_binding():
     """每测试清掉**线程绑定的工作区**（thread-local 会在同线程里残留）。
 

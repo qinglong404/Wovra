@@ -3,6 +3,7 @@
 纯追加延续。
 """
 import json
+import os
 import re
 import threading
 import time
@@ -17,9 +18,12 @@ from .. import views as views_module
 from .. import tokens as tokens
 from .. import truncate as truncate
 from ..tools import safety as safety_module
+from ..task import _PATCH_LIST_FIELDS
+from . import note as note_module
 from .support import (
     MODE_MANAGED,
     _COMPRESS_THRESHOLD,
+    _NOTE_TIMEOUT_DEFAULT,
     _clip_quote,
     maint_tools,
 )
@@ -27,6 +31,7 @@ from .prompts import (
     _ORG_META_INFO,
     _ORG_FORMAT_DISCIPLINE,
     _ORG_TAG_INSTRUCTIONS,
+    _ROUND_NOTE_INSTRUCTION,
     _SPLIT_INSTRUCTIONS,
 )
 
@@ -34,6 +39,10 @@ from .prompts import (
 _ORG_SUBMIT_TOOL = "submit_organization"
 
 _SPLIT_SUBMIT_TOOL = "submit_domains"
+
+_ROUND_NOTE_SUBMIT = "submit_round_note"
+
+
 
 def _scan_value_end(text: str, start: int) -> int:
     """从 text[start]（应为 `{` 或 `[`）扫到配对收尾的下标；被截断（扫到结尾）返回 -1。
@@ -414,6 +423,92 @@ class _MaintenanceMixin:
             # 退出前把产物落到位（§50）：run 模式下一次自主推进开局就直接是
             # "有子 agent、有归属"的状态，不必再等一次轮开启。
             self._settle_after_maintenance()
+
+    def _round_note_enabled(self) -> bool:
+        """每轮一段话（V4 §3.2 第一步）是否开启：managed ＋ 有 task ＋ 开关未关。"""
+        if self.context_mode != MODE_MANAGED or self.task is None:
+            return False
+        return (os.environ.get("WOVRA_ROUND_NOTE", "1") or "1").strip().lower() not in (
+            "0", "false", "no", "off",
+        )
+
+    def _note_failed(self, round_: dict, why: str) -> None:
+        """结算失败：只留痕，不重发、不跨轮、不动历史字节（§155）。"""
+        round_["note_state"] = "failed"
+        if self.task is not None:
+            self.task.record("note", f"R{round_.get('seq')} 结算失败：{why}（不重发，原文继续顶着）")
+
+    def _settle_round_note(self, round_: dict) -> None:
+        """轮闭合处的**同步**结算：产出"本轮的一段话"（一句话 ＋ 失败 ＋ 账本增量）。
+
+        形态：**尾部追加调用**——装配快照（与工作调用同一序列）＋ 尾部结算指令，
+        tools 数组与工作调用同一序列化（骑满前缀缓存，实测只付"指令＋产物"）。
+        **不改装配、不改归因**：产物只落 `round["note"]` 与账本，装配仍走整理链路。
+
+        纪律（§154/§155）：产物一律落地；校验只留痕；失败不重试、不跨轮、不生成骨架段；
+        历史字节一字不动。执行者由**代码**盖章（不让模型自报身份）。
+        """
+        if not self._round_note_enabled():
+            return
+        round_["note_state"] = "pending"
+        snapshot = self._maint_snapshot()
+        if snapshot is None:
+            self._note_failed(round_, "装配快照不可用（尾部协议不完整）")
+            return
+        messages = list(snapshot)
+        messages.append({
+            "role": "user",
+            "content": _ROUND_NOTE_INSTRUCTION + "\n\n[锚]\n"
+                       + "\n".join(note_module.anchor_lines(round_)),
+        })
+        tools = maint_tools(self._schemas, _ROUND_NOTE_SUBMIT)
+        box: dict = {}
+
+        def run() -> None:
+            try:
+                box["out"] = self._stream_call(messages, tools=tools, purpose="note")
+            except Exception as error:  # noqa: BLE001——异常带回主线程判失败
+                box["error"] = f"{type(error).__name__}: {str(error)[:160]}"
+
+        thread = threading.Thread(
+            target=safety_module.workspace_bound_target(run),
+            name="wovra-round-note", daemon=True,
+        )
+        thread.start()
+        thread.join(self._note_timeout)
+        if thread.is_alive():
+            self._note_failed(round_, f"结算超时（{self._note_timeout:.0f}s）")
+            return
+        if "error" in box:
+            self._note_failed(round_, f"结算调用异常：{box['error']}")
+            return
+        out = box.get("out")
+        if not out:
+            self._note_failed(round_, "结算调用没有返回")
+            return
+        _content, ordered, _usage = out
+        product, why = note_module.parse_note(ordered, round_)
+        if product is None:
+            self._note_failed(round_, why)
+            return
+        round_["note"] = product
+        round_["note_state"] = "done"
+        patch = {key: value for key, value in (product.get("ledger_append") or {}).items()
+                 if key in _PATCH_LIST_FIELDS}
+        report = self.task.apply_state_patch(patch) if patch else {}
+        self._persist_rounds()
+        if self.task is None:
+            return
+        defects = note_module.soft_defects(product, round_)
+        detail = (f"R{round_.get('seq')} 结算完成：{len(product['sentence'])} 字，"
+                  f"{len(product['failures'])} 条失败，账本 +{sum(len(v) for v in patch.values())} 条")
+        if defects:
+            detail += f"；软档 {len(defects)} 条（只留痕）：{'；'.join(defects[:3])}"
+        self.task.record("note", detail)
+        closed = (report or {}).get("closed") or []
+        if closed:
+            self.task.record("note", f"结案 {len(closed)} 条：" + "；".join(
+                f"{field}:{text[:40]}" for field, text in closed))
 
     def _ensure_worker(self) -> None:
         if self._org_thread is not None and self._org_thread.is_alive():

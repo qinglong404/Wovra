@@ -20,7 +20,9 @@ _DEFAULT_CONTEXT_LIMIT = int(os.environ.get("WOVRA_CONTEXT_LIMIT", "1000000"))
 
 _COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
 
-_MAINTENANCE_PURPOSES = ("organization", "compaction", "split")
+_MAINTENANCE_PURPOSES = ("organization", "compaction", "split"
+    "note",
+)
 
 _READ_ONLY_TOOLS = frozenset(
     {"read_file", "search_files", "list_files", "get_current_time",
@@ -32,6 +34,12 @@ _ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
 _ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
 
 _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
+
+# 每轮一段话的同步结算硬上限（V4 §3.2 第一步；超时按失败处理、只留痕）。
+# 取 180s，与工作调用的读超时同档：结算的输入是**整段装配**，冷前缀（新会话第一轮、
+# 缓存被驱逐）时预填本身可能几十秒。（2026-09-17 那次"60s 超时"的实测原因是
+# 端点 429 触发了 `_stream_call` 的退避重试，不是预填慢——归因更正。）
+_NOTE_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_NOTE_TIMEOUT", "180"))
 
 # 分裂判据的体量门槛（2026-09-11 用户拍板）：主 agent 残留桶（纯对话/
 # 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），

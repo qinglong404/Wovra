@@ -31,6 +31,7 @@ from .support import (
     _MAINTENANCE_PURPOSES,
     _ORG_COOLDOWN_ROUNDS_DEFAULT,
     _ORG_GRACE_ROUNDS_DEFAULT,
+    _NOTE_TIMEOUT_DEFAULT,
     _ORG_MAINT_TIMEOUT_DEFAULT,
     _ORG_WATERMARK_DEFAULT,
     _READ_ONLY_TOOLS,
@@ -50,6 +51,7 @@ from .prompts import (
     _ORG_DOMAINS_SCHEMA,
     _ORG_SUBMIT_SCHEMA,
     _RESPONSIBILITY_SCHEMA,
+    _ROUND_NOTE_SCHEMA,
     _ROUTE_TO_SCHEMA,
     _TODO_SCHEMA,
 )
@@ -182,6 +184,8 @@ class _CoreMixin:
         self._org_maint_timeout = (
             _ORG_MAINT_TIMEOUT_DEFAULT if org_maint_timeout is None else org_maint_timeout
         )
+        # 每轮一段话的同步结算硬上限（V4 §3.2 第一步；超时按失败处理、只留痕）
+        self._note_timeout = _NOTE_TIMEOUT_DEFAULT
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()
@@ -289,6 +293,9 @@ class _CoreMixin:
 
         if self.context_mode == MODE_MANAGED:
             self.register(self.expand_history)
+            # 每轮一段话的出口（V4 §3.2）：常驻注册，tools 数组恒定；
+            # 工作期误调用由方法体守卫拒绝（见 ledger.submit_round_note）
+            self.register(self.submit_round_note, schema=_ROUND_NOTE_SCHEMA)
             # 整理提交工具常驻：所有请求的 tools 数组恒定（工作对话与整理
             # 调用同序列化），前缀缓存才不会在 tools 区分叉。工作期误调用
             # 由方法体守卫拒绝（见 submit_organization / submit_domains）。
@@ -1158,6 +1165,14 @@ class _CoreMixin:
         self.current_round["blocks"] = blocks_module.segment_round_by_file(
             self.current_round
         )
+        # 每轮一段话：**轮闭合处同步**做完（§3.2 第一步；产物只落盘与账本，
+        # 不改装配、不改归因）。失败只留痕，绝不阻塞闭合。
+        try:
+            self._settle_round_note(self.current_round)
+        except Exception as error:  # noqa: BLE001——结算绝不能拖垮轮闭合
+            self._note_failed(
+                self.current_round, f"结算异常：{type(error).__name__}: {str(error)[:120]}"
+            )
         # 阶段锚点回填（§53）：块切分完成才能说清"这次阶段验收落在哪个块"。
         self._backfill_stage_anchors()
         self.current_round = None
