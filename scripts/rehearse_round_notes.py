@@ -424,7 +424,12 @@ def _hint_coverage(notes: dict, batch: list[dict]) -> tuple[int, int, list[str]]
     missed: list[str] = []
     for r in batch:
         n = notes.get(int(r["seq"])) or {}
-        text = " ".join(_fail_text(f) for f in (n.get("failures") or []))
+        # **证据 ID 在 evidence 字段里，不在 text 里**——只join text 会把"写了 ID 的失败"
+        # 误判成"没落进去"（2026-09-17 三次踩同族坑，度量口径比机制更容易错）
+        text = " ".join(
+            _fail_text(f) + " " + str((f or {}).get("evidence") or "")
+            for f in (n.get("failures") or [])
+        )
         for eid, h in _failure_hints(r):
             # **候选自己的事件 ID 就是最强落点**（产物常把候选改写成别的措辞，
             # 只做词面匹配会误判成"漏写"——2026-09-17 实测 1/4 vs 4/4）

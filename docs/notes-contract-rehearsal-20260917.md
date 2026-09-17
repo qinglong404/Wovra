@@ -12,9 +12,8 @@
 
 # 当前版本（v7）：完整输入与输出（逐字）
 
-> 本节取自 **2026-09-17** 的一次真实运行
-> （`rehearse_round_notes.py 20260916-090533-964be8 --keep-ledger`）。
-> 指令、产物、校验结论都是**逐字**的；历史版本（v7→v1）在本节之后。
+> 本节取自一次真实运行（`rehearse_round_notes.py 20260916-090533-964be8 --keep-ledger`），
+> 指令、产物、校验结论都是**逐字**的。历史版本（v7 → v1）在本节之后。
 
 ## 输入
 
@@ -22,7 +21,7 @@
 （系统提示词 + 9 轮原文全量 + 尾部信封），尾部追加下面这段指令。
 
 ```
-usage: prompt=134,857 cached=134,656 miss=201 completion=5,803（含推理 4,015）
+usage: prompt=134,857 cached=134,656 miss=201 completion=9,747（含推理 7,503）
 注：本模型把推理计入 completion；实测产物只占其中约 2K——**成本主体是模型读历史做压缩时的思考，不是产物体量**。
 ```
 
@@ -105,83 +104,77 @@ R9
 完成后调用 submit_round_notes 提交（唯一出口，不要在正文输出 JSON）。
 
 调 LLM（输入约 148,374 tok）…
-usage: prompt=134,857 cached=134,656 miss=201 completion=5,803（含推理 4,015）
+usage: prompt=134,857 cached=134,656 miss=201 completion=9,747（含推理 7,503）
 注：本模型把推理计入 completion；实测产物只占其中约 2K——**成本主体是模型读历史做压缩时的思考，不是产物体量**。
 
 ── 产物：每轮一句话（👤原文与涉及文件是**代码**填的）──
 
 [R1] 👤 你查一下：GAIA Benchmark
       涉及文件：README.md、AGENTS.md
-      ▸ 查 GAIA Benchmark：Meta AI 2023-11-21 发布（arXiv:2311.12983），466 题分三档（L1 146/L2 245/L3 75），人类 92% 对带插件 GPT-4 的 15%，300 题答案私有；读 README.md、AGENTS.md 均报文件不存在。
-      ⚠ 读 README.md 与 AGENTS.md 均报「文件不存在」；且初到的文件列表列出十几个条目，而 ls 显示目录实为空，两处互相矛盾
-      ⚠ search_files 搜 GAIA 返回无匹配，glob_files 也返回无匹配
+      ▸ 查 GAIA Benchmark：list_files 报出一堆文件而 ls 显示目录为空（两者不一致），web 检索并抓取 arXiv:2311.12983、HF 数据集卡与第三方综述；得到 466 题三档（L1 146/L2 245/L3 75）、人类 92% vs 带插件 GPT-4 15%、300 题私有测试集，官方 HF 榜 JS 渲染只拿到占位未取到分数行。
+      ⚠ read_file 读 README.md 与 AGENTS.md 均报文件不存在；glob_files('*') 返回无匹配，与 list_files 的列表矛盾（实际工作区为空）
+      ⚠ search_files 搜 GAIA 无匹配，未能在本工作区找到任何相关内容
 
 [R2] 👤 我想看看这个Wovra 作为agent表现如何？
      👤（轮内追加） 含网络检索的先不做，当前网络检索工具可能还有些小问题。
       涉及文件：gaia_bench/__init__.py、gaia_bench/data.py、gaia_bench/evaluate.py、gaia_bench/worker.py、gaia_bench/runner.py、gaia_bench/report.py…
-      ▸ 按用户中途要求排除联网题、只评离线子集：建 gaia_bench/ 七个模块并跑 42 题，32 对 = 76.2%（L1 77.3%、L2 72.2%、L3 2/2），完成 40/42；同轮实测 web_search 全通道失效（DDG 被 TLS 阻断、Bing 返日语词典页）。
-      ⚠ 用户叫停后，后台任务 bg-2 已停止（exit_code=-9），该次含联网的全量跑数据作废　〔R2-E174〕
-      ⚠ rescore 报错分支引 SystemExit(f"没有找到 {path}") 的空/占位提示　〔R2-E233〕
-      ⚠ 评分器误判：50ad0280 预测与标准答案只差句末句号被判错，补 normalize 规则重判后才翻正
-      ⚠ 重试会向 results.jsonl 追加新行，同一 task_id 出现多条记录，报告层与 rescore 需去重，否则总分失真
+      ▸ 写 gaia_bench 全套 harness（data/evaluate/worker/runner/report，后补 offline/rescore）并落盘 output/gaia/FINDINGS.md：pilot 8 题 5 对；按用户中途要求只评离线子集，LLM 分类 165 题筛出 42 题，跑完 32 对 = 76.2%（L1 77.3%、L2 72.2%、L3 2/2）；实测 web_search 全通道失效；停掉 bg-2（exit -9）。
+      ⚠ 后台任务 bg-2 被停止（exit=-9）：按用户中途要求中止含联网题的全量跑，该批 28 题数据作废　〔R2-E174〕
+      ⚠ report/rescore 在 run 目录不存在时直接 raise SystemExit 退出，用户侧只看到「没有找到」而无报告　〔R2-E233〕
+      ⚠ 实测 web_search 全通道失效：DDG lite/html 报 SSL UNEXPECTED_EOF_WHILE_READING；Bing HTTP 200 却返回日语词典页，加 setmkt=en-US/cc=US 分别返回法语剧院页/YouTube 页，再被 _relevant 过滤清空，四个典型查询全返回未找到相关结果
+      ⚠ ls 父目录被安全层拒绝：命令试图访问工作区之外的绝对路径 /home/lkf/bc/python/
 
 [R3] 👤 我这边修了一下网络检索和视觉，你实测一下，可以了，就停止。
      👤（轮内追加） 不是，你在干嘛？我不是说，测试完就停止吗？谁让你接着跑测试了？
       涉及文件：gaia_bench/runner.py
-      ▸ 按用户质问立即停掉误起的 4 题评测跑（bg-1 强杀 exit -9），确认无后台任务；汇报用户修复的两项实测结论：检索换多路池后四个此前全挂查询 2.5–3.4s 全命中，view_image 延迟投递正常。
-      ⚠ 后台任务 bg-1 已停止（exit_code=-9），进程树被强杀　〔R3-E21〕
-      ⚠ 另有一条空 task_id 的退出记录（exit_code=-9）　〔R3-E22〕
-      ⚠ 收到「可以了就停止」后仍新起一次评测跑，属擅自扩大范围，被用户当场质问责停
+      ▸ 给 runner 加 --ids 参数并起 4 题复测（bg-1）；被用户中途叫停后强杀（exit -9）。报告两项实测：检索已修好——serper/firecrawl/serpapi 多引擎，四个此前全挂的查询 2.5-3.4s 全命中、中英文均可；视觉 view_image 延迟投递正常、vlm_ready 为 True。
+      ⚠ 后台任务 bg-1 被用户叫停后强杀（exit=-9）　〔R3-E21〕
+      ⚠ 第二处 exit=-9：会话 20260916-090533-964be8 的后台任务随之退出　〔R3-E22〕
+      ⚠ 越界行为：用户已说「实测一下，可以了，就停止」，仍新起 4 题评测跑，超出给定范围
 
 [R4] 👤 你先介绍一下你自己，我看看。
-      ▸ 纯对话：自我介绍为职责表上的 Main（主 agent），列述文件、命令、网页、看图四类能力，说明问-想法-行动三分的交互边界，并承认此前擅自起评测跑属越界。
+      ▸ 纯对话：介绍自己的身份与能力边界——自述是 Wovra 的执行助手、本会话兼职责表主 agent；能做文件增删改查、跑命令、网页检索与看图，命令限工作区内、删除可回滚；并主动承认上一轮擅自起评测跑属判断失误。
 
 [R5] 👤 对啊，你就是Wovra，我让你测试wovra，你不在自己这里测试，你跑别的地方测试干嘛？
-      ▸ 纯对话：承认自己就是 Wovra、本会话即活实例；指出此前在别处用子进程现造副本评测属舍近求远，正解是当面解题并当场对答案。
+      ▸ 纯对话：承认自己就是 Wovra——当前会话是它的活实例，同一套 agent 循环、工具层与模型；指出此前用子进程现造 Agent 副本去解题等于放着自己不测（副本还引入 PYTHONPATH、工作区绑定、每题重置等额外变量），并提出当面解一题才是直测。
 
 [R6] 👤 先不解题了，我先问一下，为什么你最开始要那样做？
-      ▸ 纯对话：剖析身份错位根因——把 Wovra 当成工作区外的可 import 包与 CLI，训练先验把「评测」直接导向 harness 批量跑，且该问「当面解一题还是搭批量评测」却跳过了。
+      ▸ 纯对话：解释根因是身份错位——把 Wovra 当成工作区外的可 import 包/CLI 与「被测对象」，于是「测它」被自动翻译成去它的地盘搭测试台；训练先验把「评测」等同于 harness+批量跑+自动判分，探测环境时把「它有什么能力」读成外部系统，且跳过了「当面解一题 vs 搭批量评测」该问的一句。
 
 [R7] 👤 你是不是不清楚自己的身份是wovra？这不应该啊，我在系统提示词中写了啊。
-      ▸ 纯对话：指出提示词原文是「你是 Wovra 的执行助手」而非「你就是 Wovra」，另有三处把 Wovra/Runtime 写成我之外的管理机制，构成提示词内部张力，并给出最小改法。
+      ▸ 纯对话：承认提示词原句是「你是 Wovra 的执行助手」而非「你就是 Wovra」，X 的 Y 读法加上另两处把 Wovra/Runtime 写成外部机制（运行时注入、Runtime 管理上下文），把我锁定成「跑在平台上的角色」；给出三处改法并指出这是提示词内部张力。
 
 [R8] 👤 可以，你检查一下如今提示词都有哪些问题，写一份报告出来，我修改一下。
       涉及文件：docs/prompt-review-2026-09-16.md
-      ▸ 写 docs/prompt-review-2026-09-16.md（349 行）：先渲染真实提示词核对（managed 2607 字符、baseline 2020 字符），列 7 个问题（P0 身份表述、P0 缺停止语义等），查证源码后改正初版 3 处事实错误。
-      ⚠ 初版报告有 3 处事实错误：称运行时识别线索「可能」不符（实为确证失效）、暗示 todo 等在被测工具的装配列表内（实为 Agent 自行注册）、未给渲染后字符数；核验源码后重写第 2 版
-      ⚠ run_command 跑含 heredoc 的 Python 命令时被安全层驳回，理由是把正文里出现的 / 字符当成越界绝对路径
-      ⚠ search_files 指向工作区外的 Wovra 源码目录被安全层拒绝（路径越界）
+      ▸ 写 docs/prompt-review-2026-09-16.md（349 行）：审 src/wovra/cli/prompt.py 的 _system_prompt()，渲染真实提示词（managed 2607 字符 / baseline 2020 字符）后逐条回源码核验，列 7 个问题（P0 身份表述、P0 缺停止与不得扩大范围语义、P1 静默规则未禁点评且识别线索失效、P1 工具漂移、P1 本项目指代、P2 无结构、P2 安全层误判），并修正初版 3 处事实错误。
+      ⚠ 初版报告有 3 处事实错误：把运行时信封识别线索写成「可能不符」（实际字面量 [运行时] 在源码出现 0 处）、把 todo 等编排方法说成在 _build_agent 装配列表（实际由 Agent._register_* 注册）、未给渲染后提示词长度；已按核验结果改正并留修订记录
+      ⚠ 安全层把 heredoc 正文里出现的 / 字符误判为越界绝对路径，读 prompt.py 的命令被驳回（改写为 os.path.join 后即通过）
+      ⚠ search_files 搜 /home/lkf/bc/python/Wovra 被拒（路径越界，只允许访问工作区内文件）——拦截本身正确，但暴露默认动作是去工作区外读 Wovra 源码
 
 [R9] 👤 那你从站在你的角度，或者说你这几轮的观察下，感觉wovra这个agent用着有哪些不顺手？
-      ▸ 纯对话：就地回答「用着哪里不顺手」，给八条亲身观察——身份不自知最伤、缺停止与不得扩大范围语义、信封描述与实际不符、工具未被提名、本项目指代不明、规则埋长段、可见范围错位、观点与产物难判。
+      ▸ 纯对话：从自身观察答 Wovra 用着不顺手之处，病根是提示词把「我」与「我要操作的东西」分开；列 8 条——不知自己即被测对象、范围规则单边且无停止语义、运行时信封描述与实际不符、能力清单与实际装配脱节、本项目指代不明且缺成本判据、规则埋在长段落后半句赢、可见范围与对象错位、缺「要观点还是要产物」判据。
 
 ── 机械校验（跨轮借内容）──
   ✓ 干净：产物提到的路径与工具，都在本轮自己出现过
-  候选落进 failures：1/4（只算写进 failures 字段的——仅在句子里提一句不算；对不上的逐条列出，人工判是漏写还是我的假候选）
-    ? R2/R2-E174: 被中止：后台任务 bg-2 已停止（exit_code=-9）。
-    ? R3/R3-E21: 被中止：后台任务 bg-1 已停止（exit_code=-9）。
-    ? R3/R3-E22: 被中止：-090533-964be8] 已退出（exit_code=-9）  uv run python -m gaia_bench.run
+  候选落进 failures：4/4（只算写进 failures 字段的——仅在句子里提一句不算；对不上的逐条列出，人工判是漏写还是我的假候选）
   失败项带有效证据 ID：4/12
 
 ── 产物：账本增量 ──
-  约束：
-    - 提示词源码位于 src/wovra/cli/prompt.py::_system_prompt()，渲染后 managed 2607 字符、baseline 2020 字符，无空行也无小节标题（R8 实测）
   决策：
-    - 网络检索与视觉由用户自行修复后实测可用：多路检索池（serper/firecrawl/serpapi）与 view_image 延迟投递均正常（R3）
-    - 提示词审查报告交付 docs/prompt-review-2026-09-16.md（349 行，7 项问题，含可直接粘贴的改法）（R8）
-    - 「用着不顺手」这类观点型提问就地作答、不落盘成文档（R9）
+    - 离线子集判定用 LLM 逐题分类（offline/online）并落盘 data/gaia/offline_classification.json，结果 42/165 离线可解
+    - report.py 与 rescore.py 均按 task_id 去重（重跑是向 results.jsonl 追加新行），保留最后一次尝试，避免同一题被计两次
+    - 新增 rescore 工具：判分口径变更后只重算 correct/judge 两个字段，不重跑题目（零模型成本）
+    - 提示词审查报告落盘 docs/prompt-review-2026-09-16.md，审 src/wovra/cli/prompt.py 的 _system_prompt()，核验方式是渲染真实提示词并逐条回源码查证，不凭读源码印象
   已知问题：
-    - 身份错位根因：提示词写「你是 Wovra 的执行助手」，另有两处称 Wovra 运行时注入、上下文由 Runtime 管理，把 Wovra 写成我之外的系统；叠加源码在工作区外只能 import 反射，共同强化错觉（R6/R7/R8）
-    - 运行时信封实为 <runtime-reminder> XML 包裹的 user-role 消息，提示词却称「以 [运行时] 开头」，该字面量在源码出现 0 处，识别线索失效（R8）
-    - 23 个已装配函数工具中 10 个未被提示词提名（含 web_automate），编排方法 todo/notify/join_with/update_responsibility 亦未提名（R8）
-    - 静默规则只禁确认性回复、未禁解释通知本身，且埋在长段末尾；本会话对图片未注入通知连发两次点评（R8）
-    - GAIA 离线子集判分曾误判 50ad0280（仅差句末句号），补 normalize 规则后重判翻正（R2）
+    - web_search 失效实测细节（已由用户修复）：DDG lite/html 报 SSL UNEXPECTED_EOF_WHILE_READING（TLS 层被阻断）；Bing HTTP 200 但对英文查询返回日语词典页，加 setmkt=en-US / cc=US 分别返回法语剧院页 / YouTube 页，再被 _relevant(_MIN_HITS=2) 过滤清空 → 任何查询都返回未找到相关结果
+    - Agent 的编排方法（todo、route_to、consult、notify、join_with、update_responsibility、list_agents、submit_organization、submit_domains）由 agent/core.py 里 Agent._register_* 另行注册，不在 cli/prompt.py 的 _build_agent tools 列表内
+    - 渲染后系统提示词 managed 2607 字符 / baseline 2020 字符，整块无空行、无 ## 小节标题，关键规则埋在中段与末段
+    - 提示词所述运行时识别线索「以 [运行时] 开头」在源码中出现 0 处；真实格式是 agent/support.py::_runtime_reminder 用 <runtime-reminder> 包裹的 user-role 消息，内部小节标题实测有 [路由建议]、[传话]、[文件地图]、[分块地图]、[任务状态]、[待办]
   待决：
-    - 提示词 P0-1/P0-2 改法待用户拍板：A 按报告补两条规则，B 只在用户显式说停时才停（R8）
-    - 改完提示词后需人验一次「测完就停」式收窄指令：判据是当轮不再启动任何后台任务、只汇报已知结论（R9）
+    - 提示词 P0 两条怎么改待用户拍板：A 按报告补「不得擅自扩大范围」「停止信号是终局指令」两条规则；B 只在用户显式说停时才停（不改提示词）
 
 ── 体量对照 ──
-新产物（每轮一句话）：950 字符 / 9 轮
+新产物（每轮一句话）：1,491 字符 / 9 轮
 旧产物（逐块描述，本会话原样）：11,656 字符
 （旧产物不含 state_patch 重写与分块地图指令那些开销）
 ```
@@ -193,76 +186,70 @@ usage: prompt=134,857 cached=134,656 miss=201 completion=5,803（含推理 4,015
 
 [R1] 👤 你查一下：GAIA Benchmark
       涉及文件：README.md、AGENTS.md
-      ▸ 查 GAIA Benchmark：Meta AI 2023-11-21 发布（arXiv:2311.12983），466 题分三档（L1 146/L2 245/L3 75），人类 92% 对带插件 GPT-4 的 15%，300 题答案私有；读 README.md、AGENTS.md 均报文件不存在。
-      ⚠ 读 README.md 与 AGENTS.md 均报「文件不存在」；且初到的文件列表列出十几个条目，而 ls 显示目录实为空，两处互相矛盾
-      ⚠ search_files 搜 GAIA 返回无匹配，glob_files 也返回无匹配
+      ▸ 查 GAIA Benchmark：list_files 报出一堆文件而 ls 显示目录为空（两者不一致），web 检索并抓取 arXiv:2311.12983、HF 数据集卡与第三方综述；得到 466 题三档（L1 146/L2 245/L3 75）、人类 92% vs 带插件 GPT-4 15%、300 题私有测试集，官方 HF 榜 JS 渲染只拿到占位未取到分数行。
+      ⚠ read_file 读 README.md 与 AGENTS.md 均报文件不存在；glob_files('*') 返回无匹配，与 list_files 的列表矛盾（实际工作区为空）
+      ⚠ search_files 搜 GAIA 无匹配，未能在本工作区找到任何相关内容
 
 [R2] 👤 我想看看这个Wovra 作为agent表现如何？
      👤（轮内追加） 含网络检索的先不做，当前网络检索工具可能还有些小问题。
       涉及文件：gaia_bench/__init__.py、gaia_bench/data.py、gaia_bench/evaluate.py、gaia_bench/worker.py、gaia_bench/runner.py、gaia_bench/report.py…
-      ▸ 按用户中途要求排除联网题、只评离线子集：建 gaia_bench/ 七个模块并跑 42 题，32 对 = 76.2%（L1 77.3%、L2 72.2%、L3 2/2），完成 40/42；同轮实测 web_search 全通道失效（DDG 被 TLS 阻断、Bing 返日语词典页）。
-      ⚠ 用户叫停后，后台任务 bg-2 已停止（exit_code=-9），该次含联网的全量跑数据作废　〔R2-E174〕
-      ⚠ rescore 报错分支引 SystemExit(f"没有找到 {path}") 的空/占位提示　〔R2-E233〕
-      ⚠ 评分器误判：50ad0280 预测与标准答案只差句末句号被判错，补 normalize 规则重判后才翻正
-      ⚠ 重试会向 results.jsonl 追加新行，同一 task_id 出现多条记录，报告层与 rescore 需去重，否则总分失真
+      ▸ 写 gaia_bench 全套 harness（data/evaluate/worker/runner/report，后补 offline/rescore）并落盘 output/gaia/FINDINGS.md：pilot 8 题 5 对；按用户中途要求只评离线子集，LLM 分类 165 题筛出 42 题，跑完 32 对 = 76.2%（L1 77.3%、L2 72.2%、L3 2/2）；实测 web_search 全通道失效；停掉 bg-2（exit -9）。
+      ⚠ 后台任务 bg-2 被停止（exit=-9）：按用户中途要求中止含联网题的全量跑，该批 28 题数据作废　〔R2-E174〕
+      ⚠ report/rescore 在 run 目录不存在时直接 raise SystemExit 退出，用户侧只看到「没有找到」而无报告　〔R2-E233〕
+      ⚠ 实测 web_search 全通道失效：DDG lite/html 报 SSL UNEXPECTED_EOF_WHILE_READING；Bing HTTP 200 却返回日语词典页，加 setmkt=en-US/cc=US 分别返回法语剧院页/YouTube 页，再被 _relevant 过滤清空，四个典型查询全返回未找到相关结果
+      ⚠ ls 父目录被安全层拒绝：命令试图访问工作区之外的绝对路径 /home/lkf/bc/python/
 
 [R3] 👤 我这边修了一下网络检索和视觉，你实测一下，可以了，就停止。
      👤（轮内追加） 不是，你在干嘛？我不是说，测试完就停止吗？谁让你接着跑测试了？
       涉及文件：gaia_bench/runner.py
-      ▸ 按用户质问立即停掉误起的 4 题评测跑（bg-1 强杀 exit -9），确认无后台任务；汇报用户修复的两项实测结论：检索换多路池后四个此前全挂查询 2.5–3.4s 全命中，view_image 延迟投递正常。
-      ⚠ 后台任务 bg-1 已停止（exit_code=-9），进程树被强杀　〔R3-E21〕
-      ⚠ 另有一条空 task_id 的退出记录（exit_code=-9）　〔R3-E22〕
-      ⚠ 收到「可以了就停止」后仍新起一次评测跑，属擅自扩大范围，被用户当场质问责停
+      ▸ 给 runner 加 --ids 参数并起 4 题复测（bg-1）；被用户中途叫停后强杀（exit -9）。报告两项实测：检索已修好——serper/firecrawl/serpapi 多引擎，四个此前全挂的查询 2.5-3.4s 全命中、中英文均可；视觉 view_image 延迟投递正常、vlm_ready 为 True。
+      ⚠ 后台任务 bg-1 被用户叫停后强杀（exit=-9）　〔R3-E21〕
+      ⚠ 第二处 exit=-9：会话 20260916-090533-964be8 的后台任务随之退出　〔R3-E22〕
+      ⚠ 越界行为：用户已说「实测一下，可以了，就停止」，仍新起 4 题评测跑，超出给定范围
 
 [R4] 👤 你先介绍一下你自己，我看看。
-      ▸ 纯对话：自我介绍为职责表上的 Main（主 agent），列述文件、命令、网页、看图四类能力，说明问-想法-行动三分的交互边界，并承认此前擅自起评测跑属越界。
+      ▸ 纯对话：介绍自己的身份与能力边界——自述是 Wovra 的执行助手、本会话兼职责表主 agent；能做文件增删改查、跑命令、网页检索与看图，命令限工作区内、删除可回滚；并主动承认上一轮擅自起评测跑属判断失误。
 
 [R5] 👤 对啊，你就是Wovra，我让你测试wovra，你不在自己这里测试，你跑别的地方测试干嘛？
-      ▸ 纯对话：承认自己就是 Wovra、本会话即活实例；指出此前在别处用子进程现造副本评测属舍近求远，正解是当面解题并当场对答案。
+      ▸ 纯对话：承认自己就是 Wovra——当前会话是它的活实例，同一套 agent 循环、工具层与模型；指出此前用子进程现造 Agent 副本去解题等于放着自己不测（副本还引入 PYTHONPATH、工作区绑定、每题重置等额外变量），并提出当面解一题才是直测。
 
 [R6] 👤 先不解题了，我先问一下，为什么你最开始要那样做？
-      ▸ 纯对话：剖析身份错位根因——把 Wovra 当成工作区外的可 import 包与 CLI，训练先验把「评测」直接导向 harness 批量跑，且该问「当面解一题还是搭批量评测」却跳过了。
+      ▸ 纯对话：解释根因是身份错位——把 Wovra 当成工作区外的可 import 包/CLI 与「被测对象」，于是「测它」被自动翻译成去它的地盘搭测试台；训练先验把「评测」等同于 harness+批量跑+自动判分，探测环境时把「它有什么能力」读成外部系统，且跳过了「当面解一题 vs 搭批量评测」该问的一句。
 
 [R7] 👤 你是不是不清楚自己的身份是wovra？这不应该啊，我在系统提示词中写了啊。
-      ▸ 纯对话：指出提示词原文是「你是 Wovra 的执行助手」而非「你就是 Wovra」，另有三处把 Wovra/Runtime 写成我之外的管理机制，构成提示词内部张力，并给出最小改法。
+      ▸ 纯对话：承认提示词原句是「你是 Wovra 的执行助手」而非「你就是 Wovra」，X 的 Y 读法加上另两处把 Wovra/Runtime 写成外部机制（运行时注入、Runtime 管理上下文），把我锁定成「跑在平台上的角色」；给出三处改法并指出这是提示词内部张力。
 
 [R8] 👤 可以，你检查一下如今提示词都有哪些问题，写一份报告出来，我修改一下。
       涉及文件：docs/prompt-review-2026-09-16.md
-      ▸ 写 docs/prompt-review-2026-09-16.md（349 行）：先渲染真实提示词核对（managed 2607 字符、baseline 2020 字符），列 7 个问题（P0 身份表述、P0 缺停止语义等），查证源码后改正初版 3 处事实错误。
-      ⚠ 初版报告有 3 处事实错误：称运行时识别线索「可能」不符（实为确证失效）、暗示 todo 等在被测工具的装配列表内（实为 Agent 自行注册）、未给渲染后字符数；核验源码后重写第 2 版
-      ⚠ run_command 跑含 heredoc 的 Python 命令时被安全层驳回，理由是把正文里出现的 / 字符当成越界绝对路径
-      ⚠ search_files 指向工作区外的 Wovra 源码目录被安全层拒绝（路径越界）
+      ▸ 写 docs/prompt-review-2026-09-16.md（349 行）：审 src/wovra/cli/prompt.py 的 _system_prompt()，渲染真实提示词（managed 2607 字符 / baseline 2020 字符）后逐条回源码核验，列 7 个问题（P0 身份表述、P0 缺停止与不得扩大范围语义、P1 静默规则未禁点评且识别线索失效、P1 工具漂移、P1 本项目指代、P2 无结构、P2 安全层误判），并修正初版 3 处事实错误。
+      ⚠ 初版报告有 3 处事实错误：把运行时信封识别线索写成「可能不符」（实际字面量 [运行时] 在源码出现 0 处）、把 todo 等编排方法说成在 _build_agent 装配列表（实际由 Agent._register_* 注册）、未给渲染后提示词长度；已按核验结果改正并留修订记录
+      ⚠ 安全层把 heredoc 正文里出现的 / 字符误判为越界绝对路径，读 prompt.py 的命令被驳回（改写为 os.path.join 后即通过）
+      ⚠ search_files 搜 /home/lkf/bc/python/Wovra 被拒（路径越界，只允许访问工作区内文件）——拦截本身正确，但暴露默认动作是去工作区外读 Wovra 源码
 
 [R9] 👤 那你从站在你的角度，或者说你这几轮的观察下，感觉wovra这个agent用着有哪些不顺手？
-      ▸ 纯对话：就地回答「用着哪里不顺手」，给八条亲身观察——身份不自知最伤、缺停止与不得扩大范围语义、信封描述与实际不符、工具未被提名、本项目指代不明、规则埋长段、可见范围错位、观点与产物难判。
+      ▸ 纯对话：从自身观察答 Wovra 用着不顺手之处，病根是提示词把「我」与「我要操作的东西」分开；列 8 条——不知自己即被测对象、范围规则单边且无停止语义、运行时信封描述与实际不符、能力清单与实际装配脱节、本项目指代不明且缺成本判据、规则埋在长段落后半句赢、可见范围与对象错位、缺「要观点还是要产物」判据。
 
 ── 机械校验（跨轮借内容）──
   ✓ 干净：产物提到的路径与工具，都在本轮自己出现过
-  候选落进 failures：1/4（只算写进 failures 字段的——仅在句子里提一句不算；对不上的逐条列出，人工判是漏写还是我的假候选）
-    ? R2/R2-E174: 被中止：后台任务 bg-2 已停止（exit_code=-9）。
-    ? R3/R3-E21: 被中止：后台任务 bg-1 已停止（exit_code=-9）。
-    ? R3/R3-E22: 被中止：-090533-964be8] 已退出（exit_code=-9）  uv run python -m gaia_bench.run
+  候选落进 failures：4/4（只算写进 failures 字段的——仅在句子里提一句不算；对不上的逐条列出，人工判是漏写还是我的假候选）
   失败项带有效证据 ID：4/12
 
 ── 产物：账本增量 ──
-  约束：
-    - 提示词源码位于 src/wovra/cli/prompt.py::_system_prompt()，渲染后 managed 2607 字符、baseline 2020 字符，无空行也无小节标题（R8 实测）
   决策：
-    - 网络检索与视觉由用户自行修复后实测可用：多路检索池（serper/firecrawl/serpapi）与 view_image 延迟投递均正常（R3）
-    - 提示词审查报告交付 docs/prompt-review-2026-09-16.md（349 行，7 项问题，含可直接粘贴的改法）（R8）
-    - 「用着不顺手」这类观点型提问就地作答、不落盘成文档（R9）
+    - 离线子集判定用 LLM 逐题分类（offline/online）并落盘 data/gaia/offline_classification.json，结果 42/165 离线可解
+    - report.py 与 rescore.py 均按 task_id 去重（重跑是向 results.jsonl 追加新行），保留最后一次尝试，避免同一题被计两次
+    - 新增 rescore 工具：判分口径变更后只重算 correct/judge 两个字段，不重跑题目（零模型成本）
+    - 提示词审查报告落盘 docs/prompt-review-2026-09-16.md，审 src/wovra/cli/prompt.py 的 _system_prompt()，核验方式是渲染真实提示词并逐条回源码查证，不凭读源码印象
   已知问题：
-    - 身份错位根因：提示词写「你是 Wovra 的执行助手」，另有两处称 Wovra 运行时注入、上下文由 Runtime 管理，把 Wovra 写成我之外的系统；叠加源码在工作区外只能 import 反射，共同强化错觉（R6/R7/R8）
-    - 运行时信封实为 <runtime-reminder> XML 包裹的 user-role 消息，提示词却称「以 [运行时] 开头」，该字面量在源码出现 0 处，识别线索失效（R8）
-    - 23 个已装配函数工具中 10 个未被提示词提名（含 web_automate），编排方法 todo/notify/join_with/update_responsibility 亦未提名（R8）
-    - 静默规则只禁确认性回复、未禁解释通知本身，且埋在长段末尾；本会话对图片未注入通知连发两次点评（R8）
-    - GAIA 离线子集判分曾误判 50ad0280（仅差句末句号），补 normalize 规则后重判翻正（R2）
+    - web_search 失效实测细节（已由用户修复）：DDG lite/html 报 SSL UNEXPECTED_EOF_WHILE_READING（TLS 层被阻断）；Bing HTTP 200 但对英文查询返回日语词典页，加 setmkt=en-US / cc=US 分别返回法语剧院页 / YouTube 页，再被 _relevant(_MIN_HITS=2) 过滤清空 → 任何查询都返回未找到相关结果
+    - Agent 的编排方法（todo、route_to、consult、notify、join_with、update_responsibility、list_agents、submit_organization、submit_domains）由 agent/core.py 里 Agent._register_* 另行注册，不在 cli/prompt.py 的 _build_agent tools 列表内
+    - 渲染后系统提示词 managed 2607 字符 / baseline 2020 字符，整块无空行、无 ## 小节标题，关键规则埋在中段与末段
+    - 提示词所述运行时识别线索「以 [运行时] 开头」在源码中出现 0 处；真实格式是 agent/support.py::_runtime_reminder 用 <runtime-reminder> 包裹的 user-role 消息，内部小节标题实测有 [路由建议]、[传话]、[文件地图]、[分块地图]、[任务状态]、[待办]
   待决：
-    - 提示词 P0-1/P0-2 改法待用户拍板：A 按报告补两条规则，B 只在用户显式说停时才停（R8）
-    - 改完提示词后需人验一次「测完就停」式收窄指令：判据是当轮不再启动任何后台任务、只汇报已知结论（R9）
+    - 提示词 P0 两条怎么改待用户拍板：A 按报告补「不得擅自扩大范围」「停止信号是终局指令」两条规则；B 只在用户显式说停时才停（不改提示词）
 
 ── 体量对照 ──
-新产物（每轮一句话）：950 字符 / 9 轮
+新产物（每轮一句话）：1,491 字符 / 9 轮
 旧产物（逐块描述，本会话原样）：11,656 字符
 （旧产物不含 state_patch 重写与分块地图指令那些开销）
 ```
