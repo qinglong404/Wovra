@@ -848,18 +848,35 @@ class _MaintenanceMixin:
         size = int(self.last_context_estimate or 0)
         window_cut = current - self._fold_keep_rounds()
         staged: list[dict] = []
-        for r in closed[:-1]:                     # 最老的先；**最后一轮永不折**（工作集）
+        for r in closed[:-1]:                     # 最老的先；最近一轮先留在原文档
             over_window = int(r["seq"]) <= window_cut
             if not over_window and size <= target:
                 break                             # 窗口内的都留着，且已经折到目标以下了
             if r.get("folded") or str(r.get("note_state")) != "done":
                 continue
-            raw = self._estimate_messages(
-                [e.get("message") or {} for e in r.get("events") or []]
-            )
-            size -= max(0, raw - note_module.est_note_tokens(r))
+            size -= max(0, self._round_raw_tokens(r) - note_module.est_note_tokens(r))
             staged.append(r)
+        # **最近一轮也让路**（2026-09-17 实测缺陷，用户："整理完还过 10% 的水位，
+        # 整理后还这么大吗？一轮就一段啊"）：一个巨轮能顶掉整个预算——实测 R7 一轮
+        # 111 步、原文 96,820 tok（折成段落只有 731 tok），而"最后一轮永不折"让它
+        # 永远留在原文档 → 折完仍然 103.5K > 水位 100K，于是**每轮闭合都在线上触发
+        # 维护**（R8 那次白跑一遭分裂，还留下一个查不出原因的 failed）。
+        #
+        # 触发线用**水位**而不是目标线：目标线（水位×0.6）是给老轮的余量，若也拿它
+        # 去折最近一轮，那**每次压缩都会把最近一轮折掉**（到线时 size ≥ 水位 > 目标
+        # 恒成立），原文窗口就形同虚设了。只在"折完老的仍压在水位上"时才让它让路
+        # ——那才是"最近一轮自己就把预算占满"的病态情形。
+        last_round = closed[-1]
+        last_folded = False
+        if size > self._org_watermark and not last_round.get("folded") \
+                and str(last_round.get("note_state")) == "done":
+            size -= max(0, self._round_raw_tokens(last_round)
+                        - note_module.est_note_tokens(last_round))
+            staged.append(last_round)
+            last_folded = True
         if not staged:
+            if size > target:
+                self._note_fold_stuck(size, target, last_round)
             return
         for r in staged:
             r["folded"] = True
@@ -868,10 +885,34 @@ class _MaintenanceMixin:
             self.task.record(
                 "fold",
                 f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
-                f"{'' if len(staged) == 1 else '、…、R' + str(staged[-1]['seq'])}）；"
-                f"折到水位 {self._fold_target_ratio():.0%} 以下"
+                f"{'' if len(staged) == 1 else '、…、R' + str(staged[-1]['seq'])}"
+                + ("，含最近一轮" if last_folded else "")
+                + f"）；折到水位 {self._fold_target_ratio():.0%} 以下"
                 f"（目标 {target:,}，折前 {int(self.last_context_estimate or 0):,}）",
             )
+
+    def _round_raw_tokens(self, round_: dict) -> int:
+        """该轮原文（事件消息）的体量估算——折档时的减法口径。"""
+        return self._estimate_messages(
+            [e.get("message") or {} for e in round_.get("events") or []]
+        )
+
+    def _note_fold_stuck(self, size: int, target: int, last_round: dict) -> None:
+        """折不动了要说出来（否则页面读起来就是"整理完还超线"却没有任何解释）。
+
+        折不动只有一种原因：最近一轮太大**且它没有产物**（fail-safe：没产物不折），
+        或者原文窗口/水位旋钮把它挡住。留痕里把这三个数写清楚。
+        """
+        if self.task is None:
+            return
+        self.task.record(
+            "fold",
+            f"换档没能折到目标线以下：当前 {size:,} > 目标 {target:,}；"
+            f"最近一轮 R{last_round.get('seq')} 原文 {self._round_raw_tokens(last_round):,} tok"
+            f"、产物 {last_round.get('note_state') or '无'}"
+            f"（没产物不折档——原文继续顶着；水位/窗口旋钮见 WOVRA_ORG_WATERMARK / "
+            f"WOVRA_FOLD_KEEP_ROUNDS）",
+        )
 
     def _ensure_worker(self) -> None:
         if self._org_thread is not None and self._org_thread.is_alive():

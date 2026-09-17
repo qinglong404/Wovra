@@ -423,12 +423,18 @@ def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path)
     agent._fold_keep = 1
     _run(agent, 5)
     agent._fold_target = 0.6
-    _trigger(agent, size=9000)                       # 到线（>5000）
-    _fold(agent, size=9000)
+    # 材料体量要和注入的估算一致（以前注入的是一个与材料无关的大数，算出来的
+    # "折后剩多少"就没意义了）：把每轮撑到 ~1K tok，总量才真的超过水位
+    for r in task.rounds:
+        r["events"][-1]["message"]["content"] = "结论" * 1000
+    size = sum(agent._round_raw_tokens(r) for r in task.rounds) + 200
+    assert size > 5000
+    _trigger(agent, size=size)
+    _fold(agent, size=size)
 
     folded = [int(r["seq"]) for r in task.rounds if r.get("folded")]
     assert len(folded) > 1, f"一次要到水位以下，而不是只折一轮：{folded}"
-    assert 5 not in folded                           # 最后一轮永不折（工作集）
+    assert 5 not in folded                           # 折完老的已落回水位之下 → 最近一轮留原文档
     detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
     assert "折到水位" in detail and "60%" in detail
 
@@ -583,3 +589,86 @@ def test_multi_executor_backlog_goes_segment_by_segment(monkeypatch, tmp_path):
     ]
     assert "note" not in round_                           # 整轮那条不会混进来
     assert round_["note_state"] == "done"
+
+
+# ---- 换档线的边界：最近一轮也让路 / 折不动要说出来 / 维护异常不吞换档 ----
+
+
+def _big_round(seq: int, chars: int = 2400) -> dict:
+    """一个大轮（原文体量足够顶掉预算）：一进一出 ＋ 一段长回答。"""
+    return {
+        "seq": seq,
+        "user_input": {"original": f"第 {seq} 问", "normalized": ""},
+        "events": [
+            make_event(f"R{seq}-E01", "user", {"role": "user", "content": f"第 {seq} 问"}),
+            make_event(f"R{seq}-E02", "final_answer",
+                       {"role": "assistant", "content": "结论" * (chars // 2)}),
+        ],
+        "refined_index": {}, "end_state": "completed", "org_state": "",
+        "note_state": "done",
+        "note": {"seq": seq, "sentence": f"第{seq}轮结论", "failures": [],
+                 "executor": "Main", "ledger_append": {}},
+    }
+
+
+def test_fold_reaches_most_recent_round_when_still_over_target(monkeypatch, tmp_path):
+    """**一个巨轮顶掉整个预算**时，折完老的仍过线 → 最近一轮也折（水位优先）。
+
+    实测动因（会话 20260917-164243-e8562e）：R7 一轮 111 步、原文 96,820 tok，折成
+    段落只有 731 tok；而"最后一轮永不折"让它永远留在原文档 → 折完仍 103.5K > 水位
+    100K，于是每轮闭合都在线上触发维护（用户："整理完还过 10% 的水位……咋可能"）。
+    """
+    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=1000, org_grace_rounds=0)
+    agent._fold_keep = 0
+    # 形状就是实测那一轮：老轮很小，最近一轮自己就把预算占满
+    task.rounds = [_big_round(1, chars=40), _big_round(2, chars=4000)]
+    agent.rounds = task.rounds
+    agent.last_context_estimate = sum(
+        agent._round_raw_tokens(r) for r in task.rounds
+    ) + 50
+    assert agent.last_context_estimate > 1000         # 确认站在水位之上
+
+    agent._advance_fold_line()
+
+    assert [bool(r.get("folded")) for r in task.rounds] == [True, True]
+    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
+    assert "含最近一轮" in detail
+
+
+def test_fold_says_out_loud_when_it_cannot_get_below_target(monkeypatch, tmp_path):
+    """折不动的时候要说出来（最近一轮没产物 → fail-safe 不折，原文顶着）。"""
+    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=1000, org_grace_rounds=0)
+    agent._fold_keep = 0
+    big = _big_round(1)
+    big.pop("note")
+    big["note_state"] = "failed"                      # 没产物：不许折
+    task.rounds = [big]
+    agent.rounds = task.rounds
+    agent.last_context_estimate = 5000
+
+    agent._advance_fold_line()
+
+    assert not task.rounds[0].get("folded")
+    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
+    assert "没能折到目标线以下" in detail and "没产物不折档" in detail
+
+
+def test_maintenance_exception_does_not_swallow_fold_and_usage(monkeypatch, tmp_path):
+    """闭合尾部的维护出岔子，也不能吞掉换档（实测：R8 那次闭合后既无 usage 行也无换档留痕）。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _batch_chunk([_note(1)])],
+        org_watermark=0, org_grace_rounds=0,
+    )
+    called: list[str] = []
+
+    def boom():
+        raise RuntimeError("分裂阶段炸了")
+
+    monkeypatch.setattr(agent, "_maybe_organize_batch", boom)
+    monkeypatch.setattr(agent, "_advance_fold_line", lambda: called.append("fold"))
+    _run(agent, 1)
+
+    assert called == ["fold"]                          # 换档照走
+    assert any(h.get("kind") == "maintenance" and "维护异常" in str(h.get("detail"))
+               for h in task.history)
