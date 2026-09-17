@@ -46,6 +46,28 @@ _APPEND_HEAD = (
 )
 
 
+def _executor_index(task, rounds: list[dict]) -> list[str]:
+    """**执行者索引**（零 LLM，代码机械派生）：谁碰过哪些文件 → 哪几轮。
+
+    身份标签的第二个用途（用户 2026-09-17）：不只是"这轮是谁写的"，而是**路由与咨询的索引**
+    ——主 agent 转交任务、agent 之间找人问细节，都靠它知道"谁更深入了解哪一块"。
+    声明态是注册表的职责表，事实态就是这张表（从分块机械算，不看模型怎么说）。
+    """
+    lines = ["[执行者索引]（代码机械派生：谁碰过哪些文件 → 哪几轮；转交与咨询据此找人）"]
+    entries = [e for e in (task.registry or []) if (e.get("files") or [])]
+    if not entries:
+        return lines + ["  （注册表里还没有带文件的职责域）"]
+    for e in entries:
+        files = [str(x) for x in (e.get("files") or [])]
+        seqs = [int(r["seq"]) for r in rounds
+                if set(R._round_files(r)) & set(files)]
+        name = str(e.get("name") or e.get("id"))
+        where = "、".join(f"R{x}" for x in seqs) or "—"
+        lines.append(f"  {name}：{where}（{len(files)} 个文件"
+                     + (f"，如 {files[0]}" if files else "") + "）")
+    return lines
+
+
 def _call(llm: LLM, messages: list[dict]) -> dict:
     resp = llm.chat(messages, tools=[R._SCHEMA])
     usage = resp.usage
@@ -73,6 +95,7 @@ def main() -> int:
     ap.add_argument("--round", type=int, default=0, help="追加哪一轮（默认最后一个有工具动作的轮）")
     ap.add_argument("--domain", default="", help="展示该域自己的文件清单（子 agent 视角）")
     ap.add_argument("--dry", action="store_true", help="只打输入，不调 LLM")
+    ap.add_argument("--index", action="store_true", help="只打执行者索引（零 LLM）")
     args = ap.parse_args()
 
     src = task_module.TASKS_ROOT / args.session_id
@@ -87,6 +110,9 @@ def main() -> int:
     task = task_module.Task.load(args.session_id)
 
     rounds = [r for r in task.rounds if str(r.get("end_state")) == "completed"]
+    if args.index:
+        print("\n".join(_executor_index(task, rounds)))
+        return 0
     target = next((r for r in rounds if int(r["seq"]) == args.round), None)
     if target is None:
         target = next(
