@@ -33,6 +33,7 @@ from .support import (
     _ORG_GRACE_ROUNDS_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _FOLD_KEEP_ROUNDS_DEFAULT,
+    _FOLD_TARGET_DEFAULT,
     _ORG_MAINT_TIMEOUT_DEFAULT,
     _ORG_WATERMARK_DEFAULT,
     _READ_ONLY_TOOLS,
@@ -187,8 +188,9 @@ class _CoreMixin:
         )
         # 每轮一段话的同步结算硬上限（V4 §3.2 第一步；超时按失败处理、只留痕）
         self._note_timeout = _NOTE_TIMEOUT_DEFAULT
-        # 换档后保留原文的最近轮数（§3.8/§3.9 的"近 50 轮"）
+        # 换档后保留原文的最近轮数（§3.8/§3.9 的"近 50 轮"）与折到水位的比例
         self._fold_keep = _FOLD_KEEP_ROUNDS_DEFAULT
+        self._fold_target = _FOLD_TARGET_DEFAULT
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()

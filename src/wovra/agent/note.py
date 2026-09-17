@@ -18,6 +18,7 @@ import json
 import re
 
 from .. import blocks as blocks_module
+from .. import tokens as tokens_module
 
 # 只扫"执行/抓取/检索"类工具的返回：读类工具的正文里"不存在/占位"全是假阳性，
 # 但**拦截/报错**必须留（越界拦截就发生在读类工具上）。
@@ -297,6 +298,11 @@ def render_note(round_: dict) -> str:
         evidence = str(item.get("evidence") or "")
         lines.append(f"  ⚠ {item.get('text')}" + (f"　〔{evidence}〕" if evidence else ""))
     return "\n".join(lines)
+
+
+def est_note_tokens(round_: dict) -> int:
+    """该轮折成段落后的体量估算（用户侧逐字原话 ＋ 段落）。"""
+    return tokens_module.estimate(user_slot(round_)) + tokens_module.estimate(render_note(round_))
 
 
 def soft_defects(note: dict, round_: dict) -> list[str]:

@@ -25,6 +25,7 @@ from .support import (
     v4_enabled,
     _COMPRESS_THRESHOLD,
     _FOLD_KEEP_ROUNDS_DEFAULT,
+    _FOLD_TARGET_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _clip_quote,
     maint_tools,
@@ -592,6 +593,13 @@ class _MaintenanceMixin:
     def _fold_keep_rounds(self) -> int:
         return int(getattr(self, "_fold_keep", _FOLD_KEEP_ROUNDS_DEFAULT))
 
+    def _fold_target_ratio(self) -> float:
+        """折到水位的这个比例之下（越小折得越狠、下次换档来得越晚）。"""
+        try:
+            return float(getattr(self, "_fold_target", _FOLD_TARGET_DEFAULT))
+        except (TypeError, ValueError):
+            return _FOLD_TARGET_DEFAULT
+
     def _advance_fold_line(self) -> None:
         """水位到了就把"超龄且有 note"的轮**一次换到位**（§6.2/§6.3）。
 
@@ -607,11 +615,26 @@ class _MaintenanceMixin:
         current = int(closed[-1]["seq"])
         if self.last_context_estimate < self._org_watermark or current <= self._org_grace:
             return
-        cut = current - self._fold_keep_rounds()
-        staged = [r for r in closed
-                  if int(r["seq"]) <= cut
-                  and not r.get("folded")
-                  and str(r.get("note_state")) == "done"]
+        # **一次折够**（2026-09-17 实测：按"上次折到哪"逐轮推进会让水位一直悬在线上的
+        # 时候**每轮断一次前缀**——每个工作调用白付 190~260 tok；大会话里这笔是"尾部
+        # 体量"。改成：折到**目标线以下**（水位 × 0.6），于是下次换档要等上下文重新长
+        # 上来（天然滞后）。原文窗口仍是"近 N 轮"，但**窗口本身超水位时继续往近处推进**
+        # ——这正是 §3.8 用户口径里写的那条。）
+        target = int(self._org_watermark * self._fold_target_ratio())
+        size = int(self.last_context_estimate or 0)
+        window_cut = current - self._fold_keep_rounds()
+        staged: list[dict] = []
+        for r in closed[:-1]:                     # 最老的先；**最后一轮永不折**（工作集）
+            over_window = int(r["seq"]) <= window_cut
+            if not over_window and size <= target:
+                break                             # 窗口内的都留着，且已经折到目标以下了
+            if r.get("folded") or str(r.get("note_state")) != "done":
+                continue
+            raw = self._estimate_messages(
+                [e.get("message") or {} for e in r.get("events") or []]
+            )
+            size -= max(0, raw - note_module.est_note_tokens(r))
+            staged.append(r)
         if not staged:
             return
         for r in staged:
@@ -620,8 +643,10 @@ class _MaintenanceMixin:
         if self.task is not None:
             self.task.record(
                 "fold",
-                f"换档：R{staged[0]['seq']}–R{staged[-1]['seq']}（{len(staged)} 轮换成一段话；"
-                f"原文窗口保留最近 {self._fold_keep_rounds()} 轮）",
+                f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
+                f"{'' if len(staged) == 1 else '、…、R' + str(staged[-1]['seq'])}）；"
+                f"折到水位 {self._fold_target_ratio():.0%} 以下"
+                f"（目标 {target:,}，折前 {int(self.last_context_estimate or 0):,}）",
             )
 
     def _ensure_worker(self) -> None:

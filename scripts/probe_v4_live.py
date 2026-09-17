@@ -36,6 +36,7 @@ def _fresh(args) -> int:
     agent._org_grace = 0
     agent._org_cooldown = 0
     agent._fold_keep = args.keep
+    agent._fold_target = args.fold_target
     for i in range(1, args.fresh + 1):
         text = agent.run(f"第 {i} 个问题：只回一句「第 {i} 答」，不要做别的。")
         round_ = task.rounds[-1]
@@ -55,6 +56,8 @@ def main() -> int:
     ap.add_argument("session_id")
     ap.add_argument("--watermark", type=int, default=5000, help="调小水位，好让换档真的发生")
     ap.add_argument("--keep", type=int, default=2, help="换档后保留原文的最近轮数")
+    ap.add_argument("--fold-target", type=float, default=0.6,
+                    help="折到水位的这个比例之下（一次折够，越大折得越少）")
     ap.add_argument("--input", default="只回一句：验证。", help="本轮用户输入")
     ap.add_argument("--fresh", type=int, default=0,
                     help="新建一个空会话真跑 N 轮（验证'每轮一段话 → 换档 → 段落进装配'整条链）")

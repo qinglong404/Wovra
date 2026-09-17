@@ -244,11 +244,12 @@ def test_watermark_folds_old_rounds_into_paragraphs(monkeypatch, tmp_path):
     agent.run("问一")
     agent.run("问二")
 
-    assert [bool(r.get("folded")) for r in task.rounds] == [True, True]
+    # 最后一轮永不折（工作集）：到水位时折的是"最老的、且已到目标以下"的那些
+    assert [bool(r.get("folded")) for r in task.rounds] == [True, False]
     assembled = _assembled(agent)
-    assert "第1轮结论" in assembled and "第2轮结论" in assembled
+    assert "第1轮结论" in assembled                # 老轮成了段落
     assert "👤 问一" in assembled                  # 用户原话逐字仍在
-    assert "答一句" not in assembled               # 原文不再进装配
+    assert "答一句" in assembled                   # 最近一轮仍是原文
     assert any(h.get("kind") == "fold" for h in task.history)
 
 
@@ -277,7 +278,7 @@ def test_round_without_note_stays_raw(monkeypatch, tmp_path):
 
     assert task.rounds[0].get("note_state") == "failed"
     assert not task.rounds[0].get("folded")        # 没产物 → 不换档
-    assert task.rounds[1].get("folded")
+    assert not task.rounds[1].get("folded")        # 最后一轮永不折
 
 
 def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
@@ -304,6 +305,7 @@ def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
     agent.rounds = [round_]
     agent.current_round = round_
     agent.close_round()
+    round_["folded"] = True          # 单轮夹具：手工标成折叠，验段落槽的渲染
 
     assembled = _assembled(agent)
     assert "👤 先做 A" in assembled
@@ -353,3 +355,32 @@ def test_ledger_close_works_and_guards_own_round(monkeypatch, tmp_path):
     assert "第二轮的新悬问" in left          # 本轮的结不掉
     details = "\n".join(_note_records(task))
     assert "结案被拒" in details
+
+
+def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path):
+    """换档**一次折够**（折到水位以下）→ 上下文没重新长上来之前不再折。
+
+    实测动因：按"逐轮推进"会让水位悬在线上时**每轮断一次前缀**（每个工作调用白付
+    200~260 tok，大会话里这笔等于尾部体量）。
+    """
+    notes = [{"seq": i, "sentence": f"第{i}轮结论", "failures": [], "ledger_append": {}}
+             for i in range(1, 6)]
+    agent, task = _note_agent(monkeypatch, tmp_path, notes, keep=1,
+                              org_watermark=5000, org_grace_rounds=0)
+    for i in range(1, 6):
+        agent.run(f"第 {i} 问")
+    agent._fold_target = 0.6
+    agent.last_context_estimate = 9000          # 到线（>5000）
+    agent._advance_fold_line()
+
+    folded = [int(r["seq"]) for r in task.rounds if r.get("folded")]
+    assert len(folded) > 1, f"一次要到水位以下，而不是只折一轮：{folded}"
+    assert 5 not in folded                      # 最后一轮永不折（工作集）
+    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
+    assert "折到水位" in detail
+    assert "60%" in detail
+
+    # 滞后：体量已经落到水位之下 → 再调也不折
+    agent.last_context_estimate = 3000
+    agent._advance_fold_line()
+    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == folded

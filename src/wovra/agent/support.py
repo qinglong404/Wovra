@@ -58,6 +58,10 @@ def v4_enabled() -> bool:
 # 往哪推，不决定何时换（何时换由水位说了算）。
 _FOLD_KEEP_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_KEEP_ROUNDS", "50"))
 
+# 换档的目标：折到水位这个比例之下（一次折够 → 下次换档要等重新长上来，天然滞后）。
+# 实测动因：按"逐轮推进"会让水位悬在线上时**每轮断一次前缀**（worklog §160）。
+_FOLD_TARGET_DEFAULT = float(os.environ.get("WOVRA_FOLD_TARGET", "0.6"))
+
 # 分裂判据的体量门槛（2026-09-11 用户拍板）：主 agent 残留桶（纯对话/
 # 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），
 # 可以与其他只读工具并发执行。`screenshot` 则**不**进这个集合——它要启动无头
