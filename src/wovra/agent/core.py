@@ -239,6 +239,8 @@ class _CoreMixin:
         # 子 agent 的 expand_history 会读到父任务的历史
         self._tool_fns = tuple(tools)
         self._schemas: list[dict] = []
+        # 本轮冻结的 tools 数组（None ＝ 未开轮，用当前阶段算）；见 `_stage_schemas`
+        self._round_schemas: Optional[list[dict]] = None
         for fn in tools:
             self.register(fn)
 
@@ -398,6 +400,17 @@ class _CoreMixin:
         )
 
     def _stage_schemas(self) -> list[dict]:
+        """本轮用的 tools 数组：**按轮冻结**（AGENTS §2：tools 序列化在一轮内不许变）。
+
+        为什么要冻结：身份类工具的广告随"有没有子 agent"变，而**就地新建**会在轮中长出
+        第一个子 agent——不冻的话，这一轮后半段的请求就换了 tools 数组，整段前缀作废。
+        冻结后的变化点落在**下一次开轮**（本就是允许断前缀的边界）。
+        """
+        if self._round_schemas is not None:
+            return self._round_schemas
+        return self._compute_stage_schemas()
+
+    def _compute_stage_schemas(self) -> list[dict]:
         """按阶段给 tools 数组：**分裂前不广告身份类工具**（2026-09-17 用户口径）。
 
         同一阶段内数组恒定（AGENTS §2 硬线）；分裂落地那一刻整段换一次——那本来就是
@@ -426,6 +439,7 @@ class _CoreMixin:
         保证"当前有没有开放轮"这个判定与开轮动作不会交错。
         """
         with self._view_lock:
+            self._round_schemas = self._compute_stage_schemas()   # 轮内冻结（见 _stage_schemas）
             return self._open_or_reuse_round_locked(user_input)
 
     def _open_or_reuse_round_locked(self, user_input: str) -> bool:
@@ -1252,6 +1266,7 @@ class _CoreMixin:
             self._settle_after_maintenance()
             # 换档线（V4 §6.2）：水位到了就把超龄且有 note 的轮一次换成段落。
             self._advance_fold_line()
+        self._round_schemas = None          # 轮闭合：解冻（下一轮按新阶段重新冻结）
 
     def finalize_round(self, end_state: str = "open") -> None:
         """CLI 异常/中断路径：Round 保持开放（不闭合、不整理），仅持久化。

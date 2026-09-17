@@ -365,3 +365,22 @@ def test_spawn_creates_an_agent_in_place(monkeypatch, tmp_path):
     assert round_["route_handoff"]["to"] == "A"
     assert any(h.get("kind") == "maintenance" and "就地新建 agent" in str(h.get("detail"))
                for h in task.history)
+
+
+def test_tools_array_is_frozen_within_a_round(monkeypatch, tmp_path):
+    """**轮内冻结 tools 数组**（AGENTS §2）：就地新建在轮中长出第一个子 agent 时，
+    这一轮剩下的请求不许跟着换数组（换了＝整段前缀作废）。变化点落在下一次开轮。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    agent.context_mode = "managed"
+    round_ = {"seq": 9, "active_view": "Main", "events": [], "route_hops": 0}
+    agent.rounds = [round_]
+    agent.current_round = round_
+    agent._round_schemas = agent._compute_stage_schemas()      # 开轮时冻结（分裂前）
+    before = [s["function"]["name"] for s in agent._stage_schemas()]
+    assert "route_to" not in before
+
+    agent.route_to(agent="new", reason="新活")                  # 轮中长出 A
+
+    assert [s["function"]["name"] for s in agent._stage_schemas()] == before   # 冻结住
+    agent._round_schemas = None                                 # 下一轮：按新阶段重算
+    assert "route_to" in [s["function"]["name"] for s in agent._stage_schemas()]
