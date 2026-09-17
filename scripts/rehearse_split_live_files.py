@@ -158,7 +158,7 @@ def main() -> int:
     stub = Agent(llm=_StubLLM(), tools=[], task=task)
     stub.rounds = task.rounds
     co_lines = stub._live_cooccurrence_lines(task.rounds or [])
-    prompt = _split_live_prompt(lines, co_lines)
+    prompt = _split_live_prompt(lines, co_lines, stub._existing_domain_lines())
     print(f"\n=== 输入（{len(prompt):,} 字符）===")
     print(prompt)
     if args.dry:

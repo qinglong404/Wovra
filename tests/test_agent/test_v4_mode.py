@@ -384,3 +384,62 @@ def test_tools_array_is_frozen_within_a_round(monkeypatch, tmp_path):
     assert [s["function"]["name"] for s in agent._stage_schemas()] == before   # 冻结住
     agent._round_schemas = None                                 # 下一轮：按新阶段重算
     assert "route_to" in [s["function"]["name"] for s in agent._stage_schemas()]
+
+
+# ---- 增量演进：名字即身份，只增不重排（2026-09-17 用户口径）----
+
+
+def test_incremental_landing_keeps_identity_and_only_adds(monkeypatch, tmp_path):
+    """再分裂时：**同名就地更新（id 不变）**、新名字发新 id、**没提到的既有条目不退休**。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a/x.py"))
+    task.registry.append({"id": "A", "name": "附件通道", "description": "旧描述",
+                          "files": ["a/x.py"], "history_files": []})
+    task.registry.append({"id": "B", "name": "工具层", "description": "保持不动",
+                          "files": ["b/y.py"], "history_files": []})
+    domains = [
+        {"name": "附件通道", "path": "a/", "description": "新描述",
+         "files": ["a/x.py", "a/new.py"], "history_files": []},
+        {"name": "前端", "path": "web/", "files": ["web/index.html"], "history_files": []},
+    ]
+
+    added, updated, settle = agent._land_domains_incremental(domains)
+
+    by_name = {e["name"]: e for e in task.registry}
+    assert by_name["附件通道"]["id"] == "A"                  # 名字即身份：id 不变
+    assert by_name["附件通道"]["description"] == "新描述"
+    assert sorted(by_name["附件通道"]["files"]) == ["a/new.py", "a/x.py"]
+    assert added == ["C"] and updated == ["A"]               # 新名字拿最小空闲 id
+    assert by_name["前端"]["id"] == "C"
+    assert by_name["工具层"]["id"] == "B"                    # 没提到的：原样保留（不退休）
+    assert by_name["工具层"]["files"] == ["b/y.py"]
+    assert agent._report_ownerless_live_files(task.registry) == []
+
+
+def test_incremental_landing_settles_ownership(monkeypatch, tmp_path):
+    """归属结算：被新域接手的文件，从别的条目（含主 agent）清单里减掉。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a/x.py"))
+    task.registry[0]["files"] = ["a/x.py"]                   # 主 agent 手里有它
+    domains = [{"name": "附件", "path": "a/", "files": ["a/x.py"], "history_files": []}]
+
+    agent._land_domains_incremental(domains)
+
+    main = next(e for e in task.registry if e["id"] == "Main")
+    assert main["files"] == []                               # 主 agent 交出来了
+    assert next(e for e in task.registry if e["name"] == "附件")["files"] == ["a/x.py"]
+
+
+def test_incremental_landing_matches_by_file_overlap_when_renamed(monkeypatch, tmp_path):
+    """模型改名了也**不丢身份**：名字匹配不上时按文件重叠 ≥50% 认到既有条目。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a/x.py"))
+    task.registry.append({"id": "A", "name": "老名字",
+                          "files": ["a/x.py", "a/y.py"], "history_files": []})
+    # 名字换了，但两片文件还是那两片 → 该认到 A
+    domains = [{"name": "新名字", "path": "a/",
+                "files": ["a/x.py", "a/y.py"], "history_files": []}]
+
+    added, updated, _settle = agent._land_domains_incremental(domains)
+
+    entry = next(e for e in task.registry if e["id"] == "A")
+    assert added == [] and updated == ["A"]                  # 没新建、更新的是 A
+    assert entry["name"] == "新名字"
+    assert any("文件重叠" in str(h.get("detail")) for h in task.history)

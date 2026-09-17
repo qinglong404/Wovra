@@ -39,7 +39,7 @@ from wovra import task as task_module                   # noqa: E402
 COPY_ROOT = Path("/tmp/wovra-resplit/tasks")
 
 
-def _reset_split_state(task) -> tuple[int, list[str]]:
+def _reset_split_state(task, keep_agents: bool = False) -> tuple[int, list[str]]:
     """清掉旧分裂产物：轮上的 split_state/domains ＋ 注册表里的子 agent。
 
     返回 (清掉的轮数, 清掉的 agent id)。
@@ -54,6 +54,8 @@ def _reset_split_state(task) -> tuple[int, list[str]]:
         r.pop("domains", None)
         r.pop("pending_org", None)
     dropped: list[str] = []
+    if keep_agents:
+        return rounds, dropped
     keep = []
     for entry in task.registry or []:
         if not isinstance(entry, dict):
@@ -86,6 +88,9 @@ def main() -> int:
     ap.add_argument("session_id")
     ap.add_argument("--apply", action="store_true",
                     help="落在会话上（默认只在副本上跑，原会话一个字节不碰）")
+    ap.add_argument("--keep-agents", action="store_true",
+                    help="**保留现有注册表**，只清 split_state——验『增量演进』（名字即身份、"
+                         "只增不重排）时用；默认是全量重置（清掉子 agent 再重跑）")
     args = ap.parse_args()
 
     src = task_module.TASKS_ROOT / args.session_id
@@ -108,7 +113,7 @@ def main() -> int:
 
     task_module.TASKS_ROOT = root
     task = task_module.Task.load(args.session_id)
-    rounds_n, dropped = _reset_split_state(task)
+    rounds_n, dropped = _reset_split_state(task, args.keep_agents)
     print(f"清掉旧产物：{rounds_n} 轮标记、注册表子 agent {dropped or '（无）'}")
 
     agent = _build_agent(task, mode=task.mode or MODE_MANAGED,

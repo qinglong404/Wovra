@@ -48,7 +48,8 @@ _SPLIT_SUBMIT_TOOL = "submit_domains"
 _ROUND_NOTE_SUBMIT = "submit_round_notes"
 
 
-def _split_live_prompt(live_lines: list[str], co_lines: list[str]) -> str:
+def _split_live_prompt(live_lines: list[str], co_lines: list[str],
+                       domain_lines: list[str] | None = None) -> str:
     """V4 分裂调用的指令文本（**生产与排练脚本共用这一份**，口径不会走岔）。
 
     `live_lines` = 活性文件清单（路径 ＋ 首行说明，代码取）；
@@ -59,6 +60,9 @@ def _split_live_prompt(live_lines: list[str], co_lines: list[str]) -> str:
     if co_lines:
         text += ("\n[同轮共现]（同一轮里一起动过的文件——那是一条活，别拆成两个域）\n"
                  + "\n".join(co_lines) + "\n")
+    if domain_lines:
+        text += ("\n[现有域]（**名字即身份**：这些名字原样沿用，只能新增或再裂一层）\n"
+                 + "\n".join(domain_lines) + "\n")
     return text + "\n" + _SPLIT_LIVE_INSTRUCTIONS
 
 
@@ -1060,6 +1064,24 @@ class _MaintenanceMixin:
                     )
                     landed += 1
                 continue
+            if v4_enabled():
+                # **增量演进**（2026-09-17 用户口径："只有后面不得不分时才分这么细……名字即身份"）：
+                # V4 不再"重划 + 两级替换"——按**名字**匹配既有条目就地更新（保留 id 与身份），
+                # 新名字才发新 id（发最小空闲字母，不用位置），**不退休任何既有条目**。
+                # 于是反复分裂不会把 `A` 的名字/文件悄悄换给别人（路由、账本、执行者索引都认名字）。
+                added, updated, settle_lines = self._land_domains_incremental(domains)
+                if settle_lines:
+                    self.task.record(
+                        "maintenance",
+                        f"归属结算：{len(settle_lines)} 个文件的清单移到新域（"
+                        + "；".join(settle_lines[:6]) + ("…" if len(settle_lines) > 6 else "") + "）",
+                    )
+                self._publish_landing_notes(added, updated)
+                # 落地后立刻查"有没有活性文件没人管"（用户口径：出现就是机制问题，报错叫人）
+                self._report_ownerless_live_files(self.task.registry)
+                pending["registry_landed"] = True
+                landed += 1
+                continue
             parent_id = self._product_parent_id(
                 str(pending.get("split_parent") or "")
             )
@@ -1753,7 +1775,8 @@ class _MaintenanceMixin:
             live_ids, hist_ids = self._split_file_map()
             round_blocks, merged_groups = {}, None   # V4 没有块结构
             instruction = _split_live_prompt(
-                self._live_file_lines(), self._live_cooccurrence_lines(rounds)
+                self._live_file_lines(), self._live_cooccurrence_lines(rounds),
+                self._existing_domain_lines(),
             )
         else:
             # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
@@ -2322,6 +2345,130 @@ class _MaintenanceMixin:
             if path not in out:
                 out.append(path)
         return out
+
+    def _land_domains_incremental(self, domains: list) -> tuple[list[str], list[str], list[str]]:
+        """**增量落地**分裂产物（V4）：名字即身份，只增不重排。
+
+        规则（2026-09-17 用户口径"只有后面不得不分时才分这么细"＋"不许重排身份"）：
+
+        * 新节点名字**已存在** → 就地更新那条（保留 id），文件/职责/历史文件按现状改写
+          （归属结算：被新域接手的文件从旧条目清单里减掉）；
+        * 新节点名字**没出现过** → 发**最小空闲字母 id**（不用位置，避免把 `A` 换个意思）；
+        * **不退休任何既有条目**：这一版产物没提到它，它的文件与职责原样保留（下一批若把它并进
+          别的域，走"同名并"或"从未分开"那条，而不是悄悄删人）。
+
+        返回 `(added, updated, settle_lines)`。
+        """
+        entries = registry_module.build_entries(domains, "")
+        by_name = {
+            str(e.get("name")): e for e in (self.task.registry or [])
+            if isinstance(e, dict) and str(e.get("name") or "")
+            and str(e.get("id")) != registry_module.MAIN_AGENT_ID
+        }
+        added: list[str] = []
+        updated: list[str] = []
+        for entry in entries:
+            name = str(entry.get("name") or "")
+            if not name:
+                continue
+            existing = by_name.get(name)
+            how = "名字"
+            if existing is None:
+                # **名字匹配不上就按文件重叠认身份**（≥50%）：模型每次跑都会改名（实测
+                # 它把 `[现有域]` 的编号当名字用），只认名字会让身份跟着名字一起丢。
+                # 这条是"名字即身份"的机械兜底：文件名册才是硬证据。
+                mine = {str(f) for f in (entry.get("files") or [])}
+                best, best_hit = None, 0
+                for candidate in (self.task.registry or []):
+                    if not isinstance(candidate, dict):
+                        continue
+                    if str(candidate.get("id")) == registry_module.MAIN_AGENT_ID:
+                        continue
+                    hit = len(mine & {str(f) for f in (candidate.get("files") or [])})
+                    if hit > best_hit:
+                        best, best_hit = candidate, hit
+                if best is not None and mine and best_hit / len(mine) >= 0.5:
+                    existing, how = best, "文件重叠"
+            if existing is None:
+                fresh = dict(entry)
+                # 血缘 id（§63 的口径）：`父名-1`/`父名-2` 这类再裂出来的，沿用父域 id 作前缀
+                # （`A-1` 而不是发个新字母）——**只增不重排**：既有 id 一个都不动。
+                parent_name, _, suffix = name.rpartition("-")
+                parent_entry = by_name.get(parent_name) if suffix.isdigit() else None
+                fresh["id"] = (
+                    f"{parent_entry['id']}-{suffix}" if parent_entry is not None
+                    else registry_module.next_free_top_id(self.task.registry)
+                )
+                fresh["name_provisional"] = False
+                self.task.registry.append(fresh)
+                by_name[name] = fresh
+                added.append(fresh["id"])
+                continue
+            changed = False
+            # `name` 也在更新之列：名字是**现状**的一部分（模型改名＝现状变了），
+            # 而**身份是 id**——名字跟着现状走、id 不动，就是"名字变了，身份没变"。
+            for key in ("name", "description", "goal", "files", "file_domains",
+                        "history_files", "file_notes"):
+                value = entry.get(key)
+                if value in (None, "", [], {}):
+                    continue
+                if existing.get(key) != value:
+                    existing[key] = value
+                    changed = True
+            if changed:
+                existing.pop("name_provisional", None)
+                updated.append(str(existing.get("id")))
+            if how != "名字":
+                note = f"「{name}」按{how}认到 {existing.get('id')}（名字变了，身份没变）"
+                if self.task is not None:
+                    self.task.record("maintenance", f"增量落地：{note}")
+        # 归属结算：新产物的文件全集，从**其它**条目（含主 agent）的清单里减掉
+        settle = registry_module.settle_ownership(
+            self.task.registry,
+            [e for e in self.task.registry
+             if str(e.get("id")) in set(added) | set(updated)],
+        )
+        return added, updated, settle
+
+    def _publish_landing_notes(self, added: list[str], updated: list[str]) -> None:
+        """落地的留痕：新增/更新了谁（名字即身份，改了什么要说清）。"""
+        if self.task is None:
+            return
+        if added:
+            names = "、".join(
+                f"{e.get('id')}（{e.get('name')}）" for e in self.task.registry
+                if str(e.get("id")) in set(added)
+            )
+            self.task.record("maintenance", f"增量落地：新增 agent {names}")
+        if updated:
+            self.task.record(
+                "maintenance",
+                f"增量落地：更新 {len(updated)} 个既有 agent（{('、'.join(updated))}）"
+                "——名字即身份，id 不变",
+            )
+
+    def _existing_domain_lines(self) -> list[str]:
+        """`[现有域]`：把当前注册表里的域摆给模型，**名字即身份**（增量演进的一半）。
+
+        为什么必须给：模型每次分裂都会**重新起名**（两次跑下来名字都不一样），名字一变，
+        "按名字匹配既有条目"就匹配不上，身份照样重排。故把现有域连文件清单一起摆出来，
+        并要求原样沿用——机械那半在 `_land_domains_incremental`。
+        """
+        lines: list[str] = []
+        for entry in (self.task.registry if self.task is not None else None) or []:
+            if not isinstance(entry, dict):
+                continue
+            if str(entry.get("id") or "") == registry_module.MAIN_AGENT_ID:
+                continue
+            files = [str(f) for f in (entry.get("files") or [])]
+            shown = "、".join(files[:6]) + ("…" if len(files) > 6 else "")
+            # **名字在前、id 只当附注**：实测把 id 写在行首，模型会把 id 当成名字用
+            # （产出两个叫 "A"/"B" 的节点，名字匹配全落空）。
+            lines.append(
+                f"「{entry.get('name')}」（内部编号 {entry.get('id')}，"
+                f"管 {len(files)} 个文件）：{shown or '暂无文件'}"
+            )
+        return lines
 
     def _report_ownerless_live_files(self, registry: list) -> list[str]:
         """**活性文件不许无人管**（2026-09-17 用户口径）：出现就是机制问题 → 报错叫人。
