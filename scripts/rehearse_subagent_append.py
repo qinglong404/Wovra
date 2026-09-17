@@ -41,6 +41,8 @@ _APPEND_HEAD = (
     "与**本轮原文**（尚未折叠）。\n"
     "**只写本轮 R{seq} 的一句话**：不要重写、不要复述、不要合并前面任何一轮"
     "（它们已经定稿了，你的产物只会被**追加**在它们后面）。\n"
+    "本轮**可能由多个 agent 协作完成**（交棒）：那你只写**自己这一棒**做了什么；"
+    "别的参与者的部分由它们各自追加，你不要替它们写、也不必综述全局。\n"
 )
 
 
@@ -174,10 +176,14 @@ def main() -> int:
 
     product = _call(LLM(), messages)
     notes = product.get("notes") or []
-    print(f"\n--- 追加产物（应该只有 R{seq} 一条）---")
+    # 执行者由**代码**盖章（不让模型自报身份——本会话的病根就是身份错位）
+    executor = args.domain or str(target.get("active_view") or "") or "Main"
+    print(f"\n--- 追加产物（应该只有 R{seq} 一条；执行者〔{executor}〕由代码盖章）---")
     extra = [int(n.get("seq", 0)) for n in notes if int(n.get("seq", 0)) != seq]
+    multi = len(notes) > 1        # 一轮多棒：每棒各一条
     for n in notes:
-        print(f"[R{n.get('seq')}] ▸ {n.get('sentence')}")
+        tag = f"〔{executor}〕" if (multi or executor != "Main") else ""
+        print(f"[R{n.get('seq')}]{tag} ▸ {n.get('sentence')}")
         for f in n.get("failures") or []:
             ev = str((f or {}).get("evidence") or "")
             print(f"    ⚠ {R._fail_text(f)}" + (f"　〔{ev}〕" if ev else ""))

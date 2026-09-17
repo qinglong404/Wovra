@@ -561,7 +561,11 @@ def main() -> int:
         if not n:
             print("      ⚠ 这一轮没收到产物")
             continue
-        print(f"      ▸ {n.get('sentence')}")
+        # 执行者由代码盖章；该轮多棒（多条 note）或非 Main 时才显示（2026-09-17）
+        ex = str(r.get("active_view") or "") or "Main"
+        tag = f"〔{ex}〕" if (sum(1 for k in notes if int(k) == int(r["seq"])) > 1
+                             or ex != "Main") else ""
+        print(f"      ▸{tag} {n.get('sentence')}")
         for f in n.get("failures") or []:
             ev = str((f or {}).get("evidence") or "") if isinstance(f, dict) else ""
             print(f"      ⚠ {_fail_text(f)}" + (f"　〔{ev}〕" if ev else ""))
