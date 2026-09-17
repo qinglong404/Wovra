@@ -257,20 +257,44 @@ def test_single_shared_round_with_exclusive_rounds_does_not_merge(monkeypatch, t
     assert len(domains) == 3
 
 
-def test_bookkeeping_only_domain_does_not_become_an_agent(monkeypatch, tmp_path):
-    """只由留痕/配置文件组成的顶层域 → 不建 agent（归主 agent 的横切事务）。"""
+def test_report_domain_does_become_an_agent(monkeypatch, tmp_path):
+    """**留痕/报告类域照常建 agent**（2026-09-17 用户口径更正）。
+
+    我先前加过"留痕类域一律不建 agent"的准则，理解偏了：用户要的是"可以有一个 agent
+    专门写报告"，而**活性文件不许无人管**——无人管就是机制错误（见落地后的完整性检查）。
+    """
     from wovra import registry as registry_module
 
     agent, _task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
     domains = [
-        {"name": "留痕与自检", "files": ["docs/worklog.md", ".gitignore"],
-         "description": "记录"},
+        {"name": "报告与留痕", "files": ["docs/worklog.md", ".gitignore"],
+         "description": "写 worklog 与自检报告"},
         {"name": "真活", "files": ["src/wovra/attachments.py"]},
     ]
-    notes = agent._demote_bookkeeping_domains(domains)
-
-    assert domains[0].get("main_agent") is True          # 降级：不建 agent
-    assert "留痕/配置类域不建 agent" in notes[0]
-    assert not domains[1].get("main_agent")              # 有真活的域不受影响
+    assert not hasattr(agent, "_demote_bookkeeping_domains")   # 那条准则已拆掉
     entries = registry_module.build_entries(domains, "")
-    assert [e["name"] for e in entries] == ["真活"]
+    assert [e["name"] for e in entries] == ["报告与留痕", "真活"]
+
+
+def test_ownerless_live_file_is_reported_loudly(monkeypatch, tmp_path):
+    """活性文件无人管 → 报错叫人（机制问题），不静默兜底。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("src/wovra/attachments.py"))
+    progress: list[str] = []
+    agent.on_progress = progress.append
+
+    # 注册表里只有 Main（且 Main 名下没有文件）＋ 该文件没有任何域认领 → 就是无人管
+    task.registry = [{"id": "Main", "name": "主agent", "files": []}]
+    orphans = agent._report_ownerless_live_files(task.registry)
+
+    assert orphans == ["src/wovra/attachments.py"]
+    assert any("有活性文件无人管" in p for p in progress)
+    assert any(h.get("kind") == "split_defect" and "无人管" in str(h.get("detail"))
+               for h in task.history)
+
+
+def test_owned_live_file_is_quiet(monkeypatch, tmp_path):
+    """有主就不报（正常态）。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("src/wovra/attachments.py"))
+    task.registry = [{"id": "Main", "name": "主agent", "files": []},
+                     {"id": "A", "name": "附件", "files": ["src/wovra/attachments.py"]}]
+    assert agent._report_ownerless_live_files(task.registry) == []

@@ -1071,6 +1071,8 @@ class _MaintenanceMixin:
                 continue                      # 跨条目互斥 → 留到边界按拒收处理
             registry_module.land(self.task.registry, projected)
             pending["registry_landed"] = True
+            # 落地后立刻查"有没有活性文件没人管"（用户口径：出现就是机制问题，报错叫人）
+            self._report_ownerless_live_files(self.task.registry)
             if settle_lines:
                 self.task.record(
                     "maintenance",
@@ -1962,10 +1964,6 @@ class _MaintenanceMixin:
                     f"split：{merged_notes[0]}（等 {len(merged_notes)} 条，同类的见上）",
                 )
         bind_notes, uncovered_by_scope = self._bind_files_by_path(domains)
-        demoted = self._demote_bookkeeping_domains(domains)
-        if demoted and self.task is not None:
-            for n in demoted:
-                self.task.record("maintenance", f"split：{n}")
         coupled_notes = self._merge_never_apart_domains(domains, rounds)
         if coupled_notes and self.task is not None:
             for n in coupled_notes[:6]:
@@ -2325,6 +2323,30 @@ class _MaintenanceMixin:
                 out.append(path)
         return out
 
+    def _report_ownerless_live_files(self, registry: list) -> list[str]:
+        """**活性文件不许无人管**（2026-09-17 用户口径）：出现就是机制问题 → 报错叫人。
+
+        "无人管"用的是**权限层同一把尺子**（`registry.owner_of_file`）——即"有没有哪个
+        agent 有权改写它"。无人管的文件在运行时的表现就是：谁改它都撞"已存在但没有任何
+        域认领"。分裂前不算（那时主 agent 全权，P4）。
+
+        返回无人管的文件清单（空 = 干净）。
+        """
+        orphans = [
+            str(p) for p in self._live_files()
+            if registry_module.owner_of_file(registry, str(p)) is None
+        ]
+        if not orphans:
+            return []
+        shown = "、".join(orphans[:8]) + ("…" if len(orphans) > 8 else "")
+        msg = (f"⛔ 有活性文件无人管（机制问题，请报告用户）：{shown}"
+               f"（共 {len(orphans)} 个）——分裂产物没把它们认给任何 agent")
+        if self.task is not None:
+            self.task.record("split_defect", msg)
+        if self.on_progress:
+            self.on_progress(msg)
+        return orphans
+
     def _live_cooccurrence_lines(self, rounds: list[dict]) -> list[str]:
         """**同轮共现**的机械事实：哪些活性文件在同一轮里一起被动过。
 
@@ -2415,51 +2437,6 @@ class _MaintenanceMixin:
                     f"同轮从未分开的域合并：「{gone_name}」→「{keep.get('name')}」"
                     f"（活跃轮 {'、'.join('R%d' % s for s in sorted(ra | rb))}）"
                 )
-        return notes
-
-    # 横切留痕/配置类文件（不是工作线）：文档目录、附件目录，以及根目录下的
-    # md/点文件（worklog、自检报告、.gitignore、README/AGENTS 这类）。用户口径
-    # 2026-09-17："A-F 有些过分分裂了"——其中「全局协调与工作账本」就是这么冒出来的。
-    # **不含 `output/`**：那里的文件是**产物**（谁产出的归谁，见 §3.6 的 FINDINGS 例），
-    # 而且"分不出去也绝不落主 agent"那条口径对它们仍然成立（实测：放进来会把
-    # `output/_p*.py` 这类探针脚本的域整片降级，破坏既有归属结算）。
-    _BOOKKEEPING_PREFIXES = ("docs/", "attachments/", "wovra-attachments/")
-
-    @classmethod
-    def _is_bookkeeping_file(cls, path: str) -> bool:
-        p = str(path or "").strip()
-        if not p:
-            return False
-        if p.startswith(cls._BOOKKEEPING_PREFIXES):
-            return True
-        return "/" not in p and (p.startswith(".") or p.endswith(".md"))
-
-    def _demote_bookkeeping_domains(self, domains: list) -> list[str]:
-        """只由留痕/配置文件组成的顶层域 → 不建子 agent（归主 agent 的横切事务）。
-
-        判据是机械的：该节点名下的文件**全部**是留痕类（`docs/`、`output/`、附件目录、
-        根目录的 md/点文件）。这类活"每批都动、和谁都同轮"（本场 `docs/worklog` 在
-        R2/R3/R5/R6/R7 都被碰过），单独成域只是把主 agent 的账本活拆出去。
-        文件不丢：`_auto_claim` 会按同目录/最近挂到别的节点，挂不上进 Runtime 机械桶。
-        """
-        notes: list[str] = []
-        for node in list(domains):
-            if not isinstance(node, dict) or not node.get("name"):
-                continue
-            if str(node.get("parent") or "").strip() or node.get("main_agent"):
-                continue
-            files = [str(f) for f in (node.get("files") or [])]
-            if not files or not all(self._is_bookkeeping_file(f) for f in files):
-                continue
-            node["main_agent"] = True
-            node["description"] = (
-                str(node.get("description") or "").strip()
-                or f"{node['name']}：横切留痕/配置（归主 agent）"
-            )
-            notes.append(
-                f"留痕/配置类域不建 agent：「{node['name']}」"
-                f"（{len(files)} 个文件归主 agent 的横切事务）"
-            )
         return notes
 
     @staticmethod
