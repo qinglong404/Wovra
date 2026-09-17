@@ -116,6 +116,48 @@ def test_search_files_directory_missing_gives_hint(monkeypatch, tmp_path):
     assert "directory 不存在" in result and "no-such-dir" in result
 
 
+def test_search_no_match_points_at_noise_dir(monkeypatch, tmp_path):
+    """零命中真因是产物目录被跳过 → 指出文件:行号，指路显式 directory。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "a.py").write_text("nothing here", encoding="utf-8")
+    spill = tmp_path / "output" / "spill"
+    spill.mkdir(parents=True)
+    (spill / "run.txt").write_text("开头\n目标 ERROR_SPILL\n结尾", encoding="utf-8")
+
+    result = tools_module.search_files("ERROR_SPILL")
+
+    assert "无匹配" in result
+    assert "output/spill/run.txt:2" in result
+    assert "directory" in result
+
+
+def test_search_no_match_mentions_glob_filter(monkeypatch, tmp_path):
+    """零命中真因是 glob 限定过窄 → 说明 glob 只按文件名过滤，给出省略它的走法。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "a.py").write_text("TARGET", encoding="utf-8")
+
+    result = tools_module.search_files("TARGET", glob="*.md")
+
+    assert "无匹配" in result
+    assert "glob='*.md'" in result and "省略 glob" in result
+
+
+def test_search_no_match_stays_quiet_when_truly_absent(monkeypatch, tmp_path):
+    """三种原因都不是 → 不加任何提示（旧版在此处同样回原句，不许无中生有）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
+
+    result = tools_module.search_files("NOPE_NO_SUCH_TOKEN")
+
+    assert result == "无匹配：pattern='NOPE_NO_SUCH_TOKEN', directory='.', glob='*'"
+
+
 def test_glob_files_directory_is_file_gives_hint(monkeypatch, tmp_path):
     """glob_files 的 directory 指向文件 → 提示用 read_file（不再静默"无匹配文件"）。"""
     from wovra import tools as tools_module
@@ -124,3 +166,49 @@ def test_glob_files_directory_is_file_gives_hint(monkeypatch, tmp_path):
     write_file("app.py", "x")
     result = tools_module.glob_files("*.py", directory="app.py")
     assert "文件而非目录" in result and "read_file" in result
+
+
+def test_glob_no_match_points_at_noise_directory(monkeypatch, tmp_path):
+    """零命中真因是噪声目录 → 指出去向，不再甩"隐藏文件未计入"。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "output").mkdir()
+    (tmp_path / "output" / "big.txt").write_text("x", encoding="utf-8")
+
+    result = glob_files("*.txt")
+
+    assert "无匹配文件" in result
+    assert "噪声目录" in result and "output" in result
+    assert "directory='output'" in result
+
+
+def test_glob_no_match_explains_pattern_depth(monkeypatch, tmp_path):
+    """零命中真因是 pattern 层级 → 给出能命中的写法。
+
+    现场（2026-09-17）：`glob_files('src/*.py')` 自仓库根零命中，旧提示说是
+    隐藏文件的锅，据此推出过错误机制；真因是 `*` 只覆盖一层。
+    """
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    pkg = tmp_path / "src" / "pkg"
+    pkg.mkdir(parents=True)
+    (pkg / "a.py").write_text("x = 1", encoding="utf-8")
+
+    result = glob_files("src/*.py")
+
+    assert "无匹配文件" in result
+    assert "src/**/*.py" in result
+
+
+def test_glob_no_match_keeps_hidden_switch_hint(monkeypatch, tmp_path):
+    """三种原因都不是（确实没有这种文件）→ 仍提示 include_hidden 这个出口。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    (tmp_path / "a.py").write_text("x = 1", encoding="utf-8")
+
+    result = glob_files("*.rs")
+
+    assert "无匹配文件" in result and "include_hidden" in result

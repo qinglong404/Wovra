@@ -48,7 +48,7 @@ _GLOB_MAX_FILES = 1_000
 _SEARCH_MAX_BYTES = 8_000_000
 
 
-def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
+def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT, skip_noise: bool = True):
     """安全遍历 root 下匹配 glob 的文件——逐项校验，越界即跳过。
 
     三层防护：
@@ -98,8 +98,8 @@ def _walk(root: Path, glob: str, symlinks: str = _SYMLINK_IN_ROOT):
             from_root = resolved.relative_to(root_scope)
         except ValueError:
             from_root = relative
-        if any(part in _IGNORED_DIRS for part in from_root.parts):
-            continue  # ② 噪声目录（相对起点判定：显式进 output/ 就照搜）
+        if skip_noise and any(part in _IGNORED_DIRS for part in from_root.parts):
+            continue  # ② 噪声目录（相对起点判定：显式进 output/ 就照搜；skip_noise=False 用于零命中时诊断）
         if symlinks == _SYMLINK_SKIP and path.is_symlink():
             continue  # ③ 链接策略
         if resolved in seen:
@@ -303,7 +303,10 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
                     entry += f"  ｜上下文: {snippet}"
                 matches.append(entry)
     if not matches:
-        return f"无匹配：pattern={pattern!r}, directory={directory!r}, glob={glob!r}"
+        return (
+            f"无匹配：pattern={pattern!r}, directory={directory!r}, glob={glob!r}"
+            f"{_search_no_match_hint(root, glob, regex)}"
+        )
     cap = limits.list_limit(_SEARCH_MAX_MATCHES)
     if len(matches) > cap:
         # 超限不丢结果（2026-09-11 worklog §26 同批）：完整清单落盘可取回，
@@ -316,6 +319,151 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
         )
         return limits.clip("\n".join(matches[:cap]) + note, "search", limit=10 ** 9)
     return limits.clip("\n".join(matches), "search")
+
+
+def _noise_breakdown(paths: list[Path], root_scope: Path, lead: str):
+    """命中里被噪声目录挡掉的部分 → (数量, 目录名, 示例目录)；无则 None。
+
+    lead = pattern/glob 的首段（如 `output/**/*` 的 `output`）：示例优先取与它
+    同类的那批，目录名也把它排在前面——按字母序会先蹦出 .venv，指的方向与
+    pattern 无关。
+    """
+    def _from_root(path: Path) -> tuple[str, ...]:
+        try:
+            return path.relative_to(root_scope).parts
+        except ValueError:
+            return path.parts
+
+    noise = [p for p in paths if any(part in _IGNORED_DIRS for part in _from_root(p))]
+    if not noise:
+        return None
+    dirs = sorted({part for p in noise for part in _from_root(p) if part in _IGNORED_DIRS})
+    ordered = ([lead] if lead in dirs else []) + [d for d in dirs if d != lead]
+    topical = [p for p in noise if lead and _from_root(p)[0] == lead]
+    if not topical and lead:
+        topical = [p for p in noise if lead in _from_root(p)]
+    example = _display_rel((topical or noise)[0].parent).as_posix()
+    return len(noise), "、".join(ordered[:3]), example
+
+
+def _lead_segment(pattern: str) -> str:
+    """pattern/glob 的第一段（跳过 `**`）——排噪声目录与取示例时的相关方向。"""
+    return next((s for s in pattern.split("/") if s and s != "**"), "")
+
+
+# search_files 零命中时，在噪声目录里探内容命中的预算：真实原因要靠**内容命中**
+# 证明，只凭"有一堆文件被跳过"会每次零命中都报（那是新的误导）。探到预算即停。
+# 探针只走 Wovra 自己的产物目录：大输出 spill（回取路径）与扩展点。
+# .venv/__pycache__/node_modules 是第三方与构建产物，不会是搜索目标；tasks/ 的会话数据
+# 不允许被当作搜索去向推荐。探它们只会白烧预算。
+_NOISE_PROBE_DIRS = ("output", ".wovra")
+_NOISE_PROBE_FILES = 200
+_NOISE_PROBE_BYTES = 4_000_000
+
+
+def _probe_noise_match(root: Path, glob: str, regex: "re.Pattern[str]"):
+    """在默认跳过的产物目录里探一次内容命中 → (目录名, 路径:行号)；探不到 None。
+
+    只走产物目录本身（不扫全树）——省掉 .venv 那种上万文件的空转。
+    """
+    budget = _NOISE_PROBE_BYTES
+
+    def _size(path: Path) -> int:
+        try:
+            return path.stat().st_size
+        except OSError:
+            return _SEARCH_MAX_BYTES + 1
+
+    for name in _NOISE_PROBE_DIRS:
+        base = root / name
+        if not base.is_dir():
+            continue
+        try:
+            candidates = list(_walk(base, glob))
+        except (OSError, ValueError):
+            continue
+        for path in sorted(candidates, key=_size)[:_NOISE_PROBE_FILES]:
+            size = _size(path)
+            if size > _SEARCH_MAX_BYTES or size > budget:
+                continue
+            try:
+                text = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError, PermissionError):
+                continue
+            budget -= len(text)
+            for line_number, line in enumerate(text.splitlines(), start=1):
+                if regex.search(line):
+                    return name, f"{_display_rel(path).as_posix()}:{line_number}"
+    return None
+
+
+def _search_no_match_hint(root: Path, glob: str, regex: "re.Pattern[str]") -> str:
+    """search_files 零命中时分因：噪声目录内确有命中 / glob 路径过滤。
+
+    旧版只回 `无匹配：pattern=..., directory=..., glob=...`——原因不分，
+    模型照着想就容易往错方向改。
+    """
+    parts: list[str] = []
+    probe = _probe_noise_match(root, glob, regex)
+    if probe:
+        where, example = probe
+        parts.append(
+            f"pattern 在默认跳过的噪声目录 {where} 内有命中（如 {example}），其内容未被搜索——"
+            f"把 directory 指到该目录即照搜"
+        )
+    if glob not in ("*", "**", "**/*"):
+        parts.append(
+            f"glob={glob!r} 只搜文件名匹配它的文件；不确定文件类型时可省略 glob（默认 '*'）"
+        )
+    if not parts:
+        return ""
+    return "（" + "；".join(parts) + "）"
+
+
+def _no_match_hint(root: Path, pattern: str, include_hidden: bool) -> str:
+    """零命中时分因给提示：噪声目录 / pattern 层级 / 确实没有这种文件。
+
+    原来三种原因压成一句"隐藏文件未计入"——实测据此推出过错误机制
+    （`src/*.py` 从仓库根零命中，被当成隐藏文件的锅；真因是 pattern 的
+    递归层级：`src/*.py` 意即"任意层级的 src/ 下正好一层"）。
+    """
+    root_scope = root.resolve()
+    try:
+        all_hits = list(_walk(root, pattern, skip_noise=False))
+    except (OSError, ValueError):
+        all_hits = []
+
+    def _visible(paths: list[Path]) -> list[Path]:
+        return [p for p in paths if include_hidden or not _is_hidden(_display_rel(p))]
+
+    breakdown = _noise_breakdown(all_hits, root_scope, _lead_segment(pattern))
+    if breakdown:
+        count, dirs, example = breakdown
+        return (
+            f"（{count} 个文件在默认跳过的噪声目录 {dirs} 内——"
+            f"把 directory 指到该目录即会照搜，如 directory={example!r}）"
+        )
+    if "/" in pattern and not pattern.startswith("**/"):
+        segments = [s for s in pattern.split("/") if s]
+        candidates: list[str] = []
+        if len(segments) >= 2:
+            candidates.append(f"{segments[0]}/**/{segments[-1]}")
+        candidates.append(f"**/{pattern}")
+        for candidate in dict.fromkeys(candidates):
+            try:
+                deeper = _visible(list(_walk(root, candidate)))
+            except (OSError, ValueError):
+                continue
+            if deeper:
+                return (
+                    f"（pattern 是整棵子树匹配，{pattern!r} 要求目录层级完全一致；"
+                    f"要取到这一层写 {candidate!r}"
+                    f"，如 {_display_rel(deeper[0]).as_posix()}）"
+                )
+    if not include_hidden:
+        return "（隐藏文件未计入，需要时加 include_hidden=True）"
+    return ""
+
 
 def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False) -> str:
     """按文件名通配模式查找文件（如 *.py、docs/**/*.md），返回相对路径。
@@ -345,7 +493,7 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
     ]
     filtered.sort(key=lambda p: p.as_posix())
     if not filtered:
-        hint = "" if include_hidden else "（隐藏文件未计入，需要时加 include_hidden=True）"
+        hint = _no_match_hint(root, pattern, include_hidden)
         return f"无匹配文件: {pattern}（directory={directory}）{hint}"
     cap = limits.list_limit(_GLOB_MAX_FILES)
     lines = [_display_rel(p).as_posix() for p in filtered[:cap]]
