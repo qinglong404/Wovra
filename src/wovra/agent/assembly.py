@@ -1,5 +1,5 @@
 """Agent 上下文装配与展开：每步装配、紧凑/折叠视图渲染、文件地图、
-expand_history 两级展开、紧急折叠。
+expand_history（检索/看窗口/看地图）、紧急折叠。
 """
 import json
 import re
@@ -713,7 +713,8 @@ class _AssemblyMixin:
         lines = [truncate.event_index_line(e) for e in events[:fold]]
         block = {"role": "user", "content": (
             f"[紧急折叠：当前轮上下文估算已超模型窗口（{self.context_limit:,} tok），"
-            f"最老 {fold} 条事件折叠为索引；需要细节可用 expand_history 按事件 ID 展开]\n"
+            f"最老 {fold} 条事件折叠为索引；需要细节用 expand_history(pattern=…) 检索、"
+            f"或按事件 ID 看窗口]\n"
             + "\n".join(lines)
         )}
         return [block] + list(msgs[fold:])
@@ -911,8 +912,8 @@ class _AssemblyMixin:
         folded = len(r.get("block_summaries") or {})
         if folded:
             lines.append(
-                f"（{folded} 块细节已折叠，expand_history 可展开本轮；"
-                "需要文件现状先 read_file）"
+                f"（{folded} 块细节已折叠：expand_history(pattern=…) 检索细节、"
+                f"或 ids=\"R{r['seq']}\" around=… 看窗口；文件现状用 read_file）"
             )
         return "\n".join(lines)
 
@@ -965,29 +966,180 @@ class _AssemblyMixin:
             lines.append(f"- {path}（{'；'.join(parts)}）")
         return lines
 
-    def expand_history(self, ids: list[str] | str, level: str = "full") -> str:
-        """按需展开历史：Truncated → Summary（意图+索引）→ Full 三档读取。
+    # 细节展开的暂定值（2026-09-17 用户口径："暂时不设置，有数据了再说"）——
+    # 先用这三个默认值跑，每次调用的模式/命中数/返回体量都记进 history（`_note_expand`），
+    # 攒够数据再调。
+    _HISTORY_LIMIT = 5        # 一次最多列几处命中
+    _HISTORY_SNIPPET = 120    # 每处命中给的上下文窗口（字符）
+    _HISTORY_CHARS = 800      # 窗口模式默认取多少字符
 
-        ids 可为轮（"R3"）、块（"R3-B2"，取回整块原文）或事件（"R3-E02"），
-        容错逗号字符串与大小写；一次可传多个，无调用次数上限。展开只是
-        临时把更高分辨率的信息读进当前上下文，不修改历史。
+    def expand_history(
+        self,
+        ids: str = "",
+        level: str = "summary",
+        pattern: str = "",
+        scope: str = "",
+        source: str = "",
+        offset: int = 0,
+        chars: int = 0,
+        around: str = "",
+    ) -> str:
+        """取回历史细节，三种用法（结果追加在尾部，不改历史，也不整轮倒出）。
+
+        ① `pattern` 给正则 → 在历史原文里**检索**，回命中清单 + 总数 + 续取方式；
+        ② `ids` 给事件 ID，配 `around`（关键字）或 `offset`（续读）→ 只看该处**窗口**；
+        ③ `ids` 给轮号 + `level=summary/truncated` → 该轮的块视图 / 事件索引（先看地图）。
+        `scope` 限范围：`R3-R8` 或 `file:gaia_bench/runner.py`（只在该文件被读写过的事件里找）；
+        `source` 限来源：result（工具结果）/ assistant（模型正文）/ call（工具调用）/ user（用户发言）。
+        `level=full` 对**事件/块**仍给原文；**轮级整轮展开已退役**（改用 ①② 精确取）。
         """
-        if isinstance(ids, str):
-            ids = [s.strip() for s in ids.split(",") if s.strip()]
-        level = (level or "full").strip().lower()
+        text = (ids or "").strip() if isinstance(ids, str) else ",".join(ids)
+        level = (level or "summary").strip().lower()
+        if pattern:
+            return self._history_find(pattern, scope, source, offset, chars)
+        if not text:
+            return ("[历史] 用法：pattern=\"正则\" 检索；ids=\"R3-E05\" around=\"关键字\" 看窗口；"
+                    "ids=\"R3\" level=summary 看该轮地图。整轮原文不再一次性倒出。")
         if level not in ("truncated", "summary", "full"):
             return f"未知级别: {level}，可选 truncated / summary / full"
-        results = []
-        for rid in ids:
-            if "-B" in rid:
-                results.append(self._expand_block(rid))
-            elif "-E" in rid:
-                results.append(
-                    self._read_full_event(rid) if level == "full" else self._event_summary(rid)
-                )
-            else:
-                results.append(self._expand_round(rid, level))
-        return "\n\n".join(results) or "未找到任何 ID"
+        id_list = [x.strip() for x in text.split(",") if x.strip()]
+        results = [self._expand_one(rid, level, around, offset, chars) for rid in id_list]
+        return "\n\n".join(x for x in results if x) or "未找到任何 ID"
+
+    def _expand_one(self, rid: str, level: str, around: str, offset: int,
+                    chars: int) -> str:
+        if "-B" in rid:
+            return self._expand_block(rid)
+        if "-E" in rid:
+            # 窗口参数优先于 level：`ids="R3-E02" around="关键字"` 是主用法，
+            # 不该因为 level 默认值（summary）被挡住。
+            if around or offset or chars:
+                return self._history_show(rid, around, offset, chars)
+            if level == "summary":
+                return self._event_summary(rid)
+            return self._read_full_event(rid)
+        return self._expand_round(rid, level)
+
+    @staticmethod
+    def _event_parts(e: dict) -> list:
+        """事件的可检索片段（来源标签, 正文）——分开列，检索才不会把
+        "哪次调用用过这个工具"与"工具结果里的结论"混成一堆噪音。"""
+        m = e.get("message") or {}
+        parts: list = []
+        if m.get("tool_calls"):
+            parts.append(("call", json.dumps(m["tool_calls"], ensure_ascii=False)))
+        content = m.get("content")
+        body = (content if isinstance(content, str)
+                else (json.dumps(content, ensure_ascii=False) if content else ""))
+        if body:
+            role = m.get("role")
+            parts.append(("user" if role == "user" else
+                          "result" if role == "tool" else "assistant", body))
+        if e.get("full"):
+            parts.append(("result" if m.get("role") == "tool" else "assistant",
+                          str(e["full"])))
+        return parts
+
+    def _history_scope(self, scope: str) -> tuple:
+        """把 scope 解析成（轮下界, 轮上界, 事件 ID 白名单或 None）。"""
+        text = (scope or "").strip()
+        if not text:
+            return 1, 10 ** 9, None
+        if text.lower().startswith("file:"):
+            path = text.split(":", 1)[1].strip()
+            keep: set = set()
+            for r in self.rounds:
+                for b in blocks_module.segment_round_by_file(r):
+                    if b.get("kind") != "file" or str(b.get("file")) != path:
+                        continue
+                    lo = str(b.get("start_event") or "")
+                    hi = str(b.get("end_event") or "")
+                    for e in r.get("events") or []:
+                        if lo and hi and lo <= str(e.get("id")) <= hi:
+                            keep.add(str(e.get("id")))
+            return 1, 10 ** 9, keep
+        m = re.match(r"^[Rr]?(\d+)(?:\s*-\s*[Rr]?(\d+))?$", text)
+        if m:
+            return int(m.group(1)), int(m.group(2) or m.group(1)), None
+        return 1, 10 ** 9, None
+
+    def _history_find(self, pattern: str, scope: str, source: str,
+                      offset: int, chars: int) -> str:
+        try:
+            rx = re.compile(pattern)
+        except re.error as error:
+            return f"[历史检索] 正则不合法：{error}"
+        lo, hi, keep = self._history_scope(scope)
+        wanted = {"result": "result", "assistant": "assistant",
+                  "call": "call", "user": "user"}.get((source or "").strip())
+        hits: list = []
+        for r in self.rounds:
+            seq = int(r.get("seq") or 0)
+            if not (lo <= seq <= hi):
+                continue
+            for e in r.get("events") or []:
+                if keep is not None and str(e.get("id")) not in keep:
+                    continue
+                for src, body in self._event_parts(e):
+                    if wanted and src != wanted:
+                        continue
+                    hit = rx.search(body)
+                    if hit:
+                        hits.append((seq, str(e.get("id")), src, hit.start(), body))
+                        break
+        head = (f"[历史检索] pattern=/{pattern}/　范围={scope or '全部轮'}"
+                + (f"　来源={wanted}" if wanted else "")
+                + f"　命中 {len(hits)} 处")
+        if not hits:
+            out = head + ("\n（无匹配。**这不等于「历史里没有这回事」**——换个词、放宽正则，"
+                          "或去掉 scope/source 再试一次。）")
+            self._note_expand("find", f"/{pattern}/", 0, out)
+            return out
+        window = int(chars or self._HISTORY_SNIPPET)
+        start = max(0, int(offset or 0))
+        page = hits[start:start + self._HISTORY_LIMIT]
+        lines = [head]
+        for i, (seq, eid, src, at, body) in enumerate(page, start + 1):
+            a = max(0, at - window // 2)
+            snippet = body[a:at + window // 2].replace("\n", " ").strip()
+            lines.append(f"{i}. R{seq}/{eid}（{src}）@{at}  …{snippet}…")
+        nxt = start + len(page)
+        if nxt < len(hits):
+            lines.append(f"（还有 {len(hits) - nxt} 处未显示："
+                         f"expand_history(pattern=…, offset={nxt}) 续取，"
+                         f"或 expand_history(ids=\"{hits[nxt][1]}\", around=\"关键字\") 看窗口）")
+        out = "\n".join(lines)
+        self._note_expand("find", f"/{pattern}/", len(hits), out)
+        return out
+
+    def _history_show(self, eid: str, around: str, offset: int, chars: int) -> str:
+        for r in self.rounds:
+            for e in r.get("events") or []:
+                if str(e.get("id")) != eid:
+                    continue
+                body = "\n".join(x for _s, x in self._event_parts(e))
+                size = len(body)
+                at = body.find(around) if around else max(0, int(offset or 0))
+                if around and at < 0:
+                    return (f"[展开] {eid} 里没有 `{around}`（全文 {size:,} 字符）——"
+                            "先用 pattern 检索定位，或换个关键字")
+                want = int(chars or self._HISTORY_CHARS)
+                piece = body[at:at + want]
+                head = (f"[展开] {eid}（全文 {size:,} 字符，"
+                        + (f"`{around}` @{at}）" if around else f"从 {at} 起）"))
+                tail = ("" if at + want >= size else
+                        f"\n（本窗口 {len(piece)} 字符，还有 {size - at - want:,} 字符未显示："
+                        f"offset={at + want} 续读）")
+                out = head + "\n" + piece + tail
+                self._note_expand("show", eid, 1, out)
+                return out
+        return f"[展开] 未找到事件 {eid}（可用 pattern 检索，或 ids=\"R3\" level=summary 看地图）"
+
+    def _note_expand(self, mode: str, key: str, hits: int, out: str) -> None:
+        """记账：模式 / 命中数 / 返回体量——"暂时不设置上限，有数据了再说"的数据来源。"""
+        if self.task is None:
+            return
+        self.task.record("expand", f"{mode} {key}：命中 {hits} 处，返回 {len(out):,} 字符")
 
     def _event_summary(self, event_id: str) -> str:
         for r in self.rounds:
@@ -1033,15 +1185,15 @@ class _AssemblyMixin:
                     # 截断档：只给事件索引行；未整理轮无块视图也用索引
                     lines += self._round_index_lines(r)
                 return "\n".join(lines)
-            parts = lines
-            for e in r["events"]:
-                if e["type"] == "user":
-                    continue
-                parts.append(
-                    f"--- {e['id']} ({e['type']}) ---\n"
-                    + (e.get("full") or e["message"].get("content") or "")
-                )
-            return "\n".join(parts)
+            total = sum(
+                len(x) for e in r["events"] for _s, x in self._event_parts(e)
+            )
+            return (
+                f"[R{seq}] **整轮展开已退役**（本轮 {len(r['events'])} 个事件 / {total:,} 字符）。"
+                f"\n取细节：expand_history(pattern=\"关键词\", scope=\"R{seq}\") 检索；"
+                f"或 expand_history(ids=\"R{seq}-E05\", around=\"关键词\") 看某处窗口；"
+                f"\n先看地图：expand_history(ids=\"R{seq}\", level=summary)。"
+            )
         return f"未找到轮次: {round_id}"
 
     def _expand_block(self, block_id: str) -> str:

@@ -483,9 +483,10 @@ def test_expand_round_summary_shows_block_view():
     out = agent.expand_history("R1", level="summary")
     assert "块视图：" in out
     assert "R1-B1: 创建 a.txt：测试写入" in out
-    # 第二级：full 档取回原文
+    # 轮级 full 已退役（2026-09-17）：只给指引与检索入口，不整轮倒出
     full = agent.expand_history("R1", level="full")
-    assert "写文件" in full
+    assert "整轮展开已退役" in full and "pattern=" in full
+    assert "写文件" not in full
 
 
 # ---- expand_history 展开通道（2026-09-11 实测修复：此前从未真实展开过） ----
@@ -524,14 +525,14 @@ def test_expand_merged_group_anchor_expands_all_members():
     agent = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="x"))
     agent.rounds = [r1, r2]
 
-    out = agent.expand_history("R1-2", level="full")
-    assert "甲问题" in out and "乙问题" in out
+    out = agent.expand_history("R1-2", level="full")     # 轮级 full 退役：逐轮给指引
+    assert out.count("整轮展开已退役") == 2
     out_summary = agent.expand_history("R1-2", level="summary")
     assert "甲问题" in out_summary and "乙问题" in out_summary
 
 
 def test_expand_levels_are_distinct_for_organized_round():
-    """三档确有区分：truncated=事件索引、summary=块视图、full=原文。"""
+    """三档确有区分：truncated=事件索引、summary=块视图、full=退役指引（不再倒原文）。"""
     r = _round(1, "写文件", "写好了")
     r["org_state"] = "done"
     r["block_summaries"] = {"R1-B1": "创建 a.txt：写入测试内容"}
@@ -544,8 +545,8 @@ def test_expand_levels_are_distinct_for_organized_round():
 
     assert "块视图" not in trunc and "[R1-E01]" in trunc      # 最粗：索引行
     assert "块视图" in summ and "创建 a.txt" in summ          # 中：块视图
-    # 细：原文（user 事件在轮头已给，正文只列非 user 事件）
-    assert "R1-E02" in full and "写好了" in full
+    # 轮级 full 退役（2026-09-17）：不整轮倒出，只给检索/窗口入口
+    assert "整轮展开已退役" in full and "写好了" not in full
     # 三档内容互不相同
     assert len({trunc, summ, full}) == 3
 
@@ -669,3 +670,144 @@ def test_view_assembly_merges_chat_groups_once():
     assert "[R2]" not in text                       # 成员轮不单独成段
     assert "两轮闲聊合并描述" in text                # 组的合并描述被渲染
     assert "闲聊二" in text                          # 组内用户原文不丢（R2 的原话在组头里）
+
+
+# ---- 细节展开：检索 / 窗口 / 轮级 full 退役（2026-09-17） ----
+
+
+def _round_with_tools(seq: int, user: str, answer: str, result: str) -> dict:
+    """带一次工具调用与结果的轮（用于检索/窗口测试）。"""
+    from wovra.truncate import make_event
+    return {
+        "seq": seq,
+        "user_input": {"original": user, "normalized": ""},
+        "events": [
+            make_event(f"R{seq}-E01", "user", {"role": "user", "content": user}),
+            make_event(
+                f"R{seq}-E02", "tool_call",
+                {"role": "assistant", "content": "跑一下",
+                 "tool_calls": [{"id": f"c{seq}", "type": "function",
+                                 "function": {"name": "run_command",
+                                              "arguments": json.dumps({"command": "pytest"})}}]},
+            ),
+            make_event(f"R{seq}-E03", "tool_result",
+                       {"role": "tool", "tool_call_id": f"c{seq}", "content": result},
+                       tool_name="run_command"),
+            make_event(f"R{seq}-E04", "final_answer",
+                       {"role": "assistant", "content": answer}),
+        ],
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }
+
+
+def _round_with_write(seq: int, path: str) -> dict:
+    """带一次 write_file 的轮（用于 file: scope 测试）。"""
+    from wovra.truncate import make_event
+    return {
+        "seq": seq,
+        "user_input": {"original": "写文件", "normalized": ""},
+        "events": [
+            make_event(f"R{seq}-E01", "user", {"role": "user", "content": "写文件"}),
+            make_event(
+                f"R{seq}-E02", "tool_call",
+                {"role": "assistant", "content": "",
+                 "tool_calls": [{"id": f"w{seq}", "type": "function",
+                                 "function": {"name": "write_file",
+                                              "arguments": json.dumps({"path": path, "content": "x"})}}]},
+            ),
+            make_event(f"R{seq}-E03", "tool_result",
+                       {"role": "tool", "tool_call_id": f"w{seq}",
+                        "content": f"已写入 {path}"}, tool_name="write_file"),
+            make_event(f"R{seq}-E04", "final_answer",
+                       {"role": "assistant", "content": "写好了"}),
+        ],
+        "refined_index": {}, "end_state": "completed", "org_state": "done",
+    }
+
+
+def _history_agent(rounds: list) -> Agent:
+    agent = Agent(llm=_StubLLM(), tools=[], task=Task.create(goal="x"))
+    agent.rounds = rounds
+    return agent
+
+
+def test_expand_round_full_retired_gives_pointers_only():
+    """轮级 full 退役：给事件数/体量与检索入口，不把原文倒出来。"""
+    agent = _history_agent([_round_with_tools(1, "跑测试", "跑完了", "断言失败：越界拦截")])
+    out = agent.expand_history("R1", level="full")
+    assert "整轮展开已退役" in out and "4 个事件" in out
+    assert "断言失败" not in out
+    assert "pattern=" in out and "level=summary" in out
+
+
+def test_expand_event_full_still_complete():
+    """事件级 full 未被退役：单事件原文仍完整取回。"""
+    big = "结果" * 300
+    agent = _history_agent([_round_with_tools(1, "跑测试", "跑好了", big)])
+    assert big in agent.expand_history("R1-E03", level="full")
+
+
+def test_history_find_reports_hits_and_total():
+    rounds = [_round_with_tools(i, f"第{i}问", f"第{i}答", f"命中关键 key{i}") for i in (1, 2)]
+    out = _history_agent(rounds).expand_history(pattern="命中关键")
+    assert "命中 2 处" in out
+    assert "R1/R1-E03" in out and "R2/R2-E03" in out
+
+
+def test_history_find_pages_with_offset():
+    """一次只列 limit 处，并给出续取指针（有界返回）。"""
+    rounds = [_round_with_tools(i, f"第{i}问", f"第{i}答", "共同词") for i in range(1, 8)]
+    agent = _history_agent(rounds)
+    first = agent.expand_history(pattern="共同词")
+    assert "命中 7 处" in first
+    assert first.count("（result）") == agent._HISTORY_LIMIT
+    assert "offset=5" in first and "续取" in first
+    second = agent.expand_history(pattern="共同词", offset=5)
+    assert "R6/R6-E03" in second and "R7/R7-E03" in second
+
+
+def test_history_find_scope_limits_to_round():
+    rounds = [_round_with_tools(i, f"第{i}问", f"第{i}答", "共同词") for i in (1, 2, 3)]
+    out = _history_agent(rounds).expand_history(pattern="共同词", scope="R2")
+    assert "命中 1 处" in out and "R2/R2-E03" in out and "R1/R1-E03" not in out
+
+
+def test_history_find_source_filter():
+    """来源可收：找工具结果里的结论，不该被"哪次调用用过这工具"淹没。"""
+    agent = _history_agent([_round_with_tools(1, "跑测试", "跑完了", "这里是结果")])
+    assert "命中 0 处" in agent.expand_history(pattern="run_command", source="result")
+    assert "命中 1 处" in agent.expand_history(pattern="run_command", source="call")
+
+
+def test_history_find_file_scope_uses_file_blocks():
+    rounds = [_round_with_write(1, "a.txt"), _round_with_write(2, "b.txt")]
+    agent = _history_agent(rounds)
+    hit = agent.expand_history(pattern="已写入", scope="file:a.txt")
+    assert "命中 1 处" in hit and "R1/R1-E03" in hit
+    assert "命中 0 处" in agent.expand_history(pattern="已写入", scope="file:c.txt")
+
+
+def test_history_show_returns_window_and_continue_hint():
+    long_result = "开头" + "细节" * 900 + "结尾"
+    agent = _history_agent([_round_with_tools(1, "问", "答", long_result)])
+    out = agent.expand_history(ids="R1-E03", around="细节", chars=100)
+    assert "全文" in out and "细节" in out and "续读" in out
+    missing = agent.expand_history(ids="R1-E03", around="绝不存在的词")
+    assert "没有" in missing and "pattern" in missing
+
+
+def test_history_find_zero_hits_warns_not_absence():
+    """0 命中必须说清"不等于历史里没有"，防"网上没资料"式的错误结论。"""
+    agent = _history_agent([_round_with_tools(1, "问", "答", "结果")])
+    out = agent.expand_history(pattern="绝不存在的词")
+    assert "命中 0 处" in out and "不等于" in out
+
+
+def test_history_records_usage_for_later_tuning():
+    """每次取用都记账（模式/命中数/返回体量）——"暂时不设上限，有数据了再说"的依据。"""
+    task = Task.create(goal="x")
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.rounds = [_round_with_tools(1, "问", "答", "命中词")]
+    agent.expand_history(pattern="命中词")
+    lines = [str(h.get("detail")) for h in task.history if h.get("kind") == "expand"]
+    assert lines and "find" in lines[-1] and "返回" in lines[-1]

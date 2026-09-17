@@ -131,7 +131,7 @@ _ACTION_WORDS = {
     "search_files": "搜索内容",
     "list_files": "查看目录",
     "get_current_time": "获取当前时间",
-    "expand_history": "展开历史",
+    "expand_history": "检索/展开历史",
     "run_background": "后台启动命令",
     "check_background": "查看后台输出",
     "stop_background": "停止后台任务",
