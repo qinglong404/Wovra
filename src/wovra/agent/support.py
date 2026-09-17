@@ -41,6 +41,19 @@ _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 # 端点 429 触发了 `_stream_call` 的退避重试，不是预填慢——归因更正。）
 _NOTE_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_NOTE_TIMEOUT", "180"))
 
+
+def v4_enabled() -> bool:
+    """V4 行为开关（默认开）。
+
+    三件事一起生效：① **取消重组**（所有 agent 看同一份共享历史，不再按域重切）；
+    ② **整理停用**（每轮的叙事由轮闭合处的 note 承担，org 那一路不再跑）；
+    ③ **分裂按活性文件画树**（不再带块地图/块归属）。
+    `WOVRA_V4=0` 退回旧链路（对照与回滚用）。
+    """
+    return (os.environ.get("WOVRA_V4", "1") or "1").strip().lower() not in (
+        "0", "false", "no", "off",
+    )
+
 # 折叠后**保留原文**的最近轮数（§3.8/§3.9 用户口径"近 50 轮"）。它只决定换档线
 # 往哪推，不决定何时换（何时换由水位说了算）。
 _FOLD_KEEP_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_KEEP_ROUNDS", "50"))

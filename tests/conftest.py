@@ -20,6 +20,17 @@ def _isolate_tasks_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _legacy_paths_by_default(monkeypatch):
+    """测试默认跑**旧链路**（`WOVRA_V4=0`）。
+
+    V4（取消重组 ＋ 整理停用 ＋ 分裂按活性文件）会同时改装配、整理与分裂三条路，
+    与本套里大量"按旧链路脚本化"的断言互相干扰。V4 行为由
+    `tests/test_agent/test_v4_mode.py` 显式打开并覆盖。
+    """
+    monkeypatch.setenv("WOVRA_V4", "0")
+
+
+@pytest.fixture(autouse=True)
 def _round_note_off_by_default(monkeypatch):
     """默认关掉"每轮一段话"的同步结算。
 

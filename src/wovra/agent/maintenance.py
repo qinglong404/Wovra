@@ -22,6 +22,7 @@ from ..task import _PATCH_LIST_FIELDS
 from . import note as note_module
 from .support import (
     MODE_MANAGED,
+    v4_enabled,
     _COMPRESS_THRESHOLD,
     _FOLD_KEEP_ROUNDS_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
@@ -34,6 +35,7 @@ from .prompts import (
     _ORG_TAG_INSTRUCTIONS,
     _ROUND_NOTE_INSTRUCTION,
     _SPLIT_INSTRUCTIONS,
+    _SPLIT_LIVE_INSTRUCTIONS,
 )
 
 
@@ -322,6 +324,11 @@ class _MaintenanceMixin:
             # 过，挡掉本次会话第一次补整理（F 组实证：6 轮 pending 续跑，
             # R7/R8 闭合被连挡，压缩迟迟不开始）。
             return  # 两次维护之间至少安静 _org_cooldown 轮，防高频
+        if v4_enabled():
+            # V4：叙事已由每轮一段话承担（``_settle_round_note``），水位只驱动
+            # **结构树**——不再跑整理那一路（org 那套成为历史）。
+            self._maybe_split_v4()
+            return
         unorganized = self._unorganized_rounds()
         if not unorganized:
             return
@@ -510,6 +517,69 @@ class _MaintenanceMixin:
         if closed:
             self.task.record("note", f"结案 {len(closed)} 条：" + "；".join(
                 f"{field}:{text[:40]}" for field, text in closed))
+
+    def _live_file_lines(self) -> list[str]:
+        """活性文件清单（路径 + 首行说明，代码取）——V4 分裂的**全部输入**。"""
+        from pathlib import Path as _Path
+
+        workspace = _Path(safety_module.workspace_root())
+        lines: list[str] = []
+        for i, path in enumerate(sorted(self._live_files()), 1):
+            note = ""
+            try:
+                target = workspace / path
+                if target.is_file():
+                    for line in target.read_text(
+                            encoding="utf-8", errors="replace").splitlines()[:12]:
+                        text = line.strip().lstrip("#/\"'").strip()
+                        if len(text) >= 6:
+                            note = f"  —— {text[:60]}"
+                            break
+            except OSError:
+                note = ""
+            lines.append(f"{i}. {path}{note}")
+        return lines
+
+    def _maybe_split_v4(self) -> None:
+        """V4 分裂：只产出结构树（活性文件），批次 = 尚未做过分裂分析的已闭合轮。
+
+        同一批材料只试一次（失败也留痕，等文件集变化再试）——不重发、不跨轮。
+        产物落 `pending_org["domains"]`，落地复用既有 landing（注册表 ＋ 归属）。
+        """
+        if self.task is None:
+            return
+        batch = [r for r in self.rounds
+                 if str(r.get("end_state")) == "completed"
+                 and str(r.get("split_state") or "") not in ("ready",)
+                 and int(r["seq"]) not in self._org_inflight]
+        if not batch:
+            return
+        fingerprint = "\n".join(sorted(self._live_files()))
+        if not fingerprint or fingerprint == getattr(self, "_v4_split_fingerprint", ""):
+            return
+        snapshot = self._maint_snapshot()
+        if snapshot is None:
+            return
+        self._v4_split_fingerprint = fingerprint
+        for r in batch:
+            r["split_state"] = "running"
+            self._org_inflight.add(int(r["seq"]))
+        self._persist_rounds()
+        ok = False
+        try:
+            ok = self._split_rounds(batch, None, snapshot)
+        except Exception as error:  # noqa: BLE001——分裂失败不拖垮对话
+            if self.task is not None:
+                self.task.record(
+                    "split", f"V4 分裂异常：{type(error).__name__}: {str(error)[:150]}"
+                )
+        finally:
+            for r in batch:
+                self._org_inflight.discard(int(r["seq"]))
+                r["split_state"] = "ready" if ok else "failed"
+            self._persist_rounds()
+        if ok:
+            self._publish_product_early()
 
     def _fold_keep_rounds(self) -> int:
         return int(getattr(self, "_fold_keep", _FOLD_KEEP_ROUNDS_DEFAULT))
@@ -1397,41 +1467,54 @@ class _MaintenanceMixin:
                 base_messages or self._org_fallback_base(rounds)
             )
 
-        # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
-        live_ids, hist_ids = self._split_file_map()
-        hard_lines, n_live = self._split_hard_data(rounds, live_ids, hist_ids)
-        round_blocks, map_lines, _merged = self._block_map_lines(rounds)
-        # 主 agent 残留桶占比（零 LLM 体量事实）：纯对话块合计占本批内容
-        # 多少——顶层节点计数的门槛由它定（判据见 _SPLIT_INSTRUCTIONS）。
-        chat_share = self._chat_block_share(rounds, round_blocks)
-        # 逐层分裂硬数据（零 LLM）：各视图自身体量与是否到自己的水位。
-        # 分裂后水位按视图各自计量（plan §13.1）——子视图到达自己的水位时
-        # 按同一套机制在它内部再裂一层（A-1 → A-1-1），终态「只操作单个
-        # 文件为止」。判据归机制、语义归模型：Runtime 给体量事实，模型判断
-        # 这一摊活是否真已分成互不相干的两条线。
-        view_lines = self._split_view_watermarks()
-        # 覆盖缺口硬数据（2026-09-12 加，2026-09-14 用户判定"多余且错误"后
-        # **不再注入**）：它是给模型自纠用的，现在模型的职责只剩"写树"，
-        # 漏项由 Runtime 机械校验并报错，不需要模型看这条。`views.coverage_gap`
-        # 与 `_split_coverage_lines` 保留——代码侧判定与仪器仍可用。
-        all_ids = {
-            b["id"] for blocks in round_blocks.values() for b in blocks
-        }
-        seq_list = "、R".join(str(r["seq"]) for r in rounds)
-        instruction = (
-            "[分裂结构指令]\n"
-            "以上是本会话的完整上下文（含刚完成的整理产物与分块地图）。"
-            f"请把**现状**梳理成结构树（不是话题分类），对象为这些轮次：R{seq_list}。\n\n"
-            "[硬数据]（Runtime 生成，零 LLM）\n"
-            + "\n".join(hard_lines)
-            + f"\n- 纯对话块（无文件交互，闲聊）内容占比：约 {chat_share * 100:.0f}%"
-            + ("\n" + "\n".join(view_lines) if view_lines else "")
-            + "\n\n"
-            "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
-            + "\n".join(map_lines)
-            + "\n\n"
-            + _SPLIT_INSTRUCTIONS
-        )
+        if v4_enabled():
+            # V4：输入只有**活性文件**（路径 ＋ 首行说明）——没有块地图、没有用户块/
+            # 环境块/保底块、没有非 LIVE 挂载、没有视图水位；其余全由代码算。
+            all_ids: set = set()      # V4 输入里没有块，块引用校验自然空过
+            # 归属落地仍要这两张表（按路径机械绑定），但它们**不进输入**。
+            live_ids, hist_ids = self._split_file_map()
+            round_blocks, merged_groups = {}, None   # V4 没有块结构
+            instruction = (
+                "[分裂结构指令]\n以上是本会话的完整上下文。\n\n"
+                "[活性文件]\n" + "\n".join(self._live_file_lines()) + "\n\n"
+                + _SPLIT_LIVE_INSTRUCTIONS
+            )
+        else:
+            # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
+            live_ids, hist_ids = self._split_file_map()
+            hard_lines, n_live = self._split_hard_data(rounds, live_ids, hist_ids)
+            round_blocks, map_lines, _merged = self._block_map_lines(rounds)
+            # 主 agent 残留桶占比（零 LLM 体量事实）：纯对话块合计占本批内容
+            # 多少——顶层节点计数的门槛由它定（判据见 _SPLIT_INSTRUCTIONS）。
+            chat_share = self._chat_block_share(rounds, round_blocks)
+            # 逐层分裂硬数据（零 LLM）：各视图自身体量与是否到自己的水位。
+            # 分裂后水位按视图各自计量（plan §13.1）——子视图到达自己的水位时
+            # 按同一套机制在它内部再裂一层（A-1 → A-1-1），终态「只操作单个
+            # 文件为止」。判据归机制、语义归模型：Runtime 给体量事实，模型判断
+            # 这一摊活是否真已分成互不相干的两条线。
+            view_lines = self._split_view_watermarks()
+            # 覆盖缺口硬数据（2026-09-12 加，2026-09-14 用户判定"多余且错误"后
+            # **不再注入**）：它是给模型自纠用的，现在模型的职责只剩"写树"，
+            # 漏项由 Runtime 机械校验并报错，不需要模型看这条。`views.coverage_gap`
+            # 与 `_split_coverage_lines` 保留——代码侧判定与仪器仍可用。
+            all_ids = {
+                b["id"] for blocks in round_blocks.values() for b in blocks
+            }
+            seq_list = "、R".join(str(r["seq"]) for r in rounds)
+            instruction = (
+                "[分裂结构指令]\n"
+                "以上是本会话的完整上下文（含刚完成的整理产物与分块地图）。"
+                f"请把**现状**梳理成结构树（不是话题分类），对象为这些轮次：R{seq_list}。\n\n"
+                "[硬数据]（Runtime 生成，零 LLM）\n"
+                + "\n".join(hard_lines)
+                + f"\n- 纯对话块（无文件交互，闲聊）内容占比：约 {chat_share * 100:.0f}%"
+                + ("\n" + "\n".join(view_lines) if view_lines else "")
+                + "\n\n"
+                "[分块地图]（块按工作对象确定性划分，条目格式 = 块ID=事件范围）\n"
+                + "\n".join(map_lines)
+                + "\n\n"
+                + _SPLIT_INSTRUCTIONS
+            )
         messages.append({"role": "user", "content": instruction})
 
         # 与 org 同策略：恒定 tools 数组（缓存复议结论，见 org 处注释）。

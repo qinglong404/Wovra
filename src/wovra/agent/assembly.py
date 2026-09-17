@@ -15,6 +15,7 @@ from ..tools import eyes as eyes_module
 from . import note as note_module
 from .support import (
     MODE_BASELINE,
+    v4_enabled,
     _STATE_RENDER_BUDGET,
     _runtime_reminder,
 )
@@ -107,7 +108,10 @@ class _AssemblyMixin:
         # 的轮占 69%，这批轮一点不瘦身（worklog §38.4-2 / §40.4 待办甲）。
         # 开关显式关掉（WOVRA_ACTIVE_VIEW=0）时走下面旧路径、逐字节不变。
         view_name = self._active_view()
-        if view_name and not force_full and routing_module.active_view_enabled():
+        # V4：**取消重组**——所有 agent 看同一份共享历史（段落档 ＋ 近期原文），
+        # 不再按域重切（"树与上下文不一致"整类问题从源头消失）。
+        if (view_name and not force_full and routing_module.active_view_enabled()
+                and not v4_enabled()):
             msgs = self._assemble_view_messages(view_name, past)
             if msgs is not None:
                 return msgs
