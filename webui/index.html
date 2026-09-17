@@ -834,7 +834,7 @@ const SPLIT_BADGE={
   failed:['<span class="seg bad" title="分裂分析没拿到可用产物：本批不生成域树，等下一批重试（具体原因见 title）">分裂失败</span>',''],
 };
 const ORG_BADGE={
-  done:'<span class="badge b-done" title="上下文整理已完成：这轮之后的历史已压缩进整理索引，后续轮读到的是整理后视图（省 token、保前缀缓存）">已整理</span>',
+  done:'<span class="badge b-done" title="这一轮已整理：它在上文里以一段话出现（V4 折叠），原文仍在盘上、expand_history 可取回（省 token、保前缀缓存）">已整理</span>',
   pending:'<span class="badge b-pend" title="上下文整理进行中：原文暂存，整理完成后转为已整理">整理中</span>',
   failed:'<span class="badge b-fail" title="上下文整理失败：本轮保留原文全量">整理失败</span>',
   raw:'<span class="badge b-raw" title="未整理：原文全量保留（水位未到或整理未运行）">未整理</span>'};
@@ -2156,7 +2156,6 @@ function drawConv(c,toBottom){
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
       const noteLine=noteLinesHtml(row);
-      if(row.folded)segs.push('<span class="seg" title="V4：这一轮已折叠成上面那段话进装配，原文仍在盘上（expand_history 可取回）">已折叠</span>');
       html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+chip+
         `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`+noteLine;continue}
     if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}`+
@@ -2960,7 +2959,6 @@ function renderTimeline(c){
     const sender=senderOf(r);
     const blocks=(r.blocks||[]).map(blockChip).join('');
     // 状态徽标：与对话流轮头同一套（落点 / 分裂 / 折叠 / 分裂前 / 未闭合 / 参与者 / @ / Σtok）
-    const folded=r.folded?`<span class="badge b-done" title="这一轮已折叠成一段话进装配，原文仍在盘上（expand_history 可取回）">已折叠</span>`:'';
     const preSplit=r.stage===0?`<span class="badge b-raw" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'';
     const unclosed=(r.end_state==null||r.end_state===''||r.end_state==='open')
       ?`<span class="badge b-pend" title="这一轮还没有产出最终回答（中断或步数用尽）">未闭合</span>`:'';
@@ -2972,7 +2970,7 @@ function renderTimeline(c){
     return `<div class="card round org-${esc(r.org_state||'raw')}" data-seq="${r.seq}">
       <div class="r-head" onclick="openDrawer(${r.seq})">
         <span class="r-seq">R${r.seq}</span><span class="r-goal" title="${esc(r.user_input)}">${esc(r.user_input)}</span>
-        <span class="r-badges"><span class="badge" style="color:${sender.color};background:var(--bg4)">${esc(sender.id)}</span>${org}${gen}${steps}${t01}<span class="badge b-raw">${r.events}ev</span>${roundAgentBadge(r)}${roundSplitBadge(r,'badge')}${folded}${preSplit}${unclosed}${parts}${ats}${roundTokBadge(r)}</span>
+        <span class="r-badges"><span class="badge" style="color:${sender.color};background:var(--bg4)">${esc(sender.id)}</span>${org}${gen}${steps}${t01}<span class="badge b-raw">${r.events}ev</span>${roundAgentBadge(r)}${roundSplitBadge(r,'badge')}${preSplit}${unclosed}${parts}${ats}${roundTokBadge(r)}</span>
       </div>
       ${note}
       ${blocks&&r.user_input&&r.user_input.length>60?`<div class="r-body"><div class="u">${esc(r.user_input.slice(0,160))}</div><div class="blocks">${blocks}</div></div>`:(blocks?`<div class="r-body"><div class="blocks">${blocks}</div></div>`:'')}

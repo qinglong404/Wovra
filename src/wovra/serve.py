@@ -1302,7 +1302,12 @@ def _round_meta(r: dict, usage: dict | None = None,
         "seq": r.get("seq"),
         "user_input": (r.get("user_input") or {}).get("original", ""),
         "end_state": r.get("end_state"),
-        "org_state": r.get("org_state"),
+        # 整理状态：V4 里 `org_state` 永远不写（整理那一路停用），压缩由**折叠**承担
+        # ——故这里如实折算成同一个字段（折了＝已整理，没折＝未整理）。用户口径
+        # 2026-09-17："将折叠改回之前的整理吧，不然又显示'未整理'，又显示已折叠，
+        # 然后轮整理状态全显示未整理"。前端只认这一个字段，口径不会再走岔。
+        "org_state": (str(r.get("org_state") or "")
+                      or ("done" if (r.get("folded") and _v4_on()) else "raw")),
         # 分裂状态（2026-09-15）：running/ready/deferred/stale/rejected/failed/done——
         # 维护只写 history 时会被并发写覆盖（见 worklog §106），落到轮上才可见、可查。
         "split_state": r.get("split_state") or "",

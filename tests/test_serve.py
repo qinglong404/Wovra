@@ -1404,3 +1404,27 @@ def test_maint_state_treats_unfinished_start_as_stale_not_running():
     m = serve.maint_state(data)
     assert m["active"] is True and m["stale"] is False
     assert m["phase"] == "分裂"          # 轮上 split_state=running → 分裂阶段
+
+
+def test_round_meta_folds_into_org_state_under_v4(monkeypatch):
+    """V4 下"折叠"如实折算成整理状态（前端只认一个字段）。
+
+    用户口径 2026-09-17："将折叠改回之前的整理吧，不然又显示'未整理'，又显示
+    已折叠，然后轮整理状态全显示未整理"。故：折了的轮 = 已整理（done），没折的
+    轮 = 未整理（raw）；旧链路自己写的 org_state 照旧优先。
+    """
+    from wovra import serve as serve_module
+
+    monkeypatch.setenv("WOVRA_V4", "1")
+    folded = serve_module._round_meta({"seq": 1, "folded": True, "org_state": "", "events": []})
+    raw = serve_module._round_meta({"seq": 2, "folded": False, "org_state": "", "events": []})
+    legacy = serve_module._round_meta({"seq": 3, "folded": True, "org_state": "done", "events": []})
+
+    assert folded["org_state"] == "done" and folded["compressed"] is True
+    assert raw["org_state"] == "raw" and raw["compressed"] is False
+    assert legacy["org_state"] == "done"
+
+    # 旧链路（V4 关）：折叠不是它的压缩口径，不折算
+    monkeypatch.setenv("WOVRA_V4", "0")
+    off = serve_module._round_meta({"seq": 4, "folded": True, "org_state": "", "events": []})
+    assert off["org_state"] == "raw"

@@ -2201,7 +2201,8 @@ console.log('场景 AU｜时间线卡片要带上**与对话流轮头同一套**
   META.round_list = [
     {seq:1, active_view:'Main', aid:'Main', landing:'Main', events:9, steps_used:2,
      t0:'2026-09-17 10:00:00', t1:'2026-09-17 10:00:30', user_input:'改一下 serve.py',
-     folded:true, split_state:'ready', org_state:'', stage:0,
+     // serve 侧已把"折叠"折算成整理状态（折了＝已整理），前端只认 org_state
+     folded:true, split_state:'ready', org_state:'done', stage:0,
      note:{seq:1, sentence:'把 attach 端点加到 serve.py', executor:'Main', failures:[]},
      usage:{prompt:12000, cached:11000, miss:1000, completion:300, calls:2,
             context:9000, by_agent:{Main:{prompt:12000, steps:2}}}},
@@ -2216,7 +2217,7 @@ console.log('场景 AU｜时间线卡片要带上**与对话流轮头同一套**
   const brief = (html.match(/class="badge[^"]*"[^>]*>([^<]*)</g) || []).join('｜');
   check('AU 时间线', html);
   for (const [need, why] of [
-    ['已折叠', '折叠状态没进时间线'],
+    ['已整理', '折叠状态没以"已整理"进时间线'],
     ['分裂失败', '分裂状态没进时间线'],
     ['Σ 12K', '轮级 tok 用量没进时间线'],
     ['命中', '缓存命中率没进时间线'],
@@ -2229,7 +2230,15 @@ console.log('场景 AU｜时间线卡片要带上**与对话流轮头同一套**
   }
   if (!html.includes('产物里的 R2 不在这批轮里'))
     problems.push('AU: 分裂失败的原因没挂进 title');
+  if (html.includes('已折叠'))
+    problems.push('AU: 又冒出"已折叠"——折叠要并进整理状态，不单列（用户口径）');
   console.log('   AU 时间线徽标：' + brief.slice(0, 150));
+  // 只看**已折的那一轮**（R2 是未折轮，它显示"未整理"是对的）
+  const card1=(html.split('data-seq="1"')[1]||'').split('data-seq="2"')[0];
+  if (!card1.includes('已整理'))
+    problems.push('AU: 已折的轮（R1）没显示"已整理"');
+  if (card1.includes('未整理'))
+    problems.push('AU: 已折的轮（R1）同时显示了"未整理"');
 }
 
 Promise.all(__deferred).then(()=>{
