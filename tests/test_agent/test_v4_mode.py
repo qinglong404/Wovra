@@ -181,3 +181,95 @@ def test_split_instruction_forbids_duplicate_names():
     from wovra.agent.prompts import _SPLIT_LIVE_INSTRUCTIONS as text
 
     assert "别写成两个同名节点" in text
+
+
+# ---- 过分裂的机械兜底（2026-09-17：用户"A-F 有些过分分裂了"）----
+
+
+def _round_writing(seq: int, *paths: str) -> dict:
+    """一轮：写若干个文件（活性文件＝被写过的文件，机械判据用）。"""
+    events = [make_event(f"R{seq}-E00", "user", {"role": "user", "content": "干活"})]
+    for i, path in enumerate(paths, 1):
+        events.append(make_event(f"R{seq}-E{i:02d}-C", "tool_call", {
+            "role": "assistant", "content": "",
+            "tool_calls": [{"id": f"w{seq}-{i}", "type": "function",
+                            "function": {"name": "write_file",
+                                         "arguments": json.dumps({"path": path,
+                                                                  "content": "x"})}}],
+        }))
+        events.append(make_event(f"R{seq}-E{i:02d}-R", "tool_result",
+                                 {"role": "tool", "tool_call_id": f"w{seq}-{i}",
+                                  "content": f"已写入 {path}"}, tool_name="write_file"))
+    events.append(make_event(f"R{seq}-EF", "final_answer",
+                             {"role": "assistant", "content": "写好了"}))
+    return {"seq": seq, "user_input": {"original": "干活", "normalized": ""},
+            "events": events, "refined_index": {}, "end_state": "completed",
+            "org_state": ""}
+
+
+def test_domains_never_apart_are_merged(monkeypatch, tmp_path):
+    """**从未分开过**的两个域并成一个（活跃轮被包含，且共现 ≥2 轮）。"""
+    rounds = [_round_writing(7, "a/one.py", "b/two.py"),
+              _round_writing(8, "a/one.py", "b/two.py"),
+              _round_writing(9, "a/one.py"),
+              _round_writing(10, "c/three.py")]
+    agent, _task = _agent(monkeypatch, tmp_path, rounds)
+    domains = [
+        # 活跃轮 {7,8,9}
+        {"name": "附件与装配", "files": ["a/one.py", "b/two.py"], "description": "附件通道"},
+        # 活跃轮 {7,8} ⊆ 上面 → 从没单独出现过 → 并
+        {"name": "前端", "files": ["b/two.py"], "description": "前端"},
+        # 活跃轮 {10} → 分开过 → 是另一条活
+        {"name": "工具层", "files": ["c/three.py"], "description": "工具"},
+    ]
+    notes = agent._merge_never_apart_domains(domains, rounds)
+
+    assert [d["name"] for d in domains] == ["附件与装配", "工具层"]
+    kept = next(d for d in domains if d["name"] == "附件与装配")
+    assert "b/two.py" in kept["files"]                 # 文件不丢
+    assert notes and "前端" in notes[0]
+
+
+def test_domains_with_identical_active_rounds_merge(monkeypatch, tmp_path):
+    """活跃轮**完全相同**的两个域是一摊活（谁都没单独出现过）。"""
+    rounds = [_round_writing(7, "a/one.py", "b/two.py")]
+    agent, _task = _agent(monkeypatch, tmp_path, rounds)
+    domains = [{"name": "甲", "files": ["a/one.py"]},
+               {"name": "乙", "files": ["b/two.py"]}]
+
+    assert agent._merge_never_apart_domains(domains, rounds)
+    assert len(domains) == 1
+
+
+def test_single_shared_round_with_exclusive_rounds_does_not_merge(monkeypatch, tmp_path):
+    """只在一轮里同现、但各自都有独占轮 → 不并（否则一晚的活跃轮就把整棵树并成一个）。"""
+    rounds = [_round_writing(7, "a/one.py", "b/two.py", "c/three.py"),
+              _round_writing(8, "a/one.py"),
+              _round_writing(9, "b/two.py"),
+              _round_writing(10, "c/three.py")]
+    agent, _task = _agent(monkeypatch, tmp_path, rounds)
+    domains = [{"name": "甲", "files": ["a/one.py"]},
+               {"name": "乙", "files": ["b/two.py"]},
+               {"name": "丙", "files": ["c/three.py"]}]
+
+    assert agent._merge_never_apart_domains(domains, rounds) == []
+    assert len(domains) == 3
+
+
+def test_bookkeeping_only_domain_does_not_become_an_agent(monkeypatch, tmp_path):
+    """只由留痕/配置文件组成的顶层域 → 不建 agent（归主 agent 的横切事务）。"""
+    from wovra import registry as registry_module
+
+    agent, _task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    domains = [
+        {"name": "留痕与自检", "files": ["docs/worklog.md", ".gitignore"],
+         "description": "记录"},
+        {"name": "真活", "files": ["src/wovra/attachments.py"]},
+    ]
+    notes = agent._demote_bookkeeping_domains(domains)
+
+    assert domains[0].get("main_agent") is True          # 降级：不建 agent
+    assert "留痕/配置类域不建 agent" in notes[0]
+    assert not domains[1].get("main_agent")              # 有真活的域不受影响
+    entries = registry_module.build_entries(domains, "")
+    assert [e["name"] for e in entries] == ["真活"]

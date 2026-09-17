@@ -26,6 +26,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from wovra import blocks as blocks_module            # noqa: E402
+from wovra.agent import Agent                        # noqa: E402
+from wovra.agent.maintenance import _split_live_prompt   # noqa: E402
 from wovra import lifecycle as lifecycle_module      # noqa: E402
 from wovra.tools import safety as safety_module      # noqa: E402
 from wovra import task as task_module                # noqa: E402
@@ -88,6 +90,12 @@ _SCHEMA = {
 }
 
 
+class _StubLLM:
+    """只为拿几个机械方法（不打模型）：排练脚本不经过 agent 的调用环。"""
+
+    model = "stub"
+
+
 def _live_files(task) -> list[str]:
     """活性文件（FileLedger state=live）；含"当前轮"（用户口径：活性即当前有效的文件）。"""
     ledger = lifecycle_module.FileLedger()
@@ -145,7 +153,12 @@ def main() -> int:
         print("（没有活性文件——分裂无从谈起）")
         return 0
 
-    prompt = _INSTRUCTION + "\n\n[活性文件]\n" + "\n".join(lines)
+    # 指令与生产**同一份**（`_split_live_prompt`），含"同轮共现"事实——
+    # 别在这里另写一套，否则排练出来的跟真正跑的不是一个东西。
+    stub = Agent(llm=_StubLLM(), tools=[], task=task)
+    stub.rounds = task.rounds
+    co_lines = stub._live_cooccurrence_lines(task.rounds or [])
+    prompt = _split_live_prompt(lines, co_lines)
     print(f"\n=== 输入（{len(prompt):,} 字符）===")
     print(prompt)
     if args.dry:
@@ -194,6 +207,23 @@ def main() -> int:
     print("\n=== 代码机械绑定（最深的 path 前缀）===")
     for name, group in sorted(owners.items()):
         print(f"  {name}（{len(group)}）：{'、'.join(group[:6])}")
+    # ==== 机械管线（与生产同一套方法，跑完才算"会落地的东西"）====
+    same = Agent._merge_same_name_domains(domains)
+    for n in same:
+        print(f"  [机械] {n}")
+    stub._bind_files_by_path(domains)
+    for n in stub._demote_bookkeeping_domains(domains):
+        print(f"  [机械] {n}")
+    for n in stub._merge_never_apart_domains(domains, task.rounds or []):
+        print(f"  [机械] {n}")
+    print("\n=== 会建 agent 的节点（机械管线跑完）===")
+    for d in domains:
+        if str(d.get("parent") or "").strip():
+            continue
+        mark = "（不建 agent）" if (d.get("main_agent") or d.get("runtime_auto")) else ""
+        files_n = len([f for f in (d.get("files") or [])])
+        print(f"  {d.get('name')}　文件 {files_n} 个 {mark}")
+
     # 耦合检查（零 LLM）：同一轮里一起被碰过的文件，是"同一域"的证据——
     # 单文件顶层域若与别的域共享轮次，就是过度分裂（本场 output/gaia/FINDINGS.md 即此例）。
     touched: dict[int, set] = {}

@@ -48,6 +48,20 @@ _SPLIT_SUBMIT_TOOL = "submit_domains"
 _ROUND_NOTE_SUBMIT = "submit_round_notes"
 
 
+def _split_live_prompt(live_lines: list[str], co_lines: list[str]) -> str:
+    """V4 分裂调用的指令文本（**生产与排练脚本共用这一份**，口径不会走岔）。
+
+    `live_lines` = 活性文件清单（路径 ＋ 首行说明，代码取）；
+    `co_lines` = 同轮共现事实（同一轮里一起被动过的文件——那是一条活）。
+    """
+    text = ("[分裂结构指令]\n以上是本会话的完整上下文。\n\n"
+            "[活性文件]\n" + "\n".join(live_lines) + "\n")
+    if co_lines:
+        text += ("\n[同轮共现]（同一轮里一起动过的文件——那是一条活，别拆成两个域）\n"
+                 + "\n".join(co_lines) + "\n")
+    return text + "\n" + _SPLIT_LIVE_INSTRUCTIONS
+
+
 
 def _scan_value_end(text: str, start: int) -> int:
     """从 text[start]（应为 `{` 或 `[`）扫到配对收尾的下标；被截断（扫到结尾）返回 -1。
@@ -1731,10 +1745,8 @@ class _MaintenanceMixin:
             # 归属落地仍要这两张表（按路径机械绑定），但它们**不进输入**。
             live_ids, hist_ids = self._split_file_map()
             round_blocks, merged_groups = {}, None   # V4 没有块结构
-            instruction = (
-                "[分裂结构指令]\n以上是本会话的完整上下文。\n\n"
-                "[活性文件]\n" + "\n".join(self._live_file_lines()) + "\n\n"
-                + _SPLIT_LIVE_INSTRUCTIONS
+            instruction = _split_live_prompt(
+                self._live_file_lines(), self._live_cooccurrence_lines(rounds)
             )
         else:
             # 硬数据（Runtime 生成，零 LLM）：活性文件清单 + 数量上限
@@ -1945,6 +1957,14 @@ class _MaintenanceMixin:
                     f"split：{merged_notes[0]}（等 {len(merged_notes)} 条，同类的见上）",
                 )
         bind_notes, uncovered_by_scope = self._bind_files_by_path(domains)
+        demoted = self._demote_bookkeeping_domains(domains)
+        if demoted and self.task is not None:
+            for n in demoted:
+                self.task.record("maintenance", f"split：{n}")
+        coupled_notes = self._merge_never_apart_domains(domains, rounds)
+        if coupled_notes and self.task is not None:
+            for n in coupled_notes[:6]:
+                self.task.record("maintenance", f"split：{n}")
         if bind_notes and self.task is not None:
             for n in bind_notes[:6]:
                 self.task.record("maintenance", f"split：{n}")
@@ -2279,6 +2299,138 @@ class _MaintenanceMixin:
         if isinstance(unassigned, dict):
             _check(unassigned.get("block_ids"), "unassigned.block_ids")
         return defects
+
+    def _live_cooccurrence_lines(self, rounds: list[dict]) -> list[str]:
+        """**同轮共现**的机械事实：哪些活性文件在同一轮里一起被动过。
+
+        为什么给模型看（2026-09-17 用户："A-F 有些过分分裂了"）：一轮里一起被改的
+        文件就是**一条活**（实测 R7 一轮同时改 attachments.py ＋ assembly.py ＋
+        serve.py ＋ webui/index.html ＋ worklog——那是"加附件通道"这一件事，被拆成
+        四个域了）。这是**事实**，判断仍归模型；代码侧的兜底见 `_merge_never_apart_domains`。
+        """
+        live = set(self._live_files())
+        lines: list[str] = []
+        for r in rounds[-12:]:                     # 最多看最近 12 轮，别把输入撑大
+            paths: list[str] = []
+            for block in blocks_module.segment_round_by_file(r):
+                if block.get("kind") != "file" or not block.get("file"):
+                    continue
+                path = str(block["file"])
+                if path in live and path not in paths:
+                    paths.append(path)
+            if len(paths) >= 2:                    # 单个文件谈不上"共现"
+                lines.append(f"R{r.get('seq')}：{'、'.join(paths[:8])}")
+        return lines
+
+    def _merge_never_apart_domains(self, domains: list, rounds: list[dict]) -> list[str]:
+        """**从未分开过的两个顶层域 → 合成一个**（零 LLM 兜底，原地改 domains）。
+
+        判据（机械、保守）：两个顶层节点各自的活跃轮集合（按它们名下的文件在哪些轮
+        被碰过算）**互相包含且都非空**——也就是说，从没有哪一轮只动了其中一个。
+        "从没单独出现过"的两摊活不是两条工作线，是一条。只有一轮证据时也算（这正是
+        本次实测的形状：附件的两个文件只出现在 R7，而 R7 里它们一起出现）。
+        返回留痕。
+        """
+        tops = [d for d in domains
+                if isinstance(d, dict) and d.get("name")
+                and not str(d.get("parent") or "").strip()
+                and not d.get("main_agent") and not d.get("runtime_auto")]
+        if len(tops) < 2:
+            return []
+        touched: dict[int, set] = {}
+        for r in rounds:
+            paths = {str(b["file"]) for b in blocks_module.segment_round_by_file(r)
+                     if b.get("kind") == "file" and b.get("file")}
+            if paths:
+                touched[int(r.get("seq") or 0)] = paths
+        active: dict[str, set[int]] = {}
+        for node in tops:
+            files = {str(f) for f in (node.get("files") or [])}
+            active[str(node["name"])] = {
+                seq for seq, paths in touched.items() if files & paths
+            }
+        notes: list[str] = []
+        merged_into: dict[str, str] = {}
+        for i, a in enumerate(tops):
+            for b in tops[i + 1:]:
+                ra, rb = active[str(a["name"])], active[str(b["name"])]
+                if not ra or not rb:
+                    continue
+                # 判据（收紧，2026-09-17 实测踩过）：只认**证据够的**两条——
+                # ① 共现 ≥2 轮且一个的活跃轮被另一个包含（"从没单独出现过"）；
+                # ② 两者活跃轮完全相同。
+                # 不收"只共现过 1 轮"的：一个只在 R7 出现的域会被**任何**同轮域
+                # 包含，那样一晚上的活跃轮就把整棵树并成一个（实测并到只剩 2 个）。
+                shared = ra & rb
+                if not (len(shared) >= 2 and (ra <= rb or rb <= ra)) and ra != rb:
+                    continue
+                # 留哪个名字：**文件多的那个**（它更像这条活的主名，如「附件」含 3 个
+                # 文件、「上下文装配」只有 1 个），其次看描述长短
+                keep, gone = sorted(
+                    (a, b),
+                    key=lambda n: (-len(n.get("files") or []),
+                                   -len(str(n.get("description") or ""))),
+                )
+                if str(gone["name"]) in merged_into:
+                    continue
+                keep.setdefault("files", [])
+                for f in gone.get("files") or []:
+                    if f not in keep["files"]:
+                        keep["files"].append(f)
+                if not keep.get("description"):
+                    keep["description"] = str(gone.get("description") or "")
+                domains.remove(gone)
+                merged_into[str(gone["name"])] = str(keep["name"])
+                notes.append(
+                    f"同轮从未分开的域合并：「{gone['name']}」→「{keep['name']}」"
+                    f"（活跃轮 {'、'.join('R%d' % s for s in sorted(ra | rb))}）"
+                )
+        return notes
+
+    # 横切留痕/配置类文件（不是工作线）：文档目录、附件目录，以及根目录下的
+    # md/点文件（worklog、自检报告、.gitignore、README/AGENTS 这类）。用户口径
+    # 2026-09-17："A-F 有些过分分裂了"——其中「全局协调与工作账本」就是这么冒出来的。
+    # **不含 `output/`**：那里的文件是**产物**（谁产出的归谁，见 §3.6 的 FINDINGS 例），
+    # 而且"分不出去也绝不落主 agent"那条口径对它们仍然成立（实测：放进来会把
+    # `output/_p*.py` 这类探针脚本的域整片降级，破坏既有归属结算）。
+    _BOOKKEEPING_PREFIXES = ("docs/", "attachments/", "wovra-attachments/")
+
+    @classmethod
+    def _is_bookkeeping_file(cls, path: str) -> bool:
+        p = str(path or "").strip()
+        if not p:
+            return False
+        if p.startswith(cls._BOOKKEEPING_PREFIXES):
+            return True
+        return "/" not in p and (p.startswith(".") or p.endswith(".md"))
+
+    def _demote_bookkeeping_domains(self, domains: list) -> list[str]:
+        """只由留痕/配置文件组成的顶层域 → 不建子 agent（归主 agent 的横切事务）。
+
+        判据是机械的：该节点名下的文件**全部**是留痕类（`docs/`、`output/`、附件目录、
+        根目录的 md/点文件）。这类活"每批都动、和谁都同轮"（本场 `docs/worklog` 在
+        R2/R3/R5/R6/R7 都被碰过），单独成域只是把主 agent 的账本活拆出去。
+        文件不丢：`_auto_claim` 会按同目录/最近挂到别的节点，挂不上进 Runtime 机械桶。
+        """
+        notes: list[str] = []
+        for node in list(domains):
+            if not isinstance(node, dict) or not node.get("name"):
+                continue
+            if str(node.get("parent") or "").strip() or node.get("main_agent"):
+                continue
+            files = [str(f) for f in (node.get("files") or [])]
+            if not files or not all(self._is_bookkeeping_file(f) for f in files):
+                continue
+            node["main_agent"] = True
+            node["description"] = (
+                str(node.get("description") or "").strip()
+                or f"{node['name']}：横切留痕/配置（归主 agent）"
+            )
+            notes.append(
+                f"留痕/配置类域不建 agent：「{node['name']}」"
+                f"（{len(files)} 个文件归主 agent 的横切事务）"
+            )
+        return notes
 
     @staticmethod
     def _merge_same_name_domains(domains: list) -> list[str]:
