@@ -198,6 +198,83 @@ def parse_note(ordered: list, round_: dict) -> tuple[dict | None, str]:
     )
 
 
+# 账本条目的来源戳：`（R14·A）`——谁在哪一轮加的一目了然；去重与匹配都按**去掉戳的正文**比。
+_STAMP_RE = re.compile(r"（R(\d+)·[^）]*）\s*$")
+_LEDGER_FIELDS = ("constraints", "decisions", "known_issues", "open_questions")
+
+
+def core_text(text: str) -> str:
+    """去掉来源戳后的正文（去重、匹配、子串结案都按它比）。"""
+    return _STAMP_RE.sub("", str(text)).strip()
+
+
+def stamp_round(text: str) -> int:
+    """从来源戳里读回合号（没有戳 → 0）。"""
+    hit = _STAMP_RE.search(str(text))
+    return int(hit.group(1)) if hit else 0
+
+
+def build_ledger_patch(ledger_append: dict, seq: int, executor: str,
+                       existing: dict) -> tuple[dict, list[str]]:
+    """把本轮产物的账本增量变成 `apply_state_patch` 的补丁（带来源戳、按正文去重）。
+
+    结案（`closed`）在这里先过一道**越界保护**：只能结掉**更早轮次**留下的条目
+    （戳里的轮号 < 本轮）——否则本轮就会把自己或别人刚写的条目删掉。
+    返回 (patch, 留痕说明)。
+    """
+    patch: dict = {}
+    notes: list[str] = []
+    merged: dict = {}
+    for field in _LEDGER_FIELDS:
+        items = (ledger_append or {}).get(field)
+        if not isinstance(items, list):
+            continue
+        have = {core_text(x) for x in (existing.get(field) or [])}
+        added: list[str] = []
+        for item in items:
+            core = core_text(item)
+            if not core or core in have:
+                continue
+            have.add(core)
+            added.append(f"{core}（R{seq}·{executor}）")
+        if added:
+            merged[field] = added
+    if merged:
+        patch.update(merged)
+        notes.append("新增 " + "、".join(f"{k} {len(v)} 条" for k, v in merged.items()))
+    wanted = (ledger_append or {}).get("closed")
+    if isinstance(wanted, list) and wanted:
+        keep: list[dict] = []
+        for entry in wanted:
+            if not isinstance(entry, dict):
+                continue
+            field = str(entry.get("field") or "").strip()
+            match = str(entry.get("match") or "").strip()
+            if field not in _LEDGER_FIELDS or not match:
+                continue
+            hits = [x for x in (existing.get(field) or []) if match in x]
+            if not hits:
+                if any(match in x for x in merged.get(field) or []):
+                    notes.append(f"结案被拒（{field}：{match[:20]}）——本轮刚新增的条目，"
+                                 "不能同轮结案")
+                else:
+                    notes.append(f"结案未命中（{field}：{match[:20]}）——账本里没有这一段，不动")
+                continue
+            if len(hits) > 1:
+                notes.append(f"结案歧义（{field}：{match[:20]}）——命中 {len(hits)} 条，不动")
+                continue
+            owner_round = stamp_round(hits[0])
+            if owner_round and owner_round >= seq:
+                notes.append(f"结案被拒（{field}：{match[:20]}）——该条来自 R{owner_round}，"
+                             f"不比本轮早；只允许结更早轮次的条目")
+                continue
+            keep.append({"field": field, "match": match})
+        if keep:
+            patch["closed"] = keep
+            notes.append(f"结案 {len(keep)} 条")
+    return patch, notes
+
+
 def user_slot(round_: dict) -> str:
     """该轮槽位的"用户侧"内容：**全部**用户发言逐字（轮头 ＋ 轮内追加）。"""
     turns = user_turns(round_)

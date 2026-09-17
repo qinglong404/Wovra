@@ -1246,9 +1246,13 @@ def _round_meta(r: dict, usage: dict | None = None,
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",
+        # V4：每轮一段话（note）＝ 给人看的叙事；folded = 该轮已折叠成段落进装配
+        "note": r.get("note") or {},
+        "note_state": r.get("note_state") or "",
+        "folded": bool(r.get("folded")),
         "stage": views_module.stage_index(r, plan or {}),
         # 该轮是否已被整理压缩覆盖（只作整理状态的展示，不再决定轮账归属）
-        "compressed": str(r.get("org_state") or "") == "done",
+        "compressed": (str(r.get("org_state") or "") == "done" or bool(r.get("folded"))),
         "route_hops": r.get("route_hops", 0),   # 轮内转交次数（>0 = 主 agent 路由过）
         # 会合：本轮的参与者队列（join_with 排的队）——多参与者轮要看得见
         "participants": [str((p or {}).get("agent") or "")

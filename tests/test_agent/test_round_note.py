@@ -50,7 +50,9 @@ def test_round_close_writes_note_with_code_stamped_executor(monkeypatch, tmp_pat
     assert round_["note_state"] == "done"
     assert round_["note"]["sentence"] == "查了 GAIA：466 题分三档"
     assert round_["note"]["executor"] == "Main"
-    assert "只评离线子集" in task.get_state().decisions
+    assert any("只评离线子集" in x for x in task.get_state().decisions)
+    # 条目带来源戳：谁在哪一轮加的一目了然（子 agent 的贡献可追溯）
+    assert any("（R1·Main）" in x for x in task.get_state().decisions)
 
 
 def test_note_ledger_append_dedupes_and_ignores_scalars(monkeypatch, tmp_path):
@@ -70,7 +72,10 @@ def test_note_ledger_append_dedupes_and_ignores_scalars(monkeypatch, tmp_path):
     state = task.get_state()
     assert state.current_status == "旧现状"           # 标量被忽略
     assert state.goal == "g"
-    assert state.known_issues == ["已有问题", "新问题"]  # 去重后追加
+    # 按**正文**去重（戳不参与比较）：已有的"已有问题"不再重复，新条目带戳追加
+    assert state.known_issues[0] == "已有问题"
+    assert len(state.known_issues) == 2
+    assert state.known_issues[1].startswith("新问题（R1·Main）")
 
 
 def test_note_without_product_fails_locally_without_retry(monkeypatch, tmp_path):
@@ -303,3 +308,48 @@ def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
     assembled = _assembled(agent)
     assert "👤 先做 A" in assembled
     assert "👤（轮内追加）含网络检索的先不做" in assembled
+
+
+# ---- 账本：谁都能维护（来源戳 + 去重 + 结案带越界保护） ----
+
+
+def test_ledger_append_is_stamped_and_deduped_across_rounds(monkeypatch, tmp_path):
+    """跨轮去重按正文比；每个新条目带来源戳（轮号·执行者）。"""
+    notes = [
+        {"seq": 1, "sentence": "第1轮", "failures": [],
+         "ledger_append": {"known_issues": ["同一个坑"]}},
+        {"seq": 2, "sentence": "第2轮", "failures": [],
+         "ledger_append": {"known_issues": ["同一个坑", "另一个坑"]}},
+    ]
+    agent, task = _note_agent(monkeypatch, tmp_path, notes, keep=99,
+                              org_watermark=10 ** 9, org_grace_rounds=0)
+    agent.run("问一")
+    agent.run("问二")
+
+    issues = task.get_state().known_issues
+    assert [x.split("（")[0] for x in issues] == ["同一个坑", "另一个坑"]   # 重复的不再进
+    assert any("（R1·Main）" in x for x in issues)
+    assert any("（R2·Main）" in x for x in issues)
+
+
+def test_ledger_close_works_and_guards_own_round(monkeypatch, tmp_path):
+    """结案：能结更早轮次的条目；**不能结本轮刚写的**（越界保护）。"""
+    notes = [
+        {"seq": 1, "sentence": "第1轮", "failures": [],
+         "ledger_append": {"open_questions": ["第一轮的悬问"]}},
+        # 第 2 轮：结掉第 1 轮的悬问（合法），同时想结自己刚提的（非法）
+        {"seq": 2, "sentence": "第2轮", "failures": [],
+         "ledger_append": {"open_questions": ["第二轮的新悬问"],
+                           "closed": [{"field": "open_questions", "match": "第一轮的悬问"},
+                                      {"field": "open_questions", "match": "第二轮的新悬问"}]}},
+    ]
+    agent, task = _note_agent(monkeypatch, tmp_path, notes, keep=99,
+                              org_watermark=10 ** 9, org_grace_rounds=0)
+    agent.run("问一")
+    agent.run("问二")
+
+    left = [x.split("（")[0] for x in task.get_state().open_questions]
+    assert "第一轮的悬问" not in left        # 更早轮次的条目被结掉
+    assert "第二轮的新悬问" in left          # 本轮的结不掉
+    details = "\n".join(_note_records(task))
+    assert "结案被拒" in details

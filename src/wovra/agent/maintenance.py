@@ -501,15 +501,20 @@ class _MaintenanceMixin:
             return
         round_["note"] = product
         round_["note_state"] = "done"
-        patch = {key: value for key, value in (product.get("ledger_append") or {}).items()
-                 if key in _PATCH_LIST_FIELDS}
+        # 账本增量：**带来源戳**（谁在哪个轮加的）＋ 按正文去重 ＋ 结案带越界保护
+        patch, ledger_notes = note_module.build_ledger_patch(
+            product.get("ledger_append") or {}, int(round_.get("seq") or 0),
+            str(product.get("executor") or "Main"),
+            {f: (getattr(self.task.get_state(), f) or []) for f in note_module._LEDGER_FIELDS},
+        )
         report = self.task.apply_state_patch(patch) if patch else {}
         self._persist_rounds()
         if self.task is None:
             return
         defects = note_module.soft_defects(product, round_)
         detail = (f"R{round_.get('seq')} 结算完成：{len(product['sentence'])} 字，"
-                  f"{len(product['failures'])} 条失败，账本 +{sum(len(v) for v in patch.values())} 条")
+                  f"{len(product['failures'])} 条失败"
+                  + ("；账本 " + "；".join(ledger_notes) if ledger_notes else "；账本无变化"))
         if defects:
             detail += f"；软档 {len(defects)} 条（只留痕）：{'；'.join(defects[:3])}"
         self.task.record("note", detail)
@@ -517,6 +522,9 @@ class _MaintenanceMixin:
         if closed:
             self.task.record("note", f"结案 {len(closed)} 条：" + "；".join(
                 f"{field}:{text[:40]}" for field, text in closed))
+        for line in ledger_notes:
+            if "被拒" in line or "未命中" in line:
+                self.task.record("note", f"账本·{line}")
 
     def _live_file_lines(self) -> list[str]:
         """活性文件清单（路径 + 首行说明，代码取）——V4 分裂的**全部输入**。"""

@@ -386,6 +386,22 @@ _ROUND_NOTE_SCHEMA: dict = {
                         "decisions": {"type": "array", "items": {"type": "string"}},
                         "known_issues": {"type": "array", "items": {"type": "string"}},
                         "open_questions": {"type": "array", "items": {"type": "string"}},
+                        "closed": {
+                            "type": "array",
+                            "description": (
+                                "结案：把**已经过时**的旧条目移出账本。每条给 field 与 match"
+                                "（该条里的一小段原文，20-40 字，须在账本里唯一）。"
+                                "只能结**更早轮次**留下的条目"
+                            ),
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "field": {"type": "string"},
+                                    "match": {"type": "string"},
+                                },
+                                "required": ["field", "match"],
+                            },
+                        },
                     },
                 },
             },
@@ -401,7 +417,9 @@ _ROUND_NOTE_INSTRUCTION = (
     "1. 一句话：这轮做了什么、结论是什么；关键数字与路径原样保留。\n"
     "2. 失败与坑：以失败候选为底逐条核对（同类可合并），候选里没有但你知道的照样写；"
     "没有就给空数组。尽量带 evidence（候选〔〕里的事件 ID）。\n"
-    "3. 账本增量：只写新增条目；标量（现状/目标）不用你写。\n"
+    "3. 账本增量：只写新增条目；标量（现状/目标）不用你写。**账本谁都能维护**——"
+    "过时的旧条目用 ledger_append.closed 结案（field ＋ 该条里一小段唯一原文），"
+    "只能结更早轮次留下的。\n"
     "完成后调用 submit_round_note 提交（唯一出口）。"
 )
 

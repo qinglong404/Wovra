@@ -2060,6 +2060,7 @@ function drawConv(c,toBottom){
     // 轮头贴在本轮用户消息下方（用户消息在右、轮头在其下，归属一目了然）；
     // 无用户消息的轮（检查点续轮等）保持旧位（组前）。
     const sepRow={kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,
+                  note:m.note||null,noteState:m.note_state||'',folded:!!m.folded,
                   t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
                   aid:(senderOf(m)||{}).id,landing:String(m.active_view||''),
                   unassigned:!(senderOf(m)||{}).id,stage:(m.stage==null?-1:m.stage),
@@ -2143,8 +2144,13 @@ function drawConv(c,toBottom){
           }).join('')}</span>`:'',
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
+      const noteTxt=String((row.note||{}).sentence||'');
+      const noteExec=String((row.note||{}).executor||'');
+      const nFail=((row.note||{}).failures||[]).length;
+      const noteLine=noteTxt?`<div class="sysline" style="text-align:left" title="每轮一段话（V4）：这一轮的机械事实由代码给锚、模型写成一句话；折叠后它就是装配里的那一段">◆ ${noteExec&&noteExec!=='Main'?`〔${esc(noteExec)}〕`:''}${esc(noteTxt)}${nFail?` <span style="color:var(--gold)">⚠ ${nFail} 条失败</span>`:''}</div>`:'';
+      if(row.folded)segs.push('<span class="seg" title="V4：这一轮已折叠成上面那段话进装配，原文仍在盘上（expand_history 可取回）">已折叠</span>');
       html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+chip+
-        `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`;continue}
+        `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`+noteLine;continue}
     if(row.kind==='sys'){html+=`<div class="sysline" title="${esc(row.title||'')}">${esc(row.text)}`+
       (row.tm?`<span class="stime">${esc(row.tm)}</span>`:'')+`</div>`;continue}
     const s=row.sender;
@@ -3292,7 +3298,7 @@ async function openPendingView(name){
         ?`<div class="ctx-note">文件：${fileChips(pick)}</div>`:'';
       $('#d-body').innerHTML=
         `<div class="ctx-stat">整理后 · 未按域重组（全量装配口径）· ${pick.alt_count||0} 条 · ≈${fmtN(pick.alt_tokens||0)} tok（${fmtN(pick.alt_chars||0)} 字符）</div>`
-        + `<div class="ctx-note">这是分裂重组生效前的完整上下文：历史轮以折叠索引形式保留，未按域切分。</div>`
+        + `<div class="ctx-note">这是完整上下文（V4 下它就是每个 agent 看到的共享历史）：老轮以"一段话"保留，近几轮保留原文，原文随时可取回。</div>`
         + ctxMsgHtml(pick.alt_messages);
       return;
     }
