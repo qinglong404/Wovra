@@ -202,3 +202,104 @@ def test_note_call_exception_is_reported_not_swallowed(monkeypatch, tmp_path):
 
     assert task.rounds[-1]["note_state"] == "failed"
     assert any("结算调用异常" in line and "429" in line for line in _note_records(task))
+
+
+# ---- 换档：水位到了就把超龄且有 note 的轮换成分段（V4 §6.2/§6.3） ----
+
+
+def _note_agent(monkeypatch, tmp_path, notes, keep=0, **agent_kw):
+    """连续跑 len(notes) 轮，每轮脚本化两份响应：工作回答 + 结算产物（None → 不提交）。
+
+    `keep` = 换档后保留原文的最近轮数（直接设属性——env 是导入期读的，测试里设太晚）。
+    """
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setenv("WOVRA_ROUND_NOTE", "1")
+    pool: list = []
+    for note in notes:
+        pool.append([_chunk(_delta(content="答一句"))])
+        pool.append([_note_chunk(note)] if note is not None
+                    else [_chunk(_delta(content="（没提交）"))])
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM(pool), tools=[], task=task, **agent_kw)
+    agent._fold_keep = keep
+    monkeypatch.setattr(agent, "_maybe_organize_batch", lambda: None)   # 只验换档
+    return agent, task
+
+
+def _assembled(agent) -> str:
+    return "\n".join(str(m.get("content")) for m in agent._assemble_messages())
+
+
+def test_watermark_folds_old_rounds_into_paragraphs(monkeypatch, tmp_path):
+    """到水位：超龄且有 note 的轮**一次换到位**——装配里是段落，原文不再进上下文。"""
+    notes = [{"seq": i, "sentence": f"第{i}轮结论", "failures": [], "ledger_append": {}}
+             for i in (1, 2)]
+    agent, task = _note_agent(monkeypatch, tmp_path, notes, keep=0,
+                              org_watermark=0, org_grace_rounds=0)
+    agent.run("问一")
+    agent.run("问二")
+
+    assert [bool(r.get("folded")) for r in task.rounds] == [True, True]
+    assembled = _assembled(agent)
+    assert "第1轮结论" in assembled and "第2轮结论" in assembled
+    assert "👤 问一" in assembled                  # 用户原话逐字仍在
+    assert "答一句" not in assembled               # 原文不再进装配
+    assert any(h.get("kind") == "fold" for h in task.history)
+
+
+def test_fold_keeps_recent_rounds_raw(monkeypatch, tmp_path):
+    """原文窗口：最近 N 轮保持原文（窗口只决定线推到哪，不决定何时换）。"""
+    notes = [{"seq": i, "sentence": f"第{i}轮结论", "failures": [], "ledger_append": {}}
+             for i in (1, 2)]
+    agent, task = _note_agent(monkeypatch, tmp_path, notes, keep=1,
+                              org_watermark=0, org_grace_rounds=0)
+    agent.run("问一")
+    agent.run("问二")
+
+    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
+    assembled = _assembled(agent)
+    assert "第1轮结论" in assembled
+    assert "答一句" in assembled                   # 第 2 轮仍是原文档
+
+
+def test_round_without_note_stays_raw(monkeypatch, tmp_path):
+    """没有产物的轮不换档：原文继续顶着（不重发、不跨轮）。"""
+    notes = [None, {"seq": 2, "sentence": "第2轮结论", "failures": [], "ledger_append": {}}]
+    agent, task = _note_agent(monkeypatch, tmp_path, notes, keep=0,
+                              org_watermark=0, org_grace_rounds=0)
+    agent.run("问一")
+    agent.run("问二")
+
+    assert task.rounds[0].get("note_state") == "failed"
+    assert not task.rounds[0].get("folded")        # 没产物 → 不换档
+    assert task.rounds[1].get("folded")
+
+
+def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
+    """段落槽的用户侧：轮头 ＋ 轮内追加**逐字**（前提档不能丢）。"""
+    # 本测试直接 close_round（不跑工作轮），所以脚本池的第一项就是结算产物
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+    monkeypatch.setenv("WOVRA_ROUND_NOTE", "1")
+    task = Task.create(goal="g")
+    agent = Agent(llm=_StubLLM([[_note_chunk({
+        "seq": 1, "sentence": "一句话", "failures": [], "ledger_append": {},
+    })]]), tools=[], task=task, org_watermark=0, org_grace_rounds=0)
+    agent._fold_keep = 0
+    monkeypatch.setattr(agent, "_maybe_organize_batch", lambda: None)
+    round_ = {
+        "seq": 1,
+        "user_input": {"original": "先做 A", "normalized": ""},
+        "events": [
+            make_event("R1-E01", "user", {"role": "user", "content": "先做 A"}),
+            make_event("R1-E02", "user", {"role": "user", "content": "含网络检索的先不做"}),
+            make_event("R1-E03", "final_answer", {"role": "assistant", "content": "做完了"}),
+        ],
+        "refined_index": {}, "end_state": "", "org_state": "",
+    }
+    agent.rounds = [round_]
+    agent.current_round = round_
+    agent.close_round()
+
+    assembled = _assembled(agent)
+    assert "👤 先做 A" in assembled
+    assert "👤（轮内追加）含网络检索的先不做" in assembled

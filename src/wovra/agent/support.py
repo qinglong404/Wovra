@@ -41,6 +41,10 @@ _ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 # 端点 429 触发了 `_stream_call` 的退避重试，不是预填慢——归因更正。）
 _NOTE_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_NOTE_TIMEOUT", "180"))
 
+# 折叠后**保留原文**的最近轮数（§3.8/§3.9 用户口径"近 50 轮"）。它只决定换档线
+# 往哪推，不决定何时换（何时换由水位说了算）。
+_FOLD_KEEP_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_KEEP_ROUNDS", "50"))
+
 # 分裂判据的体量门槛（2026-09-11 用户拍板）：主 agent 残留桶（纯对话/
 # 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），
 # 可以与其他只读工具并发执行。`screenshot` 则**不**进这个集合——它要启动无头

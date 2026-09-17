@@ -12,6 +12,7 @@ from .. import truncate as truncate
 from .. import views as views_module
 from ..task import _MODEL_SIDE_SECTIONS
 from ..tools import eyes as eyes_module
+from . import note as note_module
 from .support import (
     MODE_BASELINE,
     _STATE_RENDER_BUDGET,
@@ -156,7 +157,21 @@ class _AssemblyMixin:
         prev_was_compact = False
         for r in past:
             evs = r.get("events") or []
-            if r.get("org_state") == "done":
+            if r.get("folded") and str(r.get("note_state") or "") == "done":
+                # 段落档（V4 §3.2/§6.3）：轮闭合时判定并落成的 `folded` 标志说了算，
+                # 装配只读标志、不现场重算——于是 note 迟到或 fold 线不动都不会在
+                # 轮次中部改历史字节。用户原话逐字（含轮内追加）＋ 一句话 ＋ 失败。
+                organized_rounds.append(r)
+                view_msgs.append({"role": "user", "content": note_module.user_slot(r)})
+                view_msgs.append({"role": "assistant", "content": note_module.render_note(r)})
+                prev_was_compact = True
+                prev_compact_tail = (
+                    evs[-1]["message"]
+                    if evs and evs[-1]["message"].get("role") == "assistant"
+                    and evs[-1]["message"].get("tool_calls")
+                    else None
+                )
+            elif r.get("org_state") == "done":
                 # 已整理：紧凑视图（原文+意图+精修索引；细节可 expand_history 取回）
                 organized_rounds.append(r)
                 if r.get("org_generation", 1) >= keep_min:

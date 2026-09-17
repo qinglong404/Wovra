@@ -23,6 +23,7 @@ from . import note as note_module
 from .support import (
     MODE_MANAGED,
     _COMPRESS_THRESHOLD,
+    _FOLD_KEEP_ROUNDS_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _clip_quote,
     maint_tools,
@@ -509,6 +510,41 @@ class _MaintenanceMixin:
         if closed:
             self.task.record("note", f"结案 {len(closed)} 条：" + "；".join(
                 f"{field}:{text[:40]}" for field, text in closed))
+
+    def _fold_keep_rounds(self) -> int:
+        return int(getattr(self, "_fold_keep", _FOLD_KEEP_ROUNDS_DEFAULT))
+
+    def _advance_fold_line(self) -> None:
+        """水位到了就把"超龄且有 note"的轮**一次换到位**（§6.2/§6.3）。
+
+        只在**轮闭合处**推进（轮内冻结）；水位/宽限与整理同一套旋钮（冷却不设——
+        换档只在到线时发生，且它是唯一允许断前缀的动作）。逐个标 `folded` 标志：
+        渲染只读标志，装配不现场重算，于是 note 迟到或线不动都不会在轮次中部改字节。
+        """
+        if not self._round_note_enabled():
+            return
+        closed = [r for r in self.rounds if str(r.get("end_state")) == "completed"]
+        if not closed:
+            return
+        current = int(closed[-1]["seq"])
+        if self.last_context_estimate < self._org_watermark or current <= self._org_grace:
+            return
+        cut = current - self._fold_keep_rounds()
+        staged = [r for r in closed
+                  if int(r["seq"]) <= cut
+                  and not r.get("folded")
+                  and str(r.get("note_state")) == "done"]
+        if not staged:
+            return
+        for r in staged:
+            r["folded"] = True
+        self._persist_rounds()
+        if self.task is not None:
+            self.task.record(
+                "fold",
+                f"换档：R{staged[0]['seq']}–R{staged[-1]['seq']}（{len(staged)} 轮换成一段话；"
+                f"原文窗口保留最近 {self._fold_keep_rounds()} 轮）",
+            )
 
     def _ensure_worker(self) -> None:
         if self._org_thread is not None and self._org_thread.is_alive():

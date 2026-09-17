@@ -32,6 +32,7 @@ from .support import (
     _ORG_COOLDOWN_ROUNDS_DEFAULT,
     _ORG_GRACE_ROUNDS_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
+    _FOLD_KEEP_ROUNDS_DEFAULT,
     _ORG_MAINT_TIMEOUT_DEFAULT,
     _ORG_WATERMARK_DEFAULT,
     _READ_ONLY_TOOLS,
@@ -186,6 +187,8 @@ class _CoreMixin:
         )
         # 每轮一段话的同步结算硬上限（V4 §3.2 第一步；超时按失败处理、只留痕）
         self._note_timeout = _NOTE_TIMEOUT_DEFAULT
+        # 换档后保留原文的最近轮数（§3.8/§3.9 的"近 50 轮"）
+        self._fold_keep = _FOLD_KEEP_ROUNDS_DEFAULT
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()
@@ -1182,6 +1185,8 @@ class _CoreMixin:
             # 产物即时生效（§50）：同步维护已跑完 → 此刻（无开放轮）落地；
             # 异步维护还没产物 → 空转，由维护线程跑完时自行结算。
             self._settle_after_maintenance()
+            # 换档线（V4 §6.2）：水位到了就把超龄且有 note 的轮一次换成段落。
+            self._advance_fold_line()
 
     def finalize_round(self, end_state: str = "open") -> None:
         """CLI 异常/中断路径：Round 保持开放（不闭合、不整理），仅持久化。

@@ -198,6 +198,30 @@ def parse_note(ordered: list, round_: dict) -> tuple[dict | None, str]:
     )
 
 
+def user_slot(round_: dict) -> str:
+    """该轮槽位的"用户侧"内容：**全部**用户发言逐字（轮头 ＋ 轮内追加）。"""
+    turns = user_turns(round_)
+    if not turns:
+        return "（本轮无用户发言）"
+    lines = [f"👤 {turns[0]}"]
+    lines += [f"👤（轮内追加）{t}" for t in turns[1:]]
+    return "\n".join(lines)
+
+
+def render_note(round_: dict) -> str:
+    """段落档：`[R{n}]〔执行者〕一句话` ＋ 失败行（执行者非 Main 才显示，见 §3.2）。"""
+    note = round_.get("note") or {}
+    head = f"[R{round_.get('seq')}]"
+    executor = str(note.get("executor") or "")
+    if executor and executor != "Main":
+        head += f"〔{executor}〕"
+    lines = [f"{head} {note.get('sentence') or ''}"]
+    for item in note.get("failures") or []:
+        evidence = str(item.get("evidence") or "")
+        lines.append(f"  ⚠ {item.get('text')}" + (f"　〔{evidence}〕" if evidence else ""))
+    return "\n".join(lines)
+
+
 def soft_defects(note: dict, round_: dict) -> list[str]:
     """软档：内容正确性（只留痕，不拦）。提到本轮没出现过的路径/工具、证据 ID 不存在。"""
     out: list[str] = []
