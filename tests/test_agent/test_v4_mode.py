@@ -224,8 +224,9 @@ def test_domains_never_apart_are_merged(monkeypatch, tmp_path):
     ]
     notes = agent._merge_never_apart_domains(domains, rounds)
 
-    assert [d["name"] for d in domains] == ["附件与装配", "工具层"]
-    kept = next(d for d in domains if d["name"] == "附件与装配")
+    # 合并后的名字要把原来那摊活说出来（名字即路由身份，不能名不副实）
+    assert [d["name"] for d in domains] == ["附件与装配＋前端", "工具层"]
+    kept = next(d for d in domains if d["name"].startswith("附件与装配"))
     assert "b/two.py" in kept["files"]                 # 文件不丢
     assert notes and "前端" in notes[0]
 

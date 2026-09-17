@@ -238,6 +238,29 @@ def report(task_id: str) -> None:
               + ("　← V4：折叠轮按段落计（不在这行里）" if v4 else ""))
         print(f"信封 {envelope:,}（账本 {state_tok:,} / 文件地图 {map_tok:,} / "
               f"todo {todo_tok:,}）")
+        # **逐轮明细**（2026-09-17 加）：用户问"整理完怎么还这么大"时，答案永远在
+        # "哪一轮没折"上——给出未折叠轮的原文体量与它折成段落后的大小（差额就是
+        # 折档能省下的量），比只有总数好查。
+        unfolded = [r for r in past if r not in folded_rounds]
+        if unfolded:
+            print(f"── 未折叠轮的体量（{len(unfolded)} 轮；折档折的就是这些）──")
+            ranked = sorted(
+                unfolded,
+                key=lambda r: -Agent._estimate_messages(
+                    [e.get("message") or {} for e in r.get("events") or []]
+                ),
+            )
+            for r in ranked[:6]:
+                raw = Agent._estimate_messages(
+                    [e.get("message") or {} for e in r.get("events") or []]
+                )
+                seg = note_module.est_note_tokens(r)
+                share = raw / max(total, 1)
+                note = "（没产物，不折）" if str(r.get("note_state") or "") != "done" else ""
+                print(f"  R{r.get('seq')}：原文 {raw:,} → 段落 {seg:,}"
+                      f"　占上下文 {share:.0%}{note}")
+            if len(ranked) > 6:
+                print(f"  …另 {len(ranked) - 6} 轮（其余都小）")
         print(f"当前开放轮 {cur_tok:,}（{'进行中' if agent.current_round else '无'}）")
         print(f"未整理轮 {len(raw_rounds)} 轮")
         # 口径（2026-09-12 订正）：地板与分项核对是**材料口径**的量（全量装配
