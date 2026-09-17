@@ -2053,10 +2053,7 @@ function drawConv(c,toBottom){
     const ob=ORG_BADGE[m.org_state||'raw']||ORG_BADGE.raw;
     // 分裂状态（存在才显示）；失败时把原因挂进 title——原因落在轮字段上，
     // 即使并发生成时 history 行被覆盖，页面也看得到为什么失败
-    let sb=(SPLIT_BADGE[m.split_state||'']||[])[0]||'';
-    if(sb&&m.split_state==='failed'&&m.split_note){
-      sb=`<span class="seg bad" title="分裂失败：${esc(String(m.split_note).slice(0,300))}">分裂失败</span>`;
-    }
+    const sb=roundSplitBadge(m,'seg');
     const evs=d.events||[];
     // 事件时间轴：开始 = 事件 timestamp；持续 = 距下一事件（工具卡即执行耗时）；
     // 尾事件运行中显示已进行时长，历史尾事件无下一事件则不显示。
@@ -2158,12 +2155,7 @@ function drawConv(c,toBottom){
           }).join('')}</span>`:'',
         row.t0?`<span class="seg">⏱ ${esc(row.t0)}${row.rd?' · '+esc(row.rd):''}</span>`:'',
       ].filter(Boolean);
-      // 段落：分裂前一轮一条；分裂后一轮多 agent 就每家一段（按事件顺序逐行）
-      const noteParts=((row.noteSegments||[]).length?row.noteSegments:[row.note]).filter(x=>x&&x.sentence);
-      const noteLine=noteParts.map(pt=>{
-        const exec=String(pt.executor||''),nf=((pt.failures||[]).length);
-        return `<div class="sysline" style="text-align:left" title="每轮一段话（V4）：这一步的机械事实由代码给锚、模型写成一句话；折叠后它就是装配里的那一段（一轮多 agent 就分段拼接）">◆ ${exec&&exec!=='Main'?`〔${esc(exec)}〕`:''}${esc(String(pt.sentence||''))}${nf?` <span style="color:var(--gold)">⚠ ${nf} 条失败</span>`:''}</div>`;
-      }).join('');
+      const noteLine=noteLinesHtml(row);
       if(row.folded)segs.push('<span class="seg" title="V4：这一轮已折叠成上面那段话进装配，原文仍在盘上（expand_history 可取回）">已折叠</span>');
       html+=`<div class="rsep"><span class="rs">R${row.seq}</span>`+chip+
         `<span class="rb">${segs.join('<span class="rs-dot">·</span>')}</span></div>`+noteLine;continue}
@@ -2904,6 +2896,43 @@ async function deleteSession(id){
   loadSessions();
 }
 
+/* 轮状态（2026-09-17 用户口径："将每轮对话上面的状态信息，也显示到时间线中"）：
+   对话流轮头与时间线卡片共用同一套——段落行、tok/命中、落点、分裂/折叠徽标。 */
+function noteLinesHtml(row){
+  // 段落：分裂前一轮一条；分裂后一轮多 agent 就每家一段（按事件顺序逐行）
+  const parts=((row.noteSegments||[]).length?row.noteSegments:[row.note]).filter(x=>x&&x.sentence);
+  return parts.map(pt=>{
+    const exec=String(pt.executor||''),nf=((pt.failures||[]).length);
+    return `<div class="sysline" style="text-align:left" title="每轮一段话（V4）：这一步的机械事实由代码给锚、模型写成一句话；折叠后它就是装配里的那一段（一轮多 agent 就分段拼接）">◆ ${exec&&exec!=='Main'?`〔${esc(exec)}〕`:''}${esc(String(pt.sentence||''))}${nf?` <span style="color:var(--gold)">⚠ ${nf} 条失败</span>`:''}</div>`;
+  }).join('');
+}
+function roundTokBadge(row){
+  // 轮级用量：Σ 输入 · 缓存命中率（与对话流轮头同口径、同一份 usage）
+  const u=(row&&row.usage)||{},tot=u.prompt||0;
+  if(!tot)return '';
+  const hit=fmtP(u.cached||0,(u.cached||0)+(u.miss||0));
+  const byKeys=Object.keys(u.by_agent||{});
+  const tip=`本轮输入 ${fmtN(tot)} tok（缓存命中 ${fmtN(u.cached||0)} · 未命中 ${fmtN(u.miss||0)}）`
+    +` · 输出 ${fmtN(u.completion||0)} tok · LLM 调用 ${u.calls||0} 次`
+    +` · 上下文峰值 ${fmtN(u.context||0)} tok`
+    +(byKeys.length>1?`\n分账：${byKeys.map(k=>`${k} ${fmtN((u.by_agent[k]||{}).prompt||0)}`).join(' + ')}`:'');
+  return `<span class="badge acc" title="${esc(tip)}">Σ ${fmtN(tot)} · 命中 ${hit}${byKeys.length>1?` · 分账 ${byKeys.length} 方`:''}</span>`;
+}
+function roundAgentBadge(row){
+  if(row.unassigned)return `<span class="badge b-raw" title="这一轮没有落点可归（机制生效前的轮，不塞给主 agent 充数）">○ 无落点</span>`;
+  if(!row.aid)return '';
+  const hops=row.hops?'Main → ':'';
+  return `<span class="badge" style="color:${agentColor(row.aid)};background:var(--bg4)" title="落点：这一轮被附加到 ${esc(row.landing||row.aid)} 的上下文${row.hops?`（轮内转交 ${row.hops} 跳）`:''}">${hops}⬤ ${esc(row.aid)}</span>`;
+}
+function roundSplitBadge(r,cls){
+  let sb=(SPLIT_BADGE[(r&&r.split_state)||'']||[])[0]||'';
+  if(!sb)return '';
+  if(r.split_state==='failed'&&r.split_note){
+    sb=`<span class="${cls} bad" title="分裂失败：${esc(String(r.split_note).slice(0,300))}">分裂失败</span>`;
+  }
+  return sb.replace(/class="seg/,`class="${cls}`);
+}
+
 /* ---------- 时间线 ---------- */
 const OP_TAG={write:['创建','t-create'],edit:['修改','t-modify'],modify:['修改','t-modify'],replace:['修改','t-modify'],read:['只读','t-read'],delete:['删除','t-delete'],move:['移动','t-modify']};
 function blockChip(b){
@@ -2930,11 +2959,22 @@ function renderTimeline(c){
       (r.t1&&r.t1!==r.t0?` → ${esc(fmtClock(r.t1))} · ${esc(fmtDur((Date.parse(r.t1)-Date.parse(r.t0))/1000))}`:'')+`</span>`:'';
     const sender=senderOf(r);
     const blocks=(r.blocks||[]).map(blockChip).join('');
+    // 状态徽标：与对话流轮头同一套（落点 / 分裂 / 折叠 / 分裂前 / 未闭合 / 参与者 / @ / Σtok）
+    const folded=r.folded?`<span class="badge b-done" title="这一轮已折叠成一段话进装配，原文仍在盘上（expand_history 可取回）">已折叠</span>`:'';
+    const preSplit=r.stage===0?`<span class="badge b-raw" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'';
+    const unclosed=(r.end_state==null||r.end_state===''||r.end_state==='open')
+      ?`<span class="badge b-pend" title="这一轮还没有产出最终回答（中断或步数用尽）">未闭合</span>`:'';
+    const parts=(r.participants||[]).length
+      ?`<span class="badge b-raw" title="会合：这些 agent 排在本轮的参与者队列里">参与者 ${r.participants.map(p=>esc((REG[p]||{}).name||p)).join('、')}</span>`:'';
+    const ats=(String(r.user_input||'').match(/@[^\s，。]+/g)||[]).length
+      ?`<span class="badge b-raw" title="定向投递：这条用户消息只送给被 @ 的 agent">定向 @</span>`:'';
+    const note=noteLinesHtml({note:r.note,noteSegments:r.note_segments});
     return `<div class="card round org-${esc(r.org_state||'raw')}" data-seq="${r.seq}">
       <div class="r-head" onclick="openDrawer(${r.seq})">
         <span class="r-seq">R${r.seq}</span><span class="r-goal" title="${esc(r.user_input)}">${esc(r.user_input)}</span>
-        <span class="r-badges"><span class="badge" style="color:${sender.color};background:var(--bg4)">${esc(sender.id)}</span>${org}${gen}${steps}${t01}<span class="badge b-raw">${r.events}ev</span></span>
+        <span class="r-badges"><span class="badge" style="color:${sender.color};background:var(--bg4)">${esc(sender.id)}</span>${org}${gen}${steps}${t01}<span class="badge b-raw">${r.events}ev</span>${roundAgentBadge(r)}${roundSplitBadge(r,'badge')}${folded}${preSplit}${unclosed}${parts}${ats}${roundTokBadge(r)}</span>
       </div>
+      ${note}
       ${blocks&&r.user_input&&r.user_input.length>60?`<div class="r-body"><div class="u">${esc(r.user_input.slice(0,160))}</div><div class="blocks">${blocks}</div></div>`:(blocks?`<div class="r-body"><div class="blocks">${blocks}</div></div>`:'')}
     </div>`}).join('');
 }

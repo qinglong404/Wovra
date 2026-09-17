@@ -2193,6 +2193,45 @@ __deferred.push(refreshAfterTurn().then(()=>{
 }));
 
 console.log('');
+console.log('场景 AU｜时间线卡片要带上**与对话流轮头同一套**状态（用户口径 2026-09-17：'
+  + '"将每轮对话上面的状态信息，也显示到时间线中"）');
+{
+  META.registry = [{id:'Main', name:'主agent'}, {id:'A', name:'serve 接口层'}];
+  REG = {Main:{id:'Main', name:'主agent'}, A:{id:'A', name:'serve 接口层'}};
+  META.round_list = [
+    {seq:1, active_view:'Main', aid:'Main', landing:'Main', events:9, steps_used:2,
+     t0:'2026-09-17 10:00:00', t1:'2026-09-17 10:00:30', user_input:'改一下 serve.py',
+     folded:true, split_state:'ready', org_state:'', stage:0,
+     note:{seq:1, sentence:'把 attach 端点加到 serve.py', executor:'Main', failures:[]},
+     usage:{prompt:12000, cached:11000, miss:1000, completion:300, calls:2,
+            context:9000, by_agent:{Main:{prompt:12000, steps:2}}}},
+    {seq:2, active_view:'A', aid:'A', landing:'A', hops:1, events:5, steps_used:1,
+     t0:'2026-09-17 10:01:00', user_input:'@A 这个接口谁维护',
+     split_state:'failed', split_note:'产物里的 R2 不在这批轮里', org_state:'',
+     note_segments:[{executor:'A', sentence:'接口层由 A 维护', failures:[{text:'越界被拦'}]}],
+     usage:{prompt:3000, cached:2500, miss:500, completion:80, calls:1, context:3000}},
+  ];
+  renderTimeline(DOM.content);
+  const html = DOM.content.innerHTML;
+  const brief = (html.match(/class="badge[^"]*"[^>]*>([^<]*)</g) || []).join('｜');
+  check('AU 时间线', html);
+  for (const [need, why] of [
+    ['已折叠', '折叠状态没进时间线'],
+    ['分裂失败', '分裂状态没进时间线'],
+    ['Σ 12K', '轮级 tok 用量没进时间线'],
+    ['命中', '缓存命中率没进时间线'],
+    ['⬤ A', '落点 agent 没进时间线'],
+    ['Main → ', '轮内转交没进时间线'],
+    ['分裂前', '阶段徽标没进时间线'],
+    ['◆', '段落（一句话）没进时间线'],
+  ]) {
+    if (!html.includes(need)) problems.push('AU: ' + why + '（缺 ' + need + '）');
+  }
+  if (!html.includes('产物里的 R2 不在这批轮里'))
+    problems.push('AU: 分裂失败的原因没挂进 title');
+  console.log('   AU 时间线徽标：' + brief.slice(0, 150));
+}
+
 Promise.all(__deferred).then(()=>{
   if (problems.length) {
     console.log('渲染核对：失败 ' + problems.length + ' 项');
@@ -2200,7 +2239,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（49 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（50 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
 });
 """
 
