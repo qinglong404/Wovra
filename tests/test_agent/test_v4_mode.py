@@ -101,3 +101,83 @@ def test_v4_split_reads_live_files_not_block_map(monkeypatch, tmp_path):
     assert "[分块地图]" not in seen["text"]              # 块地图不再进分裂输入
     assert task.rounds[0]["split_state"] == "ready"      # 批次标记
     assert any(str(e.get("name")) == "A" for e in (task.registry or []))   # 产物落注册表
+
+
+def test_same_name_nodes_merge_into_one_agent(monkeypatch, tmp_path):
+    """同名同父的顶层节点**机械归并**（实测缺陷：同名会被落地成两个同名 agent）。
+
+    名字是路由与执行者索引的唯一身份——产物里同一个职责写成两个节点时，
+    代码把它们合成一个（路径取并集），而不是造两个分不清的 agent。
+    """
+    domains = [
+        {"name": "上下文装配与附件注入", "path": "src/wovra/attachments.py"},
+        {"name": "上下文装配与附件注入",
+         "paths": ["src/wovra/agent/assembly.py", "tests/test_attachments.py"]},
+        {"name": "上下文装配与附件注入", "parent": "别的父", "path": "x.py"},
+        {"name": "serve 接口层", "path": "src/wovra/serve.py"},
+    ]
+    notes = Agent._merge_same_name_domains(domains)
+
+    assert len(domains) == 3                                   # 顶层两条合成一条
+    merged = domains[0]
+    assert merged["name"] == "上下文装配与附件注入"
+    assert merged["paths"] == ["src/wovra/attachments.py",
+                               "src/wovra/agent/assembly.py",
+                               "tests/test_attachments.py"]
+    assert "path" not in merged
+    assert domains[1]["name"] == "上下文装配与附件注入"          # 父不同的同名节点不并
+    assert domains[1]["parent"] == "别的父"
+    assert "同名节点归并" in notes[0] and "×2" in notes[0]
+
+
+def test_same_name_merge_reaches_registry_as_one_agent(monkeypatch, tmp_path):
+    """归并后的产物落地 → 注册表里这个名字只出现一次。"""
+    from wovra import registry as registry_module
+
+    domains = [
+        {"name": "域X", "path": "a/x.py", "description": "短"},
+        {"name": "域X", "path": "b/x.py", "description": "更长的描述，落地时留下这条"},
+    ]
+    Agent._merge_same_name_domains(domains)
+    assert domains[0]["paths"] == ["a/x.py", "b/x.py"]
+    entries = registry_module.build_entries(domains, "")
+    assert [e["name"] for e in entries] == ["域X"]              # 一个名字一个 agent
+    assert entries[0]["description"].startswith("更长的描述")   # 描述取信息多的那条
+
+
+def test_split_failure_leaves_reason_on_round(monkeypatch, tmp_path):
+    """分裂失败必留痕：原因同时写**轮字段**（抗并发写丢 history）与 history。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    monkeypatch.setattr(agent, "_split_rounds", lambda *a, **k: False)
+    agent._maybe_split_v4()
+
+    assert task.rounds[0]["split_state"] == "failed"
+    assert "分裂未返回可用产物" in task.rounds[0]["split_note"]
+    assert any(h.get("kind") == "split" and "V4 分裂失败" in str(h.get("detail"))
+               for h in task.history)
+
+
+def test_split_failure_uses_pending_reason_and_exception(monkeypatch, tmp_path):
+    """原因优先取暂存里的（产物不可用），异常路则带上异常原文。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    task.rounds[0]["pending_org"] = {"split_assessment": {"reason": "产物被截断"}}
+    monkeypatch.setattr(agent, "_split_rounds", lambda *a, **k: False)
+    agent._maybe_split_v4()
+    assert task.rounds[0]["split_note"] == "产物被截断"
+
+    agent2, task2 = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py", seq=1))
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("端点 400：产物结构非法")
+
+    monkeypatch.setattr(agent2, "_split_rounds", boom)
+    agent2._maybe_split_v4()
+    assert "端点 400" in task2.rounds[0]["split_note"]
+    assert task2.rounds[0]["split_state"] == "failed"
+
+
+def test_split_instruction_forbids_duplicate_names():
+    """指令里必须留着"别写两个同名节点"那条（防复发；代码归并是保证，这条是减压）。"""
+    from wovra.agent.prompts import _SPLIT_LIVE_INSTRUCTIONS as text
+
+    assert "别写成两个同名节点" in text

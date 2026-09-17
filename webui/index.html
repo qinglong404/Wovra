@@ -829,9 +829,9 @@ const SPLIT_BADGE={
   ready:['<span class="seg" style="color:var(--gold)" title="分裂产物已就绪，等待本轮闭合后生效（生效只在轮边界，轮内不改历史字节）">分裂待生效</span>',''],
   deferred:['<span class="seg" style="color:var(--gold)" title="分裂产物已就绪；有轮正在进行，按轮边界纪律等它闭合后生效">分裂待生效</span>',''],
   stale:['<span class="seg bad" title="分裂产物按旧材料做的、已过期：批次已回入水位，下批重整（不是根基缺陷，无需人工介入）">分裂过期·已回入水位</span>',''],
-  rejected:['<span class="seg bad" title="分裂产物被拒收（根基缺陷：文件重叠/空域等），需人工查整理/分裂/重组">分裂被拒收</span>',''],
+  rejected:['<span class="seg bad" title="分裂产物被拒收（根基缺陷：文件重叠/空域等），需人工查整理/分裂">分裂被拒收</span>',''],
   skipped:['<span class="seg" title="本次未分裂：产物被截断或覆盖不全（不可信），已放弃——保留整理后的结构，等下一次水位再判断是否分裂（口径：错误分裂不如不分裂）">本次未分裂</span>',''],
-  failed:['<span class="seg bad" title="分裂阶段失败：本批回入水位，下批重做">分裂失败</span>',''],
+  failed:['<span class="seg bad" title="分裂分析没拿到可用产物：本批不生成域树，等下一批重试（具体原因见 title）">分裂失败</span>',''],
 };
 const ORG_BADGE={
   done:'<span class="badge b-done" title="上下文整理已完成：这轮之后的历史已压缩进整理索引，后续轮读到的是整理后视图（省 token、保前缀缓存）">已整理</span>',
@@ -2051,7 +2051,12 @@ function drawConv(c,toBottom){
     flush();curSeq=seq;
     const d=CONV.cache[seq],m=metaBy[seq]||{};
     const ob=ORG_BADGE[m.org_state||'raw']||ORG_BADGE.raw;
-    const sb=(SPLIT_BADGE[m.split_state||'']||[])[0]||'';   // 分裂状态（存在才显示）
+    // 分裂状态（存在才显示）；失败时把原因挂进 title——原因落在轮字段上，
+    // 即使并发生成时 history 行被覆盖，页面也看得到为什么失败
+    let sb=(SPLIT_BADGE[m.split_state||'']||[])[0]||'';
+    if(sb&&m.split_state==='failed'&&m.split_note){
+      sb=`<span class="seg bad" title="分裂失败：${esc(String(m.split_note).slice(0,300))}">分裂失败</span>`;
+    }
     const evs=d.events||[];
     // 事件时间轴：开始 = 事件 timestamp；持续 = 距下一事件（工具卡即执行耗时）；
     // 尾事件运行中显示已进行时长，历史尾事件无下一事件则不显示。
@@ -2069,6 +2074,7 @@ function drawConv(c,toBottom){
     // 无用户消息的轮（检查点续轮等）保持旧位（组前）。
     const sepRow={kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,
                   note:m.note||null,noteSegments:m.note_segments||[],noteState:m.note_state||'',folded:!!m.folded,
+                  splitState:m.split_state||'',splitNote:m.split_note||'',
                   t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
                   aid:(senderOf(m)||{}).id,landing:String(m.active_view||''),
                   unassigned:!(senderOf(m)||{}).id,stage:(m.stage==null?-1:m.stage),
@@ -2313,7 +2319,8 @@ async function ensureViewSizes(force){
   try{
     const d=await api(`/api/sessions/${want}/view-sizes`);
     if(CUR!==want)return;                // 期间切走了：结果已过期，丢掉
-    VIEWSIZES={sig,agents:d.agents||[],window:d.window||0,basis:d.basis||''};
+    VIEWSIZES={sig,agents:d.agents||[],window:d.window||0,basis:d.basis||'',
+               shared:!!d.shared};
   }catch(e){VIEWSIZES=null}
   finally{VIEWSIZES_BUSY=false}
 }
@@ -2330,6 +2337,19 @@ function renderCtxbar(){
   bar.classList.toggle('show',!!rows.length);
   if(!rows.length){bar.innerHTML='';return}
   const winDefault=(VIEWSIZES&&VIEWSIZES.window)||0;
+  /* V4 取消重组：所有 agent 共用同一份共享历史——按 agent 列同一串数字是噪声，
+     直接给一行"共享上下文"（2026-09-17 用户："现在不是没有重组上下文这个概念了"）。 */
+  if(VIEWSIZES&&VIEWSIZES.shared){
+    const tk=((VIEWSIZES.agents||[])[0]||{}).tokens||0;
+    const share=winDefault?tk/winDefault*100:0;
+    const pct=share>=10?share.toFixed(1):share.toFixed(2);
+    bar.classList.add('show');
+    bar.innerHTML=`<div class="ctxrow" title="V4 取消重组：所有 agent 装配的是同一份共享历史（段落档 ＋ 近期原文）"><span class="dot" style="background:var(--teal)"></span>`
+      +`<span class="nm">共享上下文（${rows.length} 个 agent 同用）</span>`
+      +`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`
+      +`<span class="mono">${fmtN(tk)}${winDefault?`/${fmtN(winDefault)}（${pct}%）`:''}</span></div>`;
+    return;
+  }
   /* 投影要真装配一遍各视图（服务端已按 task.json 缓存；首次 2–3s），期间别显示
      "无数据"——那会被读成"还是没有"。 */
   const loading=!VIEWSIZES&&entries.length>1;
@@ -3197,8 +3217,10 @@ function ctxViz(){
     const roots=(byParent.get('')||[]).map(d=>nodeHtml(d,0)).join('');
     splitHtml=`<div class="split-head">
       <span class="fbadge t-create">结构树</span>
-      <span class="chip" style="cursor:pointer;margin-left:auto" title="分裂重组生效前的完整上下文（整理后全量装配）" onclick="openPendingView('__alt__')">重组前上下文</span>
-      <span class="chip acc" style="cursor:pointer" title="重组后各 agent 各看到什么（主 agent / A / B）" onclick="openPendingView('Main')">重组后上下文</span>
+      ${(VIEWSIZES&&VIEWSIZES.shared)
+        ?`<span class="chip acc" style="cursor:pointer;margin-left:auto" title="V4 取消重组：所有 agent 共用同一份共享历史（段落档 ＋ 近期原文）——这里给的就是运行时真正会发出去的那一份" onclick="openPendingView('Main')">共享上下文（同用一份）</span>`
+        :`<span class="chip" style="cursor:pointer;margin-left:auto" title="分裂重组生效前的完整上下文（整理后全量装配）" onclick="openPendingView('__alt__')">重组前上下文</span>
+      <span class="chip acc" style="cursor:pointer" title="重组后各 agent 各看到什么（主 agent / A / B）" onclick="openPendingView('Main')">重组后上下文</span>`}
       <span class="mono" style="color:var(--tx3);font-size:10px">${doms.length} 节点 · 活性文件 ${(lastSplit.live_files||[]).length} · 未归属块 ${un.length}</span></div>`
       +(missing.length?`<div style="margin-top:6px;color:var(--red);font-size:11px">⚠ ${missing.length} 个活性文件没有作为叶子出现在树里（Runtime 会拒收整批）：${esc(missing.slice(0,8).join('、'))}${missing.length>8?'…':''}</div>`:'')
       +`<div style="margin-top:6px;max-height:420px;overflow:auto">${roots||'<div class="empty" style="padding:6px 0">（树为空）</div>'}</div>`
@@ -3213,7 +3235,7 @@ function ctxViz(){
         `<span class="lg"><i style="background:${c}"></i>${ORG_NAME[k]}</span>`).join('')}</div>
       <div class="viz-lab" style="margin-top:14px">分裂结构树 <span style="color:var(--tx3);font-weight:400">（模型产出：活性文件 + 保底块归宿；是否分裂由代码按这棵树决定）</span></div>
       <div>${splitHtml}</div>
-      <div class="viz-lab" style="margin-top:14px">重组上下文 · 子 agent 视图 <span style="color:var(--tx3);font-weight:400">（各 agent 装配视图体量 / 模型窗口；分裂后每个域一条）</span></div>
+      <div class="viz-lab" style="margin-top:14px">${(VIEWSIZES&&VIEWSIZES.shared)?'各 agent 职责与文件 <span style="color:var(--tx3);font-weight:400">（V4 取消重组：上下文只有一份共享历史，按 agent 分的只有职责与文件归属）</span>':'重组上下文 · 子 agent 视图 <span style="color:var(--tx3);font-weight:400">（各 agent 装配视图体量 / 模型窗口；分裂后每个域一条）</span>'}</div>
       <div>${bars||'<div class="empty" style="padding:8px 0">无注册表</div>'}</div>
       <div class="viz-lab" style="margin-top:14px">调用开销构成 <span style="color:var(--tx3);font-weight:400">（整轮对话 vs 维护开销：整理/压缩/分裂）</span></div>
       <div>${usage}</div>
@@ -3245,6 +3267,12 @@ function renderProject(c){
       ${(a.inbox||[]).length?`<span class="badge b-pend" style="margin-left:auto">✉ ${a.inbox.length}</span>`:''}
       <span class="mono" style="margin-left:auto;color:var(--tx3);font-size:10.5px">名下${a.rounds||0}轮${seqRangeOf(a)} · 步${fmtN(a.steps||0)}${(function(){const pv=(VIEWSIZES&&VIEWSIZES.agents||[]).find(x=>(x.id||'')===(a.id||'')||(x.name||'')===(a.name||''));
       /* **重组后是主数**（登记即可算，不必等一轮对话）；实测只是"上次装配" */
+      if(VIEWSIZES&&VIEWSIZES.shared){
+        // V4：所有 agent 共用同一份共享历史（不是一个 agent 一份副本），
+        // 所以每一条都显示这一份的体量，而不是各自的 0
+        const tk=(pv&&pv.tokens)||((VIEWSIZES.agents||[])[0]||{}).tokens||a.ctx_cur||0;
+        return tk?` · 共享上下文 ${fmtN(tk)} tok`:' · 共享上下文';
+      }
       if(pv){const tk=pv.tokens||0;
         return ` · 重组后 ≈${fmtN(tk)} tok${pv.alt_tokens?`（全量装配 ≈${fmtN(pv.alt_tokens)}）`:''}`
           +(a.ctx_cur?` · 实测 ${fmtN(a.ctx_cur)}`:'')}
@@ -3343,7 +3371,7 @@ function fmtBytes(n){
 function renderRegistry(c){
   const reg=META.registry||[];
   if(!reg.length){c.innerHTML='<div class="empty">无注册表（未发生分裂）</div>';return}
-  c.innerHTML='<h3 class="sec">Agent 注册表 · '+reg.length+'（查看上下文 = 路由到它时模型所见，用于检查分裂/重组）</h3><div class="reg-grid">'+
+  c.innerHTML='<h3 class="sec">Agent 注册表 · '+reg.length+'（'+(VIEWSIZES&&VIEWSIZES.shared?'V4：所有 agent 共用同一份共享历史，注册表只管职责与文件归属':'查看上下文 = 路由到它时模型所见，用于检查分裂/重组')+'）</h3><div class="reg-grid">'+
     reg.map(a=>`<div class="agent"><div class="top">
       <span class="st" style="background:${agentColor(a.id)};box-shadow:0 0 8px ${agentColor(a.id)}66" title="${esc(a.status)}"></span>
       <span class="id">${esc(a.id)}</span><span class="nm">${esc(a.name)}</span>
@@ -3369,7 +3397,7 @@ async function openPendingView(name){
   // 重组后上下文预览（主 agent + 各子 agent）：后端在内存里模拟产物生效
   // 后物化各视图，不改会话；抽屉内可切换 agent 对照
   $('#drawer').classList.add('open');$('#mask').classList.add('open');
-  $('#d-title').textContent='上下文对照（重组前 / 重组后）';
+  $('#d-title').textContent='上下文（V4：一份共享历史）';
   $('#d-sub').textContent='装配中…';
   $('#d-body').innerHTML='<div class="empty">在内存中模拟产物生效…</div>';
   try{
@@ -3379,6 +3407,26 @@ async function openPendingView(name){
     if(!list.length){$('#d-body').innerHTML='<div class="empty">暂无视图（可能产物已生效，请刷新）</div>';return}
     const altOn=name==='__alt__';
     const mainEntry=list.find(x=>x.is_main)||list[0];
+    if(d.shared){
+      // V4：没有"每个子 agent 各看到什么"这回事——只有一份共享历史，
+      // 按 agent 分的只有职责与文件归属（那才是注册表要管的东西）
+      const pickS=mainEntry;
+      const duties=(d.duties||[]).map(x=>
+        `<div class="ctx-note"><b>${esc(x.id)}</b> ${esc(x.name)}`
+        +`${x.status?`　<span style="color:var(--tx3)">${esc(x.status)}</span>`:''}`
+        +`<br><span style="color:var(--tx3)">${esc(x.description||'')}</span>`
+        +`<br>${(x.files||[]).map(f=>`<span class="fd">${esc(f)}</span>`).join('')}`
+        +`${(x.history_files||[]).length?`<span class="fd" style="opacity:.55">历史 ${(x.history_files||[]).length}</span>`:''}`
+        +`</div>`).join('');
+      $('#d-sub').innerHTML=`<span class="chip acc">共享历史（全体同用）</span>`;
+      $('#d-body').innerHTML=
+        `<div class="ctx-stat">${pickS.count} 条 · ≈${fmtN(pickS.tokens||0)} tok（${fmtN(pickS.total_chars||0)} 字符）</div>`
+        + `<div class="ctx-note">${esc(d.note||'')}</div>`
+        + `<div class="viz-lab" style="margin-top:10px">各 agent 的职责与文件</div>` + duties
+        + `<div class="viz-lab" style="margin-top:14px">共享历史（就是运行时真正发出去的那一份）</div>`
+        + ctxMsgHtml(pickS.messages);
+      return;
+    }
     const pick=altOn?mainEntry:(list.find(x=>(x.name||'')===name||(x.id||'')===name)||mainEntry);
     const shortLab=x=>x.is_main?'主 agent':(esc(x.id||''));   // chip 只放短标签，全名走 title
     const chips=list.map(x=>`<span class="chip ${(!altOn&&x===pick)?'acc':''}" style="cursor:pointer"

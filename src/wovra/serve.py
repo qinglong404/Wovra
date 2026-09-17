@@ -983,6 +983,8 @@ def pending_views(task_id: str, domain: str = "") -> dict | None:
         agent._settle_views()
     except Exception:  # noqa: BLE001——预览失败不该影响任何东西
         pass
+    if _v4_on():
+        return _shared_views_payload(agent, task)
     out = []
     # 主 agent 也有"重组后视图"（不含分出去的域块），与全量装配不是一回事——
     # 同样列出来，用户才能对照"主 agent 现在看到什么"
@@ -1089,6 +1091,64 @@ _VIEW_SIZES_CACHE: dict[str, tuple[tuple[int, int], dict]] = {}
 _VIEW_SIZES_LOCK = threading.Lock()
 
 
+def _v4_on() -> bool:
+    """V4 开关（取消重组）。serve 只用来决定**投影口径**，不参与装配。"""
+    from .agent.support import v4_enabled
+
+    return v4_enabled()
+
+
+def _shared_views_payload(agent, task) -> dict:
+    """V4 的"各 agent 看到什么"：**同一份共享历史** ＋ 各 agent 的职责与文件。
+
+    V4 取消了重组（`assembly._assemble_messages_impl` 里视图分化那条被
+    `and not v4_enabled()` 关掉），所有 agent 装配的是同一份字节——所以
+    "每个子 agent 各看到什么"这个问题本身已经不存在了。这里如实给：
+    一份真实装配（就是运行时那份）＋ 各条的职责/文件归属（那是真正按 agent 分的
+    东西），不再算那套没人会走的按域视图（2026-09-17 用户："现在不是没有重组
+    上下文这个概念了"）。
+    """
+    msgs_src = agent._assemble_messages()
+    msgs, total, trunc = [], 0, 0
+    for m in msgs_src:
+        raw = _content_text(m.get("content"))
+        total += len(raw)
+        body = raw
+        if len(raw) > _DUMP_CAP:
+            body = raw[:_DUMP_CAP] + chr(10) + f"…（本条截断，原 {len(raw):,} 字符）"
+            trunc += 1
+        msgs.append({"role": m.get("role"), "content": body, "len": len(raw),
+                     "tool_calls": len(m.get("tool_calls") or [])})
+    try:
+        tok = int(agent._estimate_messages(msgs_src))
+    except Exception:  # noqa: BLE001
+        tok = total // 3
+    duties = []
+    for e in (task.registry or []):
+        if not isinstance(e, dict):
+            continue
+        duties.append({
+            "id": str(e.get("id") or ""), "name": str(e.get("name") or ""),
+            "status": str(e.get("status") or ""),
+            "files": [str(f) for f in (e.get("files") or [])],
+            "history_files": [str(f) for f in (e.get("history_files") or [])],
+            "description": str(e.get("description") or ""),
+        })
+    return {
+        "agents": [{
+            "id": "Main", "name": "主agent", "is_main": True, "shared": True,
+            "count": len(msgs), "total_chars": total, "tokens": tok,
+            "truncated": trunc, "messages": msgs,
+        }],
+        "shared": True,
+        "duties": duties,
+        "window": int(agent._agent_window()),
+        "note": "V4 取消重组：所有 agent 共用同一份共享历史（段落档 ＋ 近期原文），"
+                "这里给的就是运行时真正会发出去的那一份；下面列的是各 agent 的"
+                "职责与文件归属，不是各自的上下文副本",
+    }
+
+
 def view_sizes(task_id: str) -> dict | None:
     """各 agent **重组后视图体量**（走 pending_views 的物化，剥掉消息正文）。
 
@@ -1137,6 +1197,7 @@ def view_sizes(task_id: str) -> dict | None:
         window = int(got.get("window") or _DEFAULT_CONTEXT_LIMIT)
     except Exception:  # noqa: BLE001——拿不到就留 0，前端按"无分母"渲染
         window = int(got.get("window") or 0)
+    shared = bool(got.get("shared"))
     out = {"agents": [{k: a.get(k) for k in
                        ("id", "name", "is_main", "count", "total_chars",
                         "tokens", "alt_count", "alt_chars",
@@ -1144,8 +1205,10 @@ def view_sizes(task_id: str) -> dict | None:
                       for a in got.get("agents") or []],
            "window": window, "basis": basis,
            "pending": True,
-           "note": "零 LLM 机械投影：在内存里按当前注册表 + 轮材料装配各视图"
-                   "所得（会话一个字节都不改）"}
+           "shared": shared,
+           "note": (got.get("note") if shared else
+                    "零 LLM 机械投影：在内存里按当前注册表 + 轮材料装配各视图"
+                    "所得（会话一个字节都不改）")}
     with _VIEW_SIZES_LOCK:
         if len(_VIEW_SIZES_CACHE) > 16:      # 兜住条目数（会话数级别，不会涨）
             _VIEW_SIZES_CACHE.clear()
@@ -1243,6 +1306,8 @@ def _round_meta(r: dict, usage: dict | None = None,
         # 分裂状态（2026-09-15）：running/ready/deferred/stale/rejected/failed/done——
         # 维护只写 history 时会被并发写覆盖（见 worklog §106），落到轮上才可见、可查。
         "split_state": r.get("split_state") or "",
+        # 分裂失败的原因（落轮字段，抗并发写丢 history 行）
+        "split_note": r.get("split_note") or "",
         "org_generation": r.get("org_generation", 1),
         "steps_used": r.get("steps_used"),
         "active_view": r.get("active_view") or "",

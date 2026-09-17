@@ -85,6 +85,7 @@ def report(task_id: str) -> None:
         tmp = Path(td)
         task = _load_copy(task_id, tmp)
         agent = Agent(llm=SimpleNamespace(model="stub"), tools=[], task=task)
+        from wovra.agent import note as note_module
 
         # 包住两种渲染，分别记账——比事后反推可靠
         sizes = {"compact": 0, "collapsed": 0, "originals": 0}
@@ -145,10 +146,15 @@ def report(task_id: str) -> None:
         from wovra import routing as routing_module
         _env_key = routing_module.ACTIVE_VIEW_ENV
         _saved_env = _os2.environ.get(_env_key)
+        # **基线段不计数**（2026-09-17 修）：这次装配会把 `_render_compact` 再跑一遍，
+        # 而计数器还挂着 → 紧凑桶被重复累加（旧链路会话实测打出"偏差 66%"，
+        # 其实全是仪器自己在数两遍）。量基线时先把包装摘掉。
+        agent._render_compact, agent._render_collapsed = orig_c, orig_f
         try:
             _os2.environ[_env_key] = "0"
             legacy_total = agent._estimate_messages(agent._assemble_messages())
         finally:
+            agent._render_compact, agent._render_collapsed = compact, collapsed
             if _saved_env is None:
                 _os2.environ.pop(_env_key, None)
             else:
@@ -158,7 +164,21 @@ def report(task_id: str) -> None:
         # **不是** `end_state == completed`——未闭合的轮同样全量进上下文。
         # 第一版按 completed 过滤，自检报出 57% 偏差（这就是它该干的活）。
         past = [r for r in task.rounds if r is not agent.current_round]
-        raw_rounds = [r for r in past if r.get("org_state") != "done"]
+        # **V4 口径**（2026-09-17 修）：V4 里 `org_state` 永远不写（整理那一路停用），
+        # 压缩由 `folded` ＋ note 承担——不认这一条，会把已折成段落的轮也算成
+        # "未整理原文"，于是分项之和凭空多出折叠前那一大坨（实测打出
+        # "偏差 70%——口径有漏项" 和负地板，**全是仪器自己的口径错**）。
+        v4 = _v4_on()
+        folded_rounds = [
+            r for r in past
+            if r.get("folded") and str(r.get("note_state") or "") == "done"
+        ] if v4 else []
+        if folded_rounds:
+            for r in folded_rounds:
+                sizes["collapsed"] += note_module.est_note_tokens(r)
+                rounds["collapsed"] += 1
+        raw_rounds = [r for r in past
+                      if r.get("org_state") != "done" and r not in folded_rounds]
         raw_msgs = [e["message"] for r in raw_rounds for e in r["events"]]
         raw_tok = Agent._estimate_messages(raw_msgs) if raw_msgs else 0
         # 当前开放轮（轮内赦免的追加消息）
@@ -214,7 +234,8 @@ def report(task_id: str) -> None:
               f"用户原文 {sizes['originals']:,}　"
               f"紧凑 {sizes['compact']:,}（{rounds['compact']} 轮）　"
               f"折叠 {sizes['collapsed']:,}（{rounds['collapsed']} 轮）　"
-              f"未整理原文 {raw_tok:,}（{len(raw_rounds)} 轮）")
+              f"未整理原文 {raw_tok:,}（{len(raw_rounds)} 轮）"
+              + ("　← V4：折叠轮按段落计（不在这行里）" if v4 else ""))
         print(f"信封 {envelope:,}（账本 {state_tok:,} / 文件地图 {map_tok:,} / "
               f"todo {todo_tok:,}）")
         print(f"当前开放轮 {cur_tok:,}（{'进行中' if agent.current_round else '无'}）")
@@ -471,6 +492,13 @@ def report(task_id: str) -> None:
                   + f"　本域块 ID 保留 {kept} 个")
         except Exception as error:  # noqa: BLE001——体检不该因某节不可用而失败
             print(f"（域视图不可用：{error!r}）")
+
+
+def _v4_on() -> bool:
+    """V4 开关（取消重组 ＋ 整理停用）：仪器据此换压缩口径。"""
+    from wovra.agent.support import v4_enabled
+
+    return v4_enabled()
 
 
 def main() -> int:

@@ -835,16 +835,30 @@ class _CoreMixin:
         每次装配都调（一轮内多步、每步都装配）——故只更新最新值与峰值，
         不落盘；落盘由轮闭合时的 `save()` 一并带走（零额外 I/O）。
         """
-        entry = self._registry_entry_for(view)
-        if entry is None:
-            return
         size = int(size or 0)
-        entry["ctx_cur"] = size
-        if size > int(entry.get("ctx_peak") or 0):
-            entry["ctx_peak"] = size
-        # 窗口每次都校正（无条件写）：老会话的 registry 里存过水位 100K，
-        # 语义纠正后要随活动自然迁移到真实窗口，不能被旧值占住
-        entry["window"] = self._agent_window()
+        window = self._agent_window()
+        # **V4 取消重组 → 观察口径也跟着改**（2026-09-17）：所有 agent 装配的是
+        # 同一份共享历史，所以每个条目登记的观察值就是**这一份的体量**——只写
+        # 当前视图那一条，会让其余 agent 在页面/账本上显示 0（读起来像"没有
+        # 上下文"，其实它们共用同一份）。注意这仍是"观察"不是"各自的副本"。
+        targets = [entry for entry in (self.task.registry or [])
+                   if isinstance(entry, dict)] if (self.task is not None and v4_enabled()) else []
+        entry = self._registry_entry_for(view)
+        if entry is None and not targets:
+            return
+        if entry is not None and entry not in targets:
+            targets.append(entry)
+        if not targets:
+            return
+        for target in targets:
+            target["ctx_cur"] = size
+            if size > int(target.get("ctx_peak") or 0):
+                target["ctx_peak"] = size
+            # 窗口每次都校正（无条件写）：老会话的 registry 里存过水位 100K，
+            # 语义纠正后要随活动自然迁移到真实窗口，不能被旧值占住
+            target["window"] = window
+            if v4_enabled():
+                target["shared_ctx"] = True
 
     # `_account_agent_activity()`（轮闭合时把轮次/步数写进注册表条目）已删除
     # ——2026-09-12 用户拍板：账本**派生、不落盘**。写入式账有两个死结：

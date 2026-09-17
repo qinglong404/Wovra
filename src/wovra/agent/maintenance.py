@@ -772,20 +772,47 @@ class _MaintenanceMixin:
             self._org_inflight.add(int(r["seq"]))
         self._persist_rounds()
         ok = False
+        reason = ""
         try:
             ok = self._split_rounds(batch, None, snapshot)
         except Exception as error:  # noqa: BLE001——分裂失败不拖垮对话
+            reason = f"{type(error).__name__}: {str(error)[:150]}"
+            if self.task is not None:
+                self.task.record("split", f"V4 分裂异常：{reason}")
+        if not ok:
+            # **失败必留痕、且原因落在轮字段上**（2026-09-17 实测：某轮标了 failed，
+            # 但 history 里既没有"无可用产物"也没有异常记录，事后完全查不出原因——
+            # 并发写会丢 history 行，而**轮字段能活过并集合并**，故原因写轮上）。
+            reason = (reason or self._split_pending_reason(batch)
+                      or "分裂未返回可用产物（无异常、也没有留下原因记录）")
             if self.task is not None:
                 self.task.record(
-                    "split", f"V4 分裂异常：{type(error).__name__}: {str(error)[:150]}"
+                    "split",
+                    f"V4 分裂失败（{note_module.seq_span([int(r['seq']) for r in batch])}）："
+                    f"{reason}",
                 )
-        finally:
-            for r in batch:
-                self._org_inflight.discard(int(r["seq"]))
-                r["split_state"] = "ready" if ok else "failed"
-            self._persist_rounds()
+        for r in batch:
+            self._org_inflight.discard(int(r["seq"]))
+            r["split_state"] = "ready" if ok else "failed"
+            if ok:
+                r.pop("split_note", None)
+            else:
+                r["split_note"] = reason
+        self._persist_rounds()
         if ok:
             self._publish_product_early()
+
+    @staticmethod
+    def _split_pending_reason(batch: list[dict]) -> str:
+        """从轮上的暂存里捡失败原因（`_split_rounds` 的"无可用产物"会把原因写在那）。"""
+        for r in batch:
+            pending = r.get("pending_org")
+            if not isinstance(pending, dict):
+                continue
+            assessment = pending.get("split_assessment")
+            if isinstance(assessment, dict) and assessment.get("reason"):
+                return str(assessment["reason"])[:200]
+        return ""
 
     def _fold_keep_rounds(self) -> int:
         return int(getattr(self, "_fold_keep", _FOLD_KEEP_ROUNDS_DEFAULT))
@@ -1904,6 +1931,19 @@ class _MaintenanceMixin:
         # 产物截断只抢救出 22 个节点、另一次因两个历史文件落点被整批拒收）。
         # 没有节点声明到它的文件 → 仍走 `_auto_claim`（同目录 → 最近前缀 →
         # 机械桶），**绝不落主 agent**（2026-09-13 原口径不变）。
+        # **同名节点先归并**（2026-09-17 实测缺陷）：产物里同一个职责被写成两个同名顶层
+        # 节点（各带一片路径）时，落地会造出**两个同名 agent**——而路由/页面/执行者索引
+        # 全都按名字认人，同名即无法区分（"谁更深入了解哪一块"整张索引废掉一半）。
+        # 归并是纯机械的（同名同父 → 合一，路径/文件/块取并集），不信模型自觉。
+        merged_notes = self._merge_same_name_domains(domains)
+        if merged_notes and self.task is not None:
+            for n in merged_notes[:6]:
+                self.task.record("maintenance", f"split：{n}")
+            if len(merged_notes) > 6:
+                self.task.record(
+                    "maintenance",
+                    f"split：{merged_notes[0]}（等 {len(merged_notes)} 条，同类的见上）",
+                )
         bind_notes, uncovered_by_scope = self._bind_files_by_path(domains)
         if bind_notes and self.task is not None:
             for n in bind_notes[:6]:
@@ -2239,6 +2279,64 @@ class _MaintenanceMixin:
         if isinstance(unassigned, dict):
             _check(unassigned.get("block_ids"), "unassigned.block_ids")
         return defects
+
+    @staticmethod
+    def _merge_same_name_domains(domains: list) -> list[str]:
+        """**同名同父的节点合成一个**（原地改 `domains`，零 LLM）。
+
+        动机（2026-09-17 实测）：产物里「上下文装配与附件注入」出现两次（各带一片路径），
+        落地造出两个同名 agent（A/B），职责表按名字合并 → 两条拿到同一段描述、文件各拿
+        一半，而名字是路由与执行者索引的唯一身份。语义上"一个职责多条路径"本就该用一个
+        节点写（`paths` 数组），故这里按 (父, 名) 归并：路径/文件/块/描述取并集。
+
+        返回留痕（每条一句）。
+        """
+        groups: dict[tuple[str, str], list[dict]] = {}
+        for node in domains:
+            if not isinstance(node, dict) or not node.get("name"):
+                continue
+            groups.setdefault(
+                (str(node.get("parent") or ""), str(node.get("name"))), []
+            ).append(node)
+        notes: list[str] = []
+        for (parent, name), nodes in groups.items():
+            if len(nodes) < 2:
+                continue
+            keep = nodes[0]
+            paths: list[str] = []
+            for node in nodes:
+                for value in ([node.get("path")]
+                              + list(node.get("paths") or [])):
+                    text = str(value or "").strip()
+                    if text and text not in paths:
+                        paths.append(text)
+            if paths:
+                if len(paths) == 1:
+                    keep["path"] = paths[0]
+                    keep.pop("paths", None)
+                else:
+                    keep["paths"] = paths
+                    keep.pop("path", None)
+            for field in ("files", "history_files", "file_domains",
+                          "block_ids", "chat_block_ids", "user_block_ids"):
+                union: list[str] = []
+                for node in nodes:
+                    for value in node.get(field) or []:
+                        if value not in union:
+                            union.append(value)
+                if union:
+                    keep[field] = union
+            descriptions = [
+                str(n.get("description") or "").strip() for n in nodes
+            ]
+            keep["description"] = max(descriptions, key=len) if descriptions else ""
+            for node in nodes[1:]:
+                domains.remove(node)
+            text = f"同名节点归并：「{name}」×{len(nodes)} → 1"
+            if paths:
+                text += f"（路径 {'、'.join(paths)}）"
+            notes.append(text)
+        return notes
 
     def _bind_files_by_path(self, domains: list) -> list[str]:
         """把**每个活性文件**按节点声明的 `path`/`paths` 机械归属（最深前缀优先）。
