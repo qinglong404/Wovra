@@ -1457,7 +1457,62 @@ def test_views_payload_is_fork_aware(monkeypatch):
     payload = serve_module._shared_views_payload(_Agent(), _Task())
 
     assert payload["shared"] is False
+    # `forked` 是独立标志：前端据此走"各自一份"的渲染，不能把 shared=False
+    # 当成旧链路（那会去读 legacy 才有的 count/total_chars → 显示 0 条 0 字符）
+    assert payload["forked"] is True
     rows = {r["id"]: r for r in payload["agents"]}
     assert rows["A"]["tokens"] == 420 and rows["A"]["forked_at"] == 3
     assert rows["Main"]["tokens"] == 900
     assert "fork" in payload["note"]
+
+
+def test_view_sizes_carries_forked_flag(monkeypatch, tmp_path):
+    """`view_sizes` 要把 `forked` 透给前端（状态栏靠它区分"各自一份"与旧链路）。"""
+    from wovra import serve as serve_module
+
+    monkeypatch.setattr(serve_module, "pending_views", lambda tid: {
+        "agents": [{"id": "A", "name": "附件", "is_main": False,
+                    "tokens": 420, "forked_at": 3}],
+        "shared": False, "forked": True, "window": 1_000_000, "note": "fork 后各自一份",
+    })
+    tid = "s-fork-size"
+    (tmp_path / tid).mkdir()
+    (tmp_path / tid / "task.json").write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+
+    out = serve_module.view_sizes(tid)
+
+    assert out["shared"] is False and out["forked"] is True
+    assert out["note"] == "fork 后各自一份"
+    assert out["agents"][0]["tokens"] == 420
+
+
+def test_v4_view_messages_gives_fork_baseline_not_domain_view(monkeypatch):
+    """V4 下"这个 agent 看到什么"＝它的 fork 基线（或共享历史），
+
+    不再拿 `_assemble_view_messages` 的按域视图冒充（那条路运行时已经不走）。
+    """
+    from wovra import serve as serve_module
+
+    monkeypatch.setenv("WOVRA_V4", "1")
+
+    class _Task:
+        rounds = [{"seq": 1}]
+
+    class _Agent:
+        current_round = None
+
+        def _fork_baseline(self, view, past):
+            return [{"role": "user", "content": f"{view} 自己的轮"}] if view == "A" else None
+
+        def _assemble_messages(self):
+            return [{"role": "user", "content": "共享历史"}]
+
+        def _assemble_view_messages(self, view, past):
+            raise AssertionError("V4 不该再物化按域视图")
+
+    msgs, note = serve_module._v4_view_bytes(_Agent(), _Task(), "A")
+    assert msgs[0]["content"] == "A 自己的轮" and "fork" in note
+
+    msgs, note = serve_module._v4_view_bytes(_Agent(), _Task(), "Main")
+    assert msgs[0]["content"] == "共享历史" and "共享历史" in note

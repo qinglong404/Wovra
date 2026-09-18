@@ -695,14 +695,6 @@ def executor_index_lines(
     return lines
 
 
-def answer_view(r: dict, lookup: Optional[dict] = None) -> str:
-    """一轮**最后由谁在干活**（事件流分段里的最后一段）。"""
-    segs = round_step_segments(r, lookup)
-    if segs:
-        return segs[-1][0]
-    return str(lookup.get(str(r.get("route_explicit") or "").strip()) or MAIN_AGENT_ID)
-
-
 def _ledger_roster(
     domains: Iterable[dict] | None, registry: Iterable[dict] | None
 ) -> tuple[list[dict], dict[str, str]]:
@@ -746,13 +738,6 @@ def _ledger_roster(
         if aid:
             lookup[aid] = name
     return roster, lookup
-
-
-def agent_lookup(
-    domains: Iterable[dict] | None = None, registry: Iterable[dict] | None = None
-) -> dict[str, str]:
-    """「视图串（域名或 ID）→ 名册名」查表——消费方复用同一套归属判据。"""
-    return _ledger_roster(domains, registry)[1]
 
 
 def _round_generation_of(r: dict) -> int:

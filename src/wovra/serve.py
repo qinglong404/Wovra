@@ -1127,7 +1127,7 @@ def _shared_views_payload(agent, task) -> dict:
                 "forked_at": int(e.get("forked_at") or 0),
             })
         return {
-            "agents": rows, "shared": False,
+            "agents": rows, "shared": False, "forked": True,
             "window": int(agent._agent_window()),
             "note": "各 agent 已有自己的上下文（首次激活＝fork：公共上下文快照 ＋ 自己的职责，"
                     "之后自己干的轮全量、别人干的轮只进一段话）；数字是各自最近一次装配的体量",
@@ -1222,6 +1222,9 @@ def view_sizes(task_id: str) -> dict | None:
     except Exception:  # noqa: BLE001——拿不到就留 0，前端按"无分母"渲染
         window = int(got.get("window") or 0)
     shared = bool(got.get("shared"))
+    # `forked` 与 `shared=False` 是两回事：fork 之后各家**各有各的**上下文（给的是
+    # 逐 agent 的实测体量），旧链路才是"按域重组"。前端据这两个标志分别渲染。
+    forked = bool(got.get("forked"))
     out = {"agents": [{k: a.get(k) for k in
                        ("id", "name", "is_main", "count", "total_chars",
                         "tokens", "alt_count", "alt_chars",
@@ -1229,8 +1232,8 @@ def view_sizes(task_id: str) -> dict | None:
                       for a in got.get("agents") or []],
            "window": window, "basis": basis,
            "pending": True,
-           "shared": shared,
-           "note": (got.get("note") if shared else
+           "shared": shared, "forked": forked,
+           "note": (got.get("note") if (shared or forked) else
                     "零 LLM 机械投影：在内存里按当前注册表 + 轮材料装配各视图"
                     "所得（会话一个字节都不改）")}
     with _VIEW_SIZES_LOCK:
@@ -1475,10 +1478,29 @@ def round_detail(data: dict, seq: int,
     return None
 
 
-def view_messages(task_id: str, view: str) -> dict | None:
-    """物化某个 agent 的上下文视图（= 路由到它时模型所见，确定性派生）。
+def _v4_view_bytes(agent, task, view: str) -> tuple[list[dict] | None, str]:
+    """V4 下"这个 agent 会看到的那一份"（取消重组后，按域视图不再存在）。
 
-    用于人工检查分裂/重组后的视图是否正确。view 先按域名再按 id 尝试。
+    `forked_at > 0` 的给**它的 fork 基线**（自己干的轮全量、别人干的轮一段话）；
+    其余（未激活 / 主 agent）给**共享历史**——两者都是运行时真正发出去的那一份。
+    返回 `(messages, 说明)`；materialize 失败返 `(None, "")`。
+    """
+    try:
+        base = agent._fork_baseline(view, task.rounds or [])
+    except Exception:  # noqa: BLE001——诊断端点不该因单条材料出错而整体失败
+        return None, ""
+    if base is None:
+        return agent._assemble_messages(), (
+            f"V4 取消重组：{view} 尚未激活（零成本待命），与所有 agent 共用同一份"
+            "共享历史——以下就是运行时真正发出去的那一份")
+    return base, (f"{view} 已 fork：自己干的轮全量原文、别人干的轮只进一段话"
+                  "（内容可丢、存在性不可丢）——以下是它真正会看到的那一份")
+
+
+def view_messages(task_id: str, view: str) -> dict | None:
+    """物化某个 agent 的上下文（= 路由到它时模型所见，确定性派生）。
+
+    用于人工检查分裂后的上下文是否正确。view 先按域名再按 id 尝试。
     """
     from .agent import MODE_MANAGED
     from .cli.prompt import _build_agent  # 懒导入：避免 cli↔serve 循环依赖
@@ -1497,6 +1519,15 @@ def view_messages(task_id: str, view: str) -> dict | None:
                 break
     agent = _build_agent(task, mode=task.mode or MODE_MANAGED)
     agent.current_round = None
+    if _v4_on():
+        msgs, note = _v4_view_bytes(agent, task, view)
+        if msgs is None:
+            return {"view": view, "available": False, "messages": [],
+                    "total_chars": 0, "note": "材料装不出来（见 history 里的留痕）"}
+        return {"view": view, "available": True, "note": note,
+                "messages": [{"role": m.get("role"),
+                              "content": m.get("content", "")} for m in msgs],
+                "total_chars": sum(len(m.get("content", "")) for m in msgs)}
     msgs = agent._assemble_view_messages(view, task.rounds or [])
     if msgs is None:
         return {"view": view, "available": False, "messages": [],
@@ -1534,15 +1565,24 @@ def context_dump(task_id: str, mode: str = "view",
         note = ("全量原文：所有轮事件未经整理/压缩（未整理轮原样、已整理轮也按原文）"
                 "——与模型当前实际所见不同，仅供对照")
     elif view:
-        got = agent._assemble_view_messages(view, task.rounds or [])
-        if got is None:
-            # 无独立视图（未分裂/视图降级）：回退到主装配——用户要的是
-            # "这个 agent 现在看到什么"，不是一句"不可用"
-            msgs = agent._assemble_messages()
-            note = (f"{view} 无独立视图（未分裂或走全量路径）——"
-                    "以下为主装配视图（整理/压缩生效后）")
-        else:
+        if _v4_on():
+            # V4 取消按域重组：`_assemble_view_messages` 那条路运行时不再走，
+            # 拿它当"这个 agent 看到什么"会给出没人会看到的一份。
+            got, note = _v4_view_bytes(agent, task, view)
+            if got is None:
+                got = agent._assemble_messages()
+                note = "材料装不出来，以下是共享历史（主装配）"
             msgs = got
+        else:
+            got = agent._assemble_view_messages(view, task.rounds or [])
+            if got is None:
+                # 无独立视图（未分裂/视图降级）：回退到主装配——用户要的是
+                # "这个 agent 现在看到什么"，不是一句"不可用"
+                msgs = agent._assemble_messages()
+                note = (f"{view} 无独立视图（未分裂或走全量路径）——"
+                        "以下为主装配视图（整理/压缩生效后）")
+            else:
+                msgs = got
     else:
         msgs = agent._assemble_messages()
         note = "当前装配视图：整理/压缩/分档生效后，模型下一轮实际会看到的上下文"

@@ -388,6 +388,22 @@ check('E 在途', html, 2);
 if (!html.includes('投影计算中')) problems.push('E: 在途时没显示"投影计算中"');
 if (html.includes('无数据')) problems.push('E: 在途时显示了"无数据"（会被读成还是没有）');
 
+console.log('场景 E2｜V4 fork 之后（各家有自己的上下文）');
+META = { id:'s4', registry:[
+  {id:'Main', name:'主agent', status:'active', ctx_cur:120000, ctx_peak:130000, window:1000000, rounds:9, steps:40},
+  {id:'A', name:'附件', status:'active', ctx_cur:42000, ctx_peak:46000, window:1000000, rounds:3, steps:11, forked_at:3}],
+  round_list:[] };
+VIEWSIZES = { sig:'f', window:1000000, basis:'tiktoken:cl100k_base', shared:false, forked:true,
+  agents:[{id:'Main', name:'主agent', is_main:true, count:0, total_chars:0, tokens:120000, forked_at:0},
+          {id:'A', name:'附件', is_main:false, count:0, total_chars:0, tokens:42000, forked_at:3}],
+  note:'各 agent 已有自己的上下文' };
+renderCtxbar();
+html = byId('ctxbar').innerHTML;
+check('E2 各家一行', html, 2);
+if (!html.includes('120K') || !html.includes('42K')) problems.push('E2: 各家实测体量没显示');
+if (html.includes('0 条消息')) problems.push('E2: 读了 fork 行没有的 count（显示 0 条消息）');
+if (html.includes('重组后')) problems.push('E2: fork 会话仍写"重组后"（V4 没有重组这回事）');
+
 console.log('场景 D｜project 面板的注册表卡片');
 META = { id:'s1', registry:[
   {id:'Main', name:'主agent', status:'active', ctx_cur:235398, ctx_peak:235398, window:1000000, rounds:0, steps:208, files:[], history_files:[]},
@@ -2248,7 +2264,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（50 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（51 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
 });
 """
 
