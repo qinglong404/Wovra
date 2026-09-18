@@ -2769,6 +2769,7 @@ function renderOpenBar(){
   const tip='上一轮还没有产出最终回答（中断或步数用尽），所以它还开着：\n'
     +'• 直接发新消息 = 并入这一轮，由**当前执行方**接着处理（不新开一轮、不重新判路由）\n'
     +'• 点「续跑」= 不注入新消息，直接接着干（与 /c 等价）\n'
+    +'• 两种方式都重新给一段步数预算（轮上累计的步数照记）\n'
     +(hops>0?`• 本轮内已转交 ${hops} 次；当前执行方是最后一次接手的那位（轮头有"Main → X"）\n`:'');
   bar.innerHTML=`<span class="ob-tag">⏸ R${esc(String(last.seq))} 未闭合</span>`+
     `<span class="ob-sub">· 当前执行方 ${whoTxt}${hopNote} · 新消息将并入本轮</span>`+

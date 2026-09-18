@@ -1348,6 +1348,9 @@ class _CoreMixin:
             # agent），**再**判本轮，本轮才能粘到补判结果上。补判是纯函数、
             # 零 LLM、不改消息字节，只归位不重做活。
             self._settle_and_route(user_input)
+        else:
+            # 新输入并入开放轮 = 这一轮的新一段：步数预算重新计数（同 `resume()`）
+            self._start_step_segment()
         # 轮次与会话绑定（rounds 的 seq 随会话持久化）——进程内计数会在
         # 退出重开后归零，长会话的"第 N 轮"就错了（实测教训）
         self.turn_count = self.current_round["seq"]
@@ -1423,7 +1426,25 @@ class _CoreMixin:
         # 协议消息从事件的 Full 中重建（它们就是事实来源）
         self.messages = [e["message"] for e in last["events"]]
         self.turn_count = last["seq"]
+        self._start_step_segment()
         return self._work_loop(on_thinking, on_answer_delta)
+
+    def _start_step_segment(self) -> None:
+        """进入本轮的**新一段**工作：把步数预算的起点记在当前累计步数上。
+
+        一个轮可以跨多段（步数用尽 → 续跑／新输入并入），**每段各有一份 `max_turns`
+        预算**；`steps_used` 仍按轮累计（展示与分账口径不变，见 `_work_loop`）。
+        调用点＝每段的入口：`resume()`（`\\继续`／`/c`）与 `run()` 续上开放轮那一路。
+
+        用户口径（2026-09-18）："点续跑 200 步重新计数"。此前预算是**属于轮**的
+        （2026-09-09 拍板）——轮上记满 200 之后 `\\c` 一次都进不去循环，直接抛上限，
+        表现就是"点续跑立马退回"（实测会话 `20260918-104931-987e97`）。
+        """
+        if self.current_round is None:
+            return
+        self.current_round["steps_base"] = int(
+            self.current_round.get("steps_used") or 0
+        )
 
     def _work_loop(
         self,
@@ -1452,12 +1473,14 @@ class _CoreMixin:
         # 让子 agent 的输出直接进用户窗口（不打回主 agent 再路由）
         self._stream_cbs = {"thinking": on_thinking, "answer": on_answer_delta}
 
-        # 步数按轮累计（2026-09-09 用户拍板：同一轮被打断后 \c 续跑要
-        # 续上——预算属于轮而不属于段；记在 round 上随持久化，进程重启
-        # 后也续。里程碑轮开新轮 = 新预算）
+        # 步数按轮**累计**（记在 round 上随持久化，进程重启后也续；展示与分账口径）
+        # ——但**预算按段**重新计数（2026-09-18 用户口径："点续跑 200 步重新计数"）：
+        # 每段的起点由 `_start_step_segment` 推上来（`resume()`／新输入并入开放轮）。
+        # 此前预算也属于轮（2026-09-09 口径），轮上记满 200 后续跑一次都进不去循环。
         steps_used = (self.current_round or {}).get("steps_used", 0)
+        base = int((self.current_round or {}).get("steps_base") or 0)
         self.last_stats["llm_calls"] = steps_used  # 展示口径同步续上
-        while steps_used < self.max_turns:
+        while steps_used - base < self.max_turns:
             steps_used += 1
             if self.current_round is not None:
                 self.current_round["steps_used"] = steps_used
@@ -1580,8 +1603,9 @@ class _CoreMixin:
         # 由调用方决定后续（重试/人工介入）。
         self._persist_rounds()
         raise RuntimeError(
-            f"本轮已累计工作 {steps_used} 步（达到上限 {self.max_turns}）仍未给出"
-            f"最终回答（Round 保持开放，\\c 续跑会接着这个步数计数）"
+            f"本段已工作 {steps_used - base} 步（达到上限 {self.max_turns}；"
+            f"本轮累计 {steps_used} 步）仍未给出最终回答"
+            f"（Round 保持开放，\\c 续跑会从新的一段起重新计数）"
         )
 
     def label_blocks(self, rounds: Optional[list[dict]] = None) -> dict:

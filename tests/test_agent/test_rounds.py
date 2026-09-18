@@ -210,32 +210,69 @@ def test_turn_count_is_session_bound_across_restarts(monkeypatch, tmp_path):
     assert agent2.last_stats["turn"] == 2  # 修复前：进程内计数归零显示 1
 
 
-def test_step_count_continues_across_resume(monkeypatch, tmp_path):
-    """同一轮被打断后 \c 续跑：步数按轮累计续上（预算属于轮不属于段），
-    超限按累计数报。"""
+def test_step_budget_restarts_per_segment_on_resume(monkeypatch, tmp_path):
+    """续跑的步数预算**从新的一段重新计数**（2026-09-18 用户口径："点续跑 200 步重新计数"）。
+
+    `steps_used` 仍按轮**累计**（展示与分账口径，2026-09-09 那条保留）；变的是**限制**：
+    每段各有一份 `max_turns`。此前预算也属于轮——轮上记满以后 `\\c` 一次都进不去循环、
+    直接抛上限，表现就是"点续跑立马退回"（实测会话 `20260918-104931-987e97`）。
+    """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+
+    def noop():
+        """什么也不做。"""
+
+    def _tool_step():
+        return [_chunk(_delta(tool_calls=[
+            _fragment(0, id="c1", name="noop", arguments="{}"),
+        ]))]
+
     task = Task.create(goal="目标")
     agent = Agent(llm=_StubLLM([
-        [_chunk(_delta(content="R1"))],
-        [_chunk(_delta(content="续跑完成"))],
-    ]), tools=[], task=task, max_turns=5)
+        _tool_step(), _tool_step(),               # 第一段：2 步用尽（max_turns=2）
+        [_chunk(_delta(content="续跑完成"))],      # 第二段：第 1 步就给出最终回答
+    ]), tools=[noop], task=task, max_turns=2)
 
-    agent.run("开始")                          # R1：1 步，闭合
-    assert task.rounds[0]["steps_used"] == 1
+    with pytest.raises(RuntimeError) as excinfo:
+        agent.run("开始")
+    assert "本段已工作 2 步" in str(excinfo.value)
+    assert task.rounds[-1]["end_state"] == "open"
+    assert task.rounds[-1]["steps_used"] == 2
 
-    agent._open_or_reuse_round("继续干")        # 新开放轮，模拟已用 4 步被打断
-    agent.current_round["steps_used"] = 4
-    agent.resume()                             # 续跑只剩 1 步预算
+    agent.resume()                                 # 续跑 = 新的一段
 
     assert task.rounds[-1]["end_state"] == "completed"
-    assert task.rounds[-1]["steps_used"] == 5  # 4+1 续上，没有重置
+    assert task.rounds[-1]["steps_used"] == 3      # 计数按轮累计（2+1），没有重置
+    assert task.rounds[-1]["steps_base"] == 2      # 但本段预算是从第 3 步起算的
 
-    # 已达上限再续：按累计数报超限
-    agent._open_or_reuse_round("再续")
-    agent.current_round["steps_used"] = 5
-    with pytest.raises(RuntimeError) as excinfo:
-        agent.resume()
-    assert "累计工作 5 步" in str(excinfo.value)
+
+def test_new_input_into_open_round_also_gets_a_fresh_budget(monkeypatch, tmp_path):
+    """新输入**并入开放轮**（不新开一轮）同样重新给一段预算——同一个坑的另一条入口。"""
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
+
+    def noop():
+        """什么也不做。"""
+
+    def _tool_step():
+        return [_chunk(_delta(tool_calls=[
+            _fragment(0, id="c1", name="noop", arguments="{}"),
+        ]))]
+
+    task = Task.create(goal="目标")
+    agent = Agent(llm=_StubLLM([
+        _tool_step(),                             # 第一段：1 步用尽（max_turns=1）
+        [_chunk(_delta(content="接着干完了"))],     # 新输入这一段：第 1 步给出最终回答
+    ]), tools=[noop], task=task, max_turns=1)
+
+    with pytest.raises(RuntimeError):
+        agent.run("开始")
+    assert len(task.rounds) == 1
+
+    agent.run("接着干")                            # 并入同一个开放轮
+
+    assert len(task.rounds) == 1                   # 没新开一轮
+    assert task.rounds[-1]["end_state"] == "completed"
+    assert task.rounds[-1]["steps_used"] == 2
 
 
 def test_step_count_excludes_organization_calls(monkeypatch, tmp_path):
