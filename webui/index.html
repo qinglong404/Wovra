@@ -462,6 +462,33 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 .cfg-foot .msg.warn{color:var(--gold)}
 .cfg-foot .msg.bad{color:var(--red)}
 .cfg-foot .chip{cursor:pointer;flex-shrink:0}
+
+/* ---------- 渠道商区块（配置页顶部）：多份端点/密钥/模型，可增删改与检测 ---------- */
+.prov-list{display:flex;flex-direction:column;gap:8px}
+.prov-card{border:1px solid var(--line);border-radius:9px;background:var(--bg2);padding:9px 11px}
+.prov-card.on{border-color:var(--acc-dim);box-shadow:inset 2px 0 0 var(--acc)}
+.prov-head{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.prov-head b{font-size:12.5px}
+.prov-head .id{font-family:var(--mono);font-size:10.5px;color:var(--tx3)}
+.prov-head .spacer{flex:1}
+.prov-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin-top:8px}
+@media (max-width:760px){.prov-grid{grid-template-columns:1fr}}
+.prov-grid label{display:block;font-size:10.5px;color:var(--tx3);font-family:var(--mono);margin-bottom:3px}
+.prov-grid input,.prov-grid textarea{width:100%;background:var(--bg1);border:1px solid var(--line2);border-radius:7px;color:var(--tx);padding:6px 9px;font-family:var(--mono);font-size:11.5px;outline:none}
+.prov-grid input:focus,.prov-grid textarea:focus{border-color:var(--acc-dim)}
+/* 占位（掩码/示例）要比真值暗：否则 `******c300` 看着就像"已经填了"，
+   而它的含义恰恰是"留空=不改" */
+.prov-grid input::placeholder,.cfg-input::placeholder{color:var(--tx3);opacity:.75}
+/* 「端点」独占一行：长 URL 在一列里会被截断显示（值是全的，但看不出是哪个端点） */
+.prov-grid .wide{grid-column:1/-1}
+.prov-grid textarea{resize:vertical;min-height:46px;line-height:1.5}
+.prov-foot{display:flex;align-items:center;gap:7px;margin-top:8px;flex-wrap:wrap}
+.prov-foot .cfg-mini{border:1px solid var(--line);padding:2px 8px}
+.prov-res{font-size:11px;font-family:var(--mono);margin-top:6px;line-height:1.6;color:var(--tx2);word-break:break-word}
+.prov-res.ok{color:var(--teal)}
+.prov-res.bad{color:var(--red)}
+.model-pick{background:var(--bg2);border:1px solid var(--line2);border-radius:7px;color:var(--tx);font-size:11px;font-family:var(--mono);padding:2px 6px;outline:none;max-width:190px}
+.model-pick:focus{border-color:var(--acc-dim)}
 </style>
 </head>
 <body>
@@ -527,7 +554,7 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
     <div class="cfg-foot">
       <span class="msg" id="cfg-msg"></span>
       <span class="chip" onclick="loadConfig()">↻ 重新读取</span>
-      <span class="chip acc" onclick="saveConfig()">保存</span>
+      <span class="chip acc" onclick="saveConfig()">保存参数</span>
     </div>
   </div>
 </div>
@@ -749,6 +776,7 @@ async function select(id){
   CUR=id;renderList();
   try{META=await api('/api/sessions/'+id)}catch(e){$('#content').innerHTML='<div class="empty">加载失败</div>';return}
   buildReg();
+  await loadProvidersForPicker();   // 顶栏那两个下拉要知道当前渠道商有哪些模型
   AGENT_STATS=META.agent_stats||[];
   if(META.live_job&&!LIVE.job){
     liveAttach(META.live_job);   // 页面刷新后重新挂上直播
@@ -787,6 +815,44 @@ function renderKpis(u,rounds,tools,live){
     +`<div class="v">${v}<small>${sfx}</small></div><div class="k">${k}${live?' ⟳':''}</div></div>`
   ).join('');
 }
+/* ---------- 聊天页顶栏：模型与思考强度（会话级，下一轮生效） ----------
+   模型清单来自 current 渠道商的 models；两个下拉都写本会话的 task.json 字段，
+   落盘后下一轮重建 agent 时生效——所以标题里写明"下一轮"。 */
+let PROVS=null;
+const REASON_LABEL={off:'思考：关',auto:'思考：自动',high:'思考：高'};
+function modelPickerHtml(){
+  const p=(PROVS&&(PROVS.providers||[]).find(x=>x.id===PROVS.current))||null;
+  const models=(p&&p.models)||[];
+  const cur=META.model||(models[0]||'');
+  if(!models.length){
+    return `<span class="chip" title="还没有渠道商模型——点左上 ⚙ 配置">模型：未配置</span>`;
+  }
+  const lvl=META.reasoning||'auto';
+  return `<select class="model-pick" id="pick-model" title="本会话的模型（下一轮生效，切会话即切）">`
+    + models.map(m=>`<option value="${esc(m)}"${m===cur?' selected':''}>${esc(m)}</option>`).join('')
+    + `</select>`
+    + `<select class="model-pick" id="pick-reason" title="本会话的思考强度（下一轮生效）">`
+    + ['off','auto','high'].map(k=>`<option value="${k}"${k===lvl?' selected':''}>${REASON_LABEL[k]}</option>`).join('')
+    + `</select>`;
+}
+function bindModelPicker(){
+  const m=$('#pick-model'), r=$('#pick-reason');
+  if(m)m.addEventListener('change',()=>saveModelPick({model:m.value}));
+  if(r)r.addEventListener('change',()=>saveModelPick({reasoning:r.value}));
+}
+async function saveModelPick(patch){
+  try{
+    const res=await fetch(`/api/sessions/${CUR}/model`,{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(patch)}).then(x=>x.json());
+    if(!res.ok){toast(res.error||'保存失败');return}
+    META.model=res.model;META.reasoning=res.reasoning;
+    toast('已切到 '+(patch.model||REASON_LABEL[res.reasoning]||'')+'——下一轮生效');
+  }catch(e){toast('保存失败：'+e.message)}
+}
+async function loadProvidersForPicker(){
+  try{ PROVS=await api('/api/providers'); }catch(e){ PROVS=null; }
+}
+
 function renderHeader(){
   // 没有会话元数据就什么都不做（2026-09-13）：渲染入口不对"数据还没到"负责
   if(!META)return;
@@ -806,11 +872,13 @@ function renderHeader(){
   $('#chips').innerHTML=st+
     `<span class="chip mono" title="点击复制" style="cursor:pointer" onclick="copySid(this)">⧉ ${esc(META.id)}</span>`+
     `<span class="chip acc">${esc(META.mode||'managed')}</span>`+
+    modelPickerHtml()+
     `<span class="chip" title="工作目录 ${esc(META.workspace)}">📁 ${esc(wsMid(META.workspace))}</span>`+
     `<span class="chip">更新 ${fmtT(META.updated_at)}</span>`+
     (META.escalations?`<span class="chip bad">◉ ${META.escalations} 项待拍板</span>`:'')+
     (META.todo_milestone?`<span class="chip warn">阶段进行中</span>`:'')+
     `<span class="chip bad" style="cursor:pointer;margin-left:auto" onclick="deleteSession('${META.id}')">删除会话</span>`;
+  bindModelPicker();
   renderKpis(u,META.rounds,tools,'');
   if(META.maint&&META.maint.active)applyMaint(META.maint);
   const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['project','项目'],['usage','用量']];
@@ -3741,6 +3809,7 @@ async function loadConfig(){
   try{ CFG=await api('/api/settings'); }catch(e){
     body.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>';return;
   }
+  try{ PROV=await api('/api/providers'); }catch(e){ PROV=null; }
   $('#cfg-file').textContent=CFG.env_file||'';
   const msg=$('#cfg-msg');
   const pend=CFG.pending_restart||[];
@@ -3748,6 +3817,119 @@ async function loadConfig(){
   msg.textContent=pend.length?`${pend.length} 项在 .env 里改过、进程还没吃上：重启后生效`:'';
   msg.dataset.lock=pend.length?'1':'';   // 待重启提示比"待保存计数"重要，别被它顶掉
   renderConfig();
+}
+
+/* ---------- 渠道商（多端点/密钥/模型，可切换与检测） ----------
+   密钥一律只显掩码、留空=不改（与 .env 里的密钥同一套口径）；
+   增删改即时落盘 providers.json，不走"保存参数"那个按钮。 */
+let PROV=null;
+function provCard(p){
+  const on=PROV&&PROV.current===p.id;
+  const models=(p.models||[]).join('\n');
+  return `<div class="prov-card${on?' on':''}" data-prov="${esc(p.id)}">
+    <div class="prov-head">
+      ${on?'<span class="cfg-badge b-live">当前</span>':'<span class="cfg-mini" data-use="'+esc(p.id)+'" style="cursor:pointer">设为当前</span>'}
+      <b>${esc(p.name||p.id)}</b><span class="id">${esc(p.id)}</span>
+      <span class="spacer"></span>
+      <span class="cfg-mini" data-fetch="${esc(p.id)}" style="cursor:pointer">⤓ 拉取模型</span>
+      <span class="cfg-mini" data-test="${esc(p.id)}" style="cursor:pointer">⚡ 测试</span>
+      <span class="cfg-mini" data-del="${esc(p.id)}" style="cursor:pointer">删除</span>
+    </div>
+    <div class="prov-grid">
+      <div><label>名称</label><input data-p="${esc(p.id)}" data-pf="name" value="${esc(p.name||'')}"></div>
+      <div><label>密钥（留空=不改）</label><input data-p="${esc(p.id)}" data-pf="api_key" value="" placeholder="${p.set?esc(p.masked):'（未设置）'}"></div>
+      <div><label>思考强度字段</label><input data-p="${esc(p.id)}" data-pf="reasoning_field" value="${esc(p.reasoning_field||'auto')}" placeholder="auto / thinking / reasoning_effort"></div>
+      <div class="wide"><label>端点 base_url</label><input data-p="${esc(p.id)}" data-pf="base_url" value="${esc(p.base_url||'')}" placeholder="https://api.example.com/v1"></div>
+      <div class="wide"><label>模型（每行一个）</label>
+        <textarea data-p="${esc(p.id)}" data-pf="models" placeholder="deepseek-chat">${esc(models)}</textarea></div>
+    </div>
+    <div class="prov-foot">
+      <span class="cfg-mini" data-save="${esc(p.id)}" style="cursor:pointer">保存这条</span>
+      <span class="prov-res" data-res="${esc(p.id)}"></span>
+    </div>
+  </div>`;
+}
+function renderProviders(){
+  const box=$('#cfg-prov');
+  if(!box)return;
+  if(!PROV){box.innerHTML='';return}
+  const list=(PROV.providers||[]);
+  box.innerHTML=`<div class="cfg-group" data-group="providers">
+      <h5>模型渠道商${PROV.from_env?'（尚未生成 providers.json，下面的清单来自 .env）':''}</h5>
+      <div style="font-size:11px;color:var(--tx3);margin:-2px 0 8px;line-height:1.6">
+        多份端点/密钥/模型，聊天页按会话选。密钥存在 <span class="mono">${esc(PROV.file)}</span>（不进版本库）。</div>
+      <div class="prov-list">${list.map(provCard).join('')||'<div class="empty" style="padding:14px 0">还没有渠道商——点下面「＋ 新增」</div>'}</div>
+      <div class="prov-foot"><span class="chip" style="cursor:pointer" onclick="provAdd()">＋ 新增</span></div>
+    </div>`;
+  bindProviders();
+}
+function provValues(id){
+  const card=$(`#cfg-prov .prov-card[data-prov="${id}"]`);
+  const out={id};
+  if(!card)return out;
+  card.querySelectorAll('[data-pf]').forEach(el=>{
+    const k=el.dataset.pf;
+    out[k]=k==='models'?String(el.value||'').split('\n').map(s=>s.trim()).filter(Boolean):el.value;
+  });
+  return out;
+}
+function bindProviders(){
+  const box=$('#cfg-prov');
+  box.querySelectorAll('[data-save]').forEach(el=>el.addEventListener('click',()=>provSave(el.dataset.save)));
+  box.querySelectorAll('[data-del]').forEach(el=>el.addEventListener('click',()=>provDelete(el.dataset.del)));
+  box.querySelectorAll('[data-use]').forEach(el=>el.addEventListener('click',()=>provPost({action:'current',id:el.dataset.use})));
+  box.querySelectorAll('[data-fetch]').forEach(el=>el.addEventListener('click',()=>provFetch(el.dataset.fetch)));
+  box.querySelectorAll('[data-test]').forEach(el=>el.addEventListener('click',()=>provTest(el.dataset.test)));
+}
+function provRes(id,text,cls){
+  const el=$(`#cfg-prov [data-res="${id}"]`);
+  if(el){el.className='prov-res'+(cls?' '+cls:'');el.textContent=text}
+}
+async function provPost(payload){
+  try{
+    const r=await fetch('/api/providers',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}).then(x=>x.json());
+    if(r.providers)PROV=r;
+    return r;
+  }catch(e){toast('渠道商保存失败：'+e.message);return null}
+}
+async function provSave(id){
+  const entry=provValues(id);
+  const r=await provPost({provider:entry});
+  if(!r)return;
+  renderProviders();
+  toast('已保存渠道商 '+(entry.name||id));
+}
+async function provDelete(id){
+  if(!confirm('删除渠道商 '+id+'？（它的密钥与模型清单一起删掉）'))return;
+  await provPost({action:'remove',id});
+  renderProviders();
+}
+async function provAdd(){
+  const r=await provPost({provider:{name:'新渠道商',base_url:'',api_key:'',models:[]}});
+  if(r)renderProviders();
+}
+async function provFetch(id){
+  provRes(id,'拉取模型中…');
+  try{
+    const r=await api('/api/providers/'+encodeURIComponent(id)+'/models');
+    if(r.ok){
+      const card=$(`#cfg-prov .prov-card[data-prov="${id}"] textarea[data-pf="models"]`);
+      if(card)card.value=(r.models||[]).join('\n');
+      provRes(id,`拉到 ${(r.models||[]).length} 个模型（已填进下面的清单，记得「保存这条」）`,'ok');
+    }else provRes(id,'拉取失败：'+(r.error||'端点没给清单'),'bad');
+  }catch(e){provRes(id,'拉取失败：'+e.message,'bad')}
+}
+async function provTest(id){
+  const card=$(`#cfg-prov .prov-card[data-prov="${id}"] textarea[data-pf="models"]`);
+  const first=card?String(card.value||'').split('\n').map(s=>s.trim()).filter(Boolean)[0]:'';
+  provRes(id,'测试中…（发一次最小请求）');
+  try{
+    const r=await fetch('/api/providers',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({action:'test',id,model:first})}).then(x=>x.json());
+    if(r.ok)provRes(id,`通：${r.model} 首字 ${r.ttft}s${r.reply?'　回复：'+r.reply:''}`,'ok');
+    else provRes(id,'不通：'+(r.error||'未知错误'),'bad');
+  }catch(e){provRes(id,'测试失败：'+e.message,'bad')}
 }
 function cfgField(it){
   const input=`class="cfg-input" data-key="${esc(it.key)}"`;
@@ -3791,7 +3973,8 @@ function renderConfig(){
       + rows.map(cfgRow).join('') + '</div>';
   }
   const body=$('#cfg-body');
-  body.innerHTML=html;
+  body.innerHTML=`<div id="cfg-prov"></div>${html}`;
+  renderProviders();
   body.querySelectorAll('.cfg-input').forEach(el=>{
     // **显式把当前值写进控件**（不靠 HTML 的 value 属性）：密钥行一律留空
     // （留空=不改），其余行填现值——这样"脏值比对"有确定基线。

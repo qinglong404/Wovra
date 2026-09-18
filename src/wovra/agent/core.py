@@ -187,7 +187,13 @@ class _CoreMixin:
         on_tool_result: Optional[Callable[[str, str], None]] = None,
         on_progress: Optional[Callable[[str], None]] = None,
     ) -> None:
-        self.llm = llm or LLM()
+        # 本会话用的渠道商/模型/思考强度（task.json 里记着，切会话即切）：
+        # 没显式传 llm 时按会话选择构造——每轮重建 agent 时它就跟着变。
+        self.llm = llm or LLM(
+            provider_id=str(getattr(task, "provider", "") or ""),
+            model=str(getattr(task, "model", "") or "") or None,
+            reasoning=str(getattr(task, "reasoning", "") or ""),
+        )
         # 视觉是否可用（2026-09-15 用户口径"多模态是加分项，没有它也能干活"）：
         # 初始 True，**第一次图像请求被端点拒**就翻成 False，之后不再往请求里
         # 塞图（`_strip_images` 已经从"重发兜底"升级成"能力记忆"）。这样换到

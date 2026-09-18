@@ -88,33 +88,49 @@ function parseInto(root, html){
     const attrs = m[2] || '';
     const idm = /\bid="([^"]*)"/.exec(attrs);
     const cm = /\bclass="([^"]*)"/.exec(attrs);
-    const selfClose = /\/\s*$/.test(attrs) || VOID_TAGS.has(tag);
-    if(idm || cm){                                  // 带身份的元素：登记并挂到当前层
-      const c = mkEl(tag);
-      if(idm) c.id = idm[1];
-      if(cm) c.className = cm[1];
+    // **属性解析对每个元素都做**（2026-09-18 修桩）：此前只给"带 id/class 的元素"
+    // 解析 data-*/value，于是 `<input data-pf="api_key">` 这类**只有 data 属性**的
+    // 控件在桩里属性全空 → `[data-pf="…"]` 查不到、`.value` 恒空（真 DOM 里都成立）。
+    // 仪器得跟真 DOM 一个语义：属性谁都能有。
+    const applyAttrs = (el) => {
       const dm = /[^\s=]+="[^"]*"/g; let a;
-      // data-* 落进 dataset（camelCase），供 `[data-call="x"]` 这类选择器用
       while((a = dm.exec(attrs))){
         const eq=a[0].indexOf('='); const k=a[0].slice(0,eq); const v=a[0].slice(eq+1);
         if(!k.startsWith('data-'))continue;
         const cam=k.slice(5).replace(/-([a-z])/g,(_s,x)=>x.toUpperCase());
-        c.dataset[cam]=v.slice(1,-1);
+        el.dataset[cam]=v.slice(1,-1);
       }
       // `value="..."` 也要落到 `.value`（真 DOM 的语义）：输入框的初值全靠它，
       // 桩不解析就等于"所有输入框都空着"——脏值比对/预填断言会集体假红。
       const vm = /\bvalue="([^"]*)"/.exec(attrs);
-      if(vm) c.value = vm[1];
+      if(vm) el.value = vm[1];
+      // `selected`（option 上）要记下来——SELECT 的 `.value` 由它决定（见 fixSelects）
+      if(/\bselected\b/.test(attrs)) el._selected = true;
+      const pm = /\bplaceholder="([^"]*)"/.exec(attrs);
+      if(pm) el.placeholder = pm[1];
+      return el;
+    };
+    const selfClose = /\/\s*$/.test(attrs) || VOID_TAGS.has(tag);
+    if(idm || cm){                                  // 带身份的元素：登记并挂到当前层
+      const c = applyAttrs(mkEl(tag));
+      if(idm) c.id = idm[1];
+      if(cm) c.className = cm[1];
       frames[frames.length-1].el.appendChild(c);
       c.textContent = ''; c._html = '';             // 由后面的文本/子标签累加填
       if(selfClose){ c._parsed = true; }
       else frames.push({el:c, start:re.lastIndex});
     }else if(!selfClose){
       // 没身份的元素也要占一层，否则它的子元素会挂错层（层级照样要真）
-      const ghost = mkEl(tag);
+      const ghost = applyAttrs(mkEl(tag));
       frames[frames.length-1].el.appendChild(ghost);
       ghost._ghost = true; ghost.textContent = ''; ghost._html = '';
       frames.push({el:ghost, start:re.lastIndex});
+    } else if(/[^\s=]+="/.test(attrs)){
+      // 自闭的无身份元素（`<input data-x="1">`）：也要留在树上，否则它的
+      // data 属性无处可查（上面那条同理）。
+      const leaf = applyAttrs(mkEl(tag));
+      frames[frames.length-1].el.appendChild(leaf);
+      leaf._parsed = true;
     }
     last = re.lastIndex;
   }
@@ -122,6 +138,19 @@ function parseInto(root, html){
   // 没闭合的（截断的 HTML）也把剩下的原文给它
   for(let i=frames.length-1;i>0;i--){
     if(!frames[i].el._parsed){ frames[i].el._html = s.slice(frames[i].start); frames[i].el._parsed = true; }
+  }
+  fixSelects(root);
+}
+/* 真 DOM 里 `<select>` 的 `.value` 由**被 selected 的 option** 决定（没人 selected
+   就是第一个）。桩此前不实现它，于是"下拉有没有选中会话记的那个值"这类断言**恒假红**
+   （2026-09-18 实测：模型/思考强度两个下拉就这么被误判）。 */
+function fixSelects(root){
+  for(const el of walk(root, [])){
+    if(el.tagName !== 'SELECT' || Object.prototype.hasOwnProperty.call(el,'_valSet'))continue;
+    const opts = (el.children||[]).filter(c => c.tagName === 'OPTION');
+    if(!opts.length)continue;
+    const pick = opts.find(o => o._selected) || opts[0];
+    if(pick && pick.value !== undefined) el.value = pick.value;
   }
 }
 // **DOM 查询计数**（性能体检用）：一次重绘查了多少次 DOM、扫到多少个节点。
@@ -2396,6 +2425,121 @@ __deferred.push(Promise.all(__deferred.slice()).then(async () => {
   global.fetch = prevFetch;
 }));
 
+console.log('场景 BB｜渠道商区块：多份端点/密钥只回掩码、设当前、检测按钮');
+__deferred.push(Promise.all(__deferred.slice()).then(async () => {
+  const prevFetch = global.fetch;
+  PROV = {current:'b', file:'/repo/providers.json', from_env:false,
+    levels:['off','auto','high'],
+    providers:[
+      {id:'a', name:'甲', base_url:'https://a.example/v1', api_key:'', masked:'******2345',
+       set:true, models:['m-a1','m-a2'], reasoning_field:'auto', missing:[]},
+      {id:'b', name:'乙', base_url:'https://b.example/v1', api_key:'', masked:'******9999',
+       set:true, models:['m-b1'], reasoning_field:'thinking', missing:[]},
+    ]};
+  CFG = {env_file:'/repo/.env', pending_restart:[], groups:[{id:'model', title:'模型与密钥'}],
+         items:[{key:'Wovra_MODEL', label:'模型', group:'model', kind:'str', scope:'live',
+                 value:'x', masked:'', set:true, default:'x', hint:''}]};
+  // 按 URL 路由（loadConfig 会分别取 /api/settings 与 /api/providers）
+  const provSnap = PROV;
+  global.fetch = (u) => String(u).includes('/api/providers')
+    ? Promise.resolve({ok:true, json:async()=>provSnap})
+    : Promise.resolve({ok:true, json:async()=>CFG});
+  await loadConfig();
+  global.fetch = prevFetch;
+
+  const prov = DOM.body.querySelector('#cfg-prov');
+  const html = String(prov && prov.innerHTML || '');
+  for (const [need, why] of [
+    ['prov-card', '渠道商卡片没画出来'],
+    ['data-prov="a"', '缺 id=a 的卡片'],
+    ['******2345', '密钥没回掩码占位'],
+    ['data-use="a"', '缺"设为当前"'],
+    ['data-fetch="b"', '缺"拉取模型"按钮'],
+    ['data-test="b"', '缺"测试"按钮'],
+    ['data-save="b"', '缺"保存这条"'],
+  ]) if (!html.includes(need)) problems.push('BB: ' + why + '（缺 ' + need + '）');
+  if (html.includes('sk-')) problems.push('BB: 页面里漏出了明文密钥');
+  // 当前项要标出来，且"设为当前"只对非当前项出现
+  const cur = prov.querySelector('.prov-card.on');
+  if (!cur || cur.dataset.prov !== 'b') problems.push('BB: 当前渠道商没高亮');
+  const aCard = prov.querySelector('.prov-card[data-prov="a"]');
+  if (!aCard) problems.push('BB: 找不到 id=a 的卡片');
+  else {
+    if (aCard.classList.contains('on')) problems.push('BB: 非当前项被标成了当前');
+    if (aCard.querySelector('.b-live')) problems.push('BB: 非当前项带了"当前"徽章');
+    if (!aCard.querySelector('[data-use]')) problems.push('BB: 非当前项缺"设为当前"入口');
+  }
+  // 密钥输入框留空（留空=不改）
+  const keyBox = aCard.querySelector('input[data-pf="api_key"]');
+  if (String(keyBox.value) !== '') problems.push('BB: 渠道商密钥框预填了值');
+  console.log('   BB 卡片=' + (prov.querySelectorAll('.prov-card').length)
+              + ' 当前=b 掩码占位=' + html.includes('******2345'));
+
+  // 「拉取模型」把返回清单填进多行框
+  const prevFetch2 = global.fetch;
+  global.fetch = (u) => Promise.resolve({ok:true, json:async()=>({
+    ok:true, models:['m-b1','m-b2','m-b3'], error:''})});
+  await provFetch('b');
+  global.fetch = prevFetch2;
+  const box = prov.querySelector('.prov-card[data-prov="b"] textarea[data-pf="models"]');
+  if (String(box.value).split('\n').length !== 3)
+    problems.push('BB: 拉取模型没填进模型清单');
+  const res = prov.querySelector('[data-res="b"]');
+  if (!/拉到 3 个模型/.test(String(res.textContent||'')))
+    problems.push('BB: 拉取结果没回显');
+  console.log('   BB 拉取模型=' + String(res.textContent||'').slice(0, 40));
+}));
+
+console.log('场景 BC｜聊天页顶栏：模型下拉 + 思考强度下拉（会话级，下一轮生效）');
+__deferred.push(Promise.all(__deferred.slice()).then(async () => {
+  META = {id:'s1', goal:'g', status:'in_progress', mode:'managed', workspace:'/tmp',
+          updated_at:'', round_list:[], registry:[], usage:{}, model:'m-b2', reasoning:'high'};
+  PROVS = {current:'b', providers:[{id:'b', name:'乙', models:['m-b1','m-b2']}]};
+  CUR = 's1';
+  renderHeader();
+  const chips = DOM.body.querySelector('#chips');
+  const m = chips.querySelector('#pick-model'), r = chips.querySelector('#pick-reason');
+  if (!m) problems.push('BC: 顶栏没有模型下拉');
+  else {
+    if (String(m.value) !== 'm-b2') problems.push('BC: 模型下拉没选中会话记的模型');
+    if (m.children.length !== 2) problems.push('BC: 模型选项数不对');
+  }
+  if (!r) problems.push('BC: 顶栏没有思考强度下拉');
+  else {
+    if (String(r.value) !== 'high') problems.push('BC: 强度下拉没选中会话记的值');
+    const labels = [...r.children].map(o => String(o.textContent||''));
+    if (!labels.some(t => /关/.test(t)) || !labels.some(t => /高/.test(t)))
+      problems.push('BC: 强度选项文案缺档（应有关/自动/高）');
+  }
+
+  // 没有渠道商模型时给的是提示而不是空下拉
+  PROVS = {current:'b', providers:[{id:'b', name:'乙', models:[]}]};
+  META.model = '';
+  renderHeader();
+  if (!/未配置/.test(String(DOM.body.querySelector('#chips').innerHTML||'')))
+    problems.push('BC: 没模型时没给"未配置"提示');
+
+  // 选中即写会话（POST /api/sessions/{id}/model）
+  PROVS = {current:'b', providers:[{id:'b', name:'乙', models:['m-b1','m-b2']}]};
+  META.model = 'm-b1'; META.reasoning = 'auto';
+  renderHeader();
+  let sent = null;
+  const prevFetch = global.fetch;
+  global.fetch = (u, o) => {
+    sent = {url:String(u), opt:o||{}};
+    return Promise.resolve({ok:true, json:async()=>({ok:true, model:'m-b2', reasoning:'high'})});
+  };
+  const pick = DOM.body.querySelector('#chips #pick-model');
+  pick.value = 'm-b2';
+  await saveModelPick({model: pick.value});
+  global.fetch = prevFetch;
+  if (!sent || !/\/api\/sessions\/s1\/model$/.test(sent.url))
+    problems.push('BC: 切换模型没写会话');
+  if (!/m-b2/.test(String(sent.opt.body||''))) problems.push('BC: 切换载荷里没有新模型');
+  if (META.model !== 'm-b2') problems.push('BC: 切换后本地元数据没跟上');
+  console.log('   BC 模型=' + (m ? m.value : '无') + ' 强度=' + (r ? r.value : '无'));
+}));
+
 Promise.all(__deferred).then(()=>{
   if (problems.length) {
     console.log('渲染核对：失败 ' + problems.length + ' 项');
@@ -2403,7 +2547,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（53 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（55 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
 });
 """
 

@@ -496,6 +496,12 @@ class Task:
     approved_tags: list[str] = field(default_factory=list)
     # 会话的上下文模式（managed/baseline）：恢复时沿用，防止实验数据串味
     mode: str = ""
+    # 本会话用的模型渠道商 / 模型 / 思考强度（2026-09-18 用户口径："聊天页面有
+    # 模型选择以及思考强度选择"）。空 = 用 providers.json 的当前渠道商与它的
+    # 首个模型、思考强度 auto。切会话即切（下一页生效）。
+    provider: str = ""
+    model: str = ""
+    reasoning: str = ""
     # ⚠ V1.2 遗迹·标废不删（2026-09-11 遗产整治，方案 A）：
     # 三件套来自组织运行时（organization-runtime-v1.md），而多 agent 编排已由
     # 用户 09-07 拍板废除（提交 af40bc1 整体退场），现行机制下**都没有生产者**：

@@ -34,6 +34,9 @@ htmlcov/
 .env.*
 !.env.example
 
+# 模型渠道商清单（含密钥，本地私有；模板见 providers.example.json）
+providers.json
+
 # Wovra 运行时数据（任务状态是本地的工作产物，默认不进版本库；
 # 实验序列的会话记录除外——它们是数据资产，供跨机器分析）
 tasks/*

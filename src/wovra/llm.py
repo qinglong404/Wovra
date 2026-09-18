@@ -117,6 +117,16 @@ def _raw_detail(error: Exception) -> str:
     return text[:300] + ("…" if len(text) > 300 else "")
 
 
+def _is_bad_param(error: Exception) -> bool:
+    """错误像"端点不认这个参数"吗（用于去掉可选字段重发一次）。"""
+    text = str(error).lower()
+    return any(k in text for k in (
+        "extra_body", "reasoning_effort", "thinking", "unknown", "unrecognized",
+        "unsupported", "invalid", "unexpected",
+    ) and ("400" in text or "422" in text or "invalid" in text
+           or "unsupported" in text or "unknown" in text))
+
+
 def _config_hint(error: Exception, model: str, base_url: Optional[str]) -> str:
     """按错误类型给出"检查哪里"的提示，全部指向 .env 里的配置项。"""
     where = base_url or "OpenAI 官方地址"
@@ -156,37 +166,98 @@ class LLM:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         model: Optional[str] = None,
+        provider_id: str = "",
+        reasoning: str = "",
     ) -> None:
-        # 参数优先，其次环境变量（.env 已在上面加载进环境），最后兜底默认值。
-        # 显式传入的（测试、临时换模型）**冻结**；没传的每次调用现读环境——
-        # 前端配置面板改完，下一轮/下一次调用就是新值。
+        # 参数优先，其次会话指定的渠道商（providers.json），再次环境变量
+        # （.env 已在上面加载进环境），最后兜底默认值。
+        # 显式传入的（测试、临时换模型）**冻结**；没传的每次调用现读——
+        # 前端改完配置或切了模型，下一轮/下一次调用就是新值。
         self._explicit_key = api_key
         self._explicit_base = base_url
         self._explicit_model = model
-        self.model = model or os.environ.get("Wovra_MODEL", "gpt-4o-mini")
+        # 会话级选择（task.json 里记着，切会话即切）：渠道商 id ＋ 模型 ＋ 思考强度
+        self._provider_id = str(provider_id or "").strip()
+        self._model_override = str(model or "").strip()
+        self._reasoning = str(reasoning or "").strip()
+        self.model = ""
+        self.base_url = None
+        self._provider = {}
         _key, _base, _timeout = self._resolve()
         if not _key:
             raise RuntimeError(
                 "未配置 API 密钥。请在项目根目录 .env 中填写 Wovra_API_KEY，"
-                "或通过 LLM(api_key=...) 传入。"
+                "或在配置页添加一个模型渠道商，也可以 LLM(api_key=...) 传入。"
             )
-        # base_url 允许为 None：此时 SDK 使用 OpenAI 官方地址。
-        self.base_url = _base
         self._timeout = _timeout
         self._client_key: tuple | None = None
         self._client = None
+        # 端点是否拒过思考强度字段（拒过就不再带，省一次 400 往返）
+        self._no_reasoning = False
+        self._ensure_client()
+
+    def set_session(self, provider_id: str = "", model: str = "",
+                    reasoning: str = "") -> None:
+        """换会话级选择（下一轮生效）：渠道商/模型/思考强度。"""
+        self._provider_id = str(provider_id or "").strip()
+        self._model_override = str(model or "").strip()
+        self._reasoning = str(reasoning or "").strip()
         self._ensure_client()
 
     def _resolve(self) -> tuple[str, Optional[str], float]:
-        """(密钥, 端点, 读超时) —— 显式传入的优先，其余现读环境。"""
-        key = self._explicit_key or os.environ.get("Wovra_API_KEY", "")
-        base = self._explicit_base or os.environ.get("Wovra_BASE_URL")
+        """(密钥, 端点, 读超时)。
+
+        渠道商优先级：`provider_id` 指定的那条 → providers.json 的当前项 →
+        `.env` 的三个键 → 默认。三者任一存在就用它，不再往后找。
+        """
+        from . import providers as providers_module
+
+        entry = None
+        if self._provider_id:
+            entry = providers_module.get(self._provider_id)
+        if entry is None:
+            entry = providers_module.current()
+        self._provider = entry or {}
+        key = self._explicit_key or self._provider.get("api_key") or \
+            os.environ.get("Wovra_API_KEY", "")
+        base = self._explicit_base or self._provider.get("base_url") or \
+            os.environ.get("Wovra_BASE_URL")
+        if self._explicit_model:
+            self.model = self._explicit_model
+        elif self._model_override:
+            self.model = self._model_override
+        elif self._provider.get("models"):
+            self.model = self._provider["models"][0]
+        else:
+            self.model = os.environ.get("Wovra_MODEL", "gpt-4o-mini")
         raw = (os.environ.get("WOVRA_READ_TIMEOUT") or "").strip()
         try:
             timeout = float(raw) if raw else 180.0
         except ValueError:
             timeout = 180.0
         return key, base, timeout
+
+    def reasoning_body(self) -> dict:
+        """思考强度 → 请求体附加字段（`extra_body`）；"auto"/空返回空表。
+
+        各家字段名不同（2026-09-18 实测）：火山方舟与 GLM 走
+        `thinking: {type: enabled|disabled}`；OpenAI 系走 `reasoning_effort`。
+        `reasoning_field` 可在渠道商上钉死用哪家；auto 时按端点域名猜，
+        猜不到就发 `reasoning_effort`（主流兼容端点都认）。
+        """
+        level = (self._reasoning or "auto").lower()
+        if level in ("", "auto"):
+            return {}
+        field = str(self._provider.get("reasoning_field") or "auto").lower()
+        if field == "auto":
+            host = str(self.base_url or "").lower()
+            field = ("thinking" if ("volces.com" in host or "bigmodel" in host
+                                    or "zhipu" in host)
+                     else "reasoning_effort")
+        if field == "thinking":
+            return {"thinking": {"type": "disabled" if level == "off" else "enabled"}}
+        # 关：OpenAI 协议里最低档是 minimal；高：high
+        return {"reasoning_effort": "minimal" if level == "off" else level}
 
     def _ensure_client(self) -> None:
         """密钥/端点/超时变了就换一个客户端（SDK 把它们绑在 client 上）。"""
@@ -219,14 +290,18 @@ class LLM:
         tool_calls、usage 等细节，封装掉反而碍事。
         tools=None 时 SDK 会自动省略该参数，不影响普通对话。
         """
-        if not self._explicit_model:
-            self.model = os.environ.get("Wovra_MODEL", "gpt-4o-mini")
-        self._ensure_client()
+        self._ensure_client()   # 渠道商/模型/超时都在这里现解（改完下一次调用生效）
         if stream:
             # 流式默认要求服务端在最后一个分块附带 usage 统计
             # （OpenAI 协议扩展 stream_options，主流兼容服务都支持）。
             # 没有它，流式调用就拿不到 tokens 数，成本核算无从谈起。
             kwargs.setdefault("stream_options", {"include_usage": True})
+        # 思考强度（会话级）：调用方显式给了 extra_body 就以它为准（维护调用要
+        # 关思考）；否则按本会话选的强度发。端点已经拒过一次就不再白试。
+        if "extra_body" not in kwargs and not getattr(self, "_no_reasoning", False):
+            body = self.reasoning_body()
+            if body:
+                kwargs["extra_body"] = body
         # 可选参数缺省时不发给服务端（工具禁用 = 整个字段省略，而非 null）：
         # 严格端点对 tools=null / stream=null 这类空值可能直接 400
         payload: dict[str, Any] = {"model": self.model, "messages": messages}
@@ -235,8 +310,18 @@ class LLM:
         if tools:
             payload["tools"] = tools
         payload["max_tokens"] = self._max_tokens
+        # 部分端点不认思考强度字段（返回 400/参数错误）：去掉它重发一次，
+        # 而不是让整轮卡死在"不支持的可选参数"上。
         try:
-            return self._client.chat.completions.create(**payload, **kwargs)
+            try:
+                return self._client.chat.completions.create(**payload, **kwargs)
+            except APIError as error:
+                if not kwargs.get("extra_body") or not _is_bad_param(error):
+                    raise
+                retry = dict(kwargs)
+                retry.pop("extra_body", None)
+                self._no_reasoning = True   # 记住这端点不吃，后续不再白试
+                return self._client.chat.completions.create(**payload, **retry)
         except (NotFoundError, AuthenticationError, PermissionDeniedError, APIConnectionError) as error:
             raise LLMConfigError(
                 f"{_config_hint(error, self.model, self.base_url)}\n"

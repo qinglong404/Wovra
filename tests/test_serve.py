@@ -727,6 +727,72 @@ def test_http_settings_roundtrip(server, tmp_path, monkeypatch):
     assert code == 400
 
 
+def test_http_providers_crud_and_session_model(server, tmp_path, monkeypatch):
+    """`/api/providers` 增删改/设当前 + `/api/sessions/{id}/model` 写会话选择。
+
+    契约要点（配置页与聊天页两个下拉都靠它）：密钥不回明文；增删改即时落盘；
+    会话级选择只改 task.json 的三个字段、非法强度值 400。
+    """
+    from wovra import providers as providers_module
+
+    monkeypatch.setenv("WOVRA_PROVIDERS_FILE", str(tmp_path / "providers.json"))
+    for key in ("Wovra_API_KEY", "Wovra_BASE_URL", "Wovra_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+
+    code, body = _get(server + "/api/providers")
+    assert code == 200 and body["providers"] == [] and body["levels"] == ["off", "auto", "high"]
+
+    code, body = _get(server + "/api/providers", method="POST",
+                      body={"provider": {"name": "甲", "base_url": "https://a/v1",
+                                         "api_key": "sk-abc12345", "models": ["m1"]},
+                            "current": True})
+    assert code == 200 and len(body["providers"]) == 1
+    pid = body["providers"][0]["id"]
+    assert body["current"] == pid
+    assert body["providers"][0]["api_key"] == ""            # 前端不回明文
+    assert body["providers"][0]["masked"].endswith("2345")
+    assert providers_module.get(pid)["api_key"] == "sk-abc12345"   # 后端存着
+
+    # 改一条：密钥留空沿用旧值
+    code, body = _get(server + "/api/providers", method="POST",
+                      body={"provider": {"id": pid, "name": "甲改名",
+                                         "base_url": "https://a2/v1"}})
+    assert code == 200
+    assert providers_module.get(pid)["api_key"] == "sk-abc12345"
+    assert providers_module.get(pid)["name"] == "甲改名"
+
+    # 缺 provider → 400
+    code, _ = _get(server + "/api/providers", method="POST", body={})
+    assert code == 400
+    # 删掉它 → 清单空
+    code, body = _get(server + "/api/providers", method="POST",
+                      body={"action": "remove", "id": pid})
+    assert code == 200 and body["providers"] == []
+
+
+def test_http_session_model_selection(server, tmp_path, monkeypatch):
+    """会话级模型/思考强度：写进 task.json，meta 回读，非法值 400。"""
+    monkeypatch.setenv("WOVRA_PROVIDERS_FILE", str(tmp_path / "providers.json"))
+    code, body = _get(server + "/api/sessions/s1")
+    assert code == 200
+    assert body["provider"] == "" and body["model"] == "" and body["reasoning"] == ""
+
+    code, body = _get(server + "/api/sessions/s1/model", method="POST",
+                      body={"provider": "p1", "model": "m-x", "reasoning": "high"})
+    assert code == 200 and body["model"] == "m-x" and body["reasoning"] == "high"
+
+    code, body = _get(server + "/api/sessions/s1")
+    assert body["provider"] == "p1" and body["model"] == "m-x"
+    assert body["reasoning"] == "high"
+
+    code, body = _get(server + "/api/sessions/s1/model", method="POST",
+                      body={"reasoning": "乱写"})
+    assert code == 400 and "off/auto/high" in body["error"]
+    code, _ = _get(server + "/api/sessions/nope/model", method="POST",
+                   body={"model": "m"})
+    assert code == 404
+
+
 def test_http_attach_endpoint(server, tmp_path):
     """粘贴附件落盘 + 换回引用行（2026-09-17）。
 

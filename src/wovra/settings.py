@@ -50,10 +50,11 @@ class Spec:
 SPECS: tuple[Spec, ...] = (
     # ---- 模型与密钥 ----
     Spec("Wovra_API_KEY", "API 密钥", "model", "secret", "",
-         hint="模型服务商的密钥（写进 .env，页面只回掩码）"),
+         hint="写进 .env；渠道商清单为空时的退化配置（多个渠道商请在配置页上面维护）"),
     Spec("Wovra_BASE_URL", "服务地址", "model", "str", "",
-         hint="OpenAI 协议兼容端点，如 https://api.deepseek.com/v1；留空=官方地址"),
-    Spec("Wovra_MODEL", "模型", "model", "str", "gpt-4o-mini"),
+         hint="留空=官方地址；渠道商清单为空时的退化配置"),
+    Spec("Wovra_MODEL", "模型", "model", "str", "gpt-4o-mini",
+         hint="渠道商清单为空时的退化配置；聊天页的模型选择按会话存"),
     Spec("WOVRA_MAX_TOKENS", "单次最大输出 tok", "model", "int", "393216",
          lo=1, hi=4000000),
     Spec("WOVRA_READ_TIMEOUT", "读超时（秒）", "model", "float", "180", lo=1, hi=3600),

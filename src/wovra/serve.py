@@ -1770,6 +1770,13 @@ class _Handler(BaseHTTPRequestHandler):
         if path == "/api/settings":
             from . import settings as settings_module
             return self._json(settings_module.describe())
+        if path == "/api/providers":
+            from . import providers as providers_module
+            return self._json(providers_module.describe())
+        mpm = re.fullmatch(r"/api/providers/([^/]+)/models", path)
+        if mpm:
+            from . import providers as providers_module
+            return self._json(providers_module.list_models(unquote(mpm.group(1))))
         if path == "/api/fs/ls":
             qs = parse_qs(urlparse(self.path).query)
             return self._json(fs_list((qs.get("path") or [None])[0]))
@@ -1792,6 +1799,10 @@ class _Handler(BaseHTTPRequestHandler):
             meta["live_job"] = live[0] if live else None
             meta["safety_mode"] = str(data.get("safety_mode") or "approve")
             meta["approved_tags"] = list(data.get("approved_tags") or [])
+            # 会话级模型选择（聊天页两个下拉读它；空 = 用渠道商当前项）
+            meta["provider"] = str(data.get("provider") or "")
+            meta["model"] = str(data.get("model") or "")
+            meta["reasoning"] = str(data.get("reasoning") or "")
             from .agent.support import org_watermark
             meta["org_watermark"] = org_watermark()   # 整理水位（账本产出条件）
             meta["todo_log"] = todo_log(data)                 # todo 工具调用流水
@@ -1964,6 +1975,23 @@ class _Handler(BaseHTTPRequestHandler):
                                             for k, v in values.items()})
             result["settings"] = settings_module.describe()
             return self._json(result, 200 if result["ok"] else 400)
+        if path == "/api/providers":
+            from . import providers as providers_module
+            action = str(body.get("action") or "upsert")
+            if action == "test":
+                return self._json(providers_module.test_provider(
+                    str(body.get("id") or ""), str(body.get("model") or "")))
+            if action == "remove":
+                providers_module.remove(str(body.get("id") or ""))
+            elif action == "current":
+                providers_module.set_current(str(body.get("id") or ""))
+            else:
+                provider = body.get("provider")
+                if not isinstance(provider, dict):
+                    return self._json({"error": "provider 必填（一条渠道商）"}, 400)
+                providers_module.upsert({**provider,
+                                         "current": bool(body.get("current"))})
+            return self._json({**providers_module.describe(), "ok": True})
         if path == "/api/shutdown":
             with _job_lock:
                 busy = any(j["status"] in ("queued", "running")
@@ -1984,6 +2012,28 @@ class _Handler(BaseHTTPRequestHandler):
         mr = re.fullmatch(r"/api/sessions/([^/]+)/resume", path)
         if mr:
             return self._start_resume(mr.group(1))
+        mmo = re.fullmatch(r"/api/sessions/([^/]+)/model", path)
+        if mmo:
+            # 会话级模型选择（2026-09-18 用户口径："聊天页面有模型选择以及思考强度选择"）。
+            # 只改本会话的三个字段，落盘后**下一轮**生效（每轮重建 agent 时读它）。
+            try:
+                task = task_module.Task.load(mmo.group(1))
+            except (OSError, ValueError, json.JSONDecodeError):
+                return self._json({"error": "session not found"}, 404)
+            if "provider" in body:
+                task.provider = str(body.get("provider") or "")
+            if "model" in body:
+                task.model = str(body.get("model") or "")
+            if "reasoning" in body:
+                level = str(body.get("reasoning") or "")
+                if level and level not in ("off", "auto", "high"):
+                    return self._json({"error": "reasoning 只能是 off/auto/high"}, 400)
+                task.reasoning = level
+            task.save()
+            with self.cache._lock:
+                self.cache._cache.pop(mmo.group(1), None)
+            return self._json({"ok": True, "provider": task.provider,
+                               "model": task.model, "reasoning": task.reasoning})
         msf = re.fullmatch(r"/api/sessions/([^/]+)/safety", path)
         if msf:
             mode = str(body.get("mode") or "")

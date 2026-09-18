@@ -1,0 +1,21 @@
+{
+  "current": "deepseek",
+  "providers": [
+    {
+      "id": "deepseek",
+      "name": "DeepSeek",
+      "base_url": "https://api.deepseek.com",
+      "api_key": "你的密钥",
+      "models": ["deepseek-chat", "deepseek-reasoner"],
+      "reasoning_field": "auto"
+    },
+    {
+      "id": "ark",
+      "name": "火山方舟",
+      "base_url": "https://ark.cn-beijing.volces.com/api/v3",
+      "api_key": "你的密钥",
+      "models": ["doubao-seed-1-6", "deepseek-v3-1"],
+      "reasoning_field": "auto"
+    }
+  ]
+}
