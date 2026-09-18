@@ -253,7 +253,8 @@ class _AssemblyMixin:
         # 当前轮与上一已整理轮之间的同一处补缝（检查点把 tool_call 留在
         # 上轮、结果落在本轮开头的形态）
         cur_msgs = self._current_round_messages()
-        cur_msgs = self._with_file_change_notice(cur_msgs)
+        # 补缝先算（判据是 cur_msgs[0] 是不是 tool 结果），通知后插——通知是
+        # user 消息，先插会把 tool 结果挤到它后面，撞 tool 悬空（严格端点 400）。
         if (prev_was_compact and cur_msgs
                 and cur_msgs[0].get("role") == "tool"):
             if prev_compact_tail is not None:
@@ -261,6 +262,7 @@ class _AssemblyMixin:
             else:
                 while cur_msgs and cur_msgs[0].get("role") == "tool":
                     cur_msgs = cur_msgs[1:]
+        cur_msgs = self._with_file_change_notice(cur_msgs)
         msgs.extend(cur_msgs)
         # 信封绝对尾部（2026-09-08 用户拍板，D 组实证）：todo/TaskState/
         # 文件地图是高频变化状态，放在当前轮事件之前时每次变化都作废其
@@ -550,7 +552,14 @@ class _AssemblyMixin:
             self._file_notice_seq = seq
         if not notice:
             return cur_msgs
-        return [_runtime_reminder(notice)] + list(cur_msgs)
+        # 通知是 user 消息：插在**开头连续 tool 结果之后**。补缝那一形态里
+        # 本轮的 tool 结果排在轮头（它的 tool_call 在上一轮），插到它前面
+        # 即成悬空 tool → 严格端点 400。
+        lead = 0
+        while lead < len(cur_msgs) and cur_msgs[lead].get("role") == "tool":
+            lead += 1
+        return (list(cur_msgs[:lead]) + [_runtime_reminder(notice)]
+                + list(cur_msgs[lead:]))
 
     def _strip_router_steps(
         self, msgs: list[dict]

@@ -178,14 +178,18 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
     """按行读取项目内一个文件的内容片段。csv/tsv 表格与 docx/xlsx/pptx/pdf
     附件会自动解析成文本（不必自己写脚本或装解析库）。要通读整个文件时，直接把
     num_lines 放大一次读完（单次上限 20,000 行），不要用小段反复读同一个文件。
+    只要一个结果时传 pattern='正则'（配 context=N 取前后 N 行）——返回相关内容的
+    **行数范围**，不必全量加载。
 
     文件很大而只要一个结果时（典型场景：工具输出落盘后的长日志），传
-    pattern='关键词'（正则）只返回匹配行与行号，不必全量加载。返回按
+    pattern='关键词'（正则）只返回匹配内容，不必全量加载。返回按
     **行数范围**给：相邻或重叠的命中合并成一段，段头写明 `第 a-b 行`，
-    每行仍带自己的行号（可直接喂给 replace_lines / edit_file 定位）。
-    context=N 时每个命中连带前后 N 行一起返回并同样合并——一次调用拿到
-    能判断性质的上下文，不必再补读一次。不传 pattern 就是全量读取——
-    信息永远不丢，只是不必一次全进上下文。
+    行首标 `:` 的是命中、标 `-` 的是 context 带出的上下文，行号可直接喂给
+    replace_lines / edit_file 定位。context=N 时每个命中连带前后 N 行一起
+    返回并同样合并——一次调用拿到能判断性质的上下文，不必再补读一次。
+    不传 pattern 就是全量读取（pattern 模式下 start_line/num_lines 不参与，
+    要按行取窗口就传 start_line/num_lines）——信息永远不丢，只是不必一次
+    全进上下文。
 
     大文件请配合 search_files 先定位，再用 start_line/num_lines
     分段读取——返回值会标明文件总行数和继续读取的位置。
@@ -244,10 +248,14 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
         span = min(max(0, context), _READ_MAX_LINES)
         spans = _merge_spans(hits, span, total)
         cap = limits.list_limit(_SEARCH_MAX_MATCHES)
+        hit_set = set(hits)
         chunks: list[str] = []
         used = left = 0
         for lo, hi in spans:
-            rows = [f"{n}: {lines[n - 1].strip()[:200]}" for n in range(lo, hi + 1)]
+            # 命中行标 `:`、context 带出的行标 `-`（grep -C 同款）——不标的话
+            # 拿到一段上下文分不清哪几行真正匹配。
+            rows = [f"{n}{':' if n in hit_set else '-'} {lines[n - 1].strip()[:200]}"
+                    for n in range(lo, hi + 1)]
             room = cap - used
             if room <= 0:
                 left += len(rows)
@@ -262,9 +270,10 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
         shown = "\n\n".join(chunks)
         more = f"\n…（还有 {left} 行未显示）" if left else ""
         scope = f"，{len(spans)} 段" if len(spans) > 1 else ""
+        legend = "带 - 的行是上下文（不带就是命中）；" if span else ""
         return limits.clip(
             f"{path}（{label}共 {total} 行，匹配 {len(hits)} 行{scope}）\n{shown}{more}\n"
-            f"...（要上下文：read_file('{path}', pattern={pattern!r}, context=10)；"
+            f"...（{legend}要上下文：read_file('{path}', pattern={pattern!r}, context=10)；"
             f"要全文：不带 pattern 读）",
             f"read-{Path(path).name}", source=path,
         )

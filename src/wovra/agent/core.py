@@ -1715,9 +1715,12 @@ class _CoreMixin:
             return
         view = self._active_view()
         if name in self._WRITE_TOOLS:
+            # 先记快照、再记写入：写入日志的时间戳必须**不早于**快照时间，
+            # 否则下次比对时 `writes.at >= observed_at` 不成立，自己写的
+            # 改动会被通知说成"用户操作"。
+            observed_module.record(workspace, view, rel, content, by="edit")
             observed_module.note_write(workspace, view, rel,
                                        int((self.current_round or {}).get("seq") or 0))
-            observed_module.record(workspace, view, rel, content, by="edit")
         else:
             observed_module.record(workspace, view, rel, content, by="read")
 

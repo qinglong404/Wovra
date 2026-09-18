@@ -644,6 +644,42 @@ def test_checkpoint_split_at_current_round_boundary():
     _assert_no_dangling_tool(msgs)
 
 
+def test_file_notice_does_not_dangle_tool_at_seam(tmp_path, monkeypatch):
+    """有文件变更通知时，补缝形态仍不许出现悬空 tool。
+
+    通知是 user 消息；插在本轮开头的 tool 结果**之前**，那条 tool 的前一条
+    就不再是带 tool_calls 的 assistant（严格端点 400）。
+    """
+    from wovra import observed as observed_module
+    from wovra.tools import safety as safety_module
+
+    safety_module.bind_workspace(tmp_path)
+    rel = "a.py"
+    (tmp_path / rel).write_text("v1\n", encoding="utf-8")
+    observed_module.record(tmp_path, "Main", rel, "v1\n")
+    (tmp_path / rel).write_text("v1\nv2\n", encoding="utf-8")   # 观察后变了 → 有通知
+
+    r1, _, _ = _checkpoint_split_rounds()
+    task = Task.create(goal="x")
+    task.rounds = [r1]
+    agent = Agent(llm=_StubLLM(), tools=[], task=task)
+    agent.current_round = {
+        "seq": 2, "user_input": {"original": "[运行时] 大步验收通过",
+                                 "normalized": ""},
+        "events": [], "refined_index": {}, "end_state": "open", "org_state": "",
+        "active_view": "Main",
+    }
+    agent.rounds.append(agent.current_round)
+    agent.messages = []
+    agent._record_event("tool_result", {"role": "tool", "tool_call_id": "c1",
+                                        "content": "大步已验收"})
+
+    msgs = agent._assemble_messages()
+
+    assert any("[文件变更" in str(m.get("content") or "") for m in msgs), "通知未注入"
+    _assert_no_dangling_tool(msgs)
+
+
 def test_view_assembly_merges_chat_groups_once():
     """合并组在视图里只出现一次：组首显示组描述与全部用户原文，成员轮不单独成段。
 

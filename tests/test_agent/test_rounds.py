@@ -277,8 +277,11 @@ def test_task_state_wrapped_in_runtime_reminder_envelope(monkeypatch):
 
     envelope = [b for b in bodies if b.startswith("<runtime-reminder>")]
     assert envelope, "任务状态必须走运行时信封"
-    assert "存档测试目标" in envelope[0]
-    assert envelope[0].rstrip().endswith("</runtime-reminder>")
+    # 按**内容**定位那条信封：同一次装配里可能另有信封（如文件变更通知）
+    state = [i for i, b in enumerate(bodies) if "存档测试目标" in b]
+    assert state, "任务状态未进运行时信封"
+    assert bodies[state[0]].startswith("<runtime-reminder>")
+    assert bodies[state[0]].rstrip().endswith("</runtime-reminder>")
     # 信封绝对尾部（D 组实证）：状态高频变化只作废信封本身（~1-2K），
     # 不作废其前的事件历史——位置保证是缓存纪律的一部分
     assert msgs[-1]["content"].startswith("<runtime-reminder>")

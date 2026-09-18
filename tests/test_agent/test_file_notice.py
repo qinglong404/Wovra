@@ -80,6 +80,26 @@ def test_notice_is_per_agent(tmp_path, monkeypatch):
     assert observed_module.notice_text(ws, "B") == ""        # B 是新的，没变更
 
 
+def test_notice_after_tool_write_is_labelled_by_tool(tmp_path, monkeypatch):
+    """工具自己写过的改动，通知里必须说"工具写入"，不许说成"用户操作"。
+
+    写入日志的时间戳若早于观察快照（旧实现先 note_write 再 record），
+    `writes.at >= observed_at` 不成立 → 自己写的改动被说成用户操作，
+    模型据此把刚提交的改动当"外部干预"重新审视。
+    """
+    ws = _workspace(tmp_path, monkeypatch)
+    rel = "a.py"
+    (ws / rel).write_text("v1\n", encoding="utf-8")
+    agent, _ = _agent_with_round(monkeypatch, tmp_path, ws)
+    agent._observe_tool_effect("edit_file", json.dumps({"path": rel}), "已修改 a.py")
+    (ws / rel).write_text("v1\nv2\n", encoding="utf-8")     # 工具改完（快照即此刻）
+
+    text = observed_module.notice_text(ws, "Main")
+
+    assert "[文件变更·工具写入（Main）]" in text
+    assert "用户操作" not in text
+
+
 def _agent_with_round(monkeypatch, tmp_path, ws, **kw):
     task = Task.create(goal="g")
     agent = Agent(llm=_StubLLM(), tools=[], task=task, context_mode=MODE_MANAGED, **kw)

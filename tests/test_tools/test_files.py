@@ -118,7 +118,9 @@ def test_read_file_pattern_context_merges_into_spans(tmp_path, monkeypatch):
 
     ctx = read_file("log.txt", pattern="ERROR", context=2)
     assert "── 第 8-13 行 ──" in ctx                 # 上下 2 行连成一段
-    assert "8: 第8行 噪声" in ctx and "13: 第13行 噪声" in ctx
+    assert "8- 第8行 噪声" in ctx and "13- 第13行 噪声" in ctx    # 上下文行标 -
+    assert "10: 第10行 ERROR 甲" in ctx             # 命中行标 :
+    assert "带 - 的行是上下文" in ctx                 # 图例（否则分不清哪行匹配）
     assert "── 第 48-52 行 ──" in ctx
     assert "第7行" not in ctx                       # 窗口外不进来
 
