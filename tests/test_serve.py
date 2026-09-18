@@ -663,6 +663,34 @@ def test_http_plan_carries_live_kpis(server):
     assert code == 404
 
 
+def test_http_plan_carries_live_ctx(server, tmp_path):
+    """`/plan` 还要带**各 agent 的上下文观测**（按步更新用，2026-09-17）。
+
+    用户口径："将前端的上下文窗口改成每步一更新，而不是一轮一更新。"
+    `ctx_cur` 由运行时**每次装配**（一轮内每步装配一次）就地更新、随步落盘；
+    前端每 tick 合并这个字段并重画顶部条 = 每步一更新。
+    """
+    task_file = tmp_path / "tasks" / "s1" / "task.json"
+    data = json.loads(task_file.read_text(encoding="utf-8"))
+    data["registry"] = [
+        {"id": "Main", "name": "主agent", "status": "active",
+         "ctx_cur": 131072, "ctx_peak": 200000, "window": 1000000},
+        {"id": "A", "name": "域甲", "status": "dormant",
+         "ctx_cur": 0, "ctx_peak": 0, "window": 0},
+    ]
+    task_file.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    code, body = _get(server + "/api/sessions/s1/plan")
+    assert code == 200
+    assert [r["id"] for r in body["ctx"]] == ["Main", "A"]
+    main = body["ctx"][0]
+    assert main["ctx_cur"] == 131072 and main["ctx_peak"] == 200000
+    assert main["window"] == 1000000
+    # 与 session_meta 的注册表同源同口径（同一个字段两处读，数字必须一致）
+    _, meta = _get(server + "/api/sessions/s1")
+    assert main["ctx_cur"] == meta["registry"][0]["ctx_cur"]
+
+
 def test_http_attach_endpoint(server, tmp_path):
     """粘贴附件落盘 + 换回引用行（2026-09-17）。
 

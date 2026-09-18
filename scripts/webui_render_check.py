@@ -404,6 +404,45 @@ if (!html.includes('120K') || !html.includes('42K')) problems.push('E2: 各家�
 if (html.includes('0 条消息')) problems.push('E2: 读了 fork 行没有的 count（显示 0 条消息）');
 if (html.includes('重组后')) problems.push('E2: fork 会话仍写"重组后"（V4 没有重组这回事）');
 
+console.log('场景 E3｜上下文窗口**按步更新**（/plan 的现读观测要真的重画顶部条）');
+// 共享态（V4）：这份体量来自注册表**每步都在刷**的观测，不是投影
+META = { id:'s5', registry:[
+  {id:'Main', name:'主agent', status:'active', ctx_cur:120000, ctx_peak:120000, window:1000000, rounds:2, steps:9},
+  {id:'A', name:'域甲', status:'active', ctx_cur:0, ctx_peak:0, window:0, rounds:0, steps:0}],
+  round_list:[] };
+VIEWSIZES = { sig:'s', window:1000000, basis:'tiktoken:cl100k_base', shared:true,
+  agents:[{id:'Main', name:'主agent', is_main:true, count:0, total_chars:0, tokens:999999}] };
+renderCtxbar();
+html = byId('ctxbar').innerHTML;
+if (!html.includes('120K')) problems.push('E3: 共享态没读注册表观测（读了投影 999999）');
+// 行、色点、进度条都要走**有样式的那几类**：产品 CSS 里只有 `.ctx-cell`/`.ctx-dot`/
+// `.ctx-bar`，自造 `ctxrow`/`dot`/`nm` 等于没样式——页面上一片空（截图核对抓到的）
+check('E3 共享态一行', html, 1);
+if (!html.includes('class="ctx-dot"')) problems.push('E3: 共享态的色点没样式（页面上一片空）');
+if (!html.includes('class="ctx-bar"')) problems.push('E3: 共享态的占比条没样式');
+// 服务端每 tick 报的现读值：合并进来就要立刻重画
+applyPlanCtx({ ctx:[{id:'Main', name:'主agent', ctx_cur:131072, ctx_peak:131072, window:1000000}] });
+html = byId('ctxbar').innerHTML;
+if (!html.includes('131.1K')) problems.push('E3: applyPlanCtx 没把新观测画上屏（按步更新没生效）');
+if (!html.includes('13.1%')) problems.push('E3: 占比没跟着新观测走');
+// 没变化时不许白刷（返回 false）
+if (applyPlanCtx({ ctx:[{id:'Main', name:'主agent', ctx_cur:131072, ctx_peak:131072, window:1000000}] })) {
+  problems.push('E3: 观测没变却报"有变化"（每 tick 白刷 DOM）');
+}
+// fork 态同样按步更新（那一支读的也是同一个 ctx_cur）
+META = { id:'s6', registry:[
+  {id:'Main', name:'主agent', status:'active', ctx_cur:200000, ctx_peak:200000, window:1000000, rounds:9, steps:40},
+  {id:'A', name:'附件', status:'active', ctx_cur:42000, ctx_peak:46000, window:1000000, rounds:3, steps:11, forked_at:3}],
+  round_list:[] };
+VIEWSIZES = { sig:'f2', window:1000000, basis:'tiktoken:cl100k_base', shared:false, forked:true,
+  agents:[{id:'Main', name:'主agent', is_main:true, count:0, total_chars:0, tokens:200000, forked_at:0},
+          {id:'A', name:'附件', is_main:false, count:0, total_chars:0, tokens:42000, forked_at:3}] };
+renderCtxbar();
+applyPlanCtx({ ctx:[{id:'A', name:'附件', ctx_cur:51200, ctx_peak:51200, window:1000000}] });
+html = byId('ctxbar').innerHTML;
+check('E3 fork 按步', html, 2);
+if (!html.includes('51.2K')) problems.push('E3: fork 态没按步更新（还停在 42K）');
+
 console.log('场景 D｜project 面板的注册表卡片');
 META = { id:'s1', registry:[
   {id:'Main', name:'主agent', status:'active', ctx_cur:235398, ctx_peak:235398, window:1000000, rounds:0, steps:208, files:[], history_files:[]},
@@ -2288,6 +2327,7 @@ def main() -> int:
         ("closest('[data-p]')", "工作目录列表的点击委托（点文件夹不会进目录）"),
         ("el.dataset.p = join(", "目录行的 data-p（委托消费的路径）"),
         ("applyPlanKpis(d);", "顶部六格按步更新（/plan 的现算值没人应用）"),
+        ("applyPlanCtx(d);", "上下文窗口按步更新（/plan 的现读观测没人应用）"),
     ):
         if need not in html:
             print("渲染核对：失败 1 项")

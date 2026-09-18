@@ -1346,6 +1346,27 @@ function applyPlanKpis(d){
   renderKpis(META.usage,META.rounds,META.tools_total,'live');
   return true;
 }
+/* **顶部上下文窗口的现读值**（2026-09-17 用户："将前端的上下文窗口改成每步一更新，
+   而不是一轮一更新"）。`/plan` 每 tick 带各 agent 的注册表观测（ctx_cur/ctx_peak/
+   window）——`ctx_cur` 是运行时**每次装配**（一轮内每步装配一次）就地更新、随步落盘
+   的观测，所以每 tick 合并 + 重画 = 每步一更新，不必等轮闭合。
+   返回是否有变化（没变就一个字节都不动）。 */
+function applyPlanCtx(d){
+  const rows=(d&&d.ctx)||[];
+  if(!rows.length||!META)return false;
+  const reg=META.registry||[];
+  let changed=false;
+  for(const r of rows){
+    const e=reg.find(x=>x&&(x.id===r.id||(r.name&&x.name===r.name)));
+    if(!e)continue;
+    for(const k of ['ctx_cur','ctx_peak','window']){
+      const v=Number(r[k]||0);
+      if(Number(e[k]||0)!==v){e[k]=v;changed=true}
+    }
+  }
+  if(changed)renderCtxbar();
+  return changed;
+}
 async function pollPlan(){
   // 把**计划账本 + 维护进度**单拉一次（轻量口 /plan）：`todo` 一被调用就重画
   // 「当前进行中的阶段（上）/ 已验收阶段（下）」，不必等这一轮结束。
@@ -1366,6 +1387,7 @@ async function pollPlan(){
   // 独立签名比对——计划没变也可能用量变了（每步都在变），所以这条不跟下面的计划
   // 分支共用早退点。
   applyPlanKpis(d);
+  applyPlanCtx(d);
   applyMaint(d.maint);
   const sig=JSON.stringify(d.todo||{})+'|'+JSON.stringify(d.todo_log||[]);
   if(sig===(window._planSig||''))return;        // 计划没变化 → 后面的都不动
@@ -2331,14 +2353,20 @@ function renderCtxbar(){
   /* V4 取消重组：所有 agent 共用同一份共享历史——按 agent 列同一串数字是噪声，
      直接给一行"共享上下文"（2026-09-17 用户："现在不是没有重组上下文这个概念了"）。 */
   if(VIEWSIZES&&VIEWSIZES.shared){
-    const tk=((VIEWSIZES.agents||[])[0]||{}).tokens||0;
-    const share=winDefault?tk/winDefault*100:0;
+    /* **共享上下文按步更新**（2026-09-17 用户："将前端的上下文窗口改成每步一更新，
+       而不是一轮一更新"）：V4 下所有 agent 装配的是同一份，这份的体量就是注册表里
+       每步都在刷的实测观测（`_touch_view_context` 每次装配即更新、随步落盘）；
+       投影只在**没有观测**（还没跑过）时兜底。 */
+    const mainReg=((META&&META.registry)||[]).find(e=>e&&(e.id==='Main'||e.name==='主agent'))||{};
+    const tk=mainReg.ctx_cur||((VIEWSIZES.agents||[])[0]||{}).tokens||0;
+    const shareWin=mainReg.window||winDefault;
+    const share=shareWin?tk/shareWin*100:0;
     const pct=share>=10?share.toFixed(1):share.toFixed(2);
     bar.classList.add('show');
-    bar.innerHTML=`<div class="ctxrow" title="V4 取消重组：所有 agent 装配的是同一份共享历史（段落档 ＋ 近期原文）"><span class="dot" style="background:var(--teal)"></span>`
-      +`<span class="nm">共享上下文（${rows.length} 个 agent 同用）</span>`
+    bar.innerHTML=`<div class="ctx-cell" title="V4 取消重组：所有 agent 装配的是同一份共享历史（段落档 ＋ 近期原文）"><span class="ctx-dot" style="background:var(--teal)"></span>`
+      +`<span class="mono" style="color:var(--teal)">共享上下文（${rows.length} 个 agent 同用）</span>`
       +`<span class="ctx-bar"><i style="width:${Math.min(100,share).toFixed(1)}%;background:${share>85?'var(--red)':share>65?'var(--gold)':'var(--teal)'}"></i></span>`
-      +`<span class="mono">${fmtN(tk)}${winDefault?`/${fmtN(winDefault)}（${pct}%）`:''}</span></div>`;
+      +`<span class="mono">${fmtN(tk)}${shareWin?`/${fmtN(shareWin)}（${pct}%）`:''}</span></div>`;
     return;
   }
   /* fork 之后（V4 §3.8）：各家不再共用一份——按 agent 列**实测观测**（就是它上一轮

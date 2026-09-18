@@ -1372,6 +1372,26 @@ def _round_meta(r: dict, usage: dict | None = None,
     }
 
 
+def _live_ctx(registry: list | None) -> list[dict]:
+    """注册表里的**上下文观测**（每 agent 一行）——供 `/plan` 每 tick 现读。
+
+    只给观测字段（`ctx_cur`/`ctx_peak`/`window`）：运行时的 `_touch_view_context`
+    在**每次装配**（一轮内每步装配一次）就地更新注册表条目，`_persist_rounds`
+    随后把它写盘；前端每 tick 拉到就能重画顶部上下文窗口，不必等轮闭合。
+    """
+    out = []
+    for e in registry or []:
+        if not isinstance(e, dict):
+            continue
+        out.append({
+            "id": str(e.get("id") or ""), "name": str(e.get("name") or ""),
+            "ctx_cur": int(e.get("ctx_cur") or 0),
+            "ctx_peak": int(e.get("ctx_peak") or 0),
+            "window": int(e.get("window") or 0),
+        })
+    return out
+
+
 def session_meta(task_id: str, data: dict) -> dict:
     """会话元数据（详情页用：摘要 + 账本 + 计划 + 注册表 + 轮元数据）。"""
     meta = session_summary(task_id, data)
@@ -1825,6 +1845,11 @@ class _Handler(BaseHTTPRequestHandler):
                 "rounds": len(rounds),
                 "steps": sum(int(r.get("steps_used") or 0) for r in rounds),
                 "tools": tool_call_count(data.get("history")),
+                # **各 agent 的上下文观测**（2026-09-17：顶部上下文窗口按步更新）：
+                # `ctx_cur` 是**每次装配**（一轮内每步都装一次）的体量，随步落盘——
+                # 这里每 tick 现读，前端拉到就重画，不必等轮闭合。口径与
+                # `session_meta` 的 registry 同源（同一份 task.json 的同一个字段）。
+                "ctx": _live_ctx(data.get("registry")),
                 # 维护进度（整理/分裂在后台跑，轮闭合作业就没了——界面靠它
                 # 显示"整理中…/分裂中…（已 Ns）"，见 `maint_state`）
                 "maint": maint_state(data),
