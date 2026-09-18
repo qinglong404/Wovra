@@ -808,24 +808,31 @@ renderLive();
   console.log(`   M 运行线含整理=${!!has} 回答留在完成区=${!!(done&&/strong/.test(done.innerHTML))}`);
 }
 
-console.log('场景 N｜后台维护观察器：有 pending 轮才武装、且只武装一次');
+console.log('场景 N｜后台维护观察器：只在**真的在跑维护**时武装、且只武装一次');
+// 2026-09-18 改判据：原先看"有 pending 轮"，而 V4 下 `org_state` 是折算出来的——
+// "字还没写出来"的轮永远算 pending（`_org_state_of`），于是只要会话里有未结算轮，
+// 观察器就**永远等不到结束**，每 3 秒 `refreshAfterTurn()` 收尾式重绘一次，把正在
+// 往上翻历史的用户反复拽回底部（用户报"2.5 秒回到尾部"的真身）。
+// 现在两处都改成看"维护在不在跑"（`META.maint.active` / `/plan` 的 `maint.active`）。
 {
   const before = _timers.length;
   resetLive();
-  META.round_list = [{seq:7, active_view:'A', org_state:'done'}];
+  // ① 有 pending 轮但**维护没在跑**（V4 的常态）→ 不武装
+  META.round_list = [{seq:8, active_view:'A', org_state:'pending'}];
+  META.maint = {active:false};
   MAINT_WATCH = 0;
   watchMaintenance();
-  if (_timers.length !== before) problems.push('N: 没有 pending 轮却武装了观察器');
-  META.round_list = [{seq:7, active_view:'A', org_state:'done'},
-                     {seq:8, active_view:'A', org_state:'pending'}];
+  if (_timers.length !== before) problems.push('N: 维护没在跑却武装了观察器（会把用户拽回底部）');
+  // ② 维护真的在跑 → 武装，且幂等
+  META.maint = {active:true, phase:'整理'};
   watchMaintenance();
   const armed = _timers.length - before;
-  if (armed !== 1) problems.push(`N: 有 pending 轮应武装 1 个观察器，实际 ${armed}`);
+  if (armed !== 1) problems.push(`N: 维护在跑应武装 1 个观察器，实际 ${armed}`);
   watchMaintenance();   // 幂等
   if (_timers.length - before !== 1) problems.push('N: 重复调用又武装了一个（不幂等）');
   _timers.slice(before).forEach(t=>clearInterval(t.id));
   MAINT_WATCH = 0;
-  console.log(`   N 无 pending 不武装=true 有 pending 武装数=${armed} 幂等=${_timers.length===before}`);
+  console.log(`   N 未跑不武装=true 在跑武装数=${armed} 幂等=${_timers.length===before}`);
 }
 
 console.log('场景 O｜一轮里两名 agent：各自的思考必须各进各的消息块');

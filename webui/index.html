@@ -2127,7 +2127,11 @@ async function renderConv(c,fresh){
   // 差集为空时一个字节都不等，直接同步画（老行为原样保留）
   const plan=convSyncPlan();
   if(plan.stale.length||plan.fresh.length){try{await syncConvCache(plan)}catch(e){}}
-  drawConv(c,true);
+  /* **钉底要听 FOLLOW**（2026-09-18 修）：这里原先硬写 `true`（永远钉底），于是任何
+     一次重画——包括每 2.5s 轮询、`renderCtxbar` 的观测变化、注册表刷新——都会把正在
+     往上翻历史的用户拽回底部（用户："还是 2.5 秒回到尾部"）。跟随亮着才钉底；
+     不跟随就走锚点恢复，把视口留在原处。 */
+  drawConv(c,FOLLOW);
 }
 function toggleThink(el){el.dataset.user='1';el.classList.toggle('open')}
 function tickRunning(){
@@ -3012,7 +3016,12 @@ async function refreshAfterTurn(){
   // 消失，等下一次轮询才补回来。这里按服务端事件数补齐，**只发落后的那几轮的
   // 增量请求**（不落后时零请求）。
   try{await syncConvCache()}catch(e){}
-  drawConv($('#content'),true);
+  /* **钉底要听 FOLLOW**（2026-09-18 修，第二处）：这里原先硬写 `true`。实测栈
+     `setScrollTop ← drawConv ← refreshAfterTurn ← MAINT_WATCH 的 3s tick`——只要会话里
+     还有 `org_state==='pending'` 的轮，`watchMaintenance` 就一直每 3 秒收尾式重绘一次，
+     把正在往上翻历史的用户拽回底部（用户："2.5 秒回到尾部"）。收尾该不该回底由
+     FOLLOW 决定：跟随亮着才钉底。 */
+  drawConv($('#content'),FOLLOW);
   loadSessions();
   watchMaintenance();
 }
@@ -3021,13 +3030,23 @@ async function refreshAfterTurn(){
    整理/分裂现在是**异步**的：轮已经闭合、用户可以去说下一句，而维护还在后台跑
    （实测一批 106 秒，硬上限 900 秒）。它跑完会让产物落地（注册表长出子 agent、
    历史轮归位），界面得自己跟上——否则轮头上一直挂着「整理中」，用户以为没生效。
-   有界轮询：每 3 秒一次、最多 100 次（5 分钟）就放弃；不再有 pending 轮时刷新
-   一次并停。幂等：已经在看就直接返回。 */
+   有界轮询：每 3 秒一次、最多 200 次（10 分钟）就放弃；不再有在整理的轮时刷新
+   一次并停。幂等：已经在看就直接返回。
+
+   **2026-09-18 修**：这个观察器的结束条件原先只看 `org_state==='pending'`，而 V4
+   下 `org_state` 是**折算**出来的——"字还没写出来"的轮也算 pending（见
+   `_org_state_of`）。于是只要会话里有还没结算的轮，它**永远等不到结束**，每 3 秒
+   收尾式重绘一次（`refreshAfterTurn`），把正在往上翻历史的用户反复拽回底部
+   （用户报"2.5 秒回到尾部"，真实栈就是这条 tick）。两处收口：
+   * 起观察器前先看**服务端有没有真的在跑维护**（`META.maint.active`）——它是
+     "启动/结束"记录派生的，比轮字段可靠；
+   * 结束判定改看**在跑这件事本身**（`/plan` 的 `maint.active`），不再拿轮状态猜。 */
 let MAINT_WATCH=0;
 function watchMaintenance(){
   if(MAINT_WATCH)return;
-  const pend=()=>((META&&META.round_list)||[]).some(r=>r.org_state==='pending');
-  if(!pend())return;
+  // 没有正在跑的维护就不观察（META.maint 由 `/api/sessions/<id>` 带回来）
+  const m=META&&META.maint;
+  if(!m||!m.active)return;
   let n=0;
   MAINT_WATCH=setInterval(async()=>{
     // 上限 200 × 3s = **10 分钟**（2026-09-13 从 100 提到 200）：整理是异步的，
@@ -3037,7 +3056,10 @@ function watchMaintenance(){
     let d=null;
     try{d=await api(`/api/sessions/${CUR}/plan`)}catch(e){return}
     if(!d)return;
-    if((d.org_pending||[]).length)return;      // 还在整理：继续等
+    // **结束判定看"维护在不在跑"**（`maint.active`，由"启动/结束"记录派生），
+    // 不再看轮的 `org_state`——那个字段在 V4 下是折算的，"字还没写出来"永远算
+    // pending，观察器就永远不结束（2026-09-18 修）
+    if(d.maint&&d.maint.active)return;         // 还在跑：继续等
     clearInterval(MAINT_WATCH);MAINT_WATCH=0;
     try{await refreshAfterTurn()}catch(e){}
   },3000);
