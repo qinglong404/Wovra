@@ -333,7 +333,6 @@ def test_batch_then_fold_in_the_same_close(monkeypatch, tmp_path):
          _batch_chunk([_note(1), _note(2), _note(3)])],
         org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
     )
-    agent._fold_keep = 0
     _run(agent, 3)
     _trigger(agent)
     _fold(agent)
@@ -356,7 +355,6 @@ def test_round_without_note_stays_raw(monkeypatch, tmp_path):
          _batch_chunk([_note(2)])],                  # 产物里没有 R1
         org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
     )
-    agent._fold_keep = 0
     _run(agent, 2)
     _trigger(agent)
     _fold(agent)
@@ -375,7 +373,6 @@ def test_paragraph_carries_in_round_user_turn_verbatim(monkeypatch, tmp_path):
         [_batch_chunk([_note(1, "一句话")])],
         org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
     )
-    agent._fold_keep = 0
     round_ = {
         "seq": 1,
         "user_input": {"original": "先做 A", "normalized": ""},
@@ -414,26 +411,6 @@ def _big_round(seq: int, chars: int = 2400) -> dict:
     }
 
 
-def test_fold_line_stops_at_the_recent_window(monkeypatch, tmp_path):
-    """原文窗口：最近 N 轮保持原文（窗口决定换档线推到哪，不决定何时换）。"""
-    agent, task = _agent(monkeypatch, tmp_path, [], org_grace_rounds=0)
-    r1, r2 = _big_round(1, chars=1700), _big_round(2, chars=1700)
-    task.rounds = [r1, r2]
-    agent.rounds = task.rounds
-    agent._fold_keep = 1
-    def raw(r):        # 与 `_advance_fold_line` 同一把尺子
-        return agent._estimate_messages(
-            [e.get("message") or {} for e in r.get("events") or []]
-        )
-
-    size = raw(r1) + raw(r2)
-    agent._org_watermark = int(size * 0.97)          # 到线；目标 ≈ 0.58×size
-    _fold(agent, size=size)
-
-    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
-    assembled = _assembled(agent)
-    assert "第1轮结论" in assembled                   # 第 1 轮折成段落
-    assert "第2轮结论" not in assembled              # 第 2 轮还留着原文
 
 
 def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path):
@@ -448,7 +425,6 @@ def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path)
         + [_batch_chunk([_note(i) for i in range(1, 6)])],
         org_watermark=5000, org_grace_rounds=0,
     )
-    agent._fold_keep = 1
     _run(agent, 5)
     agent._fold_target = 0.6
     _trigger(agent, size=9000)                       # 到线（>5000）
@@ -558,7 +534,6 @@ def test_partial_segment_failure_keeps_round_unfolded(monkeypatch, tmp_path):
 
     assert [s["executor"] for s in round_["note_segments"]] == ["Main"]   # 只落了第一段
     assert round_["note_state"] == "failed"        # 没齐 → 不许折档
-    agent._fold_keep = 0
     agent.last_context_estimate = _WATERMARK_OFF
     agent._advance_fold_line()
     assert not round_.get("folded")
@@ -612,24 +587,6 @@ def test_multi_executor_backlog_goes_segment_by_segment(monkeypatch, tmp_path):
     assert round_["note_state"] == "done"
 
 
-def test_fold_triggers_on_round_cap_even_below_watermark(monkeypatch, tmp_path):
-    """**轮次上限触发**（2026-09-17 用户口径"15 轮"）：连续小轮到不了水位也要折一次。"""
-    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=10 ** 9, org_grace_rounds=0)
-    agent._fold_keep = 99                                  # 窗口不参与
-    agent._fold_max_rounds = 3
-    task.rounds = [_big_round(i, chars=40) for i in range(1, 5)]   # 4 轮小轮（远低于水位）
-    agent.rounds = task.rounds
-    agent.last_context_estimate = 100                      # 体量小得离水位十万八千里
-
-    agent._advance_fold_line()
-
-    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
-    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
-    assert "轮次上限触发" in detail
-
-    # 距上次折档还没满 3 轮 → 不折
-    agent._advance_fold_line()
-    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
 
 
 def test_note_carries_awaiting_user_and_the_tail(monkeypatch, tmp_path):
@@ -700,10 +657,8 @@ def test_catch_up_settles_rounds_closed_during_maintenance(monkeypatch, tmp_path
         monkeypatch, tmp_path,
         [_plain(), _plain(), _plain(),
          _batch_chunk([_note(1), _note(2), _note(3)])],
-        org_watermark=10 ** 9, org_grace_rounds=0,     # 水位远在天边：补齐不看它
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,   # 跑轮期间闸门关着
     )
-    agent._fold_keep = 99
-    agent._fold_max_rounds = 2                          # 未折轮 3 > 2 → 折老的那个
     _run(agent, 3)
     agent._open_round_on_disk = lambda: None           # 没有开放轮 → 可以折档
 
@@ -712,6 +667,9 @@ def test_catch_up_settles_rounds_closed_during_maintenance(monkeypatch, tmp_path
     assert [r["note_state"] for r in task.rounds] == ["done"] * 3   # 全补齐
     detail = "\n".join(str(h.get("detail")) for h in task.history if h.get("kind") == "note")
     assert "维护期间闭合的轮已补齐：R1–R3" in detail
+    agent._org_watermark = 1                           # 目标线落到体量之下 → 折档该推
+    agent.last_context_estimate = 9000
+    agent._catch_up_after_maintenance()
     assert any(r.get("folded") for r in task.rounds)                # 折档也推了
 
 
@@ -720,13 +678,60 @@ def test_catch_up_settles_but_does_not_fold_with_an_open_round(monkeypatch, tmp_
     agent, task = _agent(
         monkeypatch, tmp_path,
         [_plain(), _plain(), _batch_chunk([_note(1), _note(2)])],
-        org_watermark=10 ** 9, org_grace_rounds=0,
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
     )
-    agent._fold_keep = 0
     _run(agent, 2)
     agent._open_round_on_disk = lambda: {"seq": 3, "end_state": "open"}
+    agent._org_watermark = 1                           # 该折的条件都成立，只差"没有开放轮"
+    agent.last_context_estimate = 9000
 
     agent._catch_up_after_maintenance()
 
     assert [r["note_state"] for r in task.rounds] == ["done"] * 2
     assert not any(r.get("folded") for r in task.rounds)            # 一个都没折
+
+
+def test_fold_is_decided_by_watermark_not_by_round_number(monkeypatch, tmp_path):
+    """折档只看水位：会话早期（轮号很小）冲过线也要折得动（2026-09-18 事故）。
+
+    实测会话 `20260918-095302-f8c67a`：4 轮顶着 261K，水位早过了，折档却一轮没折——
+    选轮里那条"最近 N 轮不折"的窗口守卫在会话早期是恒真的（`current − 50 < 0`），
+    触发一次、`staged` 空着静默返回。现在窗口与轮次上限都已删除（用户："将 50 轮
+    那个机制彻底删了，没啥大用"）：到线就折，最老的先，折到目标线以下为止。
+    """
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _plain(), _plain(),
+         _batch_chunk([_note(1), _note(2), _note(3)])],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _run(agent, 3)
+    _trigger(agent)                                    # 到水位（R1–R3 都在窗口内也要折）
+    _fold(agent)
+
+    folded = [int(r["seq"]) for r in task.rounds if r.get("folded")]
+    assert folded == [1, 2, 3], f"到线必须折得动（轮号不参与判定）：{folded}"
+    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
+    assert "换档" in detail and "折后" in detail
+
+    # 没到水位：新来一轮有产物也照样留原文（轮号再大也不折——轮次上限已删）
+    task.rounds.append(_big_round(4, chars=40))
+    agent.rounds = task.rounds
+    agent.last_context_estimate = 10
+    agent._advance_fold_line()
+    assert not task.rounds[3].get("folded")
+
+
+def test_fold_without_candidates_leaves_a_trace(monkeypatch, tmp_path):
+    """到线却一轮没折 → 留痕（否则"没折"与"没触发"在 history 里长得一样）。"""
+    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=1000, org_grace_rounds=0)
+    task.rounds = [_big_round(1, chars=40)]
+    task.rounds[0]["note_state"] = "failed"            # 唯一的轮没有产物
+    agent.rounds = task.rounds
+    agent.last_context_estimate = 5000                 # 过线
+
+    agent._advance_fold_line()
+
+    assert not any(r.get("folded") for r in task.rounds)
+    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
+    assert "折档未折" in detail

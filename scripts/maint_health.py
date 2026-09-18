@@ -263,6 +263,25 @@ def report(task_id: str) -> None:
                 print(f"  …另 {len(ranked) - 6} 轮（其余都小）")
         print(f"当前开放轮 {cur_tok:,}（{'进行中' if agent.current_round else '无'}）")
         print(f"未整理轮 {len(raw_rounds)} 轮")
+        # ── 折档判定（2026-09-18 加：会话 20260918-095302-f8c67a 顶着 261K 没折档）──
+        # 直接调运行时那份 `_fold_plan`（纯函数、不改状态）——**同一份代码**，
+        # 不会出现"仪器说该折、运行时没折"。用户问"为什么还没压缩"时答案就在这行。
+        closed = [r for r in task.rounds
+                  if str(r.get("end_state")) == "completed"]
+        if closed:
+            staged, after, why = agent._fold_plan(closed, total)
+            print("── 折档判定（只有水位说话；轮号既不触发也不拦）──")
+            print(f"触发：{'水位' if total >= watermark else '无'}"
+                  f"（装配 {total:,} / 水位 {watermark:,}）")
+            print(f"目标线 {int(watermark * agent._fold_target_ratio()):,}"
+                  f"（水位 × {agent._fold_target_ratio():.0%}）")
+            if staged:
+                seqs = "、".join(f"R{int(r['seq'])}" for r in staged[:8])
+                more = "" if len(staged) <= 8 else f"…（共 {len(staged)} 轮）"
+                print(f"会折：{seqs}{more}")
+                print(f"折后 ≈{after:,}（省 {max(total - after, 0):,}）；停手：{why}")
+            else:
+                print(f"**不会折**：{why}")
         # 口径（2026-09-12 订正）：地板与分项核对是**材料口径**的量（全量装配
         # `legacy_total`）。此前拿"本轮装配口径"的 `total` 当分母——视图分化
         # 开启后 total 只是"当前视图那一桶"，于是打出「地板 −168,137／

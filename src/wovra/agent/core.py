@@ -35,8 +35,6 @@ from .support import (
     _ORG_GRACE_ROUNDS_DEFAULT,
     _NOTE_BATCH_MAX_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
-    _FOLD_KEEP_ROUNDS_DEFAULT,
-    _FOLD_MAX_ROUNDS_DEFAULT,
     _FOLD_TARGET_DEFAULT,
     v4_enabled,
     _ORG_MAINT_TIMEOUT_DEFAULT,
@@ -194,11 +192,8 @@ class _CoreMixin:
         # 结算（水位处攒批，V4 §6.1）的硬上限与单批轮数上限；超时按失败处理、只留痕
         self._note_timeout = _NOTE_TIMEOUT_DEFAULT
         self._note_batch_max = _NOTE_BATCH_MAX_DEFAULT
-        # 换档后保留原文的最近轮数（§3.8/§3.9 的"近 50 轮"）与折到水位的比例
-        self._fold_keep = _FOLD_KEEP_ROUNDS_DEFAULT
+        # 折到水位的比例（一次折够，见 `_fold_plan`）
         self._fold_target = _FOLD_TARGET_DEFAULT
-        # 折档的轮次上限（连续小轮兜底；2026-09-17 用户口径"15 轮"）
-        self._fold_max_rounds = _FOLD_MAX_ROUNDS_DEFAULT
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()

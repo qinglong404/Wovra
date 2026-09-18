@@ -63,19 +63,9 @@ def v4_enabled() -> bool:
         "0", "false", "no", "off",
     )
 
-# 折叠后**保留原文**的最近轮数（§3.8/§3.9 用户口径"近 50 轮"）。它只决定换档线
-# 往哪推，不决定何时换（何时换由水位说了算）。
-_FOLD_KEEP_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_KEEP_ROUNDS", "50"))
-
 # 换档的目标：折到水位这个比例之下（一次折够 → 下次换档要等重新长上来，天然滞后）。
 # 实测动因：按"逐轮推进"会让水位悬在线上时**每轮断一次前缀**（worklog §160）。
 _FOLD_TARGET_DEFAULT = float(os.environ.get("WOVRA_FOLD_TARGET", "0.6"))
-
-# 折档的**轮次上限**：攒到这个轮数还没到水位，就照样折一次（2026-09-17 用户口径：
-# "改成同一的 50 轮……50 轮还没到水位，就直接压缩吧"）。**与原文窗口同一个数**
-# （`WOVRA_FOLD_KEEP_ROUNDS` 默认 50）：窗口是"别折比它更新的轮"的下限，上限是
-# "多久必须折一次"的兜底——两者取同一个值时，语义就是"最多留 50 轮原文"。
-_FOLD_MAX_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_MAX_ROUNDS", "50"))
 
 # 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），
 # 可以与其他只读工具并发执行。`screenshot` 则**不**进这个集合——它要启动无头

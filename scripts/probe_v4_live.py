@@ -6,7 +6,7 @@
 
 用法（项目根执行）：
 
-    .venv/bin/python scripts/probe_v4_live.py <会话ID> [--watermark 5000] [--keep 2] [--input "回一句：验证。"]
+    .venv/bin/python scripts/probe_v4_live.py <会话ID> [--watermark 5000] [--input "回一句：验证。"]
 
 约定：**只动副本**（`/tmp/wovra-v4-probe/tasks/`），原会话一个字节不碰。脚本不删（§0.3）。
 """
@@ -36,7 +36,6 @@ def _fresh(args) -> int:
     agent._org_watermark = args.watermark
     agent._org_grace = 0
     agent._org_cooldown = 0
-    agent._fold_keep = args.keep
     agent._fold_target = args.fold_target
     for i in range(1, args.fresh + 1):
         text = agent.run(f"第 {i} 个问题：只回一句「第 {i} 答」，不要做别的。")
@@ -60,7 +59,6 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="V4 成品验证（会话副本上真跑一轮）")
     ap.add_argument("session_id")
     ap.add_argument("--watermark", type=int, default=5000, help="调小水位，好让换档真的发生")
-    ap.add_argument("--keep", type=int, default=2, help="换档后保留原文的最近轮数")
     ap.add_argument("--fold-target", type=float, default=0.6,
                     help="折到水位的这个比例之下（一次折够，越大折得越少）")
     ap.add_argument("--input", default="只回一句：验证。", help="本轮用户输入")
@@ -87,11 +85,10 @@ def main() -> int:
     agent._org_watermark = args.watermark
     agent._org_grace = 0
     agent._org_cooldown = 0
-    agent._fold_keep = args.keep
     before = len(task.history or [])
 
     print(f"副本：{dst}")
-    print(f"V4=1　水位={args.watermark}　原文窗口={args.keep}　输入：{args.input!r}")
+    print(f"V4=1　水位={args.watermark}　输入：{args.input!r}")
     print("跑一轮…", flush=True)
     answer = agent.run(args.input)
     print(f"\n回答：{str(answer)[:200]}")

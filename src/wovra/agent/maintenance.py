@@ -24,10 +24,8 @@ from .support import (
     MODE_MANAGED,
     v4_enabled,
     _COMPRESS_THRESHOLD,
-    _FOLD_KEEP_ROUNDS_DEFAULT,
     _FOLD_TARGET_DEFAULT,
     _NOTE_BATCH_MAX_DEFAULT,
-    _FOLD_MAX_ROUNDS_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _clip_quote,
     maint_tools,
@@ -850,9 +848,6 @@ class _MaintenanceMixin:
                 return str(assessment["reason"])[:200]
         return ""
 
-    def _fold_keep_rounds(self) -> int:
-        return int(getattr(self, "_fold_keep", _FOLD_KEEP_ROUNDS_DEFAULT))
-
     def _fold_target_ratio(self) -> float:
         """折到水位的这个比例之下（越小折得越狠、下次换档来得越晚）。"""
         try:
@@ -860,8 +855,38 @@ class _MaintenanceMixin:
         except (TypeError, ValueError):
             return _FOLD_TARGET_DEFAULT
 
+    def _fold_plan(self, closed: list[dict],
+                   total: int) -> tuple[list[dict], int, str]:
+        """折档选轮：**纯函数**（不改任何状态）→ `(要折的轮, 折后估算, 停手原因)`。
+
+        运行时（`_advance_fold_line`）与仪器（`scripts/maint_health.py`）调**同一份**
+        ——否则会出现"仪器说该折、运行时没折"，白查一圈。
+
+        规则：**只有水位说话**——最老的先折，折到目标线（水位 × `WOVRA_FOLD_TARGET`，
+        默认 0.6）以下为止；**最近一轮没有特权**（触发那一刻的整批都算范围）。
+        轮号不参与判定：有产物的轮就是候选，折到线以下就停手。
+        """
+        target = int(self._org_watermark * self._fold_target_ratio())
+        size = int(total or 0)
+        staged: list[dict] = []
+        why = ""
+        for r in closed:                          # 最老的先
+            if size <= target:
+                why = f"已折到目标线 {target:,} 以下"
+                break
+            if r.get("folded") or str(r.get("note_state")) != "done":
+                continue
+            raw = self._estimate_messages(
+                [e.get("message") or {} for e in r.get("events") or []]
+            )
+            size -= max(0, raw - note_module.est_note_tokens(r))
+            staged.append(r)
+        if not why:
+            why = "候选轮都折完了"
+        return staged, max(size, 0), why
+
     def _advance_fold_line(self, with_catch_up: bool = False) -> None:
-        """水位到了就把"超龄且有 note"的轮**一次换到位**（§6.2/§6.3）。
+        """水位到了就把有产物、还没折的轮**一次换到位**（§6.2/§6.3）。
 
         只在**轮闭合处**推进（轮内冻结）；水位/宽限与整理同一套旋钮（冷却不设——
         换档只在到线时发生，且它是唯一允许断前缀的动作）。逐个标 `folded` 标志：
@@ -872,67 +897,40 @@ class _MaintenanceMixin:
         closed = [r for r in self.rounds if str(r.get("end_state")) == "completed"]
         if not closed:
             return
-        current = int(closed[-1]["seq"])
-        by_water = with_catch_up or self.last_context_estimate >= self._org_watermark
-        # **轮次上限**（2026-09-17 用户口径："改成同一的 50 轮……50 轮还没到水位就直接压缩"）：
-        # 距上一次折档**事件**已满 N 轮就折一次（N 与原文窗口同一个数，默认 50）。
-        cap = int(getattr(self, "_fold_max_rounds", _FOLD_MAX_ROUNDS_DEFAULT))
-        # **按"上一次折档事件"计时**（不是"上一次折的那一轮"）：折完一轮若拿它当起点，
-        # 下一轮立刻又满足上限 → 退化成"每轮折一轮"，又变成每轮断一次前缀（§160 的教训）。
-        last_fold_at = int(getattr(self.task, "fold_at_seq", 0) or 0)
-        by_rounds = current - last_fold_at >= cap
-        if not (by_water or by_rounds) or current <= self._org_grace:
+        # **只有水位触发**（2026-09-18 用户口径："将 50 轮那个机制彻底删了，没啥大用"）：
+        # 轮号既不触发折档、也不拦折档——攒着的小轮不到水位就一直留原文，到线才折。
+        if not with_catch_up and self.last_context_estimate < self._org_watermark:
+            return
+        if int(closed[-1]["seq"]) <= self._org_grace:
             return
         # **一次折够**（2026-09-17 实测：按"上次折到哪"逐轮推进会让水位一直悬在线上的
         # 时候**每轮断一次前缀**——每个工作调用白付 190~260 tok；大会话里这笔是"尾部
         # 体量"。改成：折到**目标线以下**（水位 × 0.6），于是下次换档要等上下文重新长
-        # 上来（天然滞后）。原文窗口仍是"近 N 轮"，但**窗口本身超水位时继续往近处推进**
-        # ——这正是 §3.8 用户口径里写的那条。）
+        # 上来（天然滞后）。
         target = int(self._org_watermark * self._fold_target_ratio())
-        size = int(self.last_context_estimate or 0)
-        window_cut = current - self._fold_keep_rounds()
-        # **范围就是这批**（2026-09-17 用户口径更正）：触发那一刻"过线的批次"是
-        # R1–R7（含刚闭合的那一轮），整理就该把它整批压掉——**最近一轮不是特权**。
-        # 此前这里写的是 `closed[:-1]`（"最后一轮永不折"，我加的，与用户规则相反）：
-        # 实测代价 R7 一轮 96,820 tok 原文顶着 92% 的上下文，折完 R1–R6 仍 103.5K >
-        # 水位 100K，于是**每轮闭合都在线上触发维护**（R8 那次白跑一遭分裂）。
-        # 未折的轮数（有产物、还没折的）——轮次上限管的就是它
-        unfolded = [r for r in closed
-                    if not r.get("folded") and str(r.get("note_state")) == "done"]
-        staged: list[dict] = []
-        for r in closed:                          # 最老的先
-            # 停手条件：已经折到目标以下、**且未折轮数在上限内**（窗口是下限，见下）
-            if size <= target and len(unfolded) <= cap:
-                break
-            if int(r["seq"]) > window_cut and len(unfolded) <= cap:
-                # **原文窗口是下限**：再往近处不折——但**被轮次上限逼着时让路**
-                # （两者默认是同一个数，正常不会打架；上限更小时以"必须折"为准）
-                break
-            if r.get("folded") or str(r.get("note_state")) != "done":
-                continue
-            if unfolded:
-                unfolded = unfolded[1:]           # 折掉最老的那个
-
-            raw = self._estimate_messages(
-                [e.get("message") or {} for e in r.get("events") or []]
-            )
-            size -= max(0, raw - note_module.est_note_tokens(r))
-            staged.append(r)
+        staged, after, why = self._fold_plan(
+            closed, int(self.last_context_estimate or 0)
+        )
         if not staged:
+            # 到线却一轮没折 → **必须留痕**（否则"没折"和"没触发"在 history 里长得一样）
+            if self.task is not None:
+                self.task.record(
+                    "fold",
+                    f"折档未折：{why}（已闭合 {len(closed)} 轮；装配 "
+                    + f"{int(self.last_context_estimate or 0):,} tok、目标 {target:,}）",
+                )
             return
         for r in staged:
             r["folded"] = True
-        if self.task is not None:
-            self.task.fold_at_seq = current       # 轮次上限的计时起点（本轮）
         self._persist_rounds()
         if self.task is not None:
             self.task.record(
                 "fold",
-                ("（轮次上限触发）" if (by_rounds and not by_water) else "")
-                + f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
+                f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
                 f"{'' if len(staged) == 1 else '、…、R' + str(staged[-1]['seq'])}）；"
                 f"折到水位 {self._fold_target_ratio():.0%} 以下"
-                f"（目标 {target:,}，折前 {int(self.last_context_estimate or 0):,}）",
+                f"（目标 {target:,}，折前 {int(self.last_context_estimate or 0):,}"
+                f" → 折后 ≈{after:,}）",
             )
 
     def _ensure_worker(self) -> None:
