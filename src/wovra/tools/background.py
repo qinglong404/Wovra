@@ -79,9 +79,11 @@ def run_background(command: str, keep_alive: bool = False) -> str:
         if targets and safety._request_path_authorization(targets, "run_background"):
             safety._audit(f"[run_background][越界已授权] {command}")
         else:
+            where = safety.escape_offender(command, targets)
             return (
                 f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
-                f"后台命令同样默认限定在工作区 {safety.workspace_root()} 内运行；"
+                + (f"\n触发的片段：{where}\n" if where else "")
+                + f"后台命令同样默认限定在工作区 {safety.workspace_root()} 内运行；"
                 f"越界访问需用户授权一次（授权后自动放行）。"
             )
     reason = safety._confirm_reason(command)

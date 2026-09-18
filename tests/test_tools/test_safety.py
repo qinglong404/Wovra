@@ -1028,6 +1028,40 @@ def test_text_with_slash_fragment_is_not_an_escape():
     assert abs_paths("find / -name x") == ["/"]
 
 
+def test_data_heredoc_body_is_not_scanned_for_paths():
+    """数据类 heredoc 的**正文**不是要执行的命令，不作路径判定。
+
+    实测现场：`git commit -F - <<'MSG'` 的正文里写了 `/api/settings`，
+    被判成"访问工作区之外的绝对路径"整条驳回（正文是喂给 git 的数据，
+    与引号文本同性质）。解释器 heredoc 的正文照旧受检。
+    """
+    from wovra import tools as tools_module
+
+    escape = tools_module.safety._command_escape
+    commit = ("git commit -F - <<'MSG'\n"
+              "前端配置面板：写通道 /api/settings（写仓库根 .env）\n"
+              "MSG")
+    assert escape(commit) is None
+    # 非代码 heredoc（cat 读数据、feed 脚本）同样不看正文
+    assert escape("cat <<'EOF'\nsee /etc/passwd\nEOF") is None
+    # 解释器 heredoc 的正文是真代码：界外路径照旧检出
+    assert escape("bash <<EOF\ncat /etc/passwd\nEOF")
+    assert escape("sh <<'X'\nls /\nX")
+    # heredoc 之外的真越界不受影响
+    assert escape("git commit -F - <<'MSG' && cat /etc/passwd\n正文\nMSG")
+
+
+def test_escape_rejection_names_the_offending_snippet(workspace):
+    """越界拒绝要点明**是哪一段**触发的（否则只能二分猜）。"""
+    from wovra import tools as tools_module
+
+    command = "echo hi\ncat /etc/passwd"
+    offender = tools_module.safety.escape_offender(command, ["/etc/passwd"])
+    assert "第 2 行" in offender and "/etc/passwd" in offender
+    # 判不出时不编（空串）
+    assert tools_module.safety.escape_offender("x", []) == ""
+
+
 def test_command_substitution_inside_text_command_is_still_checked():
     """纯文本命令里的**命令替换**要照旧受检（2026-09-13 Linux 实测回归）。
 

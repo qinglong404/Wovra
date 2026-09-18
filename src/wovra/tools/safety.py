@@ -252,14 +252,69 @@ _EXEC_FLAG_ARG = re.compile(
     re.DOTALL,
 )
 _QUOTED_SEGMENT = re.compile(r"(['\"])(.*?)\1", re.DOTALL)
+# heredoc 起始（`<<WORD` / `<<-WORD` / `<<'WORD'`）与其分隔词
+_HEREDOC_START = re.compile(r"<<-?\s*(['\"]?)([A-Za-z_][A-Za-z0-9_]*)\1")
+# 命令行里出现的任意 token（用来判 heredoc 正文喂给谁）
+_WORD_TOKEN = re.compile(r"[A-Za-z0-9_./-]+")
+
+
+def _heredoc_is_code(line: str) -> bool:
+    """这一行启动的 heredoc，正文是不是**要执行的代码**（喂给解释器）。
+
+    `git commit -F - <<'MSG'`（git 自己读正文）→ 数据；
+    `uv run python - <<'PY'` / `bash <<'EOF'` → 代码，正文里的越界路径必须继续扫。
+    判据是**整行**里有没有解释器词——`uv run ... python -` 的段首词是 `uv`，
+    只看段首词会把代码正文当数据放过去。
+    """
+    for word in _WORD_TOKEN.findall(line):
+        head = word.replace("\\", "/").rsplit("/", 1)[-1].lower()
+        for ext in (".exe", ".cmd", ".bat"):
+            if head.endswith(ext):
+                head = head[: -len(ext)]
+        if head in _CODE_EXEC_COMMANDS:
+            return True
+    return False
+
+
+def _mask_heredoc_bodies(command: str) -> str:
+    """把**数据类** heredoc 的正文掩码（代码解释器的正文保留给检测器）。
+
+    实测现场：`git commit -F - <<'MSG'` 的正文里写了 `/api/settings`，被判成
+    "访问工作区之外的绝对路径"整条驳回——正文是**喂给命令的数据**，不是要执行的
+    命令（引号文本一直是这个口径，heredoc 正文此前没有对应处理）。
+    """
+    lines = command.split("\n")
+    if len(lines) < 2:
+        return command
+    out: list[str] = []
+    delim: str | None = None
+    for line in lines:
+        if delim is not None:
+            if line.strip() == delim:
+                delim = None
+                out.append(line)
+            else:
+                out.append("TEXT")      # 正文：按数据掩码
+            continue
+        out.append(line)
+        if "<<" not in line or _heredoc_is_code(line):
+            continue
+        for m in _HEREDOC_START.finditer(line):
+            delim = m.group(2)
+            break                        # 一行多条 heredoc 少见：只认第一条
+    if delim is not None:
+        # 正文没闭合（命令被截断）：保守起见按原样返回（不掩码、照旧检测）
+        return command
+    return "\n".join(out)
 
 
 def _mask_quoted_text(command: str) -> str:
-    """把命令里的数据引号段掩码；代码解释器的 `-c/-e` 段还原保留。
+    """把命令里的数据引号段/数据 heredoc 正文掩码；代码解释器的段还原保留。
 
     白名单解释器（bash -c、perl -e、python3 -c…）的引号内是**要执行
     的代码**——其中的越界路径必须继续被检测；echo/-m/grep 等传参的
-    引号内是**数据**——掩码掉避免误伤。
+    引号内、以及 git 之类读 stdin 的 heredoc 正文是**数据**——掩码掉
+    避免误伤。
     """
     protected: list[str] = []
 
@@ -267,7 +322,8 @@ def _mask_quoted_text(command: str) -> str:
         protected.append(m.group(0))
         return f"\x00{len(protected) - 1}\x00"
 
-    masked = _EXEC_FLAG_ARG.sub(_keep, command)
+    masked = _mask_heredoc_bodies(command)
+    masked = _EXEC_FLAG_ARG.sub(_keep, masked)
     masked = _QUOTED_SEGMENT.sub(
         lambda m: m.group(1) + "TEXT" + m.group(1), masked
     )
@@ -772,6 +828,27 @@ def _command_escape(command: str) -> str | None:
     """检测命令里"离开工作区"的意图，返回原因；没有则 None。"""
     result = _command_escape_targets(command)
     return result[0] if result else None
+
+
+def escape_offender(command: str, targets: list[str] | None = None) -> str:
+    """越界拒绝时点明"是哪一段触发的"——返回可读片段（判不出返回空串）。
+
+    实测摩擦：只说"命令试图访问工作区之外的绝对路径（/api/settings）"时，模型
+    得靠二分猜是哪一处（heredoc 正文里的文本、引号里的说明、真参数都可能像路径）。
+    """
+    for raw in (targets or []):
+        token = str(raw or "").strip()
+        if not token:
+            continue
+        idx = command.find(token)
+        if idx < 0:
+            continue
+        line_no = command.count("\n", 0, idx) + 1
+        line = command.splitlines()[line_no - 1] if command.splitlines() else token
+        shown = line.strip()[:120]
+        return (f"第 {line_no} 行的 `{shown}`（命中目标 {token}）"
+                if line_no > 1 else f"`{shown}`（命中目标 {token}）")
+    return ""
 
 # ---- 审计挂钩 ---------------------------------------------------------------
 # Agent 绑定任务时通过 set_audit_recorder 注册回调；工具用它把

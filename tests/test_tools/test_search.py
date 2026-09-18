@@ -97,14 +97,26 @@ def test_search_and_glob_reach_spill_dir(monkeypatch, tmp_path):
     assert "无匹配" in tools_module.search_files("ERROR")
 
 
-def test_search_files_directory_is_file_gives_hint(monkeypatch, tmp_path):
-    """search_files 的 directory 指向文件 → 提示用 read_file（不再静默"无匹配"）。"""
+def test_search_files_directory_may_be_a_single_file(monkeypatch, tmp_path):
+    """search_files 的 directory 指向**文件** → 就在该文件里搜（不再要求换参数）。"""
     from wovra import tools as tools_module
 
     monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
-    write_file("app.py", "def foo(): pass")
+    write_file("app.py", "def foo(): pass\nx = 1\n")
+    write_file("other.py", "foo = 2\n")
     result = tools_module.search_files("foo", directory="app.py")
-    assert "文件而非目录" in result and "read_file" in result
+    assert "app.py:1" in result and "other.py" not in result
+
+
+def test_search_files_directory_is_dir_still_walks(monkeypatch, tmp_path):
+    """目录入参照旧遍历整个目录（上一条改的是"传文件"这条路）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("app.py", "def foo(): pass\n")
+    write_file("other.py", "foo = 2\n")
+    result = tools_module.search_files("foo", directory=".")
+    assert "app.py:1" in result and "other.py:1" in result
 
 
 def test_search_files_directory_missing_gives_hint(monkeypatch, tmp_path):

@@ -16,6 +16,7 @@ import re
 import time
 from pathlib import Path
 
+from .. import observed
 from . import documents, limits, permissions, safety
 
 
@@ -226,7 +227,7 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
                     f"{documents.binary_hint(target)}")
         origin, text = parsed
     label = f"{origin}，" if origin else ""
-    _observe_file(target)  # 记录观察时的状态，供 edit/write 的过期保护比对
+    _observe_file(target, text)  # 记录状态 + 内容快照（过期拒绝靠它算差异）
     lines = text.splitlines()
     total = len(lines)
     if total == 0:
@@ -310,18 +311,18 @@ def search_files(pattern: str, directory: str = ".", glob: str = "*",
         raise ValueError(f"正则表达式无效: {error}") from error
 
     root = safety._safe_directory(directory)
-    # 参数误用预检（2026-09-13 摩擦修复）：directory 指向文件时不再静默"无匹配"，
-    # 那会误导模型以为目录里真的没内容（实测踩过）。明确指路。
+    # directory 指向文件时**就在该文件里搜**（实测摩擦：想搜一个已知文件里的
+    # 函数定义，最自然的写法就是把它填进 directory，却被要求换参数重来一次）。
+    single_file: Path | None = None
     if root.is_file():
-        return (
-            f"directory 指向一个文件而非目录：{directory}。search_files 在目录内搜内容；"
-            f"读该文件请用 read_file('{directory}')，"
-            f"或在它所在目录内搜索（directory=其父目录）。"
-        )
+        single_file = root
+        root = root.parent
     if not root.exists():
         return f"directory 不存在: {directory}（解析为 {root}）。先确认目录路径。"
     matches: list[str] = []
     for path in _walk(root, glob):
+        if single_file is not None and path.resolve() != single_file.resolve():
+            continue  # 指定了单个文件：只搜它
         # 超大文件上限（2026-09-12 由 1MB 放宽到 8MB）：超限落盘的 spill
         # 文件动辄几 MB，原阈值把它挡在搜索之外——而定位恰恰是大输出最
         # 需要的操作。文本 8MB 正则扫描成本可接受，真卡住还有超时兜底。
@@ -564,29 +565,63 @@ def glob_files(pattern: str, directory: str = ".", include_hidden: bool = False)
 _file_registry: dict[tuple[str, Path], tuple[int, int]] = {}
 
 
-def _observe_file(path: Path) -> None:
+def _observe_file(path: Path, content: str | None = None) -> None:
+    """记下这次读到/写到的状态；给了 content 就同时存一份内容快照。
+
+    内容快照让"文件被改过"的**差异**可算（只说"被改过"的话，模型只能整读
+    一遍才知道变了什么）。与 agent 层的观察是同一份存储（内容寻址，重复无害）。
+    """
     key = (safety.current_agent(), path)
     try:
         st = path.stat()
         _file_registry[key] = (st.st_mtime_ns, st.st_size)
     except OSError:
         _file_registry.pop(key, None)
+    if content is None:
+        return
+    try:
+        workspace = Path(safety.workspace_root())
+        rel = path.relative_to(workspace).as_posix()
+    except (ValueError, OSError):
+        return
+    observed.record(workspace, safety.current_agent(), rel, content, by="read")
 
 
-def _stale_error(path: Path) -> str | None:
+def _stale_detail(path: Path, now: str | None = None) -> str:
+    """「变了哪几行」——相对本 agent 上次看到的内容（拿不到就返回空串）。
+
+    过期拒绝只说"被改过"是不够的（实测：每次都得把文件整读一遍才知道变了什么，
+    大文件尤其贵）。观察快照里存着上次看到的内容，直接给出 hunk。
+    """
+    if now is None:
+        try:
+            now = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            return ""
+    try:
+        workspace = Path(safety.workspace_root())
+        rel = path.relative_to(workspace).as_posix()
+        report = observed.stale_report(workspace, safety.current_agent(), rel, now)
+    except (ValueError, OSError):
+        return ""
+    return f"\n{report}\n" if report else ""
+
+
+def _stale_error(path: Path, now: str | None = None) -> str | None:
     """文件在观察后被外部修改 → 返回拒绝原因；否则 None（**按当前 agent 的记录判**）。"""
-    observed = _file_registry.get((safety.current_agent(), path))
-    if observed is None:
+    observed_state = _file_registry.get((safety.current_agent(), path))
+    if observed_state is None:
         return None
     try:
         st = path.stat()
     except OSError:
         return None
-    if (st.st_mtime_ns, st.st_size) != observed:
+    if (st.st_mtime_ns, st.st_size) != observed_state:
         return (
-            f"文件在你上次读取后已被外部修改（用户或其他进程）：{path}。"
-            f"上下文里的内容可能已过期。请先 read_file 重新确认最新内容，"
-            f"再决定如何修改。"
+            f"文件在你上次读取后已被外部修改（用户、别的会话或别的进程）：{path}。"
+            + _stale_detail(path, now)
+            + "上下文里的内容可能已过期——按上面的差异对齐锚点/行号即可继续，"
+              "或先 read_file 重新确认最新内容。"
         )
     return None
 
@@ -679,7 +714,7 @@ def restore_file(path: str, version: str = "") -> str:
     if target.exists():
         _archive_version(target)  # 当前内容先归档：回滚可撤销
     target.write_text(matches[0].read_text(encoding="utf-8"), encoding="utf-8")
-    _observe_file(target)
+    _observe_file(target, matches[0].read_text(encoding="utf-8"))
     safety._audit(f"[restore_file] {path} ← {matches[0].stem}")
     return f"已回滚 {path} 到版本 {matches[0].stem}（回滚前的内容已归档，可再次回滚）"
 
@@ -830,7 +865,7 @@ def write_file(path: str, content: str, force: bool = False) -> str:
     if existed:
         _archive_version(target)  # 覆盖前归档旧内容：restore_file 可回滚
     target.write_text(content, encoding="utf-8")
-    _observe_file(target)
+    _observe_file(target, content)
     action = "覆盖" if existed else "创建"
     if not existed:
         # F5：新文件谁创建谁拥有——创建成功即归属当前视图（运行时守卫负责落册）
@@ -927,8 +962,19 @@ def edit_file(path: str, old_text: str, new_text: str,
         safety._audit(f"[edit_file][权限拒绝] {path}")
         return denied
     stale = _stale_error(target)
+    # 锚点仍然唯一时**不必白拒一次**（实测摩擦：明明只差一处引用，却被要求整读
+    # 一遍）。文件被改过但 old_text 在**当前磁盘内容**里恰好命中 → 放行。
+    pass_stale = False
     if stale:
-        return stale
+        try:
+            latest = target.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            latest = None
+        hits = latest.count(old_text) if latest is not None else 0
+        if hits == 1 or (replace_all and hits >= 1):
+            pass_stale = True
+        else:
+            return stale
     # 参数误用预检（2026-09-13 摩擦修复）：目标是目录 → 明确提示而不是裸 IsADirectoryError。
     # 文案保留 "是目录" 子串：lifecycle/blocks 靠它判断编辑是否真发生（同 read/write 预检约定）。
     if target.is_dir():
@@ -972,15 +1018,17 @@ def edit_file(path: str, old_text: str, new_text: str,
     replaced = text.replace(old_text, new_text) if replace_all else text.replace(old_text, new_text, 1)
     _archive_version(target)  # 编辑前归档：restore_file 可回滚
     target.write_text(replaced, encoding="utf-8")
-    _observe_file(target)
+    _observe_file(target, replaced)
     scope = f"全部 {n} 处" if replace_all else "唯一一处"
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
     safety._audit(f"[edit_file] {path}（替换{scope}）\n定位片段:\n{old_text}\n替换为:\n{new_text}")
     anchor = _persistent_anchor(text, line_no)
     diff = _change_diff(text, replaced)
     tail = f"\n改动：\n{diff}" if diff else "\n（改动后内容与原来一致）"
+    stale_note = ("\n（文件在你上次读取后被改过：已按当前磁盘内容替换；"
+                  "差异见上面的「改动」）" if pass_stale else "")
     return (f"已修改 {path}（替换{scope}，{len(old_text)} 字符 → {len(new_text)} 字符，"
-            f"位于第 {line_no} 行附近{anchor}）{tail}")
+            f"位于第 {line_no} 行附近{anchor}）{tail}{stale_note}")
 
 
 def _persistent_anchor(text: str, line_no: int, max_lookback: int = 40) -> str:
@@ -1048,10 +1096,26 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     replaced = lines[:start_line - 1] + new_lines + lines[end_line:]
     _archive_version(target)  # 替换前归档：restore_file 可回滚
     target.write_text("\n".join(replaced) + ("\n" if trailing else ""), encoding="utf-8")
-    _observe_file(target)
+    _observe_file(target, "\n".join(replaced) + ("\n" if trailing else ""))
     # 旧块与新块都留底（超长截断到 5000，原则与 write_file 备份一致）
     safety._audit(f"[replace_lines] {path} 第 {start_line}-{end_line} 行\n旧内容:\n"
            f"{old_block[:5000]}\n替换为:\n{new_content[:5000]}")
+    # **被删掉的内容要摆到显眼处**（实测损伤：区间里几行不该删的常量被一起吃掉，
+    # 回执只说"N 行 → M 行"，靠事后 `git diff` 才发现）。判据用 difflib 的
+    # `delete` 块——那才是"原文里没有、新内容里也没有"的行；`replace`（改写）
+    # 不算丢失，否则每次改一行都会报一遍。
+    import difflib
+
+    old_lines = old_block.split("\n")
+    deleted = [old_lines[i] for tag, i1, i2, _j1, _j2
+               in difflib.SequenceMatcher(None, old_lines, new_lines).get_opcodes()
+               if tag == "delete" for i in range(i1, i2) if old_lines[i].strip()]
+    warn = ""
+    if deleted:
+        shown = "\n".join(f"  − {ln}" for ln in deleted[:20])
+        more = f"\n  …（共 {len(deleted)} 行）" if len(deleted) > 20 else ""
+        warn = (f"\n⚠ 这个区间里有 {len(deleted)} 行非空内容没出现在 new_content 里"
+                f"（若不是本意，用 restore_file 回滚）：\n{shown}{more}")
     return (f"已替换 {path} 第 {start_line}-{end_line} 行"
             f"（{end_line - start_line + 1} 行 → {len(new_lines)} 行，现共 {len(replaced)} 行）"
-            f"\n改动：\n{_change_diff(old_block, new_content)}")
+            f"\n改动：\n{_change_diff(old_block, new_content)}{warn}")

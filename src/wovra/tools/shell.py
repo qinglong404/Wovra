@@ -128,9 +128,13 @@ def run_command(command: str, timeout: int | None = None) -> str:
                 "越界访问需用户授权：授权一次后该路径自动放行"
                 f"（授权清单: {safety.workspace_root() / '.wovra' / 'authorized-paths.json'}）。"
             )
+            # 点明**是哪一段**触发的（实测：只说"命令试图访问…"时，模型得靠二分
+            # 猜是哪一处；heredoc 正文、引号文本、参数都可能是"看起来像路径"的文本）。
+            where = safety.escape_offender(command, targets)
             return (
                 f"已拒绝执行：命令试图{reason}（{command[:120]}）。"
-                f"所有命令默认限定在工作区 {safety.workspace_root()} 内运行。"
+                + (f"\n触发的片段：{where}\n" if where else "")
+                + f"所有命令默认限定在工作区 {safety.workspace_root()} 内运行。"
                 f"{hint}{tail}"
             )
     reason = safety._confirm_reason(command)

@@ -1703,22 +1703,35 @@ class _CoreMixin:
             result = f"{result}\n[hooks 反馈] {feedback}"
         result = sanitize_surrogates(result)
         if name in _VISION_TOOLS:               # 记账 + 软线收敛提示
-            result = self._count_image_view(result)
+            result = self._count_image_view(result, str(parsed.get("path") or ""))
         return result
 
     def _image_view_count(self) -> int:
         """本回合已看图次数（没有 round 时按 0 计——脚本/测试直调的场景）。"""
         return int((self.current_round or {}).get("image_views") or 0)
 
-    def _count_image_view(self, result: str) -> str:
+    def _count_image_view(self, result: str, path: str = "") -> str:
         """看图计数，并在**恰好**到软线时把"该收敛了"写进结果。
 
         只提示一次：到硬线还有一次拒绝（见 `_invoke_tool`），中间每次都贴
         会白烧 token。计数落在 round 上，随轮持久化。
+
+        同一张图重复请求时补一句（实测连调四次才发现是**延迟投递**——图上一次
+        请求里已经排进队列，再请求一次不会更快看到它）。
         """
         count = self._image_view_count() + 1
+        repeat = False
         if self.current_round is not None:
             self.current_round["image_views"] = count
+            seen = self.current_round.setdefault("image_paths", [])
+            repeat = bool(path) and path in seen
+            if path and not repeat:
+                seen.append(path)
+        note = ""
+        if repeat:
+            note = ("\n（这张图本回合已请求过——它在**上一次**请求之后就已排入投递队列，"
+                    "再请求一次不会更快看到；下次回复里就会出现。要新的信息请换区域重截。）")
+        result += note
         if count == _env_image_views() and count < _env_image_views_max():
             return f"{result}\n{image_converge_note(count, _env_image_views_max())}"
         return result
@@ -1769,12 +1782,12 @@ class _CoreMixin:
             return
         view = self._active_view()
         if name in self._WRITE_TOOLS:
-            # 先记快照、再记写入：写入日志的时间戳必须**不早于**快照时间，
-            # 否则下次比对时 `writes.at >= observed_at` 不成立，自己写的
-            # 改动会被通知说成"用户操作"。
+            # 先记快照、再记写入：写入日志的摘要/时间戳必须对得上**刚写下的**内容，
+            # 下次比对才认得出"这是工具写的"。
             observed_module.record(workspace, view, rel, content, by="edit")
             observed_module.note_write(workspace, view, rel,
-                                       int((self.current_round or {}).get("seq") or 0))
+                                       int((self.current_round or {}).get("seq") or 0),
+                                       content=content)
         else:
             observed_module.record(workspace, view, rel, content, by="read")
 

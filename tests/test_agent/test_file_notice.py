@@ -43,18 +43,24 @@ def test_notice_reports_tool_write_with_hunks(tmp_path, monkeypatch):
     assert "别整文件重读" in text
 
 
-def test_notice_for_user_edit_does_not_judge(tmp_path, monkeypatch):
-    """外部（用户）改动**不预判对错**：措辞按用户口径原文（可能高质量、也可能手滑）。"""
+def test_notice_for_non_tool_edit_does_not_judge(tmp_path, monkeypatch):
+    """非本会话工具造成的改动**不预判对错**，也不断言是谁改的。
+
+    措辞保留用户口径（可能高质量、也可能手滑）；归属只说"不是本会话的工具写的"
+    ——外部编辑器与**另一个会话/进程**在事实层面无从区分（实测：并行会话的编辑
+    曾被通知写成"用户操作"，我据此误判成用户动了我正在改的文件）。
+    """
     ws = _workspace(tmp_path, monkeypatch)
     rel = "note.md"
     (ws / rel).write_text("x\n", encoding="utf-8")
     observed_module.record(ws, "Main", rel, "x\n")
-    (ws / rel).write_text("x\n-1\n", encoding="utf-8")     # 没有工具写入记录 → 用户操作
+    (ws / rel).write_text("x\n-1\n", encoding="utf-8")     # 没有工具写入记录 → 非工具写入
 
     text = observed_module.notice_text(ws, "Main")
 
-    assert "[文件变更·用户操作]" in text
-    assert "不是工具写的" in text
+    assert "[文件变更·非工具写入]" in text
+    assert "不是本会话的工具写的" in text
+    assert "另一个会话" in text
     assert "不要当成权威版本，也不要当成错误" in text
 
 
@@ -161,3 +167,44 @@ def test_stale_detection_is_per_agent(tmp_path, monkeypatch):
     safety_module.bind_agent("B")
     assert files_module._stale_error(f) is None          # B 是新鲜的
     safety_module.bind_agent("")
+
+
+def test_write_log_keeps_records_from_concurrent_writers(tmp_path, monkeypatch):
+    """并行会话的写入记录**互不覆盖**，归属判定不靠单条记录。
+
+    旧实现把写入日志存成 `{rel: {view, at}}` 单条：同一份工作区被另一个会话
+    写过就把记录顶掉，于是**本次会话刚做的编辑**被通知说成"非工具写入"
+    （实测：通知把 ledger.py / web.py 这些我自己改的文件标成外部改动）。
+    """
+    ws = _workspace(tmp_path, monkeypatch)
+    rel = "a.py"
+    (ws / rel).write_text("v1\n", encoding="utf-8")
+
+    observed_module.note_write(ws, "Main", rel, seq=1, content="v1\n")
+    observed_module.note_write(ws, "Other", rel, seq=9, content="别人的内容\n")
+
+    # 另一个会话后写，不该把 Main 的记录挤掉
+    raw = (ws / ".wovra" / "observed" / "writes.json").read_text(encoding="utf-8")
+    assert "Main" in raw and "Other" in raw
+    # 本次会话写下的内容仍认成工具写入（按内容摘要判，不靠时间戳先后）
+    observed_module.record(ws, "Main", rel, "v1\n", by="read")
+    (ws / rel).write_text("v1\n改过\n", encoding="utf-8")
+    observed_module.note_write(ws, "Main", rel, seq=2, content="v1\n改过\n")
+    (ws / rel).write_text("v1\n改过\n", encoding="utf-8")
+    text = observed_module.notice_text(ws, "Main")
+    assert "工具写入" in text and "非工具写入" not in text
+
+
+def test_snapshot_text_and_stale_report(tmp_path, monkeypatch):
+    """`stale_report` 给出「变了哪几行」——工具层的过期拒绝靠它带差异。"""
+    ws = _workspace(tmp_path, monkeypatch)
+    rel = "a.py"
+    (ws / rel).write_text("v1\nkeep\n", encoding="utf-8")
+    observed_module.record(ws, "Main", rel, "v1\nkeep\n")
+
+    assert observed_module.snapshot_text(ws, "Main", rel) == "v1\nkeep\n"
+    report = observed_module.stale_report(ws, "Main", rel, "v1\nkeep\n新加\n")
+    assert "变了这几行" in report and "+1 −0" in report and "新加" in report
+    # 没变 → 空串（不白带一段）
+    assert observed_module.stale_report(ws, "Main", rel, "v1\nkeep\n") == ""
+    assert observed_module.snapshot_text(ws, "Main", "没有这个文件.py") is None

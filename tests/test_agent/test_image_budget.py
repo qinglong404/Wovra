@@ -48,6 +48,23 @@ def test_image_budget_soft_note_then_hard_refusal(monkeypatch):
     assert agent.current_round["image_views"] == 4
 
 
+def test_repeat_image_request_gets_a_note(monkeypatch):
+    """同一张图重复请求要说明"已在投递队列里"（实测连调四次才发现是延迟投递）。
+
+    换一张图不提示——那是正常的"再看一处"。
+    """
+    agent, _ = _agent(soft=9, hard=10, monkeypatch=monkeypatch)
+
+    first = agent._invoke_tool("view_image", '{"path": "a.png"}')
+    again = agent._invoke_tool("view_image", '{"path": "a.png"}')
+    other = agent._invoke_tool("view_image", '{"path": "b.png"}')
+
+    assert "已请求过" not in first
+    assert "已请求过" in again and "投递队列" in again
+    assert "已请求过" not in other
+    assert agent.current_round["image_paths"] == ["a.png", "b.png"]
+
+
 def test_image_budget_counts_only_vision_tools(monkeypatch):
     """screenshot 只落盘、不注入图像，不进预算（挡它挡不住看图循环）。"""
     agent, seen = _agent(soft=1, hard=2, monkeypatch=monkeypatch)

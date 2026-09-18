@@ -160,6 +160,62 @@ def test_edit_file_rejects_externally_modified_file(monkeypatch, tmp_path):
     assert "已修改" in result
 
 
+def test_edit_file_stale_rejection_carries_diff(monkeypatch, tmp_path):
+    """过期拒绝要给出「变了哪几行」——只说"被改过"的话，模型只能整读一遍。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("note.md", "v1\nkeep\n")
+    (tmp_path / "note.md").write_text("v1\nkeep\n外部新增\n", encoding="utf-8")
+
+    result = edit_file("note.md", "锚点不在文件里", "x")
+
+    assert "已被外部修改" in result
+    # 差异可见（hunk + 行数），不必整读
+    assert "变了这几行" in result and "+1 −0" in result and "外部新增" in result
+    assert "别整文件重读" in result or "对齐锚点" in result
+
+
+def test_edit_file_stale_but_unique_anchor_still_edits(monkeypatch, tmp_path):
+    """文件被改过，但待替换文本在**当前内容**里仍唯一 → 直接改，不白拒一次。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("note.md", "alpha\nbeta\n")
+    (tmp_path / "note.md").write_text("alpha\nbeta\n新加的\n", encoding="utf-8")
+
+    result = edit_file("note.md", "alpha", "ALPHA")
+
+    assert "已修改" in result
+    assert (tmp_path / "note.md").read_text(encoding="utf-8") == "ALPHA\nbeta\n新加的\n"
+    assert "已按当前磁盘内容替换" in result          # 回执里交代这件事
+
+
+def test_replace_lines_warns_about_swallowed_content(monkeypatch, tmp_path):
+    """区间里的非空内容被吞掉时要显眼提示（实测：误删过几行常量，回执只说行数）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("m.py", "KEEP_A = 1\nDROP_ME = 2\nKEEP_B = 3\n")
+    result = replace_lines("m.py", 1, 3, "KEEP_A = 1\nKEEP_B = 3")
+
+    assert "已替换" in result
+    assert "DROP_ME = 2" in result                   # 被删的那行出现在回执里
+    assert "没出现在 new_content" in result
+    assert "restore_file" in result                  # 给出回滚路径
+
+
+def test_replace_lines_quiet_when_nothing_is_lost(monkeypatch, tmp_path):
+    """没丢内容时不打这条警告（改文案是本意，别当噪声）。"""
+    from wovra import tools as tools_module
+
+    monkeypatch.setattr(tools_module.safety, "PROJECT_ROOT", tmp_path)
+    write_file("m.py", "A = 1\nB = 2\n")
+    result = replace_lines("m.py", 2, 2, "B = 22")
+
+    assert "已替换" in result and "没出现在 new_content" not in result
+
+
 def test_write_file_rejects_stale_overwrite(monkeypatch, tmp_path):
     """整体覆盖同样受过期保护：外部改过的文件不能被盲写覆盖。"""
     from wovra import tools as tools_module

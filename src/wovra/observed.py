@@ -30,6 +30,8 @@ _OBSERVED_DIR = (".wovra", "observed")
 _INDEX = "index.json"
 _WRITES = "writes.json"
 _MAX_HUNK_LINES = 14
+# 每个文件的写入记录保留条数（只用来判"是不是工具写的"，留最近若干条足够）
+_WRITE_LOG_KEEP = 20
 
 
 def _root(workspace: Path) -> Path:
@@ -86,15 +88,68 @@ def record(workspace: Path, view: str, rel: str, content: str, *,
     _dump(slot / _INDEX, index)
 
 
-def note_write(workspace: Path, view: str, rel: str, seq: int = 0) -> None:
-    """记一笔"工具写了这个文件"——通知里用它区分工具写入与用户操作。"""
+def note_write(workspace: Path, view: str, rel: str, seq: int = 0,
+               task: str = "", content: Optional[str] = None) -> None:
+    """记一笔"工具写了这个文件"——通知里用它区分工具写入与别的来源。
+
+    记录**按 (view, rel) 分桶、追加成列表**：同一份工作区可能被多个会话/进程
+    同时写（实测踩过），单键覆盖会把别人刚写的记录顶掉。
+
+    判定归属用**内容摘要**（`content` 是工具刚写进去的内容）：当前内容与某条
+    记录里的摘要相同 → 就是工具写的。只比时间戳不够稳——观察（读）也会刷新
+    "上次看到"的时间，把工具刚写的记录比下去，于是自己的编辑被说成别人改的。
+    """
     rel = str(rel or "").strip()
     if not rel:
         return
     path = _root(workspace) / _WRITES
     data = _load(path)
-    data[rel] = {"view": view or "Main", "seq": int(seq or 0), "at": time.time()}
+    key = f"{_safe(view or 'Main')}|{rel}"
+    entries = data.get(key)
+    if isinstance(entries, dict):                 # 旧格式（单条）：升级成列表
+        entries = [entries]
+    if not isinstance(entries, list):
+        entries = []
+    entries.append({"view": view or "Main", "seq": int(seq or 0),
+                    "task": str(task or ""), "at": time.time(),
+                    "hash": _digest(content) if content is not None else ""})
+    data[key] = entries[-_WRITE_LOG_KEEP:]
     _dump(path, data)
+
+
+def _write_entries(writes: dict, rel: str) -> list[dict]:
+    """这个文件的写入记录（新格式按 view 分桶，旧格式是单条 dict）。"""
+    out: list[dict] = []
+    for key, value in (writes or {}).items():
+        if str(key).split("|")[-1] != rel and key != rel:
+            continue
+        if isinstance(value, list):
+            out += [v for v in value if isinstance(v, dict)]
+        elif isinstance(value, dict):
+            out.append(value)
+    return out
+
+
+def snapshot_text(workspace: Path, view: str, rel: str) -> Optional[str]:
+    """这个 agent 上次看到的该文件内容；没有快照返回 None。"""
+    index = _load(_slot(workspace, view) / _INDEX)
+    info = index.get(rel)
+    if not isinstance(info, dict):
+        return None
+    return _observed_text(workspace, view, rel, info)
+
+
+def stale_report(workspace: Path, view: str, rel: str, now: str, *,
+                 limit: int = _MAX_HUNK_LINES) -> str:
+    """相对"你上次看到的内容"，这个文件变了哪些行；没有快照或没变返回空串。"""
+    old = snapshot_text(workspace, view, rel)
+    if old is None or old == now:
+        return ""
+    hunks, added, removed, truncated = _hunks(old.splitlines(), now.splitlines(), limit)
+    if not hunks:
+        return ""
+    tail = f"\n  …（改动更多，只列前 {limit} 行）" if truncated else ""
+    return f"变了这几行（+{added} −{removed}）：\n" + "\n".join(hunks) + tail
 
 
 def _read(path: Path) -> Optional[str]:
@@ -164,13 +219,20 @@ def changes(workspace: Path, view: str, *, limit: int = _MAX_HUNK_LINES) -> list
         old_lines = old.splitlines()
         now_lines = now.splitlines()
         hunks, added, removed, truncated = _hunks(old_lines, now_lines, limit)
-        written = writes.get(rel) if isinstance(writes.get(rel), dict) else None
+        # 「是谁改的」只有两种可判定的来源：**工具写入**（当前内容与某条写入
+        # 记录的内容摘要相同，或写入记录落在观察之后）与**别的来源**（外部编辑器、
+        # 别的会话、另一个进程——本进程的日志判不出它是谁，只知道自己没写）。
+        # 不要断言成"用户操作"。
         observed_at = float((info or {}).get("at") or 0)
-        by_tool = bool(written and float(written.get("at") or 0) >= observed_at)
-        if by_tool:
-            who = f"工具写入（{written.get('view') or '某个 agent'}）"
-        else:
-            who = "用户操作"
+        now_hash = _digest(now)
+        entries = _write_entries(writes, rel)
+        by_tool = any(
+            (str(e.get("hash") or "") and str(e.get("hash")) == now_hash)
+            or float(e.get("at") or 0) >= observed_at
+            for e in entries
+        )
+        who = (f"工具写入（{entries[-1].get('view') or '某个 agent'}）"
+               if by_tool else "非工具写入")
         head = (f"[文件变更·{who}] {rel}"
                 f"　你在上次观察之后它被改过：+{added} −{removed} 行"
                 f"（{len(old_lines)} → {len(now_lines)} 行）")
@@ -185,8 +247,8 @@ def changes(workspace: Path, view: str, *, limit: int = _MAX_HUNK_LINES) -> list
             body.append("  （只要改动处就够用，别整文件重读；要全文再 read_file）")
         else:
             body.append(
-                "  **这是用户操作，不是工具写的**——可能是有意的高质量修改，也可能是不小心的"
-                "（例如多加一个符号导致报错、误删了一段）；**不要当成权威版本，也不要当成错误**，"
+                "  **不是本会话的工具写的**——可能是用户手改，也可能是另一个会话/进程"
+                "在同一份工作区里改（并行干活时常见）；**不要当成权威版本，也不要当成错误**，"
                 "先看差异再决定：顺着它改、改回去、还是先问一句。"
             )
         out.append("\n".join(body))
