@@ -771,8 +771,53 @@ async function loadSessions(){
 })();
 
 /* ---------- 会话选择 ---------- */
-async function select(id){
+/* **切会话要清掉"属于上一个会话"的界面状态**（2026-09-18 用户："运行时状态、消息提示
+   等等，不随着切换不同会话消失，一直存在"）：这些量都是**跨会话残留**的模块级状态，
+   不清就会把上一个会话的维护进度/失败提示/视图投影/附件/签名缓存带到新会话上——
+   表现就是"换了个会话，那条消息还挂在上面"。
+   清单与理由（漏一个就还会出现同类现象）：
+   * `MAINT` / `MAINT_DISMISSED`：维护进度条与分裂失败提示（用户报的那条）；
+   * `MAINT_WATCH`：上一个会话的"等维护跑完"轮询——不清会继续替旧会话拉 `/plan`，
+     拉回来又覆盖新会话的 MAINT（**最隐蔽的一条**）；
+   * `_pv` / `VIEWSIZES`：上下文投影（按会话算的，签名同号不同会话会误命中）；
+   * `_kpiSig` / `_planSig` / `_planAt` / `_maintTail`：三个"没变就不重画"的签名
+     与节流时间戳——跨会话留着会让新会话的第一次刷新被当成"没变化"而跳过；
+   * `_ctxMode`：上下文抽屉的页签选择；
+   * `ATTACH`：待发送的附件（属于上一个会话的输入，不该跟着走）；
+   * `OPEN_SIG` / `PEND_SIG`：未闭合条与审批条的重绘签名。
+   不清的（它们有各自的会话归属判定或本就该跟着走）：`LIVE`（直播区按 `LIVE.cur`
+   自己判）、`CONV`（按 `CONV.session` 自己判）、`FOLLOW`/`TAB`（用户偏好）。 */
+function resetSessionView(id){
+  // **只在"真的换了会话"时清**（2026-09-18）：`select(CUR)` 这种**同会话重选**（维护
+  // 结果落地后的重取、点 ↻ 刷新）不该把状态清掉——否则刚设好的失败提示会被自己清掉
+  // （`applyMaint` 末尾就会 `select(CUR)` 重取元数据）。
+  if(String(id == null ? '' : id) === String(CUR == null ? '' : CUR)) return;
+  if(MAINT_WATCH){clearInterval(MAINT_WATCH);MAINT_WATCH=0}
+  MAINT=null;MAINT_DISMISSED='';
+  window._pv=null;VIEWSIZES=null;
+  window._kpiSig='';window._planSig='';window._planAt=0;window._maintTail=0;
+  window._ctxMode='view';
+  ATTACH=[];renderAttach();
+  OPEN_SIG='';PEND_SIG='';
+  // **旧会话的直播区要撤**（2026-09-18）：`LIVE` 自己按 `LIVE.cur` 判"是不是当前会话"，
+  // 但它只影响**渲染**——`runbar`/`⏹ 终止`/标题里的"运行中"是挂在页面外壳上的，
+  // 不清就会在新会话头顶上显示上一个会话还在跑。**任务本身不受影响**（服务端照跑），
+  // 这里只是把壳收拾干净；用户回到那个会话时 `select` 会按 `META.live_job` 重新挂上。
+  if(LIVE.job&&LIVE.cur&&String(LIVE.cur)!==String(id)){
+    try{liveDetach()}catch(e){}
+  }
+  // 抽屉/弹层里装的是**上一个会话的内容**（上下文预览、注册表、附件…）——切走就关掉，
+  // 不然新会话下面挂着一份旧会话的正文（用户报的那类"一直存在"）
+  const dr=document.getElementById('drawer'),mk=document.getElementById('mask');
+  if(dr&&dr.classList.contains('open')){
+    dr.classList.remove('open');
+    if(mk)mk.classList.remove('open');
+  }
+  if(typeof renderMaintBar==='function')renderMaintBar();
   if(CUR!==id){TREESEL.clear();window._treeQ=''}
+}
+async function select(id){
+  resetSessionView(id);
   CUR=id;renderList();
   try{META=await api('/api/sessions/'+id)}catch(e){$('#content').innerHTML='<div class="empty">加载失败</div>';return}
   buildReg();
@@ -1416,7 +1461,9 @@ let MAINT_DISMISSED='';               // 用户点过 ✕ 的那条坏消息（�
 function renderMaintBar(){
   const bar=document.getElementById('maintbar');
   if(!bar)return;
-  const defect=String((MAINT&&MAINT.defect)||'');
+  // `defect` 只表示**要常驻显示的坏消息**（不在跑时才有意义）——活动态的进度条
+  // 讲的是"正在干什么"，不该把上一次的失败原因夹在里面（2026-09-18 修）
+  const defect=String((MAINT&&MAINT.active?'':MAINT&&MAINT.defect)||'');
   const showDefect=!!defect&&defect!==MAINT_DISMISSED;
   if(!CUR||!MAINT||TAB!=='conv'||!(MAINT.active||MAINT.notice||showDefect)){
     bar.classList.remove('show','bad');
@@ -1444,8 +1491,9 @@ function applyMaint(m){
   if(!m)return;
   const wasActive=!!(MAINT&&MAINT.active);
   if(m.active){
-    MAINT={active:true,phase:m.phase,elapsed:m.elapsed,batch:m.batch||'',
-           defect:String(m.last_defect||'')};
+    // 活动态：只报"正在干什么"。**不带 defect**——上一次的失败原因由"不在跑"的那些
+    // tick 负责常驻（`m.last_defect` 一直都在），两类信息各管一段，互不覆盖。
+    MAINT={active:true,phase:m.phase,elapsed:m.elapsed,batch:m.batch||''};
     window._maintTail=Date.now()+15000;   // 结束后再多拉 15s，别漏掉结果那一条
   }else if(m.last_defect&&String(m.last_defect)!==((MAINT&&MAINT.defect)||'')){
     // **失败常驻**：不在跑的每一 tick 都带着 last_defect，有新的就挂着（不再要求
@@ -1459,7 +1507,10 @@ function applyMaint(m){
     window._maintTail=0;
     if(typeof select==='function')select(CUR);   // 结果落地 → 重取元数据（徽标/注册表）
   }else{
-    return;                              // 本来就没在跑、也没有坏消息：UI 不动
+    // 不在跑、也没有**新**坏消息：把已有的失败提示原样留着（常驻语义），
+    // 其余情况不动 UI。注意这里**不能**用 `return` 提前退出——`renderMaintBar`
+    // 在下面统一调用，节流分支要保持一致。
+    if(!(MAINT&&MAINT.defect))return;
   }
   renderMaintBar();
 }
@@ -3039,6 +3090,7 @@ function batchSel(id,on){
   if(el)el.textContent=`删除所选（${BATCH.sel.size}）`;
 }
 function forgetCurrent(){
+  resetSessionView(null);      // 同一个清场路径：别让"切走"与"删掉"两处各清一半
   CUR=null;META=null;AGENT_STATS=[];
   $('#goal').classList.add('empty');$('#goal').textContent='从左侧选择一个会话';
   $('#chips').innerHTML='';$('#kpis').innerHTML='';$('#tabs').innerHTML='';

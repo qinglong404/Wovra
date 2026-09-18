@@ -1982,6 +1982,45 @@ resetLive();
   }
 }
 
+console.log('场景 BD｜切会话：上一个会话的运行状态与提示不许跟着走');
+// 用户报（2026-09-18）："运行时状态，消息提示等等，不随着切换不同会话消失，一直存在"。
+// 这些量都是**跨会话残留**的模块级状态，不清就会把上一个会话的维护进度/失败提示/
+// 投影/附件带到新会话上。这里逐条钉住 resetSessionView 的清场范围。
+resetLive();
+{
+  const bar = document.getElementById('maintbar');
+  TAB = 'conv';
+  // ① 会话 A：挂着一条分裂失败提示 + 维护进度 + 投影缓存 + 附件 + 各种签名
+  CUR = 'A'; META = {id:'A', round_list:[]};
+  applyMaint({active:false, last_defect:'分裂失败：A 会话的错'});
+  if (!bar.classList.contains('show')) problems.push('AZ: 前置失败（A 的提示没上屏）');
+  window._pv = {agents:[{id:'Main'}]};
+  VIEWSIZES = {sig:'A', agents:[{tokens:1}], window:1, shared:true};
+  ATTACH.push({name:'a.txt', text:'x', lines:1});
+  window._kpiSig='k'; window._planSig='p'; window._ctxMode='raw'; OPEN_SIG='o'; PEND_SIG='pe';
+  window._maintTail = Date.now() + 9999;
+
+  // ② 切到会话 B：上面那些**全部**要清掉
+  resetSessionView('B');
+  if (bar.classList.contains('show')) problems.push('AZ: 切会话后旧会话的失败提示还挂着');
+  if (MAINT) problems.push('AZ: MAINT 没清（旧会话的维护状态会渲染到新会话）');
+  if (window._pv) problems.push('AZ: 上下文投影缓存没清');
+  if (VIEWSIZES) problems.push('AZ: VIEWSIZES 没清（签名同号会误命中，数字是旧会话的）');
+  if (ATTACH.length) problems.push('AZ: 待发附件没清（上一个会话的输入跟过来了）');
+  for (const k of ['_kpiSig','_planSig','_ctxMode','_maintTail','_planAt']) {
+    const v = window[k];
+    if (v !== '' && v !== 0 && v !== 'view' && v != null) problems.push('AZ: ' + k + ' 没清：' + v);
+  }
+  if (OPEN_SIG !== '' || PEND_SIG !== '') problems.push('AZ: 未闭合/审批条签名没清');
+
+  // ③ **同会话重选不清**（否则维护结果落地后的 select(CUR) 会把自己刚设的提示清掉）
+  CUR = 'A'; META = {id:'A', round_list:[]};
+  applyMaint({active:false, last_defect:'分裂失败：A 会话的错'});
+  resetSessionView('A');
+  if (!bar.classList.contains('show')) problems.push('AZ: 同会话重选把失败提示清掉了（维护结果落地后会自己清自己）');
+  dismissMaint();
+}
+
 console.log('场景 AV｜跟随尾部：内容一次长高超过阈值，不许"跟着跟着突然停住"');
 // 用户报（2026-09-15）："跟随着跟随着突然停到某一位置不跟随了"。两个叠加的毛病：
 //   ① 自动 pin 有"离底部 < tol(≥160px)"门控——内容一次长高超过它，`near` 恒假、
@@ -2559,7 +2598,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（55 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（56 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
 });
 """
 
