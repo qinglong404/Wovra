@@ -420,3 +420,35 @@ def test_chat_bucket_counts_as_top_level_but_stays_with_main():
     entries = registry_module.build_entries(domains)
     assert [e["name"] for e in entries] == ["工作区"]        # 桶不建 agent
     assert registry_module.split_defects(domains, ["a.py"]) == []
+
+
+def test_owner_of_file_recognizes_public_files():
+    """公共文件区：`owner_of_file` 报 `公共`（谁都能先动），不再是"无人认领"。
+
+    用户口径（2026-09-18）："如果活性文件没有归类，将其放到公共文件中，所有 agent
+    都有其所有操作权，但后面第一次操作写/改的 agent 获得其所有权。"
+    """
+    registry = [{"id": "A", "name": "甲", "files": ["src/a.py"]}]
+    public = ["docs/notes.md", "output/"]
+
+    assert registry_module.owner_of_file(registry, "src/a.py") == "A（甲）"
+    assert registry_module.owner_of_file(registry, "docs/notes.md") is None
+    assert registry_module.owner_of_file(registry, "docs/notes.md", public) == "公共"
+    assert registry_module.owner_of_file(registry, "output/x.txt", public) == "公共"
+
+    assert registry_module.is_public_file(public, "docs/notes.md") is True
+    assert registry_module.is_public_file(public, "output/sub/x.txt") is True
+    assert registry_module.is_public_file(public, "src/a.py") is False
+    assert registry_module.is_public_file(None, "docs/notes.md") is False
+
+
+def test_private_claim_beats_public_membership():
+    """已归到某个 agent 名下的文件，即使还在公共区名单里也按**私有**算。
+
+    摘牌由 `_claim_new_file` 负责；即使名单还没摘干净（并发写/手工编辑），
+    "精确清单优先"这条也得保证它不被当成谁都能改。
+    """
+    registry = [{"id": "A", "name": "甲", "files": ["docs/notes.md"]}]
+    public = ["docs/notes.md"]
+
+    assert registry_module.owner_of_file(registry, "docs/notes.md", public) == "A（甲）"

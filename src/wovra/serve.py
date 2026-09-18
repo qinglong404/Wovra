@@ -1461,6 +1461,10 @@ def session_meta(task_id: str, data: dict) -> dict:
     # 数据原样保留（用户口径），但一个文件同时挂在两个 agent 名下这件事不该
     # 静默躺在页面上。新分裂由 promote 的落点预演拦住，不会再长出这种条目。
     meta["registry_defects"] = registry_module.registry_defects(meta["registry"])
+    # **公共文件**（2026-09-18 用户口径）：结构树没认领的活性文件——谁都能先动手，
+    # 第一次写/改的那个 agent 得所有权。页面上要让这件事看得见（不然"这个文件归谁"
+    # 在注册表里查不到，看起来像漏了）。
+    meta["public_files"] = [str(p) for p in (data.get("public_files") or [])]
     # 窗口语义纠正（2026-09-12）：旧数据把整理水位 100K 存进了 registry
     # window——投影层按真实窗口展示；落盘值随下一轮活动由 core 自愈。
     # **未观测的条目不要补默认窗口**（2026-09-13，worklog §78）：`window=0`

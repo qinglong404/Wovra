@@ -402,6 +402,11 @@ def report(task_id: str) -> None:
                 built.get("domains"), task.rounds,
                 index=_idx, owners=built.get("owners"),
             )
+            pub = [str(p) for p in (data.get("public_files") or [])]
+            if pub:
+                print(f"公共文件 {len(pub)} 个（结构树没认领：谁都能先动手，"
+                      "第一次写/改的 agent 得所有权）："
+                      + "、".join(pub[:12]) + ("…" if len(pub) > 12 else ""))
             uncovered = list(gap.get("uncovered") or [])
             if uncovered:
                 print(f"未覆盖文件 {len(uncovered)} 个（未落在任何域 file_domains 下）："

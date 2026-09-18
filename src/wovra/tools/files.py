@@ -867,9 +867,10 @@ def write_file(path: str, content: str, force: bool = False) -> str:
     target.write_text(content, encoding="utf-8")
     _observe_file(target, content)
     action = "覆盖" if existed else "创建"
-    if not existed:
-        # F5：新文件谁创建谁拥有——创建成功即归属当前视图（运行时守卫负责落册）
-        permissions.claim("write", path)
+    # 写成功即认领：新建（F5）与**公共文件的首次写/改**（P6）都要落册——
+    # 后者是"结构树漏认的文件谁先动手就归谁"（2026-09-18 用户口径）；
+    # 是不是公共文件、要不要摘牌，由守卫拿 Task 判（工具层看不到 Task）。
+    permissions.claim("write", path)
     if old is not None:
         # 旧内容完整留底（审计原则：能还原）；超大文件截断到 20000 字符
         backup = old if len(old) <= 20_000 else old[:20_000] + "\n...(已截断)"
@@ -1019,6 +1020,8 @@ def edit_file(path: str, old_text: str, new_text: str,
     _archive_version(target)  # 编辑前归档：restore_file 可回滚
     target.write_text(replaced, encoding="utf-8")
     _observe_file(target, replaced)
+    # P6：公共文件的**首次改**也认领（同 write_file；不是公共文件时守卫会自己跳过）
+    permissions.claim("edit", path)
     scope = f"全部 {n} 处" if replace_all else "唯一一处"
     # 替换片段对完整留底：改了哪段、改成了什么，一目了然
     safety._audit(f"[edit_file] {path}（替换{scope}）\n定位片段:\n{old_text}\n替换为:\n{new_text}")
@@ -1100,6 +1103,8 @@ def replace_lines(path: str, start_line: int, end_line: int, new_content: str) -
     # 旧块与新块都留底（超长截断到 5000，原则与 write_file 备份一致）
     safety._audit(f"[replace_lines] {path} 第 {start_line}-{end_line} 行\n旧内容:\n"
            f"{old_block[:5000]}\n替换为:\n{new_content[:5000]}")
+    # P6：公共文件的**首次改**也认领（同 write_file）
+    permissions.claim("edit", path)
     # **被删掉的内容要摆到显眼处**（实测损伤：区间里几行不该删的常量被一起吃掉，
     # 回执只说"N 行 → M 行"，靠事后 `git diff` 才发现）。判据用 difflib 的
     # `delete` 块——那才是"原文里没有、新内容里也没有"的行；`replace`（改写）

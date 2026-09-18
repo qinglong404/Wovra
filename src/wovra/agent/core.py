@@ -731,10 +731,14 @@ class _CoreMixin:
         P2 别人的文件：只读
         P4 分裂之前（注册表里只有主 agent）：主 agent 全权
         P5 分裂之后：主 agent 权限与子 agent 相同
+        P6 公共文件（结构树没认领的）：全权——谁**第一次写/改**就归谁
         F5 新文件：谁创建谁拥有（放行，创建成功后由 claim 落册）
         ```
         没有任何域认领**已存在**的文件 = 分裂/整理的缺陷（用户口径：不存在
         "未认领文件"）→ 拒绝并叫人，不静默吸进谁的桶。
+        2026-09-18 起那个"缺陷"有了出口：结构树漏认的文件进**公共区**
+        （`Task.public_files`）——不再让整批分裂作废、也不再撞这条拒绝。
+        每个环节都不卡死，后面环节能修（下一批分裂仍可把它认给某个节点）。
         """
         if self.task is None:
             return None
@@ -748,7 +752,10 @@ class _CoreMixin:
         mine = self._registry_entry_for(view)
         if mine is not None and registry_module.file_owned_by(mine, rel):
             return None                       # P1：自己的文件，全权
-        owner = registry_module.owner_of_file(registry, rel)
+        public = list(getattr(self.task, "public_files", None) or [])
+        if registry_module.is_public_file(public, rel):
+            return None                       # P6：公共文件，谁都能先动手
+        owner = registry_module.owner_of_file(registry, rel, public)
         if op == "read":
             # **分裂后主 agent 连读也不干**（2026-09-17 用户口径："主 agent 不可以干任何活，
             # 除了路由，不然会污染上下文"；"有主的活，例如读，让对应 agent 来，也许可以节省
@@ -779,11 +786,15 @@ class _CoreMixin:
         )
 
     def _claim_new_file(self, path: str) -> None:
-        """F5：新文件归属创建者——立即写进它自己条目的文件清单并落盘。
+        """F5/P6：新文件归属创建者；**公共文件被首次写/改时也归动手的那个 agent**。
 
         顺带机械生一条**占位的一句话描述**（零 LLM，取首行/标题前 30 字）：
         用户口径要的是"文件描述永远新鲜"，而 agent 可能忘记写 → 先有占位，
         它下一轮用 `update_responsibility(file_notes=…)` 换成正式描述。
+
+        公共区那条是 2026-09-18 用户口径："所有 agent 都有其所有操作权，但后面第一次
+        操作写/改的 agent 获得其所有权，被归宿后后面 agent 就只能读了"——所以这里要
+        把它从 `public_files` 摘掉（摘掉那一刻，权限判定自然变成"别人的文件只读"）。
         """
         if self.task is None:
             return
@@ -791,10 +802,17 @@ class _CoreMixin:
         rel = self._rel_path(path)
         if entry is None or not rel:
             return
+        public = list(getattr(self.task, "public_files", None) or [])
+        from_public = registry_module.is_public_file(public, rel)
         files = entry.setdefault("files", [])
-        if rel in files:
+        if rel in files and not from_public:
             return
-        files.append(rel)
+        if rel not in files:
+            files.append(rel)
+        if from_public:
+            self.task.public_files = [
+                p for p in public if not registry_module.is_public_file([p], rel)
+            ]
         note = self._guess_file_note(rel)
         if note:
             entry.setdefault("file_notes", {})[rel] = note
@@ -802,7 +820,9 @@ class _CoreMixin:
         # 归属变更不该混进去（它不改变文件状态，只改变"谁维护它"）。
         self.task.record(
             "ownership",
-            f"[归属] {rel} 由 {entry.get('name')} 新建 → 计入它的文件清单",
+            f"[归属] {rel} 由 {entry.get('name')} "
+            + ("首次写/改公共文件 → 归它所有（此后别人只能读）"
+               if from_public else "新建 → 计入它的文件清单"),
         )
         self.task.save()
 

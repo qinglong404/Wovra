@@ -290,3 +290,43 @@ def test_readonly_env_extra_dirs_from_env_var(tmp_path, monkeypatch):
     ok = _call(_agent(task, registry_module.MAIN_AGENT_ID), "write_file",
                {"path": "secrets/x.md", "content": "这下能写"})
     assert "禁写区" not in ok
+
+
+def test_public_files_are_writable_and_first_writer_owns(tmp_path, monkeypatch):
+    """P6：**公共文件**谁都能先动手；第一次写/改它的那个 agent 获得所有权。
+
+    用户口径（2026-09-18）："如果活性文件没有归类，将其放到公共文件中，所有 agent
+    都有其所有操作权，但后面第一次操作写/改的 agent 获得其所有权，被归宿后后面
+    agent 就只能读了。"——所以断言分两段：**先写成功**（谁都不撞拒绝），
+    **写完之后变成它的私有文件**（另一个 agent 再写就撞"别人的文件只读"）。
+    """
+    task = _split_task(tmp_path, monkeypatch)
+    (tmp_path / "notes.md").write_text("公共笔记\n", encoding="utf-8")
+    task.public_files = ["notes.md"]
+
+    # ① 甲（工具层）先写：放行，且归它
+    a = _agent(task, "工具层")
+    out = _call(a, "write_file", {"path": "notes.md", "content": "甲写的"})
+    assert "已覆盖" in out, out
+    assert "notes.md" not in (task.public_files or []), "写完要从公共区摘牌"
+    assert "notes.md" in [str(f) for f in task.registry[1].get("files") or []]
+    assert any("公共文件" in str(e.get("detail")) for e in task.history
+               if e.get("kind") == "ownership")
+
+    # ② 乙（前端）再写：现在它是甲的私有文件 → 撞 P2
+    b = _agent(task, "前端")
+    out2 = _call(b, "write_file", {"path": "notes.md", "content": "乙也要改"})
+    assert "权限拒绝" in out2 and "工具层" in out2
+    assert (tmp_path / "notes.md").read_text(encoding="utf-8") == "甲写的"
+
+    # ③ 乙**读**公共文件（还没被人拿下时）仍有全权——另起一个公共文件验证
+    task.public_files = ["docs/"]
+    (tmp_path / "docs").mkdir(exist_ok=True)
+    (tmp_path / "docs" / "spec.md").write_text("规格\n", encoding="utf-8")
+    assert "权限拒绝" not in _call(b, "read_file", {"path": "docs/spec.md"})
+    # **改**也算"第一次动手"（不只写）——edit_file 成功后同样认领
+    assert "已修改" in _call(b, "edit_file",
+                            {"path": "docs/spec.md", "old_text": "规格",
+                             "new_text": "规格 v2"})
+    assert any(str(f) == "docs/spec.md"
+               for f in task.registry[2].get("files") or []), "改公共文件也认领"

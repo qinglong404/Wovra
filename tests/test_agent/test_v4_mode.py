@@ -231,6 +231,63 @@ def test_domains_never_apart_chain_does_not_remove_twice(monkeypatch, tmp_path):
         assert f in domains[0]["files"]
 
 
+def test_domain_drop_is_by_identity_not_by_equality(monkeypatch, tmp_path):
+    """删节点必须**按对象身份**，不能按值相等（2026-09-18 同类隐患审计）。
+
+    `list.remove` 比的是 `==`：产物里两个节点**内容完全一样**（同名、同文件）时，
+    它会删掉列表里第一个等值项——也就是把想留下的那个删了、想删的留下了，而且
+    **一声不响**（上一批修的 double-remove 是这条的显性版本：同一个对象删两次直接抛）。
+    """
+    from wovra.agent.maintenance import _drop_domain_by_identity
+
+    keep = {"name": "甲", "files": ["a.py"]}
+    dup = {"name": "甲", "files": ["a.py"]}          # 等值、不同对象
+    domains = [keep, dup]
+
+    assert _drop_domain_by_identity(domains, dup) is True
+    assert len(domains) == 1
+    assert domains[0] is keep                        # 删掉的是 dup，留下的还是 keep 这个对象
+
+    # 不在列表里 → 返回 False（不抛），调用方自行决定要不要留痕
+    assert _drop_domain_by_identity(domains, {"name": "丙"}) is False
+
+
+def test_mechanical_steps_failure_does_not_kill_the_batch(monkeypatch, tmp_path):
+    """机械后处理单步出错，**产物照常落地**（2026-09-18 用户："以后如何杜绝"）。
+
+    `_merge_same_name_domains` / `_bind_files_by_path` / `_merge_never_apart_domains`
+    / `_auto_claim` 是纯代码的结构性整理，产出是"更干净的 domains"，**不是**分裂
+    成立的前提。任一步抛异常就整批 failed，代价是"模型已经算出正确的树，却被我们
+    自己的整理步骤葬掉"（实测 §193：四轮全 failed、一个 agent 都没长出来）。
+    护栏：跳过 + 留痕，产物继续落地。
+    """
+    rounds = [_round_writing(7, "a/one.py", "b/two.py")]
+    agent, task = _agent(monkeypatch, tmp_path, rounds)
+    product = {"domains": [{"name": "甲", "path": "a/"},
+                           {"name": "乙", "path": "b/"}],
+               "split_assessment": {}, "unassigned": {}}
+    # 只桩模型调用（真实管线照跑）：返回一个合法产物
+    monkeypatch.setattr(agent, "_stream_call",
+                        lambda messages, tools=None, purpose="": (
+                            "", [{"name": "submit_domains",
+                                  "arguments": json.dumps(product, ensure_ascii=False)}],
+                            {}))
+    monkeypatch.setattr(agent, "_persist_rounds", lambda: None)
+
+    # 同名归并这一步炸掉（模拟实测那种 ValueError）
+    def boom(_domains):
+        raise ValueError("list.remove(x): x not in list")
+    monkeypatch.setattr(agent, "_merge_same_name_domains", boom)
+
+    agent._maybe_split_v4()
+
+    assert [str(r.get("split_state")) for r in task.rounds] == ["ready"], \
+        "机械步骤出错不该让整批分裂失败"
+    notes = "\n".join(str(h.get("detail")) for h in task.history
+                      if h.get("kind") == "maintenance")
+    assert "同名节点归并 出错已跳过" in notes and "ValueError" in notes
+
+
 def test_domains_never_apart_are_merged(monkeypatch, tmp_path):
     """**从未分开过**的两个域并成一个（活跃轮被包含，且共现 ≥2 轮）。"""
     rounds = [_round_writing(7, "a/one.py", "b/two.py"),

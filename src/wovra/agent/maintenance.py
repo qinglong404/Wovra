@@ -44,6 +44,23 @@ _SPLIT_SUBMIT_TOOL = "submit_domains"
 _ROUND_NOTE_SUBMIT = "submit_round_notes"
 
 
+def _drop_domain_by_identity(domains: list, node: dict) -> bool:
+    """从 `domains` 里删掉**这一个对象**（按 `is`，不按 `==`），返回删没删到。
+
+    为什么不用 `list.remove`（2026-09-18 实测事故的同一类隐患）：`remove` 比的是
+    **相等**——产物里两个节点内容完全一样（同名、同文件）时，它会删掉**列表里第一个
+    等值项**，也就是把想留下的那个删了、想删的留下了，而且**一声不响**。
+    另一个坑是"删两次"：同一个对象第二次 `remove` 直接抛 ValueError，整批分裂失败
+    （会话 `20260918-104931-987e97` 那次就是这么炸的）。
+    按身份删两个坑都没有：删不到就返回 False，由调用方决定要不要留痕。
+    """
+    for i, d in enumerate(domains):
+        if d is node:
+            domains.pop(i)
+            return True
+    return False
+
+
 def _split_live_prompt(live_lines: list[str], co_lines: list[str],
                        domain_lines: list[str] | None = None) -> str:
     """V4 分裂调用的指令文本（**生产与排练脚本共用这一份**，口径不会走岔）。
@@ -1042,41 +1059,57 @@ class _MaintenanceMixin:
         return str((ent or {}).get("id") or "")
 
     def _skip_incomplete_split(self, product_round: dict, uncovered: list) -> bool:
-        """产物**覆盖不全**（节点声明的范围盖不住现有文件）→ **本次不分裂**。
+        """**已退役**（2026-09-18 用户口径）：覆盖不全不再闭锁，改成"漏认的进公共区"。
 
-        用户口径（2026-09-15，原话）："不可以的，你这样降级……如果不行，就不分裂了，
-        就直接按整理后结构来。不可以给我错误分裂，错误分裂不如不分裂。"
+        原口径（2026-09-15）："如果不行，就不分裂了……不可以给我错误分裂，错误分裂不如
+        不分裂。"——那条的**目标**是防"残树长出错的 agent"（树本身是残缺的）。但实测
+        形状是**树是好的、只是没盖全**（39 个活性文件里 36 个没被声明的范围覆盖），
+        整批作废的代价是"一个 agent 都没长出来"，而收益只是"没落地一棵 90% 正确的树"。
 
-        于是这里从"机械归位 + 照常落地"改成**闭锁**：
+        新口径（用户原话）："结构树也不卡那么死，如果又活性文件没有归类，将其放到公共
+        文件中，所有 agent 都有其所有操作权，但后面第一次操作写/改的 agent 获得其所有权
+        ……这样，每个环节都不卡死，同时确保后面环节可以修，不要求一次做完美。"
 
-        * 产物声明 `path`/`paths` 却盖不住现有活性文件 → 这棵树是残缺的（模型没看完
-          材料 / 边做边加了文件）——落下去就是**错的域树与错的 agent**；
-        * 处置：**丢弃产物、不落域树**，但**保留整理结果**（`org_state` 不动，
-          不把批次打回水位——那会让整理白跑一遍）；`split_state='skipped'` +
-          `split_skipped` 留痕；
-        * 下一次水位满时（新轮进批、`_live_files()` 已是全局口径）会重新判断是否分裂，
-          届时材料完整，树也就完整。
-
-        返回 True 表示"已按不分裂处置"。
+        故本函数**一律返回 False**（不闭锁），漏认的文件由 `_bind_files_by_path` 返回、
+        再写进 `Task.public_files`（见 `_note_public_files`）。留着函数与调用点是因为它是
+        一条有历史的判据，删掉会让"为什么不再闭锁"这件事在代码里无处可查。
         """
-        if self.task is None or not uncovered:
-            return False
-        product_round.pop("pending_org", None)     # 产物丢弃：不落域树、不落注册表
-        gen = product_round.get("org_generation")
-        for rr in self.rounds:
-            if (str(rr.get("org_state") or "") == "done"
-                    and rr.get("org_generation") == gen):
-                rr["split_state"] = "skipped"
+        return False
+
+    def _note_public_files(self, pending: dict) -> list[str]:
+        """把产物里"没被任何节点认领"的活性文件记进 **`Task.public_files`**（公共区）。
+
+        用户口径（2026-09-18）："如果活性文件没有归类，将其放到公共文件中，所有 agent
+        都有其所有操作权，但后面第一次操作写/改的 agent 获得其所有权……每个环节都不卡死，
+        同时确保后面环节可以修，不要求一次做完美。"
+
+        纯机械、零 LLM，改的是**权限归属**（不碰装配字节），故任何路径都能立刻落。
+        已经属于某个节点的文件不进来（下一批分裂把它认给节点后，这里也自然把它摘掉）。
+        """
+        if self.task is None:
+            return []
+        uncovered = [str(p) for p in (pending.get("uncovered_by_scope") or [])]
+        if not uncovered:
+            return []
+        owned = {
+            str(f) for e in (self.task.registry or []) if isinstance(e, dict)
+            for f in (e.get("files") or [])
+        }
+        fresh = [p for p in uncovered if p not in owned]
+        current = list(getattr(self.task, "public_files", None) or [])
+        # 与现状取并集：**只增不删**（认给节点由 `_bind_files_by_path` 的重建来管，
+        # 这里只负责把新漏认的记上）
+        merged = current + [p for p in fresh if p not in current]
+        if merged == current:
+            return []
+        self.task.public_files = merged
+        shown = "、".join(fresh[:6]) + ("…" if len(fresh) > 6 else "")
         self.task.record(
-            "split_skipped",
-            "分裂产物覆盖不全（声明范围盖不住 "
-            f"{len(uncovered)} 个文件：{'、'.join(str(u) for u in uncovered[:3])}"
-            "…）——**本次不分裂**：保留整理后的结构，等下一次水位再判断是否分裂"
-            "（用户口径：错误分裂不如不分裂）",
+            "maintenance",
+            f"split：{len(fresh)} 个活性文件没有归类 → 进**公共文件**（{shown}）"
+            "——所有 agent 都能先动手，谁第一次写/改就归谁",
         )
-        if self.on_progress:
-            self.on_progress("⏸ 分裂产物覆盖不全 → 本次不分裂（保留整理结果，下批再判断）")
-        return True
+        return fresh
 
     def _publish_product_early(self) -> int:
         """A 步：产物就绪就**立刻**落"不碰上下文字节"的部分，不再等轮边界。
@@ -1121,12 +1154,9 @@ class _MaintenanceMixin:
         for r in products:
             pending = r["pending_org"]
             domains = pending.get("domains")
-            # 早落路径同样区分两类：**材料过期**（声明的范围覆盖不到 → 回水位，
-            # 可自愈不必等边界）与**硬缺陷**（重叠/空域 → 留到边界分类留痕）。
-            # 未覆盖不再是缺陷（2026-09-15：Runtime 已机械归位）。
-            if self._skip_incomplete_split(r, list(pending.get("uncovered_by_scope") or [])):
-                landed += 1
-                continue
+            # 漏认的文件**进公共区**（2026-09-18：不再闭锁，见 `_skip_incomplete_split`）：
+            # 任何路径都能立刻落——它只改"谁有权动这个文件"，不碰装配字节。
+            self._note_public_files(pending)
             defects = registry_module.split_defects(
                 domains, self._live_files(), self._non_live_files()
             )
@@ -2078,7 +2108,25 @@ class _MaintenanceMixin:
         # 节点（各带一片路径）时，落地会造出**两个同名 agent**——而路由/页面/执行者索引
         # 全都按名字认人，同名即无法区分（"谁更深入了解哪一块"整张索引废掉一半）。
         # 归并是纯机械的（同名同父 → 合一，路径/文件/块取并集），不信模型自觉。
-        merged_notes = self._merge_same_name_domains(domains)
+        # **机械后处理：单步失败不许拖垮整批**（2026-09-18 用户："以后如何杜绝"）。
+        # 这一段（同名归并／按路径绑定／从未分开归并／历史文件挂载）全是纯代码的
+        # 结构性整理，它们的产出是"更干净的 domains"，**不是**分裂成立的前提——
+        # 任一步抛异常就整批 failed，代价是"模型已经算出正确的树，却被我们自己
+        # 的整理步骤葬掉"（实测 §193：三个节点的一条合并链上 double-remove
+        # ValueError → 四轮全 failed、一个 agent 都没长出来）。故逐步护栏：
+        # 出错就跳过这一步、留痕，产物照常往下走。
+        def _guard(label: str, fn, *args):
+            try:
+                return fn(*args)
+            except Exception as error:  # noqa: BLE001——机械整理出错不拖垮整批
+                if self.task is not None:
+                    self.task.record(
+                        "maintenance",
+                        f"split：{label} 出错已跳过（{type(error).__name__}: "
+                        f"{str(error)[:120]}）——产物照常落地，此处只是机械整理",
+                    )
+                return None
+        merged_notes = _guard("同名节点归并", self._merge_same_name_domains, domains)
         if merged_notes and self.task is not None:
             for n in merged_notes[:6]:
                 self.task.record("maintenance", f"split：{n}")
@@ -2087,8 +2135,13 @@ class _MaintenanceMixin:
                     "maintenance",
                     f"split：{merged_notes[0]}（等 {len(merged_notes)} 条，同类的见上）",
                 )
-        bind_notes, uncovered_by_scope = self._bind_files_by_path(domains)
-        coupled_notes = self._merge_never_apart_domains(domains, rounds)
+        bound = _guard("按路径绑定文件", self._bind_files_by_path, domains)
+        if bound is None:
+            bind_notes, uncovered_by_scope = [], []
+        else:
+            bind_notes, uncovered_by_scope = bound
+        coupled_notes = _guard("从未分开的域归并", self._merge_never_apart_domains,
+                               domains, rounds) or []
         if coupled_notes and self.task is not None:
             for n in coupled_notes[:6]:
                 self.task.record("maintenance", f"split：{n}")
@@ -2118,8 +2171,9 @@ class _MaintenanceMixin:
         if missing_hist:
             # 同上：Runtime 归位（非 LIVE 文件也**绝不落主 agent**——用户口径
             # 2026-09-14"必须挂满"仍成立，只是由代码来挂）
-            notes = self._auto_claim(domains, missing_hist, "history_files")
-            if self.task is not None:
+            notes = _guard("历史文件机械挂载", self._auto_claim,
+                           domains, missing_hist, "history_files") or []
+            if notes and self.task is not None:
                 for n in notes[:6]:
                     self.task.record(
                         "maintenance", f"split：Runtime 自动归位（历史文件）——{n}")
@@ -2171,10 +2225,9 @@ class _MaintenanceMixin:
         # 暂存到批首轮（与 state_patch 同通道），下一轮开启随 promote 生效
         pending = rounds[0].setdefault("pending_org", {})
         pending["domains"] = domains
-        # **材料过期的信号**（2026-09-15）：节点声明的**范围**覆盖不到的文件。
-        # 不再据此拒收（Runtime 已把它们机械归位），但它是"这份产物是对旧材料
-        # 做的"的可靠证据——轮到边界生效时若有更新轮次，本批回水位重做（原来
-        # 这条判据挂在"未覆盖"缺陷上，那正是整批拒收的来源）。
+        # **没认全的文件进公共区**（2026-09-18 用户口径）：不再据"覆盖不全"
+        # 整批闭锁，只把漏认的记下来——`_publish_product_early`/promote 会把
+        # 它写进 `Task.public_files`（权限层认它 = 谁都能先动）。
         pending["uncovered_by_scope"] = list(uncovered_by_scope)
         # **分裂主体**（2026-09-12，worklog §64）：这批轮里出现最多的那个视图。
         # 为什么不取"promote 那一刻的本轮视图"：异步维护可能跨轮完成，届时
@@ -2641,14 +2694,17 @@ class _MaintenanceMixin:
         """**活性文件不许无人管**（2026-09-17 用户口径）：出现就是机制问题 → 报错叫人。
 
         "无人管"用的是**权限层同一把尺子**（`registry.owner_of_file`）——即"有没有哪个
-        agent 有权改写它"。无人管的文件在运行时的表现就是：谁改它都撞"已存在但没有任何
-        域认领"。分裂前不算（那时主 agent 全权，P4）。
+        agent 有权改写它"。**公共区的文件不算无人管**（2026-09-18 用户口径）：它有人能
+        动（谁都能先动），只是还没定归谁——那是**待定**，不是**没人管**。
+        分裂前不算（那时主 agent 全权，P4）。
 
         返回无人管的文件清单（空 = 干净）。
         """
+        public = list(getattr(self.task, "public_files", None) or []) \
+            if self.task is not None else []
         orphans = [
             str(p) for p in self._live_files()
-            if registry_module.owner_of_file(registry, str(p)) is None
+            if registry_module.owner_of_file(registry, str(p), public) is None
         ]
         if not orphans:
             return []
@@ -2756,7 +2812,7 @@ class _MaintenanceMixin:
                 composed = f"{keep_name}＋{gone_name}"
                 if len(composed) <= 30 and gone_name not in keep_name:
                     keep["name"] = composed
-                domains.remove(gone)
+                _drop_domain_by_identity(domains, gone)
                 notes.append(
                     f"同轮从未分开的域合并：「{gone_name}」→「{keep.get('name')}」"
                     f"（活跃轮 {'、'.join('R%d' % s for s in sorted(ra | rb))}）"
@@ -2816,7 +2872,7 @@ class _MaintenanceMixin:
             ]
             keep["description"] = max(descriptions, key=len) if descriptions else ""
             for node in nodes[1:]:
-                domains.remove(node)
+                _drop_domain_by_identity(domains, node)
             text = f"同名节点归并：「{name}」×{len(nodes)} → 1"
             if paths:
                 text += f"（路径 {'、'.join(paths)}）"
@@ -2834,8 +2890,10 @@ class _MaintenanceMixin:
           `file_domains`（目录前缀）同样当范围用；
         * 每个文件取**匹配最深**的范围（`src/wovra/tools/` 优先于 `src/`）；
           同深度时按节点声明顺序取前一个（确定性，不随机）；
-        * 命中不了的 → **不补救**：记为"覆盖不全"交应用侧闭锁（本次不分裂，
-          见 `_skip_incomplete_split`）——错树比如不分裂更坏（用户口径）；
+        * 命中不了的 → 进 **公共文件区**（`Task.public_files`）：所有 agent 全权，
+          谁**第一次写/改**它所有权就归谁（2026-09-18 用户口径）。不再是"覆盖不全
+          就整批不分裂"——错树比如不分裂更坏，但**漏认一两个文件**不是错树，
+          那只是"这一批没认全"，后面环节能修（下一批分裂仍可认给某个节点）；
         * 各节点的 `files` 由本函数**重建**（不再信模型手抄的清单）——因此
           "重叠/未覆盖"这两类缺陷在构造上不可能出现，`split_defects` 相应的
           拒收路径随之退场；
@@ -2843,8 +2901,7 @@ class _MaintenanceMixin:
           首行注释/标题/docstring）——"文件描述窃取文件开头一部分"，永远新鲜、
           不需要模型抄。
 
-        返回 `(留痕行, 没被任何范围命中的文件)`——后者是**材料过期**的信号
-        （写进 `pending["uncovered_by_scope"]`），不再用来拒收。
+        返回 `(留痕行, 进公共区的文件)`。
         """
         live = sorted(set(self._live_files()))
         if not live:
@@ -2907,14 +2964,15 @@ class _MaintenanceMixin:
                 note = self._guess_file_note(node["files"][0])
                 if note:
                     node["description"] = note
-        # **未命中范围的文件 = 产物覆盖不全 → 本次不分裂**（2026-09-15 用户拍板：
-        # "不可以给我错误分裂，错误分裂不如不分裂"）。旧行为是把它们塞进
-        # "Runtime 自动归类"的机械桶再照常落地——那等于**用错的树**（模型没看完
-        # 材料的产物落了地、还长了 agent）。现在只报告、不补救：`uncovered_by_scope`
-        # 交应用侧闭锁（丢弃产物、保留整理结果、下批水位再判断）。
+        # **未命中范围的文件 → 公共文件区**（2026-09-18 用户口径："如果活性文件
+        # 没有归类，将其放到公共文件中，所有 agent 都有其所有操作权，但后面第一次
+        # 操作写/改的 agent 获得其所有权"）。旧行为是整批闭锁不分裂（"错误分裂不如
+        # 不分裂"）——那条口径的**目标**是防"残树长出错的 agent"，而漏认一两个文件
+        # 不是残树：树本身是好的，只是没盖全。现在只把它们记进公共区（谁都能先动，
+        # 首次写者得所有权），产物照常落地——每个环节都不卡死，后面环节能修。
         notes.append(f"文件归属按路径机械绑定（{len(live)} 个活性文件 → "
                      f"{sum(1 for n in nodes if n['files'])} 个节点"
-                     f"{f'，{len(unmatched)} 个没被任何节点范围覆盖' if unmatched else ''}）")
+                     f"{f'，{len(unmatched)} 个进公共区' if unmatched else ''}）")
         return notes, unmatched
 
     @staticmethod
@@ -3401,9 +3459,9 @@ class _MaintenanceMixin:
                 # 装配进上下文），由 split_defects 的 F3-历史检查兜底。
                 # **材料过期判定**（不拒收、但仍要识别）：产物声明的范围覆盖
                 # 不到当前材料 + 有更新轮次 → 本批回水位，下批带新材料重做。
-                if self._skip_incomplete_split(
-                        r, list(pending.get("uncovered_by_scope") or [])):
-                    continue
+                # 2026-09-18：覆盖不全**不再闭锁**（`_skip_incomplete_split` 恒 False），
+                # 漏认的文件进公共区（谁都能先动，首次写者得所有权）。
+                self._note_public_files(pending)
                 defects = registry_module.split_defects(
                     pending["domains"], self._live_files(), self._non_live_files()
                 )

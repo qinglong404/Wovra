@@ -1060,16 +1060,17 @@ def test_split_auto_assigns_blocks_by_file_domain(monkeypatch, tmp_path):
     assert bucket and chat_bid in bucket[0]["chat_block_ids"]  # 闲聊→主 agent 桶节点
 
 
-def test_split_incomplete_coverage_does_not_split(monkeypatch, tmp_path):
-    """产物**覆盖不全** → **本次不分裂**（2026-09-15 用户拍板）。
+def test_split_incomplete_coverage_goes_to_public_files(monkeypatch, tmp_path):
+    """产物**覆盖不全** → 漏认的文件进**公共区**，产物照常落地（2026-09-18 用户口径）。
 
-    用户原话："不可以的，你这样降级……如果不行，就不分裂了，就直接按整理后结构来。
-    不可以给我错误分裂，错误分裂不如不分裂。"
+    用户原话："结构树也不卡那么死，如果又活性文件没有归类，将其放到公共文件中，所有
+    agent 都有其所有操作权，但后面第一次操作写/改的 agent 获得其所有权……这样，每个
+    环节都不卡死，同时确保后面环节可以修，不要求一次做完美。"
 
-    旧行为是把没被认领的文件塞进"Runtime 自动归类"的机械桶再照常落地——那等于
-    **用一棵错的树**（模型没看完材料，落了地还长 agent）。现在的处置：丢弃产物、
-    **保留整理结果**（`org_state` 不动，不回水位——那会让整理白跑）、
-    `split_state='skipped'` + `split_skipped` 留痕；下一次水位满时材料完整再判断。
+    此前的口径是**整批闭锁不分裂**（2026-09-15："错误分裂不如不分裂"）——那条的目标是
+    防"残树长出错的 agent"，但实测形状是"树是好的、只是没盖全"（39 个文件里 36 个没被
+    声明覆盖），整批作废的代价是一个 agent 都没长出来。现在：漏认进公共区、
+    `split_state='ready'`、注册表照常长 agent。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     domains_args = json.dumps({
@@ -1100,14 +1101,16 @@ def test_split_incomplete_coverage_does_not_split(monkeypatch, tmp_path):
     agent._maybe_organize_batch()
 
     entries = [str(e.get("detail")) for e in task.history]
-    assert any("不分裂" in x and "覆盖不全" in x for x in entries), entries[-4:]
+    assert any("没有归类" in x and "公共文件" in x for x in entries), entries[-4:]
     assert not any("中止" in x for x in entries)
     r1 = task.rounds[0]
-    assert r1["org_state"] == "done", "整理结果必须保留（不回水位，别让整理白跑）"
-    assert r1["split_state"] == "skipped"
-    assert not (r1.get("pending_org") or {}).get("domains"), "产物必须丢弃"
-    assert [str(e.get("id")) for e in task.registry] == ["Main"], "不分裂 = 不长 agent"
-    assert any(e.get("kind") == "split_skipped" for e in task.history)
+    assert r1["org_state"] == "done", "整理结果必须保留"
+    assert r1["split_state"] == "ready", "漏认文件不该让整批分裂作废"
+    assert "src/a.py" in (task.public_files or []), "漏认的文件进公共区"
+    # 产物**照常暂存**（落地仍在轮边界，见 `_promote_org_results`）——旧口径下这里
+    # 是被整个丢掉的（`pending_org` 清空），现在树还在
+    staged = (r1.get("pending_org") or {}).get("domains") or []
+    assert "后端" in [str(d.get("name")) for d in staged], staged
 
 
 def test_registry_entry_description_falls_back_mechanically():
@@ -1319,11 +1322,11 @@ def test_split_normalizes_prefixless_path_refs(monkeypatch, tmp_path):
 
 
 def test_split_incomplete_coverage_does_not_abort_or_land(monkeypatch, tmp_path):
-    """「本轮已归某域」不再需要特判：覆盖不全就**不分裂**（不抛错、不落错树）。
+    """「本轮已归某域」不再需要特判：漏认的文件进**公共区**（不抛错、不中止）。
 
     历史背景：会话 20260913-175945-533c5d 里 R5 已归某域，旧检查把它的文件块
-    当成"漏认领"报错中止。2026-09-15 用户口径改成闭锁之后，这类情形统一按
-    "产物覆盖不全 → 本次不分裂、保留整理结果"处置——既不中止、也不拿残树落地。
+    当成"漏认领"报错中止。闭锁时代按"覆盖不全 → 本次不分裂"处置；2026-09-18 用户
+    口径改成**公共区**（谁都能先动，首次写者得所有权）——既不中止，也不整批作废。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     domains_args = json.dumps({
@@ -1357,8 +1360,8 @@ def test_split_incomplete_coverage_does_not_abort_or_land(monkeypatch, tmp_path)
     entries = [str(e.get("detail")) for e in task.history]
     assert not any("中止" in x or "SplitCoverageError" in x for x in entries)
     assert task.rounds[0]["org_state"] == "done"      # 整理结果保留
-    assert task.rounds[0]["split_state"] == "skipped"  # 覆盖不全 → 不分裂
-    assert [str(e.get("id")) for e in task.registry] == ["Main"]
+    assert task.rounds[0]["split_state"] == "ready"    # 漏认不再让整批作废
+    assert "src/a.py" in (task.public_files or [])     # 漏认的进公共区
 
 
 def test_label_blocks_batch_semantic_labeling(monkeypatch, tmp_path):
@@ -2374,13 +2377,12 @@ def test_chat_bucket_is_materialized_as_top_level_node(monkeypatch, tmp_path):
     assert "unassigned" not in staged[0]["pending_org"]     # 已并入桶节点
 
 
-def test_incomplete_split_product_is_dropped_keeping_org_result(monkeypatch, tmp_path):
-    """产物**覆盖不全** → 丢弃产物、**保留整理结果**、标记 skipped（用户口径 2026-09-15）。
+def test_incomplete_split_product_lands_and_uncovered_goes_public(monkeypatch, tmp_path):
+    """产物**覆盖不全** → 漏认的进公共区，**产物照常落地**（用户口径 2026-09-18）。
 
-    旧行为是"回入水位、下批重整"（`org_state=failed`）——那会让**整理白跑一遍**，
-    而用户明确说"就直接按整理后结构来"。新行为：产物不落、`split_state='skipped'`、
-    `org_state` 保持 done；下一次水位满时（新轮进批、`_live_files()` 是全局口径）
-    材料完整，再判断是否分裂。
+    旧行为（2026-09-15 闭锁）是丢弃产物 / `split_state='skipped'` / 不长 agent；
+    新口径："结构树也不卡那么死……每个环节都不卡死，同时确保后面环节可以修，
+    不要求一次做完美。"——树是好的就别丢，只是把没认到的文件记进公共区。
     """
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path)
     task = Task.create(goal="g")
@@ -2402,11 +2404,10 @@ def test_incomplete_split_product_is_dropped_keeping_org_result(monkeypatch, tmp
 
     agent._promote_org_results()
 
-    assert task.rounds[0]["org_state"] == "done", "整理结果必须保留（别让整理白跑）"
-    assert task.rounds[0]["split_state"] == "skipped"
-    assert not task.rounds[0].get("pending_org"), "产物应丢弃"
-    assert any(e.get("kind") == "split_skipped" for e in task.history)
-    assert [str(e.get("id")) for e in task.registry] == ["Main"], "不分裂 = 不长 agent"
+    assert task.rounds[0]["org_state"] == "done", "整理结果必须保留"
+    assert "b.py" in (task.public_files or []), "漏认的文件进公共区"
+    assert any("公共文件" in str(e.get("detail")) for e in task.history)
+    assert str(task.registry[-1].get("name")) == "A 域", "产物照常落地（长 agent）"
 
 
 def test_hard_split_defect_still_rejected_and_marked(monkeypatch, tmp_path):
@@ -2530,20 +2531,19 @@ def test_promote_after_early_publish_is_idempotent(monkeypatch, tmp_path):
     assert task.rounds[0].get("split_state") == "done"
 
 
-def test_incomplete_product_skips_immediately_without_boundary(monkeypatch, tmp_path):
-    """覆盖不全的产物**立刻**判"不分裂"（纯账目），不必等轮闭合。
+def test_incomplete_product_records_public_files_without_boundary(monkeypatch, tmp_path):
+    """覆盖不全的产物：**公共区立刻落**（纯账目），产物仍等轮边界。
 
-    与旧行为的差别就一句：**不回水位、不落产物**——保留整理结果，等下批水位再判断。
+    公共区只改"谁有权动这个文件"，不碰装配字节——故任何路径都能立刻落（口径同
+    `state_patch`/`unassigned`）。产物（`domains`）仍在轮边界落地。
     """
     agent, task = _early_fixture(monkeypatch, tmp_path, newer_round=True)
 
     agent._publish_product_early()
 
-    assert task.rounds[0]["org_state"] == "done", "整理结果保留（旧行为会改成 failed）"
-    assert task.rounds[0].get("split_state") == "skipped"
-    assert not task.rounds[0].get("pending_org"), "产物应丢弃"
-    assert any(e.get("kind") == "split_skipped" for e in task.history)
-    assert [str(e.get("id")) for e in task.registry] == ["Main"], "不分裂不许落注册表"
+    assert task.rounds[0]["org_state"] == "done", "整理结果保留"
+    assert task.public_files, "漏认的文件进公共区"
+    assert any("公共文件" in str(e.get("detail")) for e in task.history)
 
 
 def test_early_publish_lands_envelope_and_display_fields(monkeypatch, tmp_path):

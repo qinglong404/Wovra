@@ -3460,6 +3460,14 @@ function renderProject(c){
       <div style="color:var(--tx3);margin-top:6px">这类冲突来自旧分裂（落点未做归属结算）——
       数据原样保留不改写；新分裂在 promote 前做落点预演，重叠即拒收。</div>
     </div></div>`:'';
+  const pub=(META.public_files||[]);
+  const pubHtml=pub.length?`<div class="lcard" style="border-color:var(--gold);margin-bottom:10px">
+    <h4 style="color:var(--gold)">公共文件 · ${pub.length} 个（结构树没认领：谁都能先动手，第一次写/改的 agent 得所有权）</h4>
+    <div style="padding:8px 16px;font-size:12px;line-height:1.8;color:var(--tx2)">
+      ${pub.slice(0,10).map(p=>`<span class="fd" title="谁都能先动手；被谁第一次写/改就归谁，此后别人只能读">${esc(p)}</span>`).join('')}
+      ${pub.length>10?`<div style="color:var(--tx3);margin-top:4px">…另有 ${pub.length-10} 个</div>`:''}
+      <div style="color:var(--tx3);margin-top:6px">下一批分裂可以把它们认给某个节点（认了就从这里摘牌）。</div>
+    </div></div>`:'';
   const files=TREE.files.filter(f=>!q||f.p.toLowerCase().includes(q));
   const rows=treeHtml(buildTree(files),status,q,0);
   const agents=reg.map(a=>{
@@ -3521,6 +3529,7 @@ function renderProject(c){
       <div class="proj-right">
         <h3 class="sec">多 agent 职责划分 · ${reg.length}</h3>
         <div class="reg-grid">${agents}</div>
+        ${pubHtml}
         ${defectHtml}
         ${ctxViz()}
       </div>

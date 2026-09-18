@@ -189,13 +189,45 @@ def next_free_top_id(registry: Iterable[dict] | None) -> str:
     return top_id(len(used) + 1)
 
 
-def owner_of_file(
-    registry: Iterable[dict] | None, rel: str
-) -> Optional[str]:
-    """文件归谁：**精确清单优先**，其次最长前缀（历史产物）。
+PUBLIC_FILE_LABEL = "公共"
 
-    返回拥有者的展示串（`id（name）`）；没有任何域认领时返回 None——那是
-    分裂/整理的缺陷（用户口径：不存在"未认领文件"），不是正常态。
+
+def is_public_file(public_files: Iterable[str] | None, rel: str) -> bool:
+    """这个文件是不是**公共文件**（还没被任何节点认领，谁都能先动手）。
+
+    用户口径（2026-09-18）：结构树漏认的活性文件不再让整批分裂作废，而是进
+    "公共文件"区——**所有 agent 都有全权**；谁第一次写/改它，所有权就归谁。
+
+    匹配认两种写法（与节点范围声明同口径）：**具体文件**（`docs/notes.md`，
+    走 `pathmatch.matches`，容忍路径写法差异）与**目录前缀**（`output/`，
+    走 `pathmatch.under`）。
+    """
+    from . import pathmatch as pathmatch_module
+    want = str(rel or "").strip().strip("/")
+    if not want:
+        return False
+    for item in (public_files or []):
+        p = str(item or "").strip().strip("/")
+        if not p:
+            continue
+        if "/" not in p.rsplit("/", 1)[-1] and "." not in p.rsplit("/", 1)[-1]:
+            # 末段没有扩展名 → 目录（与 `_bind_files_by_path` 的 scopes_of 同判据）
+            if pathmatch_module.under(want, p):
+                return True
+            continue
+        if pathmatch_module.matches(want, [p]):
+            return True
+    return False
+
+
+def owner_of_file(
+    registry: Iterable[dict] | None, rel: str,
+    public_files: Iterable[str] | None = None,
+) -> Optional[str]:
+    """文件归谁：**精确清单优先**，其次最长前缀（历史产物），最后**公共区**。
+
+    返回拥有者的展示串（`id（name）`）；在公共区里返回 `PUBLIC_FILE_LABEL`
+    （谁都能动，首次写者得所有权）；其余无人认领返回 None。
     """
     want = str(rel or "").strip().strip("/")
     if not want:
@@ -211,7 +243,7 @@ def owner_of_file(
                 if best is None or len(prefix) > best[0]:
                     best = (len(prefix), entry)
     if best is None:
-        return None
+        return PUBLIC_FILE_LABEL if is_public_file(public_files, want) else None
     entry = best[1]
     return f"{entry.get('id')}（{entry.get('name')}）"
 
