@@ -125,6 +125,22 @@ def _display_rel(path: Path) -> Path:
     except ValueError:
         return path
 
+
+def _merge_spans(hits: list[int], span: int, total: int) -> list[tuple[int, int]]:
+    """命中行号 → 合并后的行区间 [(起, 止), …]。
+
+    每个命中扩成 [i-span, i+span]（裁到文件范围），相邻或重叠的窗口并成一段：
+    连续命中不重复输出，返回值直接告诉模型内容落在哪个行数范围。
+    """
+    spans: list[tuple[int, int]] = []
+    for i in hits:
+        lo, hi = max(1, i - span), min(total, i + span)
+        if spans and lo <= spans[-1][1] + 1:
+            spans[-1] = (spans[-1][0], max(spans[-1][1], hi))
+        else:
+            spans.append((lo, hi))
+    return spans
+
 # ---- 只读工具 -------------------------------------------------------------
 
 
@@ -158,14 +174,17 @@ def list_files(directory: str = ".") -> list[str]:
 
 
 def read_file(path: str, start_line: int = 1, num_lines: int = 200,
-              pattern: str = "") -> str:
+              pattern: str = "", context: int = 0) -> str:
     """按行读取项目内一个文件的内容片段。csv/tsv 表格与 docx/xlsx/pptx/pdf
     附件会自动解析成文本（不必自己写脚本或装解析库）。要通读整个文件时，直接把
     num_lines 放大一次读完（单次上限 20,000 行），不要用小段反复读同一个文件。
 
     文件很大而只要一个结果时（典型场景：工具输出落盘后的长日志），传
-    pattern='关键词'（正则）只返回匹配行与行号，不必全量加载；再用行号
-    配 start_line/num_lines 取上下文。不传 pattern 就是全量读取——
+    pattern='关键词'（正则）只返回匹配行与行号，不必全量加载。返回按
+    **行数范围**给：相邻或重叠的命中合并成一段，段头写明 `第 a-b 行`，
+    每行仍带自己的行号（可直接喂给 replace_lines / edit_file 定位）。
+    context=N 时每个命中连带前后 N 行一起返回并同样合并——一次调用拿到
+    能判断性质的上下文，不必再补读一次。不传 pattern 就是全量读取——
     信息永远不丢，只是不必一次全进上下文。
 
     大文件请配合 search_files 先定位，再用 start_line/num_lines
@@ -210,29 +229,44 @@ def read_file(path: str, start_line: int = 1, num_lines: int = 200,
         return f"{path} 是空文件"
     if pattern:
         # 定位模式（2026-09-12）：大输出可以不全加载，但必须能快速找到要的
-        # 那一段。只回匹配行 + 行号，再配 start_line 取上下文（全量读取的
-        # 权限不受影响——不传 pattern 就是全量）。
+        # 那一段。context ＋ 区间合并（2026-09-17）：命中带前后 N 行、相邻窗口
+        # 合成一段——一次调用给到可判断性质的上下文，连续命中不逐行重复。
         try:
             regex = re.compile(pattern)
         except re.error as error:
             return f"正则表达式无效: {error}（pattern={pattern!r}）"
-        hits = [(i, line) for i, line in enumerate(lines, start=1) if regex.search(line)]
+        hits = [i for i, line in enumerate(lines, start=1) if regex.search(line)]
         if not hits:
             return (
                 f"{path} 共 {total} 行，无匹配 {pattern!r}。"
                 f"可换关键词，或直接全量读取（不带 pattern）。"
             )
+        span = min(max(0, context), _READ_MAX_LINES)
+        spans = _merge_spans(hits, span, total)
         cap = limits.list_limit(_SEARCH_MAX_MATCHES)
-        shown = "\n".join(f"{i}: {line.strip()[:200]}" for i, line in hits[:cap])
-        more = (
-            f"\n…（共 {len(hits)} 行匹配，此处只显示前 {cap} 行）"
-            if len(hits) > cap else ""
-        )
-        first = hits[0][0]
-        return (
-            f"{path}（{label}共 {total} 行，匹配 {len(hits)} 行）\n{shown}{more}\n"
-            f"...（取上下文：read_file('{path}', start_line={max(1, first - 10)}, "
-            f"num_lines=40)；要全文：不带 pattern 读）"
+        chunks: list[str] = []
+        used = left = 0
+        for lo, hi in spans:
+            rows = [f"{n}: {lines[n - 1].strip()[:200]}" for n in range(lo, hi + 1)]
+            room = cap - used
+            if room <= 0:
+                left += len(rows)
+                continue
+            if len(rows) > room:
+                left += len(rows) - room
+                rows = rows[:room]
+            chunks.append(
+                (f"── 第 {lo}-{hi} 行 ──\n" if hi > lo else "") + "\n".join(rows)
+            )
+            used += len(rows)
+        shown = "\n\n".join(chunks)
+        more = f"\n…（还有 {left} 行未显示）" if left else ""
+        scope = f"，{len(spans)} 段" if len(spans) > 1 else ""
+        return limits.clip(
+            f"{path}（{label}共 {total} 行，匹配 {len(hits)} 行{scope}）\n{shown}{more}\n"
+            f"...（要上下文：read_file('{path}', pattern={pattern!r}, context=10)；"
+            f"要全文：不带 pattern 读）",
+            f"read-{Path(path).name}", source=path,
         )
     start = max(1, start_line)
     if start > total:

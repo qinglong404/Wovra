@@ -82,7 +82,7 @@ def test_read_file_locates_with_pattern(tmp_path, monkeypatch):
     assert "共 500 行，匹配 1 行" in hit
     assert "300: 第300行 ERROR 关键失败" in hit
     assert "第1行" not in hit                     # 不是全量加载
-    assert "start_line=290" in hit                # 给出取上下文的位置
+    assert "context=10" in hit                    # 给出取上下文的方式
 
     miss = read_file("log.txt", pattern="不存在的东西")
     assert "无匹配" in miss and "共 500 行" in miss
@@ -92,6 +92,41 @@ def test_read_file_locates_with_pattern(tmp_path, monkeypatch):
 
     full = read_file("log.txt", num_lines=5000)   # 全量权限保留
     assert "第1行" in full and "第500行" in full
+
+
+def test_read_file_pattern_context_merges_into_spans(tmp_path, monkeypatch):
+    """pattern 的返回是**行数范围**：相邻/重叠窗口并成一段，context 一并给上下文。
+
+    2026-09-17 用户口径：搜索一个文件的内容要能返回相关内容的行数范围，
+    配合 read_file 更高效地阅读修改。
+    """
+    from wovra import tools
+
+    monkeypatch.setattr(tools.safety, "PROJECT_ROOT", tmp_path)
+    monkeypatch.delenv("WOVRA_OUTPUT_LIMIT", raising=False)
+    lines = [f"第{i}行 噪声" for i in range(1, 101)]
+    lines[9] = "第10行 ERROR 甲"      # 第 10 行
+    lines[10] = "第11行 ERROR 乙"     # 第 11 行（与上一行相邻）
+    lines[49] = "第50行 ERROR 丙"     # 第 50 行
+    (tmp_path / "log.txt").write_text("\n".join(lines), encoding="utf-8")
+
+    plain = read_file("log.txt", pattern="ERROR")
+    assert "共 100 行，匹配 3 行，2 段" in plain     # 相邻命中并成一段
+    assert "── 第 10-11 行 ──" in plain
+    assert "第 50-50 行" not in plain               # 单行段不带段头
+    assert "10: 第10行 ERROR 甲" in plain and "50: 第50行 ERROR 丙" in plain
+
+    ctx = read_file("log.txt", pattern="ERROR", context=2)
+    assert "── 第 8-13 行 ──" in ctx                 # 上下 2 行连成一段
+    assert "8: 第8行 噪声" in ctx and "13: 第13行 噪声" in ctx
+    assert "── 第 48-52 行 ──" in ctx
+    assert "第7行" not in ctx                       # 窗口外不进来
+
+    # 输出帽：超出部分报数，不静默丢
+    (tmp_path / "many.txt").write_text(
+        "\n".join(f"第{i}行 HIT" for i in range(1, 301)), encoding="utf-8")
+    capped = read_file("many.txt", pattern="HIT")
+    assert "匹配 300 行" in capped and "还有 100 行未显示" in capped
 
 
 def test_read_file_reports_binary_and_empty(tmp_path, monkeypatch):
