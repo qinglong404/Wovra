@@ -166,12 +166,20 @@ def test_organized_rounds_render_block_details_view(monkeypatch):
 
     msgs = agent._assemble_messages()
     body = "\n".join(m.get("content", "") for m in msgs)
+    # **只看这一轮的渲染结果**（那条紧凑视图），别把整份装配当判据：
+    # 装配里还有系统提示词与**文件变更通知**（§3.7：它会注入被改文件的 diff 文本），
+    # 两者都可能恰好含"事件索引"字样——2026-09-18 实测就这么被撞红过（改测试文件时，
+    # 通知把那段 diff 注进了 body，里面正好有这五个字）。断言要盯渲染产物本身。
+    rendered = "\n".join(
+        str(m.get("content") or "") for m in msgs
+        if "👤 用户:" in str(m.get("content") or "")
+    )
 
     assert '👤 用户: "不要用git,先把0和初期扩展做了."' in body
     assert "🎯 意图: 拒绝 git，落库测试脚本并实施全部短期扩展" in body
     assert "📌 关键约束: 全程禁止任何 git 命令" in body
     assert "▸ R1-B1: 创建 tests/run.js 一键回归入口" in body
-    assert "事件索引" not in body                       # 事件行退场
+    assert "事件索引：" not in rendered                  # 事件行退场（看渲染，不看整份装配）
     assert "细节" * 200 not in body                     # 回答原文不进上下文
 
 
