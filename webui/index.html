@@ -880,7 +880,8 @@ function renderHeader(){
     `<span class="chip bad" style="cursor:pointer;margin-left:auto" onclick="deleteSession('${META.id}')">删除会话</span>`;
   bindModelPicker();
   renderKpis(u,META.rounds,tools,'');
-  if(META.maint&&META.maint.active)applyMaint(META.maint);
+  // 维护态：在跑或**上次失败**都要上屏（失败常驻，见 renderMaintBar）
+  if(META.maint&&(META.maint.active||META.maint.last_defect))applyMaint(META.maint);
   const tabs=[['conv','对话'],['timeline','时间线'],['ledger','账本'],['todo','计划'],['project','项目'],['usage','用量']];
   $('#tabs').innerHTML=tabs.map(([k,n])=>`<div class="tab${TAB===k?' on':''}" onclick="setTab('${k}')">${n}</div>`).join('')+
     `<span class="chip" id="follow-chip" style="margin-left:auto;align-self:center;cursor:pointer;display:${TAB==='conv'?'inline-block':'none'}" onclick="FOLLOW=!FOLLOW;renderFollowChip()">跟随尾部 ✓</span>`+
@@ -950,8 +951,8 @@ const SPLIT_BADGE={
   failed:['<span class="seg bad" title="分裂分析没拿到可用产物：本批不生成域树，等下一批重试（具体原因见 title）">分裂失败</span>',''],
 };
 const ORG_BADGE={
-  done:'<span class="badge b-done" title="这一轮已整理：它在上文里以一段话出现（V4 折叠），原文仍在盘上、expand_history 可取回（省 token、保前缀缓存）">已整理</span>',
-  pending:'<span class="badge b-pend" title="上下文整理进行中：原文暂存，整理完成后转为已整理">整理中</span>',
+  done:'<span class="badge b-done" title="这一轮已整理：它在上文里以一段话出现（原文仍在盘上、expand_history 可取回；省 token、保前缀缓存）">已整理</span>',
+  pending:'<span class="badge b-pend" title="整理中：这一轮的结算（一段话）正在后台写；在此之前原文照常留在上下文里，写完即转为已整理">整理中</span>',
   failed:'<span class="badge b-fail" title="上下文整理失败：本轮保留原文全量">整理失败</span>',
   raw:'<span class="badge b-raw" title="未整理：原文全量保留（水位未到或整理未运行）">未整理</span>'};
 
@@ -1406,44 +1407,59 @@ function showCmdOutput(title,text){
 /* 维护（整理/分裂）进度条（2026-09-15 用户报"没有 UI 进度提示"）。
    维护跑在**后台线程**里，轮闭合作业就结束了——旧前端在"没有作业"时停止轮询，
    于是那一两分钟页面毫无反馈（看起来像卡死）。`/plan` 现在带 `maint` 现算态，
-   这里显示阶段 + 已耗时，并在**结束时给出结果**（尤其拒收原因——它以前只落在
-   history 里，页面上只有一个小徽标）。 */
+   这里显示阶段 + 已耗时，并在**结束时给出结果**。
+   **失败/被拒收要常驻**（2026-09-18 用户："分裂炸了，前端也没有提示"）：以前
+   `notice` 只在"从活动变结束"那一次跳出来，还被 15s 尾部窗口限制——页面刷过一次
+   或晚看一眼就再也看不到。现在 `last_defect` 有值就**一直挂着**，直到用户点 ✕。 */
 let MAINT=null;                       // 最近一次收到的 maint（{active,phase,elapsed,...}）
+let MAINT_DISMISSED='';               // 用户点过 ✕ 的那条坏消息（同一条不重复弹）
 function renderMaintBar(){
   const bar=document.getElementById('maintbar');
   if(!bar)return;
-  if(!CUR||!MAINT||TAB!=='conv'||!(MAINT.active||MAINT.notice)){
+  const defect=String((MAINT&&MAINT.defect)||'');
+  const showDefect=!!defect&&defect!==MAINT_DISMISSED;
+  if(!CUR||!MAINT||TAB!=='conv'||!(MAINT.active||MAINT.notice||showDefect)){
     bar.classList.remove('show','bad');
     if(bar.innerHTML)bar.innerHTML='';
     return;
   }
-  const bad=!!MAINT.bad;
+  const bad=!!MAINT.bad||showDefect;
   bar.classList.toggle('show',true);
   bar.classList.toggle('bad',bad);
   const tag=MAINT.active
     ? (MAINT.phase==='分裂'?'⛏ 分裂中…':MAINT.phase==='整理'?'⏳ 整理中…':'⚙ 维护收尾…')
-    : (bad?'⛔ 分裂被拒收':'✓ 维护完成');
+    : (bad?'⛔ 分裂失败':'✓ 维护完成');
   const sub=MAINT.active
     ? `已 ${MAINT.elapsed||0}s · 后台跑，完成前不必等（可以继续看别的页签）`
-    : esc(MAINT.notice||'');
+    : esc(showDefect?defect:(MAINT.notice||''));
   bar.innerHTML=`<span class="mb-tag">${tag}</span><span class="mb-sub">${sub}</span>`
     +`<span class="mb-x" onclick="dismissMaint()" title="收起">✕</span>`;
 }
-function dismissMaint(){ if(MAINT)MAINT={}; renderMaintBar(); }
+function dismissMaint(){
+  if(MAINT&&MAINT.defect)MAINT_DISMISSED=String(MAINT.defect);
+  if(MAINT)MAINT={};
+  renderMaintBar();
+}
 function applyMaint(m){
   if(!m)return;
   const wasActive=!!(MAINT&&MAINT.active);
   if(m.active){
-    MAINT={active:true,phase:m.phase,elapsed:m.elapsed,batch:m.batch||''};
+    MAINT={active:true,phase:m.phase,elapsed:m.elapsed,batch:m.batch||'',
+           defect:String(m.last_defect||'')};
     window._maintTail=Date.now()+15000;   // 结束后再多拉 15s，别漏掉结果那一条
+  }else if(m.last_defect&&String(m.last_defect)!==((MAINT&&MAINT.defect)||'')){
+    // **失败常驻**：不在跑的每一 tick 都带着 last_defect，有新的就挂着（不再要求
+    // "必须是刚刚从活动变结束的那一次"——那正是"晚看一眼就没了"的根因）
+    MAINT={active:false,bad:true,defect:String(m.last_defect)};
+    if(typeof select==='function')select(CUR);
   }else if(wasActive){
-    // 刚结束 → 给一次结果提示：维护完成后接口至少要能回答"成了还是没成"
-    MAINT={active:false,bad:!!m.last_defect,
-           notice:(m.last_defect||m.last_end||'维护已结束').slice(0,300)};
+    // 刚结束（且没有失败）→ 给一次结果提示：至少要能回答"成了还是没成"
+    MAINT={active:false,bad:false,
+           notice:(m.last_end||'维护已结束').slice(0,300)};
     window._maintTail=0;
     if(typeof select==='function')select(CUR);   // 结果落地 → 重取元数据（徽标/注册表）
   }else{
-    return;                              // 本来就没在跑：UI 不动
+    return;                              // 本来就没在跑、也没有坏消息：UI 不动
   }
   renderMaintBar();
 }
@@ -3039,14 +3055,14 @@ async function deleteSession(id){
 }
 
 /* 轮状态（2026-09-17 用户口径："将每轮对话上面的状态信息，也显示到时间线中"）：
-   对话流轮头与时间线卡片共用同一套——段落行、tok/命中、落点、分裂/折叠徽标。 */
+   对话流轮头与时间线卡片共用同一套——段落行、tok/命中、落点、分裂/整理徽标。 */
 function noteLinesHtml(row){
   // 段落：分裂前一轮一条；分裂后一轮多 agent 就每家一段（按事件顺序逐行）。
   // 末尾再出「⏳ 等你答复」——这一轮结尾在等用户拍板什么（V4 连续性，防脱节）。
   const parts=((row.noteSegments||[]).length?row.noteSegments:[row.note]).filter(x=>x&&x.sentence);
   let html=parts.map(pt=>{
     const exec=String(pt.executor||''),nf=((pt.failures||[]).length);
-    return `<div class="sysline" style="text-align:left" title="每轮一段话（V4）：这一步的机械事实由代码给锚、模型写成一句话；折叠后它就是装配里的那一段（一轮多 agent 就分段拼接）">◆ ${exec&&exec!=='Main'?`〔${esc(exec)}〕`:''}${esc(String(pt.sentence||''))}${nf?` <span style="color:var(--gold)">⚠ ${nf} 条失败</span>`:''}</div>`;
+    return `<div class="sysline" style="text-align:left" title="每轮一段话：这一步的机械事实由代码给锚、模型写成一句话；整理之后它就是装配里的那一段（一轮多 agent 就分段拼接）">◆ ${exec&&exec!=='Main'?`〔${esc(exec)}〕`:''}${esc(String(pt.sentence||''))}${nf?` <span style="color:var(--gold)">⚠ ${nf} 条失败</span>`:''}</div>`;
   }).join('');
   const waiting=String(row.awaitingUser||(row.note&&row.note.awaiting_user)||'').trim();
   if(waiting)html+=`<div class="sysline" style="text-align:left" title="这一轮结尾把选项摆给用户了——下一轮要从这里接着聊（防脱节）">⏳ 等你答复：${esc(waiting)}</div>`;
@@ -3105,7 +3121,7 @@ function renderTimeline(c){
       (r.t1&&r.t1!==r.t0?` → ${esc(fmtClock(r.t1))} · ${esc(fmtDur((Date.parse(r.t1)-Date.parse(r.t0))/1000))}`:'')+`</span>`:'';
     const sender=senderOf(r);
     const blocks=(r.blocks||[]).map(blockChip).join('');
-    // 状态徽标：与对话流轮头同一套（落点 / 分裂 / 折叠 / 分裂前 / 未闭合 / 参与者 / @ / Σtok）
+    // 状态徽标：与对话流轮头同一套（落点 / 分裂 / 整理 / 分裂前 / 未闭合 / 参与者 / @ / Σtok）
     const preSplit=r.stage===0?`<span class="badge b-raw" title="分裂前：这时还没有子 agent 可分，这一轮不归任何 agent（整段记）">分裂前</span>`:'';
     const unclosed=(r.end_state==null||r.end_state===''||r.end_state==='open')
       ?`<span class="badge b-pend" title="这一轮还没有产出最终回答（中断或步数用尽）">未闭合</span>`:'';

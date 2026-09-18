@@ -352,15 +352,29 @@ class _MaintenanceMixin:
             if snapshot is None:
                 self._maint_deferred = True
                 return
+            batch = self._note_pending_rounds()
+            if self.task is not None:
+                # 与旧链路同格式的"启动/结束"对（serve.maint_state 靠它算"在跑/
+                # 跑了多久/收没收尾"）——V4 之前不写，前端维护进度条在 V4 下
+                # 从不亮起（2026-09-18 实测："分裂炸了，前端也没有提示"）。
+                self.task.record(
+                    "maintenance",
+                    ("启动：批次 R%d-R%d" % (batch[0]["seq"], batch[-1]["seq"]))
+                    if batch else "启动：批次（空）",
+                )
             if self.async_organization:
-                batch = self._note_pending_rounds()
                 for r in batch:
                     self._org_inflight.add(int(r["seq"]))
                 self._org_queue.put(("v4", batch, snapshot))
                 self._ensure_worker()
                 return
-            self._settle_round_notes()
+            self._settle_round_notes(batch=batch)
             self._maybe_split_v4()
+            if self.task is not None:
+                self.task.record(
+                    "maintenance",
+                    f"结束：v4 批次（同步，结算 {len(batch)} 轮）",
+                )
             return
         unorganized = self._unorganized_rounds()
         if not unorganized:
@@ -869,7 +883,7 @@ class _MaintenanceMixin:
         why = ""
         for r in closed:                          # 最老的先
             if size <= target:
-                why = f"已折到目标线 {target:,} 以下"
+                why = f"已整理到目标线 {target:,} 以下"
                 break
             if r.get("folded") or str(r.get("note_state")) != "done":
                 continue
@@ -913,7 +927,7 @@ class _MaintenanceMixin:
             if self.task is not None:
                 self.task.record(
                     "fold",
-                    f"折档未折：{why}（已闭合 {len(closed)} 轮；装配 "
+                    f"整理未推进：{why}（已闭合 {len(closed)} 轮；装配 "
                     + f"{int(self.last_context_estimate or 0):,} tok、目标 {target:,}）",
                 )
             return
@@ -923,11 +937,11 @@ class _MaintenanceMixin:
         if self.task is not None:
             self.task.record(
                 "fold",
-                f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
+                f"整理：{len(staged)} 轮压缩成一段话（R{staged[0]['seq']}"
                 f"{'' if len(staged) == 1 else '、…、R' + str(staged[-1]['seq'])}）；"
-                f"折到水位 {self._fold_target_ratio():.0%} 以下"
-                f"（目标 {target:,}，折前 {int(self.last_context_estimate or 0):,}"
-                f" → 折后 ≈{after:,}）",
+                f"压到水位 {self._fold_target_ratio():.0%} 以下"
+                f"（目标 {target:,}，整理前 {int(self.last_context_estimate or 0):,}"
+                f" → 整理后 ≈{after:,}）",
             )
 
     def _ensure_worker(self) -> None:
@@ -972,10 +986,23 @@ class _MaintenanceMixin:
                     self._catch_up_after_maintenance()
 
     def _run_v4_maintenance(self, batch: list[dict]) -> None:
-        """后台跑完冻结批次：这批的结算（一次调用）＋ 分裂分析（树描述现状）。"""
+        """后台跑完冻结批次：这批的结算（一次调用）＋ 分裂分析（树描述现状）。
+
+        收尾写「结束：」——与 `_maybe_organize_batch` 的「启动：」成对，
+        serve.maint_state 靠它判"收没收尾、上次结果是什么"。
+        """
         if batch:
             self._settle_round_notes(batch=batch)
         self._maybe_split_v4()
+        if self.task is not None:
+            states = {str(r.get("split_state") or "") for r in batch}
+            split_txt = ("ready" if "ready" in states
+                         else ("failed" if "failed" in states
+                               else ("skipped" if "skipped" in states else "pending")))
+            self.task.record(
+                "maintenance",
+                f"结束：v4 批次（结算 {len(batch)} 轮，分裂={split_txt}）",
+            )
 
     def _catch_up_after_maintenance(self) -> None:
         """后台维护跑完后的**阻塞补齐**（2026-09-17 用户口径）。
@@ -2569,11 +2596,11 @@ class _MaintenanceMixin:
             return
         public = self._registry_entry_for(registry_module.MAIN_AGENT_ID) or {}
         if int(public.get("ctx_cur") or 0) >= 0.4 * float(self._org_watermark):
-            # 公共那条线也满了 → **先折早期内容**再让它回落（用户口径的 40% 线）
+            # 公共那条线也满了 → **先整理早期内容**再让它回落（用户口径的 40% 线）
             self._advance_fold_line(with_catch_up=True)
             self.task.record(
                 "fold",
-                f"回落前先折：公共上下文已占 40% 水位（{int(public.get('ctx_cur') or 0):,}"
+                f"回落前先整理：公共上下文已占 40% 水位（{int(public.get('ctx_cur') or 0):,}"
                 f" / {int(0.4 * self._org_watermark):,}）",
             )
         seq = int((round_ or {}).get("seq") or 0)

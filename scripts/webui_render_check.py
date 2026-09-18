@@ -1959,6 +1959,18 @@ resetLive();
     txt = String(bar.textContent || '');
     if (!/拒收/.test(txt) || !/历史未落点/.test(txt)) problems.push('AY: 拒收原因没显示：' + txt);
     if (!bar.classList.contains('bad')) problems.push('AY: 拒收没标成异常色');
+    // ③b **失败常驻**（2026-09-18 用户："分裂炸了，前端也没有提示"）：以前只在
+    //    "从活动变结束"那一次弹 notice、还被 15s 尾部窗口限制——页面刷过一次或
+    //    晚看一眼就再也看不到。现在每一 tick 都带着 last_defect 来，就该一直挂着。
+    applyMaint({active:false, last_defect:'分裂失败：ValueError: list.remove(x): x not in list'});
+    if (!bar.classList.contains('show')) problems.push('AY: 分裂失败的提示没常驻（刷新后就没了）');
+    if (!/ValueError/.test(String(bar.textContent||''))) problems.push('AY: 失败原因没显示');
+    // ③c 用户点 ✕ 之后**同一条**不再重复弹，但新的一条要能弹
+    dismissMaint();
+    applyMaint({active:false, last_defect:'分裂失败：ValueError: list.remove(x): x not in list'});
+    if (bar.classList.contains('show')) problems.push('AY: 用户已收起，同一条失败不该再弹');
+    applyMaint({active:false, last_defect:'分裂失败：另一种错'});
+    if (!bar.classList.contains('show')) problems.push('AY: 新的失败消息要能弹出来');
     // ④ 收起
     dismissMaint();
     if (bar.classList.contains('show')) problems.push('AY: 收起后进度条还在');

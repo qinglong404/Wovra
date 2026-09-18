@@ -832,20 +832,29 @@ def maint_state(data: dict) -> dict:
     * 轮的 `org_state == "pending"` → 整理中；`split_state ∈ {running, ready,
       deferred}` → 分裂中（这两个字段本来就是维护线程写的）；
     * history 里最后一条「启动：批次 …」（其后没有「结束：」）→ 在跑，并给出
-      起始时刻算已耗时；
-    * 最后一条 `split_defect`/`split_stale` → 上次结果（**拒收原因必须看得见**：
-      以前它只落在 history 里，页面上只有一个小徽标）。
+      起始时刻算已耗时；**V4 也写这同一对**（2026-09-18 补：之前 V4 不写，
+      前端维护进度条在 V4 下从不亮起）；
+    * 最后一条 `split_defect`/`split_stale`（旧链路）或**轮上的
+      `split_state=failed`＋`split_note`**（V4 的持久来源，抗并发写丢 history 行）
+      → 上次结果（**失败原因必须看得见**：以前它只落在 history 里，页面上只有
+      一个小徽标）。
     """
     rounds = [r for r in (data.get("rounds") or []) if isinstance(r, dict)]
     pending = [r.get("seq") for r in rounds
                if str(r.get("org_state") or "") == "pending"]
     splitting = [r.get("seq") for r in rounds
                  if str(r.get("split_state") or "") in ("running", "ready", "deferred")]
+    last_defect = ""
+    # V4 分裂失败的**持久来源**（轮字段抗并发写丢行；history 只是旁证）
+    for r in rounds:
+        if str(r.get("split_state") or "") == "failed":
+            note = str(r.get("split_note") or "").strip()
+            last_defect = f"分裂失败：{note}" if note else "分裂失败（无原因记录）"
+            break
     since = ""
     batch = ""
     last_end = ""
     finished_at = ""
-    last_defect = ""
     for h in data.get("history") or []:
         if not isinstance(h, dict):
             continue
@@ -858,6 +867,8 @@ def maint_state(data: dict) -> dict:
             # 时间另存 `finished_at`
             last_end, finished_at, since = detail, str(h.get("time") or ""), ""
         elif kind in ("split_defect", "split_stale"):
+            last_defect = detail
+        elif kind == "split" and ("失败" in detail or "异常" in detail):
             last_defect = detail
     elapsed = 0
     if since:
@@ -877,7 +888,13 @@ def maint_state(data: dict) -> dict:
                 "finished_at": finished_at, "last_defect": last_defect, "stale": True}
     phase = ""
     if since:
-        phase = "分裂" if splitting else ("整理" if pending else "收尾")
+        # V4 的"整理"阶段：结算还没落（闭合轮里还有没写段话的）也算整理中，
+        # 不只是旧链路的 `org_state == "pending"`
+        unsettled = [r for r in rounds
+                     if str(r.get("end_state")) == "completed"
+                     and str(r.get("note_state")) != "done"]
+        phase = ("分裂" if splitting
+                 else ("整理" if (pending or unsettled) else "收尾"))
     return {"active": bool(since), "phase": phase, "since": since,
             "elapsed": elapsed, "org_pending": pending, "splitting": splitting,
             "batch": batch, "last_end": last_end, "finished_at": finished_at,
@@ -925,8 +942,8 @@ def session_summary(task_id: str, data: dict) -> dict:
     for r in rounds:
         # **V4 折算**（2026-09-18 实测：列表/摘要的"已整理 N · 未整理 M"原先直读
         # 轮上的 `org_state` 原字段，而 V4 折叠不写它 → 折过的轮全被数成"未整理"。
-        # 与时间线的轮徽标同一套折算（`_round_meta`），口径不再走岔。）
-        state = _round_meta(r).get("org_state") or "raw"
+        # 与时间线的轮徽标同一套折算（`_org_state_of`），口径不再走岔。）
+        state = _org_state_of(r)
         org[state if state in _ORG_STATES else "raw"] += 1
     ts = data.get("task_state") or {}
     todo = data.get("todo") or {}
@@ -1326,6 +1343,40 @@ def _split_meta(r: dict, live_files: list[str] | None = None) -> dict | None:
     }
 
 
+def _note_pending_for(r: dict) -> bool:
+    """这一轮是不是"正在整理"（V4 口径）：已闭合、还没写出一段话。
+
+    `note_state` 由结算写：`done`（成了）／`failed`（失败留痕，原文继续顶着）／
+    `running`（写的过程中）。**空**＝还没轮到它写（异步维护在后台跑，或水位没到）。
+    只把"空且不是 failed"算成整理中——`failed` 是**结果**，不是"还在进行"。
+    """
+    if str(r.get("end_state")) != "completed":
+        return False
+    if bool(r.get("folded")):
+        return False
+    return str(r.get("note_state") or "") not in ("done", "failed")
+
+
+def _org_state_of(r: dict) -> str:
+    """一轮的整理状态（**唯一折算点**：时间线徽标、会话摘要、列表都走这里）。
+
+    * 旧链路自己写的 `org_state` 照旧优先（它的整理是另一条路）；
+    * V4：折了 → done（它在上文里就是一段话）；没折但**还没写出一段话** →
+      pending（**整理中**）；其余 → raw（原文全量保留）。
+
+    "折叠"这个词退出用户界面（2026-09-18 用户："以后统一叫折叠为整理，和前端统一"），
+    代码内部仍叫 `folded`——它是机械标志，不是用户词汇。
+    """
+    legacy = str(r.get("org_state") or "")
+    if legacy:
+        return legacy
+    if not _v4_on():
+        return "raw"
+    if r.get("folded"):
+        return "done"
+    return "pending" if _note_pending_for(r) else "raw"
+
+
 def _round_meta(r: dict, usage: dict | None = None,
                 plan: dict | None = None,
                 live_files: list[str] | None = None) -> dict:
@@ -1339,12 +1390,8 @@ def _round_meta(r: dict, usage: dict | None = None,
         "seq": r.get("seq"),
         "user_input": (r.get("user_input") or {}).get("original", ""),
         "end_state": r.get("end_state"),
-        # 整理状态：V4 里 `org_state` 永远不写（整理那一路停用），压缩由**折叠**承担
-        # ——故这里如实折算成同一个字段（折了＝已整理，没折＝未整理）。用户口径
-        # 2026-09-17："将折叠改回之前的整理吧，不然又显示'未整理'，又显示已折叠，
-        # 然后轮整理状态全显示未整理"。前端只认这一个字段，口径不会再走岔。
-        "org_state": (str(r.get("org_state") or "")
-                      or ("done" if (r.get("folded") and _v4_on()) else "raw")),
+        # 整理状态：折算规则见 `_org_state_of`（**唯一折算点**）
+        "org_state": _org_state_of(r),
         # 分裂状态（2026-09-15）：running/ready/deferred/stale/rejected/failed/done——
         # 维护只写 history 时会被并发写覆盖（见 worklog §106），落到轮上才可见、可查。
         "split_state": r.get("split_state") or "",

@@ -1547,7 +1547,9 @@ def test_round_meta_folds_into_org_state_under_v4(monkeypatch):
 
     monkeypatch.setenv("WOVRA_V4", "1")
     folded = serve_module._round_meta({"seq": 1, "folded": True, "org_state": "", "events": []})
-    raw = serve_module._round_meta({"seq": 2, "folded": False, "org_state": "", "events": []})
+    raw = serve_module._round_meta({"seq": 2, "folded": False, "org_state": "",
+                                    "end_state": "completed", "note_state": "done",
+                                    "events": []})
     legacy = serve_module._round_meta({"seq": 3, "folded": True, "org_state": "done", "events": []})
 
     assert folded["org_state"] == "done" and folded["compressed"] is True
@@ -1558,6 +1560,69 @@ def test_round_meta_folds_into_org_state_under_v4(monkeypatch):
     monkeypatch.setenv("WOVRA_V4", "0")
     off = serve_module._round_meta({"seq": 4, "folded": True, "org_state": "", "events": []})
     assert off["org_state"] == "raw"
+
+
+def test_round_meta_reports_pending_while_note_is_being_written(monkeypatch):
+    """**整理中**在 V4 下有真信号（2026-09-18 用户："为什么现在这个整理中没有用了"）。
+
+    以前只认旧链路的 `org_state=pending`，而 V4 从不写它——所以"整理中"永远出不来。
+    现在按 `note_state` 折算：已闭合、没折、产物还没写出来 → pending（后台正在写）；
+    产物写成了（`done`）或写失败（`failed`）都不是"进行中"。
+    """
+    from wovra import serve as serve_module
+
+    monkeypatch.setenv("WOVRA_V4", "1")
+    writing = serve_module._round_meta({"seq": 1, "end_state": "completed",
+                                        "note_state": "", "folded": False, "events": []})
+    done = serve_module._round_meta({"seq": 2, "end_state": "completed",
+                                     "note_state": "done", "folded": False, "events": []})
+    failed = serve_module._round_meta({"seq": 3, "end_state": "completed",
+                                       "note_state": "failed", "folded": False, "events": []})
+    open_round = serve_module._round_meta({"seq": 4, "end_state": "open",
+                                           "note_state": "", "folded": False, "events": []})
+
+    assert writing["org_state"] == "pending"
+    assert done["org_state"] == "raw" and failed["org_state"] == "raw"
+    assert open_round["org_state"] == "raw"          # 没闭合的轮谈不上"整理中"
+
+
+def test_maint_state_surfaces_v4_split_failure_and_phase(monkeypatch):
+    """V4 的分裂失败与"整理中"阶段也要能从 `/plan` 的 maint 里看见。
+
+    2026-09-18 实测：分裂抛 ValueError 整批失败，页面上**一点提示都没有**——
+    V4 不写"启动/结束"记录（`maint_state` 的 `active` 判据）、失败原因也没进
+    `last_defect`（旧链路靠 history 的 split_defect）。两条都补上。
+    """
+    from wovra import serve as serve_module
+
+    # 起始时刻取"刚刚"——维护硬上限之外的历史记录会被 `maint_state` 判成
+    # "上次没正常收尾"（stale），那是另一条分支（见 §879 的注释）
+    import datetime as _dt
+    fresh = (_dt.datetime.now() - _dt.timedelta(seconds=30)).isoformat(timespec="seconds")
+    data = {
+        "rounds": [
+            {"seq": 1, "end_state": "completed", "note_state": "", "folded": False,
+             "split_state": "failed", "split_note": "ValueError: boom"},
+        ],
+        "history": [
+            {"time": fresh, "kind": "maintenance", "detail": "启动：批次 R1-R1"},
+            {"time": fresh, "kind": "split",
+             "detail": "V4 分裂失败（R1）：ValueError: boom"},
+        ],
+    }
+    m = serve_module.maint_state(data)
+    assert m["active"] is True and m["phase"] == "整理"      # 结算还没落 → 整理阶段
+    assert "ValueError: boom" in m["last_defect"]
+
+    # 分裂在跑 → 阶段是分裂；**失败提示不该因此消失**（重试期间用户仍要看得见
+    # 上一次为什么失败——它落在 history 里，是持久来源）
+    data["rounds"][0]["split_state"] = "running"
+    m2 = serve_module.maint_state(data)
+    assert m2["phase"] == "分裂" and "ValueError: boom" in m2["last_defect"]
+
+    # 没在跑、也没失败 → 不硬造提示
+    clean = serve_module.maint_state({"rounds": [], "history": []})
+    assert clean["active"] is False and clean["last_defect"] == ""
 
 
 def test_session_summary_counts_folded_as_done_under_v4(monkeypatch):

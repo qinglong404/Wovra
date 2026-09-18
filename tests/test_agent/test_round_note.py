@@ -436,7 +436,7 @@ def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path)
     folded = [int(r["seq"]) for r in task.rounds if r.get("folded")]
     assert len(folded) > 1, f"一次要到水位以下，而不是只折一轮：{folded}"
     detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
-    assert "折到水位" in detail and "60%" in detail
+    assert "压到水位" in detail and "60%" in detail
 
     # 滞后：体量已经落到水位之下 → 再调也不折
     agent.last_context_estimate = 3000
@@ -649,6 +649,17 @@ def test_async_dispatch_does_not_block_the_close(monkeypatch, tmp_path):
     assert kind == "v4" and [int(r["seq"]) for r in batch] == [1, 2]
     assert _batches(agent) == []                            # 还没发结算调用（不阻塞）
     assert [r.get("note_state") for r in task.rounds] == [None, None]
+    # **「启动：」必须写**（2026-09-18 补）：serve.maint_state 靠它算"在跑/跑了多久"，
+    # V4 以前不写 → 前端维护进度条在 V4 下从不亮起（用户："分裂炸了，前端也没有提示"）
+    starts = [str(h.get("detail")) for h in task.history
+              if h.get("kind") == "maintenance" and "启动：批次" in str(h.get("detail"))]
+    assert starts and "R1-R2" in starts[-1]
+
+    # 后台批次跑完 → 写「结束：」（同一对记录；不然界面永远显示"在跑"）
+    agent._run_v4_maintenance(batch)
+    ends = [str(h.get("detail")) for h in task.history
+            if h.get("kind") == "maintenance" and str(h.get("detail")).startswith("结束：")]
+    assert ends and "v4 批次" in ends[-1]
 
 
 def test_catch_up_settles_rounds_closed_during_maintenance(monkeypatch, tmp_path):
@@ -715,7 +726,7 @@ def test_fold_is_decided_by_watermark_not_by_round_number(monkeypatch, tmp_path)
     folded = [int(r["seq"]) for r in task.rounds if r.get("folded")]
     assert folded == [1, 2, 3], f"到线必须折得动（轮号不参与判定）：{folded}"
     detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
-    assert "换档" in detail and "折后" in detail
+    assert "整理：" in detail and "整理后" in detail
 
     # 没到水位：新来一轮有产物也照样留原文（轮号再大也不折——轮次上限已删）
     task.rounds.append(_big_round(4, chars=40))
@@ -737,4 +748,4 @@ def test_fold_without_candidates_leaves_a_trace(monkeypatch, tmp_path):
 
     assert not any(r.get("folded") for r in task.rounds)
     detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
-    assert "折档未折" in detail
+    assert "整理未推进" in detail
