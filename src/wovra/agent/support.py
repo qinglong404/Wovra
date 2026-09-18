@@ -71,9 +71,11 @@ _FOLD_KEEP_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_KEEP_ROUNDS", "50"))
 # 实测动因：按"逐轮推进"会让水位悬在线上时**每轮断一次前缀**（worklog §160）。
 _FOLD_TARGET_DEFAULT = float(os.environ.get("WOVRA_FOLD_TARGET", "0.6"))
 
-# 折档的**轮次上限**（2026-09-17 用户口径："15 轮吧"）：连续小轮（每轮几百 tok）迟迟
-# 到不了水位线时，攒到 15 轮就折一次——防"最坏情况下多久换一次"没有兜底。
-_FOLD_MAX_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_MAX_ROUNDS", "15"))
+# 折档的**轮次上限**：攒到这个轮数还没到水位，就照样折一次（2026-09-17 用户口径：
+# "改成同一的 50 轮……50 轮还没到水位，就直接压缩吧"）。**与原文窗口同一个数**
+# （`WOVRA_FOLD_KEEP_ROUNDS` 默认 50）：窗口是"别折比它更新的轮"的下限，上限是
+# "多久必须折一次"的兜底——两者取同一个值时，语义就是"最多留 50 轮原文"。
+_FOLD_MAX_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_FOLD_MAX_ROUNDS", "50"))
 
 # 分裂判据的体量门槛（2026-09-11 用户拍板）：主 agent 残留桶（纯对话/
 # 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），

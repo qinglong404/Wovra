@@ -874,12 +874,13 @@ class _MaintenanceMixin:
             return
         current = int(closed[-1]["seq"])
         by_water = with_catch_up or self.last_context_estimate >= self._org_watermark
-        # **轮次上限**（2026-09-17 用户口径"15 轮"）：连续小轮到不了水位时兜底——
-        # 距上一次折档已满 N 轮就折一次（"最坏情况下多久换一次"要有上限）。
+        # **轮次上限**（2026-09-17 用户口径："改成同一的 50 轮……50 轮还没到水位就直接压缩"）：
+        # 距上一次折档**事件**已满 N 轮就折一次（N 与原文窗口同一个数，默认 50）。
         cap = int(getattr(self, "_fold_max_rounds", _FOLD_MAX_ROUNDS_DEFAULT))
-        folded_seqs = [int(r["seq"]) for r in closed if r.get("folded")]
-        last_fold = max(folded_seqs) if folded_seqs else int(closed[0]["seq"]) - 1
-        by_rounds = current - last_fold >= cap
+        # **按"上一次折档事件"计时**（不是"上一次折的那一轮"）：折完一轮若拿它当起点，
+        # 下一轮立刻又满足上限 → 退化成"每轮折一轮"，又变成每轮断一次前缀（§160 的教训）。
+        last_fold_at = int(getattr(self.task, "fold_at_seq", 0) or 0)
+        by_rounds = current - last_fold_at >= cap
         if not (by_water or by_rounds) or current <= self._org_grace:
             return
         # **一次折够**（2026-09-17 实测：按"上次折到哪"逐轮推进会让水位一直悬在线上的
@@ -899,10 +900,13 @@ class _MaintenanceMixin:
         unfolded = [r for r in closed
                     if not r.get("folded") and str(r.get("note_state")) == "done"]
         staged: list[dict] = []
-        for r in closed:                          # 最老的先；折到目标线以下为止
-            over_window = int(r["seq"]) <= window_cut
-            # 停手条件：窗口内的轮不折、且已经折到目标以下、且**未折轮数没超上限**
-            if not over_window and size <= target and len(unfolded) <= cap:
+        for r in closed:                          # 最老的先
+            # 停手条件：已经折到目标以下、**且未折轮数在上限内**（窗口是下限，见下）
+            if size <= target and len(unfolded) <= cap:
+                break
+            if int(r["seq"]) > window_cut and len(unfolded) <= cap:
+                # **原文窗口是下限**：再往近处不折——但**被轮次上限逼着时让路**
+                # （两者默认是同一个数，正常不会打架；上限更小时以"必须折"为准）
                 break
             if r.get("folded") or str(r.get("note_state")) != "done":
                 continue
@@ -918,6 +922,8 @@ class _MaintenanceMixin:
             return
         for r in staged:
             r["folded"] = True
+        if self.task is not None:
+            self.task.fold_at_seq = current       # 轮次上限的计时起点（本轮）
         self._persist_rounds()
         if self.task is not None:
             self.task.record(

@@ -529,6 +529,8 @@ class Task:
     # ——每次装配都算一遍签名，与它相等就不重复占位；变了才把新的地图作为一条
     # `runtime_note` 事件**追加进历史**（于是它此后在前缀里，只付一次钱）。
     file_map_sig: str = ""
+    # 上一次折档发生在哪一轮（轮次上限的计时起点；2026-09-17 用户口径"50 轮"）
+    fold_at_seq: int = 0
     created_at: str = ""
     updated_at: str = ""
 

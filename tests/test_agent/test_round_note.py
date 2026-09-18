@@ -677,12 +677,16 @@ def test_async_dispatch_does_not_block_the_close(monkeypatch, tmp_path):
         org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
     )
     agent.async_organization = True
+    # 不起真线程（否则它会在测试结束后继续跑，与本套其它用例抢时序）
+    agent._ensure_worker = lambda: None
     _run(agent, 2)
     agent.last_context_estimate = _WATERMARK_OFF
 
     agent._maybe_organize_batch()
 
     assert agent._org_queue.qsize() == 1                    # 批次进了队列
+    kind, batch, _snapshot = agent._org_queue.get_nowait()
+    assert kind == "v4" and [int(r["seq"]) for r in batch] == [1, 2]
     assert _batches(agent) == []                            # 还没发结算调用（不阻塞）
     assert [r.get("note_state") for r in task.rounds] == [None, None]
 
