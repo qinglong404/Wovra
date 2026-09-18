@@ -923,7 +923,10 @@ def session_summary(task_id: str, data: dict) -> dict:
     rounds = data.get("rounds") or []
     org = {"done": 0, "pending": 0, "failed": 0, "raw": 0}
     for r in rounds:
-        state = r.get("org_state")
+        # **V4 折算**（2026-09-18 实测：列表/摘要的"已整理 N · 未整理 M"原先直读
+        # 轮上的 `org_state` 原字段，而 V4 折叠不写它 → 折过的轮全被数成"未整理"。
+        # 与时间线的轮徽标同一套折算（`_round_meta`），口径不再走岔。）
+        state = _round_meta(r).get("org_state") or "raw"
         org[state if state in _ORG_STATES else "raw"] += 1
     ts = data.get("task_state") or {}
     todo = data.get("todo") or {}

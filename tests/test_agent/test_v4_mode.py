@@ -207,6 +207,30 @@ def _round_writing(seq: int, *paths: str) -> dict:
             "org_state": ""}
 
 
+def test_domains_never_apart_chain_does_not_remove_twice(monkeypatch, tmp_path):
+    """合并链上**被并掉的节点不能 remove 两次**（2026-09-18 实测事故）。
+
+    会话 `20260918-104931-987e97`：三个顶层域里"文件少"的那个先后与两个"文件多"的
+    都满足合并——第一次把它从 domains 里 remove 掉，第二次再 remove 同一个对象就抛
+    `ValueError: list.remove(x): x not in list`，整批分裂失败（history 里只有一句
+    "V4 分裂失败（R1–R4）：ValueError…"）。书签必须记在**被并掉**那方的索引上。
+    """
+    rounds = [_round_writing(7, "a.py", "b.py", "c.py")]
+    agent, _task = _agent(monkeypatch, tmp_path, rounds)
+    domains = [
+        {"name": "甲", "files": ["a.py"]},                       # 小（被并两次的那方）
+        {"name": "乙", "files": ["a.py", "b.py"]},
+        {"name": "丙", "files": ["a.py", "c.py"]},
+    ]
+
+    notes = agent._merge_never_apart_domains(domains, rounds)   # 修前这里抛 ValueError
+
+    assert len(notes) == 2                                       # 甲→乙、乙＋甲→丙 两条
+    assert len(domains) == 1                                     # 三条活并成一条
+    for f in ("a.py", "b.py", "c.py"):
+        assert f in domains[0]["files"]
+
+
 def test_domains_never_apart_are_merged(monkeypatch, tmp_path):
     """**从未分开过**的两个域并成一个（活跃轮被包含，且共现 ≥2 轮）。"""
     rounds = [_round_writing(7, "a/one.py", "b/two.py"),

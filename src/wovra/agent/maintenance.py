@@ -2706,8 +2706,16 @@ class _MaintenanceMixin:
                     key=lambda n: (-len(n.get("files") or []),
                                    -len(str(n.get("description") or ""))),
                 )
-                # 并进来的一方不再参与后续配对（它已经不是一个域了）
-                merged_into.add(j if (keep is b) else i)
+                # **被并掉的那一方不再参与后续配对**（它已经不是一个域了）——书签
+                # 记在**被并掉**的头上；保留方继续参与（还可以跟别人并）。
+                # 2026-09-18 实测（会话 20260918-104931-987e97）：这里原先记的是**保留**
+                # 方的索引，被并掉的索引下一对照样进来——同一个对象 remove 两次 →
+                # `ValueError: list.remove(x): x not in list` → 整批分裂失败。
+                # 若被并掉的是**外层**节点，本外轮就此打住（它已经不在 domains 里了）。
+                if gone is a:
+                    merged_into.add(i)
+                else:
+                    merged_into.add(j)
                 keep.setdefault("files", [])
                 for f in gone.get("files") or []:
                     if f not in keep["files"]:
@@ -2726,6 +2734,8 @@ class _MaintenanceMixin:
                     f"同轮从未分开的域合并：「{gone_name}」→「{keep.get('name')}」"
                     f"（活跃轮 {'、'.join('R%d' % s for s in sorted(ra | rb))}）"
                 )
+                if gone is a:
+                    break
         return notes
 
     @staticmethod

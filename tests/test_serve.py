@@ -1560,6 +1560,32 @@ def test_round_meta_folds_into_org_state_under_v4(monkeypatch):
     assert off["org_state"] == "raw"
 
 
+def test_session_summary_counts_folded_as_done_under_v4(monkeypatch):
+    """列表/摘要的整理计数与时间线同一套折算（2026-09-18 实测：折过的轮被数成"未整理"）。
+
+    会话 `20260918-104931-987e97` 四轮全折（folded=True），时间线徽标已显示"已整理"，
+    列表摘要却仍报"未整理 4"——`session_summary` 直读轮上 `org_state` 原字段，而 V4
+    折叠不写它。修复：复用 `_round_meta` 的折算（折了＝done）。
+    """
+    from wovra import serve as serve_module
+
+    data = {
+        "rounds": [
+            {"seq": 1, "org_state": "", "folded": True, "events": []},
+            {"seq": 2, "org_state": "", "folded": False, "events": []},
+            {"seq": 3, "org_state": "done", "folded": True, "events": []},
+        ],
+        "task_state": {}, "todo": {}, "history": [],
+    }
+    monkeypatch.setenv("WOVRA_V4", "1")
+    summary = serve_module.session_summary("s1", data)
+    assert summary["org"] == {"done": 2, "pending": 0, "failed": 0, "raw": 1}
+
+    monkeypatch.setenv("WOVRA_V4", "0")
+    off = serve_module.session_summary("s1", data)
+    assert off["org"] == {"done": 1, "pending": 0, "failed": 0, "raw": 2}
+
+
 def test_views_payload_is_fork_aware(monkeypatch):
     """fork 之后各家上下文不再相同：投影要给**逐 agent** 的行（数字取按视图观察），
     不再说"共享一份"（2026-09-17）。"""
