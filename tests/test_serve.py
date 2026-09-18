@@ -1562,28 +1562,54 @@ def test_round_meta_folds_into_org_state_under_v4(monkeypatch):
     assert off["org_state"] == "raw"
 
 
-def test_round_meta_reports_pending_while_note_is_being_written(monkeypatch):
-    """**整理中**在 V4 下有真信号（2026-09-18 用户："为什么现在这个整理中没有用了"）。
+def test_round_meta_pending_needs_maintenance_actually_running(monkeypatch):
+    """**整理中**只在维护真的在跑时才算（2026-09-18 用户："R1、R2 都显示整理中，现在不是没有触发水位吗？"）。
 
-    以前只认旧链路的 `org_state=pending`，而 V4 从不写它——所以"整理中"永远出不来。
-    现在按 `note_state` 折算：已闭合、没折、产物还没写出来 → pending（后台正在写）；
-    产物写成了（`done`）或写失败（`failed`）都不是"进行中"。
+    `note_state` 为空是**歧义的**：既可能是"后台正在写这一段话"，也可能是"水位没到、
+    压根没开始整理"（后者是常态）。所以判 pending 必须带上服务端的上下文事实
+    `maint_running`——没在跑时空着＝还没到水位，不是"整理中"。
+
+    上一版只看"空且非 failed"就算 pending，于是**任何水位没到的会话里每个已闭合轮都被
+    显示成「整理中」**（假信号还骗着前端的维护观察器一直武装，见 worklog §197）。
     """
     from wovra import serve as serve_module
 
     monkeypatch.setenv("WOVRA_V4", "1")
-    writing = serve_module._round_meta({"seq": 1, "end_state": "completed",
-                                        "note_state": "", "folded": False, "events": []})
-    done = serve_module._round_meta({"seq": 2, "end_state": "completed",
-                                     "note_state": "done", "folded": False, "events": []})
-    failed = serve_module._round_meta({"seq": 3, "end_state": "completed",
-                                       "note_state": "failed", "folded": False, "events": []})
-    open_round = serve_module._round_meta({"seq": 4, "end_state": "open",
-                                           "note_state": "", "folded": False, "events": []})
+    def meta(**kw):
+        base = {"seq": 1, "end_state": "completed", "note_state": "",
+                "folded": False, "events": []}
+        return serve_module._round_meta({**base, **kw}, maint_running=kw.pop("running", False))
 
-    assert writing["org_state"] == "pending"
-    assert done["org_state"] == "raw" and failed["org_state"] == "raw"
-    assert open_round["org_state"] == "raw"          # 没闭合的轮谈不上"整理中"
+    # ① 维护没在跑、字没写 → 水位没到，是"未整理"（**本批修的假 pending**）
+    assert meta(running=False)["org_state"] == "raw"
+    # ② 维护在跑、这一轮还没轮到写 → 整理中
+    assert meta(running=True)["org_state"] == "pending"
+    # ③ 明写着在写（`note_state=running`）→ 整理中，不必靠上下文推
+    assert meta(note_state="running", running=False)["org_state"] == "pending"
+    # ④ 写失败是**结果**不是"进行中"
+    assert meta(note_state="failed", running=True)["org_state"] == "raw"
+    # ⑤ 产物写成了：还没折 = 未整理；折了 = 已整理
+    assert meta(note_state="done")["org_state"] == "raw"
+    assert meta(folded=True)["org_state"] == "done"
+    # ⑥ 没闭合的轮谈不上"整理中"
+    assert meta(end_state="open", running=True)["org_state"] == "raw"
+
+
+def test_session_meta_pending_follows_maintenance_state(monkeypatch):
+    """同一条会话：维护没在跑时，`round_list` 与摘要都不得报"整理中"。"""
+    from wovra import serve as serve_module
+
+    monkeypatch.setenv("WOVRA_V4", "1")
+    data = {
+        "rounds": [{"seq": 1, "end_state": "completed", "note_state": "",
+                    "folded": False, "events": []}],
+        "history": [], "task_state": {}, "todo": {},
+    }
+    meta = serve_module.session_meta("s1", data)
+    assert meta["maint"]["active"] is False
+    assert [r["org_state"] for r in meta["round_list"]] == ["raw"]
+    assert serve_module.session_summary("s1", data)["org"] == {
+        "done": 0, "pending": 0, "failed": 0, "raw": 1}
 
 
 def test_maint_state_surfaces_v4_split_failure_and_phase(monkeypatch):

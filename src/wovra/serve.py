@@ -953,11 +953,14 @@ def session_summary(task_id: str, data: dict) -> dict:
     """会话摘要（列表视图用；小对象，常驻缓存）。"""
     rounds = data.get("rounds") or []
     org = {"done": 0, "pending": 0, "failed": 0, "raw": 0}
+    # 维护在不在跑 = 判 pending 的**上下文事实**（见 `_note_pending_for`）：
+    # 没在跑时"字还没写出来"只表示"水位没到"，不是"整理中"。
+    maint_running = bool(maint_state(data).get("active"))
     for r in rounds:
         # **V4 折算**（2026-09-18 实测：列表/摘要的"已整理 N · 未整理 M"原先直读
         # 轮上的 `org_state` 原字段，而 V4 折叠不写它 → 折过的轮全被数成"未整理"。
         # 与时间线的轮徽标同一套折算（`_org_state_of`），口径不再走岔。）
-        state = _org_state_of(r)
+        state = _org_state_of(r, maint_running)
         org[state if state in _ORG_STATES else "raw"] += 1
     ts = data.get("task_state") or {}
     todo = data.get("todo") or {}
@@ -1365,26 +1368,43 @@ def _split_meta(r: dict, live_files: list[str] | None = None) -> dict | None:
     }
 
 
-def _note_pending_for(r: dict) -> bool:
-    """这一轮是不是"正在整理"（V4 口径）：已闭合、还没写出一段话。
+def _note_pending_for(r: dict, running: bool = False) -> bool:
+    """这一轮是不是"**正在整理**"（V4 口径）：已闭合、没折、这一段话**正在写**。
 
-    `note_state` 由结算写：`done`（成了）／`failed`（失败留痕，原文继续顶着）／
-    `running`（写的过程中）。**空**＝还没轮到它写（异步维护在后台跑，或水位没到）。
-    只把"空且不是 failed"算成整理中——`failed` 是**结果**，不是"还在进行"。
+    `note_state` 明说了：`done`（成了）／`failed`（失败留痕，原文继续顶着）／
+    `running`（写的过程中）。**空**是歧义的——它同时表示两件相反的事：
+
+    * "后台正在写这一段话"（维护跑起来了，这一轮排在批里还没轮到）；
+    * "水位没到，压根没开始整理"（这是常态，绝大多数轮都是这个）。
+
+    所以必须带上服务端的**上下文事实** `running`（维护在不在跑）才能判：
+    `running=True` 时空着＝正在整理；`running=False` 时空着＝还没到水位，不是"整理中"。
+
+    **2026-09-18 修**：此前只看"空且非 failed"就算 pending，于是**任何水位没到的会话里，
+    每个已闭合轮都被显示成「整理中」**（用户实测："R1、R2 都显示整理中，现在不是没有触发
+    水位吗？"）。同一个假信号还骗着前端的维护观察器一直武装（见 worklog §197）。
     """
     if str(r.get("end_state")) != "completed":
         return False
     if bool(r.get("folded")):
         return False
-    return str(r.get("note_state") or "") not in ("done", "failed")
+    state = str(r.get("note_state") or "")
+    if state in ("done", "failed"):
+        return False
+    if state == "running":
+        return True          # 明写着在写：不必再靠上下文推
+    return bool(running)
 
 
-def _org_state_of(r: dict) -> str:
+def _org_state_of(r: dict, running: bool = False) -> str:
     """一轮的整理状态（**唯一折算点**：时间线徽标、会话摘要、列表都走这里）。
 
     * 旧链路自己写的 `org_state` 照旧优先（它的整理是另一条路）；
-    * V4：折了 → done（它在上文里就是一段话）；没折但**还没写出一段话** →
-      pending（**整理中**）；其余 → raw（原文全量保留）。
+    * V4：折了 → **done**（它在上文里就是一段话）；维护在跑且这一段话还没写出来 →
+      **pending（整理中）**；其余 → **raw**（原文全量保留，水位还没到）。
+
+    参数 `running` = 服务端的维护在不在跑（`maint_state(data)["active"]`）——判 pending
+    必须带上它，否则"还没到水位"会被误报成"整理中"（见 `_note_pending_for`）。
 
     "折叠"这个词退出用户界面（2026-09-18 用户："以后统一叫折叠为整理，和前端统一"），
     代码内部仍叫 `folded`——它是机械标志，不是用户词汇。
@@ -1396,16 +1416,20 @@ def _org_state_of(r: dict) -> str:
         return "raw"
     if r.get("folded"):
         return "done"
-    return "pending" if _note_pending_for(r) else "raw"
+    return "pending" if _note_pending_for(r, running) else "raw"
 
 
 def _round_meta(r: dict, usage: dict | None = None,
                 plan: dict | None = None,
-                live_files: list[str] | None = None) -> dict:
+                live_files: list[str] | None = None,
+                maint_running: bool = False) -> dict:
     """轮元数据（不含 events 原文——16MB 级会话事件按需单轮取）。
 
     `stage` = 该轮属于哪个阶段（0 = **分裂前**，i≥1 = 第 i 次分裂生效之后）——
     显示按阶段分，且分裂前的轮**不归任何 agent**（§58）。
+
+    `maint_running` = 服务端的维护在不在跑（`maint_state(data)["active"]`）——判
+    "整理中"必须带上它，否则"水位没到"会被误报成"整理中"（见 `_note_pending_for`）。
     """
     evs = r.get("events") or []
     return {
@@ -1413,7 +1437,7 @@ def _round_meta(r: dict, usage: dict | None = None,
         "user_input": (r.get("user_input") or {}).get("original", ""),
         "end_state": r.get("end_state"),
         # 整理状态：折算规则见 `_org_state_of`（**唯一折算点**）
-        "org_state": _org_state_of(r),
+        "org_state": _org_state_of(r, maint_running),
         # 分裂状态（2026-09-15）：running/ready/deferred/stale/rejected/failed/done——
         # 维护只写 history 时会被并发写覆盖（见 worklog §106），落到轮上才可见、可查。
         "split_state": r.get("split_state") or "",
@@ -1534,7 +1558,9 @@ def session_meta(task_id: str, data: dict) -> dict:
     usage = round_usage_map(data)
     plan = views_module.stage_plan(rounds)
     live_files = _live_file_paths(rounds)
-    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")), plan, live_files)
+    meta["round_list"] = [_round_meta(r, usage.get(r.get("seq")), plan, live_files,
+                                      maint_running=bool(
+                                          (meta.get("maint") or {}).get("active")))
                           for r in rounds]
     meta["agent_stats"] = agent_stats(data)
     return meta
