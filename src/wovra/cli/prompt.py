@@ -257,10 +257,34 @@ def _build_agent(task: Task, mode: str = MODE_MANAGED, async_organization: bool 
     谁要带着工具干活（CLI 的一轮、serve 的一轮、serve 的预览/命令），
     谁在自己的线程里经此绑上该会话的工作区。绑定放在提示词/AGENTS.md
     读取之前，否则系统提示词里的"工作区：…"会和工具实际解析的目录不一致。
+
+    **工作目录不可用就别想悄悄退回启动目录**（2026-09-18 用户报障："我工作路径下是空的，
+    其为什么说当前工作路径是 wovra，且不需要我授权就去读取修改了"）。此前这里是
+    `if workspace and Path(workspace).is_dir(): bind(...)`——**目录一旦不可用就静默跳过
+    绑定**，`safety.workspace_root()` 于是退回**进程默认**（serve 的启动目录）。后果不是
+    "读不到"，而是**读错地方**：相对路径 `docs/x.md` 被解析成 `<启动目录>/docs/x.md`，
+    它**恰好在界内**——既读得到运行器自己的仓库，又因为"没越界"而**压根不问授权**
+    （实测那条会话正是这样读到了本仓库的 `docs/*.md`）。
+
+    处置分两层（只读端点也要能跑，所以不在这里一律抛）：
+    * 目录**可用** → 正常绑；
+    * 目录**不可用** → **不绑**（宁可让工具报"越界/不存在"，也不落到启动目录），
+      并在审计里**响亮留痕**；真正要干活的入口（serve 起轮）会据此**拒绝开工**。
     """
     workspace = str(getattr(task, "workspace", "") or "").strip()
-    if workspace and Path(workspace).is_dir():
-        safety_module.bind_workspace(workspace)
+    if workspace:
+        if Path(workspace).is_dir():
+            safety_module.bind_workspace(workspace)
+        else:
+            safety_module.unbind_workspace()
+            try:
+                safety_module._audit(
+                    "[工作区][拒绝兜底] 会话声明的工作目录不可用：" + workspace
+                    + "——不绑到进程启动目录（否则会读到运行器自己的仓库且不问授权）"
+                )
+            except Exception:  # noqa: BLE001——留痕失败不影响构造
+                pass
+            task.__dict__["_workspace_bind_failed"] = workspace
     return Agent(
         system_prompt=_system_prompt(
             mode,

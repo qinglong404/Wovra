@@ -999,8 +999,13 @@ def test_http_ask_bridge_flow(server, monkeypatch, tmp_path):
 
     tasks = tmp_path / "tasks3"
     (tasks / "s1").mkdir(parents=True)
+    # 工作目录给**真目录**（2026-09-18）：这个用例跑真的 `/turn`，而 serve 的开工闸门
+    # 会拒绝"会话声明了工作目录却没绑上"的轮（防读到运行器自己的仓库、还不问授权）。
+    # 夹具里那个 `C:/x/proj` 是假路径，正好撞上这道闸门——那不是缺陷，是闸门在工作。
+    data = _fake_task()
+    data["workspace"] = str(tmp_path)
     (tasks / "s1" / "task.json").write_text(
-        json.dumps(_fake_task(), ensure_ascii=False), encoding="utf-8")
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
     monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
 
     captured = {}
@@ -1015,6 +1020,10 @@ def test_http_ask_bridge_flow(server, monkeypatch, tmp_path):
             pass
 
     def fake_build(task, mode="managed", **kw):
+        # 真的 `_build_agent` 会在这里把自己的工作区绑到本线程（那是它的职责之一）。
+        # 这个替身同样要绑——serve 的开工闸门会核对"声明的工作目录 == 实际绑的"，
+        # 不绑就等于"文件世界落回运行器启动目录"，闸门拦下是对的。
+        safety_mod.bind_workspace(str(task.workspace))
         return FakeAgent()
 
     monkeypatch.setattr(cli_prompt, "_build_agent", fake_build)
@@ -1649,6 +1658,70 @@ def test_maint_state_surfaces_v4_split_failure_and_phase(monkeypatch):
     # 没在跑、也没失败 → 不硬造提示
     clean = serve_module.maint_state({"rounds": [], "history": []})
     assert clean["active"] is False and clean["last_defect"] == ""
+
+
+def test_turn_is_refused_when_session_workspace_is_unusable(tmp_path, monkeypatch):
+    """工作目录不可用时**拒绝开工**，不许悄悄退回运行器启动目录（2026-09-18 用户报障）。
+
+    不拦的代价不是"读不到"，而是**读错地方**：相对路径落到 serve 的启动目录——那是运行器
+    自己的仓库，而且因为它**恰好在界内**，连越界授权都不会问。实测那条会话就是这样读到了
+    本仓库的 `docs/*.md`（工作区是空的 `/home/lkf/bc/python/test`）。
+    """
+    from wovra.cli import prompt as cli_prompt
+    from wovra.tools import safety as safety_module
+
+    tasks = tmp_path / "tasks"
+    (tasks / "s1").mkdir(parents=True)
+    data = _fake_task()
+    data["workspace"] = str(tmp_path / "这个目录不存在")
+    (tasks / "s1" / "task.json").write_text(
+        json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(task_module, "TASKS_ROOT", tasks)
+
+    class FakeAgent:
+        def run(self, content, **kw):
+            return "不该跑到这里"
+
+        def organize_backlog(self):
+            pass
+
+    def fake_build(task, mode="managed", **kw):
+        # 目录不可用：真的 `_build_agent` 会留标记、不绑定
+        safety_module.unbind_workspace()
+        task.__dict__["_workspace_bind_failed"] = str(task.workspace)
+        return FakeAgent()
+
+    # 两道闸门各钉一次（第二道是真正的兜底：不看标记，只看"绑定结果 == 声明的工作目录"）。
+    # 只禁第一道时，第二道仍会拦——所以本用例对两道都成立。
+
+    monkeypatch.setattr(cli_prompt, "_build_agent", fake_build)
+
+    import time as _time
+
+    httpd, base = _server_on(tasks)
+    try:
+        body = json.dumps({"content": "干活"}).encode("utf-8")
+        req = urllib.request.Request(base + "/api/sessions/s1/turn", data=body,
+                                     method="POST",
+                                     headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=5) as r:
+            job_id = json.loads(r.read())["job_id"]
+
+        j = {}
+        for _ in range(60):
+            code, j = _get(base + f"/api/jobs/{job_id}")
+            if j.get("status") in ("error", "done"):
+                break
+            _time.sleep(0.05)
+
+        assert j.get("status") == "error", f"工作区不可用却让它开工了：{j}"
+        assert "拒绝开工" in str(j.get("error")), f"错误不是闸门给的：{j.get('error')!r}"
+        # 报错里要有"哪条路不可用"或"绑到哪/应为哪"（两道闸门任一的证据都算）
+        err = str(j.get("error"))
+        assert ("工作目录不可用" in err) or ("应为" in err), f"闸门报错说不清原因：{err!r}"
+        assert "不该跑到这里" not in str(j.get("answer") or ""), "闸门没拦住，轮真的跑了"
+    finally:
+        httpd.shutdown()
 
 
 def test_meta_running_is_derived_not_the_status_field(monkeypatch):

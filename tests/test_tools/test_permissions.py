@@ -330,3 +330,48 @@ def test_public_files_are_writable_and_first_writer_owns(tmp_path, monkeypatch):
                              "new_text": "规格 v2"})
     assert any(str(f) == "docs/spec.md"
                for f in task.registry[2].get("files") or []), "改公共文件也认领"
+
+
+def test_workspace_not_bound_when_session_dir_is_unusable(tmp_path, monkeypatch):
+    """会话的工作目录不可用 → **不许悄悄退回启动目录**（2026-09-18 用户报障）。
+
+    用户原话："我工作路径下是空的，其为什么说当前工作路径是 wovra，且不需要我授权
+    就去读取修改了。"
+
+    链条（三个事实叠起来）：`workspace_root()` 是"线程绑定优先、进程默认兜底"；
+    进程默认 = serve 的**启动目录**；越界检查只拦"解析后落在界外"的路径。于是绑定
+    一旦静默跳过，相对路径 `docs/x.md` 解析成 `<启动目录>/docs/x.md`——**恰好在界内**，
+    既读得到运行器自己的仓库，又压根不问授权。
+    """
+    from wovra.cli.prompt import _build_agent
+    from wovra.tools import safety as safety_module
+
+    monkeypatch.setattr("wovra.tools.safety.PROJECT_ROOT", tmp_path)
+    task = Task.create(goal="工作区不可用")
+    task.workspace = str(tmp_path / "并不存在" / "这个目录")
+
+    _build_agent(task)
+
+    assert not safety_module.is_bound(), "目录不可用就不该绑（更不能绑到启动目录）"
+    assert str(safety_module.workspace_root()) == str(tmp_path), "应回退到进程默认供只读端点用"
+    # 工具层：相对路径落在启动目录下——**这正是要防的**
+    resolved = safety_module._safe_path_lexical("docs/x.md")
+    assert str(resolved).startswith(str(tmp_path))
+    # 会话上留了标记，起轮那道闸门据此拒绝开工
+    assert task.__dict__.get("_workspace_bind_failed")
+
+
+def test_workspace_binds_when_dir_is_usable(tmp_path, monkeypatch):
+    """目录可用时正常绑定，且 `is_bound()` 如实为真。"""
+    from wovra.cli.prompt import _build_agent
+    from wovra.tools import safety as safety_module
+
+    safety_module.unbind_workspace()
+    task = Task.create(goal="正常")
+    task.workspace = str(tmp_path)
+
+    _build_agent(task)
+
+    assert safety_module.is_bound()
+    assert safety_module.workspace_root() == tmp_path.resolve()
+    assert not task.__dict__.get("_workspace_bind_failed")

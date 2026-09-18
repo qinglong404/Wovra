@@ -510,6 +510,29 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
             _acquire_session_lock(task)  # 被占用时抛 SystemExit（CLI 语义）
             try:
                 agent = _build_turn_agent(task)
+                # **开工前确认工作区真的绑上了**（2026-09-18 用户报障："我工作路径下是空的，
+                # 其为什么说当前工作路径是 wovra，且不需要我授权就去读取修改了"）。
+                # 这是最后一道闸门：会话声明了工作目录却没绑上（目录不可用，或将来有人
+                # 改了绑定点）→ **拒绝开工**。不拦的代价是"读到运行器自己的仓库"——
+                # 相对路径落到 serve 启动目录，**恰好在界内**，连越界授权都不会问。
+                from .tools import safety as _safety_check
+                failed = str(task.__dict__.get("_workspace_bind_failed") or "")
+                if failed or (getattr(task, "workspace", "")
+                              and not _safety_check.is_bound()):
+                    bad = failed or str(task.workspace)
+                    raise RuntimeError(
+                        "会话的工作目录不可用（" + bad + "）——拒绝开工："
+                        "不静默退回运行器的启动目录，那会读到它自己的仓库、"
+                        "而且因为落在界内连越界授权都不会问。请修好该目录，"
+                        "或给会话换一个工作目录。"
+                    )
+                want = str(Path(str(task.workspace)).resolve()) if task.workspace else ""
+                if want and str(_safety_check.workspace_root()) != want:
+                    raise RuntimeError(
+                        "本轮绑到的工作目录不对（绑到了 "
+                        + str(_safety_check.workspace_root()) + "，应为 " + want
+                        + "）——拒绝开工。"
+                    )
                 # **轮号立刻报出去**（2026-09-13 用户实测的 bug）：见 `_round_seq_for`
                 job["round"] = _round_seq_for(agent, content)
 

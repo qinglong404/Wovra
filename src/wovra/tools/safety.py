@@ -80,9 +80,25 @@ def current_agent() -> str:
 
 
 def workspace_root() -> Path:
-    """当前线程的有效工作区：线程绑定优先，进程默认兜底。"""
+    """当前线程的有效工作区：线程绑定优先，进程默认兜底。
+
+    **兜底那条有陷阱**（2026-09-18 实测）：进程默认 = serve 的**启动目录**。若某个干活
+    线程忘了绑（或绑定时目录不可用而静默跳过），相对路径就会解析到**运行器自己的仓库**
+    ——那**恰好在界内**，于是既读得到、也不会问越界授权（用户报："我工作路径下是空的，
+    其为什么说当前工作路径是 wovra，且不需要我授权就去读取修改了"）。
+    要分辨"是绑过的还是兜底的"，用 `is_bound()`。
+    """
     bound = getattr(_WORKSPACE, "root", None)
     return bound if bound is not None else PROJECT_ROOT
+
+
+def is_bound() -> bool:
+    """本线程有没有**显式绑定**工作区（False = 正在用进程默认兜底）。
+
+    兜底本身合法（CLI 直接在某个目录里跑就该以它为工作区）；可疑的是"有会话却走了
+    兜底"——那说明绑定点被跳过，文件世界是启动目录而不是会话的工作目录。
+    """
+    return getattr(_WORKSPACE, "root", None) is not None
 
 
 def bind_workspace(path) -> Path:
