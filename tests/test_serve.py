@@ -1428,3 +1428,36 @@ def test_round_meta_folds_into_org_state_under_v4(monkeypatch):
     monkeypatch.setenv("WOVRA_V4", "0")
     off = serve_module._round_meta({"seq": 4, "folded": True, "org_state": "", "events": []})
     assert off["org_state"] == "raw"
+
+
+def test_views_payload_is_fork_aware(monkeypatch):
+    """fork 之后各家上下文不再相同：投影要给**逐 agent** 的行（数字取按视图观察），
+    不再说"共享一份"（2026-09-17）。"""
+    from wovra import serve as serve_module
+
+    monkeypatch.setenv("WOVRA_V4", "1")
+    tricky = {"id": "s-fork"}
+
+    class _Task:
+        registry = [
+            {"id": "Main", "name": "主agent", "files": [], "ctx_cur": 900},
+            {"id": "A", "name": "附件", "files": ["a.py"], "ctx_cur": 420, "forked_at": 3},
+        ]
+
+        def save(self):
+            raise AssertionError("投影不该落盘")
+
+    class _Agent:
+        def _assemble_messages(self):
+            raise AssertionError("fork 过的会话不该再算「一份共享」那份装配")
+
+        def _agent_window(self):
+            return 1_000_000
+
+    payload = serve_module._shared_views_payload(_Agent(), _Task())
+
+    assert payload["shared"] is False
+    rows = {r["id"]: r for r in payload["agents"]}
+    assert rows["A"]["tokens"] == 420 and rows["A"]["forked_at"] == 3
+    assert rows["Main"]["tokens"] == 900
+    assert "fork" in payload["note"]

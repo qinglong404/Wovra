@@ -898,30 +898,19 @@ class _CoreMixin:
         每次装配都调（一轮内多步、每步都装配）——故只更新最新值与峰值，
         不落盘；落盘由轮闭合时的 `save()` 一并带走（零额外 I/O）。
         """
-        size = int(size or 0)
-        window = self._agent_window()
-        # **V4 取消重组 → 观察口径也跟着改**（2026-09-17）：所有 agent 装配的是
-        # 同一份共享历史，所以每个条目登记的观察值就是**这一份的体量**——只写
-        # 当前视图那一条，会让其余 agent 在页面/账本上显示 0（读起来像"没有
-        # 上下文"，其实它们共用同一份）。注意这仍是"观察"不是"各自的副本"。
-        targets = [entry for entry in (self.task.registry or [])
-                   if isinstance(entry, dict)] if (self.task is not None and v4_enabled()) else []
         entry = self._registry_entry_for(view)
-        if entry is None and not targets:
+        if entry is None:
             return
-        if entry is not None and entry not in targets:
-            targets.append(entry)
-        if not targets:
-            return
-        for target in targets:
-            target["ctx_cur"] = size
-            if size > int(target.get("ctx_peak") or 0):
-                target["ctx_peak"] = size
-            # 窗口每次都校正（无条件写）：老会话的 registry 里存过水位 100K，
-            # 语义纠正后要随活动自然迁移到真实窗口，不能被旧值占住
-            target["window"] = window
-            if v4_enabled():
-                target["shared_ctx"] = True
+        size = int(size or 0)
+        # **按视图记**（2026-09-17 恢复）：fork 之后每个 agent 各有自己的上下文体量，
+        # 子 agent 的"到水位就回落"（§3.8）正是拿它当触发读数的；未 fork 的 agent
+        # 读的就是公共那份（页面按"共享上下文"显示，见 serve 的 shared 分支）。
+        entry["ctx_cur"] = size
+        if size > int(entry.get("ctx_peak") or 0):
+            entry["ctx_peak"] = size
+        # 窗口每次都校正（无条件写）：老会话的 registry 里存过水位 100K，
+        # 语义纠正后要随活动自然迁移到真实窗口，不能被旧值占住
+        entry["window"] = self._agent_window()
 
     # `_account_agent_activity()`（轮闭合时把轮次/步数写进注册表条目）已删除
     # ——2026-09-12 用户拍板：账本**派生、不落盘**。写入式账有两个死结：
@@ -1004,6 +993,18 @@ class _CoreMixin:
         if target == before:
             return False
         self.current_round["active_view"] = target
+        # **首次激活＝fork**（V4 §3.8）：从这一刻起它有自己稳定的前缀（公共快照 ＋ 职责）。
+        # 零成本——只是记下轮号；装配侧据此走"自己的轮全量 ＋ 别人的轮段落"。
+        forked_id = registry_module.mark_forked(
+            self.task.registry if self.task is not None else None,
+            target, int(self.current_round.get("seq") or 0),
+        )
+        if forked_id and self.task is not None:
+            self.task.record(
+                "route",
+                f"首次激活＝fork：{forked_id} 在 R{self.current_round.get('seq')} 起持有自己的"
+                "上下文（公共上下文快照 ＋ 自己的职责）",
+            )
         self.current_round["route_hops"] = int(
             self.current_round.get("route_hops") or 0
         ) + 1
@@ -1263,6 +1264,11 @@ class _CoreMixin:
             self._note_failed(
                 self.current_round, f"结算异常：{type(error).__name__}: {str(error)[:120]}"
             )
+        # 就地新建的 agent 若没自己补职责 → 用这一轮的段落兜底（2026-09-17 用户口径）
+        try:
+            self._fill_spawned_agent_duties(self.current_round)
+        except Exception:  # noqa: BLE001——兜底失败不影响闭合
+            pass
         # 阶段锚点回填（§53）：块切分完成才能说清"这次阶段验收落在哪个块"。
         self._backfill_stage_anchors()
         self.current_round = None
@@ -1274,6 +1280,11 @@ class _CoreMixin:
             self._settle_after_maintenance()
             # 换档线（V4 §6.2）：水位到了就把超龄且有 note 的轮一次换成段落。
             self._advance_fold_line()
+            # 子 agent 到水位＝回落（V4 §3.8）：重建为"当前公共上下文 ＋ 自己的职责"
+            try:
+                self._maybe_fall_back_to_public(closed[-1] if closed else None)
+            except Exception:  # noqa: BLE001——回落失败不影响闭合
+                pass
         self._round_schemas = None          # 轮闭合：解冻（下一轮按新阶段重新冻结）
 
     def finalize_round(self, end_state: str = "open") -> None:

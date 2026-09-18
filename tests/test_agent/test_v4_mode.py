@@ -500,3 +500,126 @@ def test_executor_index_is_derived_from_the_events(monkeypatch, tmp_path):
                   ], "refined_index": {}, "end_state": "completed", "org_state": "",
                   "active_view": "Main"}]
     assert "README.md（读，R9）" in "\n".join(views_module.executor_index_lines(read_only))
+
+
+def test_spawned_agent_gets_its_duty_from_its_own_round(monkeypatch, tmp_path):
+    """**自动补职责**：就地新建的 agent 没自己补时，用它那一轮的段落兜底（并留痕）。"""
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    agent.context_mode = "managed"
+    round_ = {"seq": 9, "active_view": "Main", "events": [], "route_hops": 0}
+    agent.rounds = [round_]
+    agent.current_round = round_
+    agent.route_to(agent="new", reason="收尾这摊活")
+    entry = next(e for e in task.registry if e["id"] == "A")
+    assert entry.get("name_provisional") is True
+
+    # 它这一轮干完，产出段落（没人调 update_responsibility）
+    round_["note"] = {"seq": 9, "sentence": "收尾这摊活：改了 a.py 并跑通测试", "failures": [],
+                      "executor": "A", "ledger_append": {}}
+    round_["note_state"] = "done"
+    agent._fill_spawned_agent_duties(round_)
+
+    assert entry.get("name_provisional") is None            # 占位标记撤掉
+    assert entry["description"].startswith("收尾这摊活：改了 a.py")
+    assert any("自动补职责" in str(h.get("detail")) for h in task.history)
+
+
+def test_serve_meta_exposes_awaiting_user(monkeypatch):
+    """`awaiting_user` 上屏：serve 的轮元数据要把它透出去（前端据此渲染 ⏳ 行）。"""
+    from wovra import serve as serve_module
+
+    monkeypatch.setenv("WOVRA_V4", "1")
+    meta = serve_module._round_meta({
+        "seq": 1, "folded": False, "org_state": "", "events": [],
+        "note": {"seq": 1, "sentence": "给了八条", "failures": [],
+                 "awaiting_user": "要不要让 B 合进报告"},
+    })
+    assert meta["awaiting_user"] == "要不要让 B 合进报告"
+
+
+# ---- fork：未激活共享 → 首次激活快照 → 自己的轮全量/别人的轮段落 → 水位回落 ----
+
+
+def _fork_fixture(monkeypatch, tmp_path):
+    """两轮：R1 主 agent 干（写了 a/x.py），R2 转交 A 干（写了 a/y.py）。"""
+    rounds = [_round_writing(1, "a/x.py"),
+              _round_writing(2, "a/y.py")]
+    rounds[1]["active_view"] = "A"
+    rounds[0]["note"] = {"seq": 1, "sentence": "主 agent 建了 a/x.py", "failures": [],
+                         "executor": "Main", "ledger_append": {}}
+    rounds[0]["note_state"] = "done"
+    rounds[1]["note"] = {"seq": 2, "sentence": "A 建了 a/y.py", "failures": [],
+                         "executor": "A", "ledger_append": {}}
+    rounds[1]["note_state"] = "done"
+    agent, task = _agent(monkeypatch, tmp_path, rounds)
+    task.registry.append({"id": "A", "name": "附件", "files": ["a/y.py"]})
+    agent.rounds = rounds
+    agent.current_round = None
+    return agent, task, rounds
+
+
+def test_unactivated_agent_shares_the_public_context(monkeypatch, tmp_path):
+    """**未激活**的 agent 不持有自己的上下文（forked_at=0 → 走公共那条线）。"""
+    agent, task, rounds = _fork_fixture(monkeypatch, tmp_path)
+    assert agent._fork_baseline("A", rounds[:1]) is None      # 没激活 → 按公共上下文装配
+    assert "a/x.py" in "\n".join(
+        str(m.get("content")) for m in agent._assemble_messages()
+    )
+
+
+def test_forked_agent_sees_own_rounds_raw_and_others_as_paragraphs(monkeypatch, tmp_path):
+    """fork 过：**自己的轮全量**、**别人的轮只进那一段话**（含用户原话逐字）。"""
+    agent, task, rounds = _fork_fixture(monkeypatch, tmp_path)
+    next(e for e in task.registry if e["id"] == "A")["forked_at"] = 2
+
+    base = agent._fork_baseline("A", rounds)
+    text = "\n".join(str(m.get("content")) for m in base)
+
+    assert "已写入 a/y.py" in text                          # 自己的轮：**全量原文**
+    assert "主 agent 建了 a/x.py" in text                   # 别人的轮：**那一段话**
+    assert "已写入 a/x.py" not in text                      # 别人的轮不是全量原文（只进段落）
+    assert "👤 干活" in text                                # 用户原话逐字仍在
+
+
+def test_route_to_marks_the_first_activation(monkeypatch, tmp_path):
+    """首次激活＝fork：换视图时盖章（零成本，只记轮号），并且只盖一次。"""
+    import wovra.registry as registry_module
+
+    agent, task = _agent(monkeypatch, tmp_path, _rounds_with_file("a.py"))
+    task.registry.append({"id": "A", "name": "附件", "files": ["a.py"]})
+    round_ = {"seq": 5, "active_view": "Main", "events": [], "route_hops": 0}
+    agent.rounds = [round_]
+    agent.current_round = round_
+    agent._pending_route = "A"
+    assert agent._apply_pending_route() is True
+
+    entry = next(e for e in task.registry if e["id"] == "A")
+    assert entry["forked_at"] == 5
+    assert any("首次激活＝fork" in str(h.get("detail")) for h in task.history)
+    assert registry_module.mark_forked(task.registry, "A", 9) is None   # 已经 fork 过，不改
+
+
+def test_fallback_reforks_when_sub_agent_hits_the_watermark(monkeypatch, tmp_path):
+    """子 agent 到水位＝**回落**（不是自己折）：`forked_at` 推到当前轮；公共占 40% 时先折。"""
+    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=1000, org_grace_rounds=0)
+    next(e for e in task.registry if e["id"] == "Main")["ctx_cur"] = 500
+    task.registry.append({"id": "A", "name": "附件", "files": ["a.py"],
+                          "forked_at": 3, "ctx_cur": 1200})
+    round_ = {"seq": 9, "active_view": "A", "events": [], "route_hops": 0}
+
+    agent._maybe_fall_back_to_public(round_)
+
+    entry = next(e for e in task.registry if e["id"] == "A")
+    assert entry["forked_at"] == 9 and entry["ctx_cur"] == 0        # 回落到当前公共上下文
+    assert any("回落：" in str(h.get("detail")) for h in task.history)
+    assert any("公共上下文已占 40% 水位" in str(h.get("detail")) for h in task.history)
+
+
+def test_fallback_skips_main_and_unforked(monkeypatch, tmp_path):
+    """主 agent 不 fork、也不回落；没 fork 过的 agent 没有可回落的东西。"""
+    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=1000, org_grace_rounds=0)
+    task.registry.append({"id": "A", "name": "附件", "files": ["a.py"], "ctx_cur": 99999})
+    agent._maybe_fall_back_to_public({"seq": 9, "active_view": "A"})     # forked_at=0
+    assert next(e for e in task.registry if e["id"] == "A")["ctx_cur"] == 99999
+    agent._maybe_fall_back_to_public({"seq": 9, "active_view": "Main"})
+    assert not any("回落" in str(h.get("detail")) for h in task.history)

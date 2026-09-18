@@ -2526,6 +2526,72 @@ class _MaintenanceMixin:
                 "——名字即身份，id 不变",
             )
 
+    def _fill_spawned_agent_duties(self, round_: dict) -> None:
+        """**就地新建的 agent 没自己补职责时，用它这一轮的段落补上**（机械兜底）。
+
+        用户口径（2026-09-17）："就地新建……它做完再补上自己的职责描述＋这轮整理"。它若忘了调
+        `update_responsibility`，条目就一直是占位名——这里在轮闭合处兜底：拿它这一轮的段落
+        （有产物的那条）当职责，并留痕写明这是**自动补的**（它自己没写）。
+        """
+        if self.task is None or not round_:
+            return
+        seq = int(round_.get("seq") or 0)
+        for entry in self.task.registry or []:
+            if not isinstance(entry, dict) or not entry.get("name_provisional"):
+                continue
+            if int(entry.get("spawned_at") or 0) > seq:
+                continue
+            sentence = str((note_module.note_segments(round_) or [{}])[0].get("sentence") or "")
+            if not sentence:
+                continue
+            entry["description"] = sentence[:120]
+            entry.pop("name_provisional", None)
+            self.task.record(
+                "maintenance",
+                f"自动补职责：{entry.get('id')}（它没自己写）——用 R{seq} 的段落",
+            )
+
+    def _maybe_fall_back_to_public(self, round_: dict) -> None:
+        """子 agent 到水位 ＝ **回落**，不是自己折（V4 §3.8，2026-09-17 用户口径）。
+
+        "子 agent 上下文达到水位，那其就替换为公共上下文即可。然后激活时划分职责即可。"
+        以及"其它子 agent 水位再满的时会与主 agent 同步，这个时候判断，如果当前公共上下文
+        占用 40% 的水位，也就是 40K，那就折叠早期的内容"。
+
+        做法：把自己的 `forked_at` 推到**当前轮**（＝重新从"当前公共上下文 ＋ 自己的职责"
+        起一段新前缀），并在公共那条线已占 **40% 水位**时先折一次早期内容（给它留余量）。
+        """
+        if self.task is None or self._registry_entry_for is None:
+            return
+        view = str((round_ or {}).get("active_view") or "")
+        if not view or view == registry_module.MAIN_AGENT_ID:
+            return                               # 主 agent 不 fork、也不回落
+        entry = self._registry_entry_for(view)
+        if entry is None or int(entry.get("forked_at") or 0) <= 0:
+            return
+        size = int(entry.get("ctx_cur") or 0)
+        if size < self._org_watermark:
+            return
+        public = self._registry_entry_for(registry_module.MAIN_AGENT_ID) or {}
+        if int(public.get("ctx_cur") or 0) >= 0.4 * float(self._org_watermark):
+            # 公共那条线也满了 → **先折早期内容**再让它回落（用户口径的 40% 线）
+            self._advance_fold_line(with_catch_up=True)
+            self.task.record(
+                "fold",
+                f"回落前先折：公共上下文已占 40% 水位（{int(public.get('ctx_cur') or 0):,}"
+                f" / {int(0.4 * self._org_watermark):,}）",
+            )
+        seq = int((round_ or {}).get("seq") or 0)
+        entry["forked_at"] = seq
+        entry["ctx_cur"] = 0
+        entry["ctx_peak"] = 0
+        self.task.record(
+            "route",
+            f"回落：{entry.get('id')} 到水位（{size:,}）→ 从 R{seq} 起重建为"
+            "「当前公共上下文 ＋ 自己的职责」",
+        )
+        self._persist_rounds()
+
     def _existing_domain_lines(self) -> list[str]:
         """`[现有域]`：把当前注册表里的域摆给模型，**名字即身份**（增量演进的一半）。
 

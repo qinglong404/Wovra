@@ -13,6 +13,7 @@ from .. import truncate as truncate
 from .. import views as views_module
 from .. import attachments as attachments_module
 from .. import observed as observed_module
+from . import note as note_module
 from ..task import _MODEL_SIDE_SECTIONS
 from ..tools import eyes as eyes_module
 from ..tools import safety as tools_module
@@ -123,6 +124,18 @@ class _AssemblyMixin:
             msgs = self._assemble_view_messages(view_name, past)
             if msgs is not None:
                 return msgs
+
+        # ---- fork：激活过的子 agent 看**自己那份**上下文（V4 §3.8）----
+        # 未激活的 agent 不在装配路径上（它没在干活）；激活过（`forked_at > 0`）的：
+        #   * **自己干的轮** → 全量原文（自己那几轮是它的工作集）；
+        #   * **别人干的轮** → 只进**那一段话**（轮简述 ＋ 用户原话逐字）——"内容可丢，
+        #     存在性不可丢"；没有产物的轮按原文进（fail-safe，宁可多花 token）。
+        # 从 fork 那一刻起只追加，所以它的前缀是稳定的（fold 只动公共那条线）。
+        fork_base = self._fork_baseline(view_name, past)
+        if fork_base is not None:
+            msgs = list(fork_base)
+            msgs.extend(self._current_round_messages())
+            return msgs
 
         # ---- managed：未整理全量，已整理紧凑视图 --------------------
         # 前缀纪律（2026-09-07 用户拍板）：**只有整理生效才破坏前缀**。
@@ -481,6 +494,38 @@ class _AssemblyMixin:
         eye = self._eye_image_message()
         if eye is not None:
             msgs.append(eye)
+        return msgs
+
+    def _fork_baseline(self, view_name: str, past: list[dict]) -> Optional[list[dict]]:
+        """fork 过的子 agent 的**基线**：自己的轮全量 ＋ 别人的轮段落（V4 §3.8）。
+
+        返回 None ＝"不走 fork 路径"（主 agent、还没激活的、或基线为空时按公共上下文走）。
+        """
+        if not view_name or str(view_name) == views_module.MAIN_AGENT_ID:
+            return None                       # **Main 不 fork**（它就是公共上下文）
+        entry = self._registry_entry_for(view_name)
+        forked_at = int((entry or {}).get("forked_at") or 0)
+        if forked_at <= 0:
+            return None                       # 未激活：共享公共上下文（零成本待命）
+        msgs: list[dict] = []
+        if self.system_prompt:
+            msgs.append({"role": "system", "content": self.system_prompt})
+        for r in past:
+            if not isinstance(r, dict):
+                continue
+            seq = int(r.get("seq") or 0)
+            if seq <= forked_at and str(r.get("active_view") or "") == str(view_name):
+                # fork 那一轮起、自己干的：全量
+                for e in r.get("events") or []:
+                    msgs.append(e.get("message") or {})
+                continue
+            # 别人的轮（或 fork 之前的自己）：只进一段话 ＋ 用户原话逐字
+            if str(r.get("note_state") or "") == "done":
+                msgs.append({"role": "user", "content": note_module.user_slot(r)})
+                msgs.append({"role": "assistant", "content": note_module.render_note(r)})
+                continue
+            for e in r.get("events") or []:    # 没产物：按原文进（fail-safe）
+                msgs.append(e.get("message") or {})
         return msgs
 
     def _with_file_change_notice(self, cur_msgs: list[dict]) -> list[dict]:

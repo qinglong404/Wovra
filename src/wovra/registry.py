@@ -154,6 +154,27 @@ def file_owned_by(entry: dict, rel: str) -> bool:
                for p in entry_prefixes(entry))
 
 
+def mark_forked(registry: Iterable[dict] | None, view: str, seq: int) -> Optional[str]:
+    """把某个 agent 标成"在 R{seq} 首次激活（fork）"（零 LLM）。
+
+    用户口径（§3.8）：**未激活的 agent 不持有自己的上下文**（它看到的就是公共上下文，零成本
+    待命）；**首次激活＝fork**——公共上下文快照 ＋ 自己的职责 ＋ 本轮输入，从这一刻起只追加，
+    成为它自己稳定的前缀。`forked_at` 记的就是这个时刻的轮号（0/缺失 ＝ 还没激活）。
+    """
+    want = str(view or "").strip()
+    if not want:
+        return None
+    for entry in registry or []:
+        if not isinstance(entry, dict):
+            continue
+        if want in (str(entry.get("id") or ""), str(entry.get("name") or "")):
+            if int(entry.get("forked_at") or 0) <= 0:
+                entry["forked_at"] = int(seq or 0)
+                return str(entry.get("id") or "")
+            return None                      # 已经 fork 过：前缀从那时起就稳定了
+    return None
+
+
 def next_free_top_id(registry: Iterable[dict] | None) -> str:
     """下一个没被占用的顶层字母 ID（`A`/`B`/…；零 LLM）。
 

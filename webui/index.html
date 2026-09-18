@@ -2070,7 +2070,7 @@ function drawConv(c,toBottom){
     // 轮头贴在本轮用户消息下方（用户消息在右、轮头在其下，归属一目了然）；
     // 无用户消息的轮（检查点续轮等）保持旧位（组前）。
     const sepRow={kind:'sep',seq,ob,steps:m.steps_used,n:evs.length,
-                  note:m.note||null,noteSegments:m.note_segments||[],noteState:m.note_state||'',folded:!!m.folded,
+                  note:m.note||null,noteSegments:m.note_segments||[],awaitingUser:m.awaiting_user||'',noteState:m.note_state||'',folded:!!m.folded,
                   splitState:m.split_state||'',splitNote:m.split_note||'',
                   t0:fmtClock(evs[0]?.time),rd,usage:m.usage||{},
                   aid:(senderOf(m)||{}).id,landing:String(m.active_view||''),
@@ -2898,12 +2898,16 @@ async function deleteSession(id){
 /* 轮状态（2026-09-17 用户口径："将每轮对话上面的状态信息，也显示到时间线中"）：
    对话流轮头与时间线卡片共用同一套——段落行、tok/命中、落点、分裂/折叠徽标。 */
 function noteLinesHtml(row){
-  // 段落：分裂前一轮一条；分裂后一轮多 agent 就每家一段（按事件顺序逐行）
+  // 段落：分裂前一轮一条；分裂后一轮多 agent 就每家一段（按事件顺序逐行）。
+  // 末尾再出「⏳ 等你答复」——这一轮结尾在等用户拍板什么（V4 连续性，防脱节）。
   const parts=((row.noteSegments||[]).length?row.noteSegments:[row.note]).filter(x=>x&&x.sentence);
-  return parts.map(pt=>{
+  let html=parts.map(pt=>{
     const exec=String(pt.executor||''),nf=((pt.failures||[]).length);
     return `<div class="sysline" style="text-align:left" title="每轮一段话（V4）：这一步的机械事实由代码给锚、模型写成一句话；折叠后它就是装配里的那一段（一轮多 agent 就分段拼接）">◆ ${exec&&exec!=='Main'?`〔${esc(exec)}〕`:''}${esc(String(pt.sentence||''))}${nf?` <span style="color:var(--gold)">⚠ ${nf} 条失败</span>`:''}</div>`;
   }).join('');
+  const waiting=String(row.awaitingUser||(row.note&&row.note.awaiting_user)||'').trim();
+  if(waiting)html+=`<div class="sysline" style="text-align:left" title="这一轮结尾把选项摆给用户了——下一轮要从这里接着聊（防脱节）">⏳ 等你答复：${esc(waiting)}</div>`;
+  return html;
 }
 function roundTokBadge(row){
   // 轮级用量：Σ 输入 · 缓存命中率（与对话流轮头同口径、同一份 usage）
@@ -2966,7 +2970,7 @@ function renderTimeline(c){
       ?`<span class="badge b-raw" title="会合：这些 agent 排在本轮的参与者队列里">参与者 ${r.participants.map(p=>esc((REG[p]||{}).name||p)).join('、')}</span>`:'';
     const ats=(String(r.user_input||'').match(/@[^\s，。]+/g)||[]).length
       ?`<span class="badge b-raw" title="定向投递：这条用户消息只送给被 @ 的 agent">定向 @</span>`:'';
-    const note=noteLinesHtml({note:r.note,noteSegments:r.note_segments});
+    const note=noteLinesHtml({note:r.note,noteSegments:r.note_segments,awaitingUser:r.awaiting_user});
     return `<div class="card round org-${esc(r.org_state||'raw')}" data-seq="${r.seq}">
       <div class="r-head" onclick="openDrawer(${r.seq})">
         <span class="r-seq">R${r.seq}</span><span class="r-goal" title="${esc(r.user_input)}">${esc(r.user_input)}</span>
@@ -3435,7 +3439,7 @@ async function openPendingView(name){
   // 重组后上下文预览（主 agent + 各子 agent）：后端在内存里模拟产物生效
   // 后物化各视图，不改会话；抽屉内可切换 agent 对照
   $('#drawer').classList.add('open');$('#mask').classList.add('open');
-  $('#d-title').textContent='上下文（V4：一份共享历史）';
+  $('#d-title').textContent='上下文（V4：共享历史 / 各自上下文）';
   $('#d-sub').textContent='装配中…';
   $('#d-body').innerHTML='<div class="empty">在内存中模拟产物生效…</div>';
   try{
@@ -3469,10 +3473,10 @@ async function openPendingView(name){
     const shortLab=x=>x.is_main?'主 agent':(esc(x.id||''));   // chip 只放短标签，全名走 title
     const chips=list.map(x=>`<span class="chip ${(!altOn&&x===pick)?'acc':''}" style="cursor:pointer"
       title="${esc(x.name||'')}"
-      onclick="openPendingView('${esc(x.name||x.id||'')}')">重组后 · ${shortLab(x)}</span>`).join('');
+      onclick="openPendingView('${esc(x.name||x.id||'')}')">上下文 · ${shortLab(x)}</span>`).join('');
     const altChip=mainEntry&&mainEntry.alt_messages?`<span class="chip ${altOn?'acc':''}" style="cursor:pointer"
-      title="分裂重组生效前的完整上下文（整理后全量装配）"
-      onclick="openPendingView('__alt__')">重组前（整理后全量）</span>`:'';
+      title="分裂前的完整上下文（整理后全量装配）"
+      onclick="openPendingView('__alt__')">分裂前（整理后全量）</span>`:'';
     $('#d-sub').innerHTML=altChip+chips;
     const cmp=(pick.is_main&&pick.alt_chars)?`　对照：全量装配 ${fmtN(pick.alt_count||0)} 条 / ${fmtN(pick.alt_chars)} 字符（分裂前口径）`:'';
     if(altOn){

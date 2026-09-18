@@ -1107,7 +1107,31 @@ def _shared_views_payload(agent, task) -> dict:
     一份真实装配（就是运行时那份）＋ 各条的职责/文件归属（那是真正按 agent 分的
     东西），不再算那套没人会走的按域视图（2026-09-17 用户："现在不是没有重组
     上下文这个概念了"）。
+
+    **fork 之后另说**（2026-09-17）：一旦有 agent 被激活过（`forked_at > 0`），
+    各家上下文就**不再是同一份**（公共快照 ＋ 自己的职责，之后自己干的轮全量、
+    别人干的轮只进一段话）——这时给**逐 agent** 的行，数字取注册表里的按视图观察。
     """
+    forked = [e for e in (task.registry or [])
+              if isinstance(e, dict) and int(e.get("forked_at") or 0) > 0]
+    if forked:
+        rows = []
+        for e in (task.registry or []):
+            if not isinstance(e, dict):
+                continue
+            rows.append({
+                "id": str(e.get("id") or ""), "name": str(e.get("name") or ""),
+                "is_main": str(e.get("id") or "") == "Main", "shared": False,
+                "count": 0, "total_chars": 0,
+                "tokens": int(e.get("ctx_cur") or 0),
+                "forked_at": int(e.get("forked_at") or 0),
+            })
+        return {
+            "agents": rows, "shared": False,
+            "window": int(agent._agent_window()),
+            "note": "各 agent 已有自己的上下文（首次激活＝fork：公共上下文快照 ＋ 自己的职责，"
+                    "之后自己干的轮全量、别人干的轮只进一段话）；数字是各自最近一次装配的体量",
+        }
     msgs_src = agent._assemble_messages()
     msgs, total, trunc = [], 0, 0
     for m in msgs_src:
@@ -1320,6 +1344,13 @@ def _round_meta(r: dict, usage: dict | None = None,
         # `note_segments` = 分裂后一轮多 agent 时的分段产物（每家一段，按事件顺序）。
         "note": r.get("note") or {},
         "note_segments": r.get("note_segments") or [],
+        # "这一轮在等用户拍什么板"（V4 §3.7 连续性）：没产出就没有这个字段
+        "awaiting_user": (str((r.get("note") or {}).get("awaiting_user") or "")
+                          or "；".join(
+                              str(s.get("awaiting_user") or "")
+                              for s in (r.get("note_segments") or [])
+                              if str(s.get("awaiting_user") or "")
+                          )),
         "note_state": r.get("note_state") or "",
         "folded": bool(r.get("folded")),
         "stage": views_module.stage_index(r, plan or {}),
