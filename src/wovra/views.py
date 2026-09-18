@@ -651,6 +651,50 @@ def round_step_segments(r: dict, lookup: Optional[dict] = None) -> list[tuple[st
     return segs
 
 
+def executor_index_lines(
+    rounds: Iterable[dict] | None,
+    *,
+    limit_rounds: int = 40,
+    limit_files: int = 6,
+    limit_seqs: int = 6,
+) -> list[str]:
+    """`[执行者索引]`（**事实态**）：谁实际碰过哪些文件、在哪些轮——零 LLM，从分块直接算。
+
+    与职责表（**声明态**：注册表说谁负责什么）互补（V4 §3.2）：主 agent 转交任务、agent 之间
+    找人问细节，都要靠它知道"谁更深入了解哪一块"。**不采信模型的说法**——执行者取事件流的
+    `route_to` 分段（`event_owners`），文件取分块，两者按事件下标对齐；对不上就认轮的执行者。
+
+    `改` = 有写入/编辑/删除；只读过标 `读`（说明"看过/知道"，不等于"归它管"）。
+    """
+    per: dict[str, dict[str, list[tuple[int, str]]]] = {}
+    for r in list(rounds or [])[-limit_rounds:]:
+        if not isinstance(r, dict):
+            continue
+        seq = int(r.get("seq") or 0)
+        owners = event_owners(r)
+        fallback = str(r.get("active_view") or "") or MAIN_AGENT_ID
+        for block in blocks_module.segment_round_by_file(r):
+            if block.get("kind") != "file" or not block.get("file"):
+                continue
+            start = int(block.get("start") or 0)
+            who = owners[start] if 0 <= start < len(owners) else fallback
+            ops = {str(o.get("op")) for o in (block.get("ops") or [])}
+            mark = "改" if ops & {"write", "edit", "delete"} else "读"
+            per.setdefault(str(who), {}).setdefault(str(block["file"]), []).append((seq, mark))
+    lines: list[str] = []
+    for who in sorted(per, key=lambda w: (w != MAIN_AGENT_ID, w)):
+        parts: list[str] = []
+        ranked = sorted(per[who].items(), key=lambda kv: -len(kv[1]))
+        for path, hits in ranked[:limit_files]:
+            seqs = "、".join(f"R{s}" for s, _m in hits[:limit_seqs])
+            mark = "改" if any(m == "改" for _s, m in hits) else "读"
+            parts.append(f"{path}（{mark}，{seqs}）")
+        if len(ranked) > limit_files:
+            parts.append(f"…另 {len(ranked) - limit_files} 个")
+        lines.append(f"{who}：" + "｜".join(parts))
+    return lines
+
+
 def answer_view(r: dict, lookup: Optional[dict] = None) -> str:
     """一轮**最后由谁在干活**（事件流分段里的最后一段）。"""
     segs = round_step_segments(r, lookup)

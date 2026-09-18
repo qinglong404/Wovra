@@ -161,6 +161,8 @@ def _system_prompt(mode: str, stage: str = "post") -> str:
             "③ `ids=\"R3\"` 给该轮的地图（summary 块视图 / truncated 事件索引）。"
             "范围可用 scope 收（`R3-R8` 或 `file:路径`），来源可用 source 收"
             "（result/assistant/call/user）。\n"
+            "**用户追问上一轮的内容时，先用上一轮的结果答**（它就在你的上下文里）——"
+            "只有确实需要最新状态时才去读文件；别把\u201c接着上一句问\u201d当成新活重新查一遍（脱节）。\n"
             "**这一摊活现在只有你一个 agent，直接干**——不用考虑分工、没有职责表要看。\n"
         )
     elif mode == MODE_MANAGED:
@@ -174,6 +176,8 @@ def _system_prompt(mode: str, stage: str = "post") -> str:
             "③ `ids=\"R3\"` 给该轮的地图（summary 块视图 / truncated 事件索引）。"
             "范围可用 scope 收（`R3-R8` 或 `file:路径`），来源可用 source 收"
             "（result/assistant/call/user）。"
+            "**用户追问上一轮的内容时，先用上一轮的结果答**（它就在你的上下文里）——"
+            "只有确实需要最新状态时才去读文件；别把\u201c接着上一句问\u201d当成新活重新查一遍（脱节）。"
             "上下文还按**职责域分化**：你只拿到自己名下那份历史，"
             "别人的工作不在你的上下文里。全局职责表在尾部——它是跨 agent 的唯一公共"
             "信息。\n"

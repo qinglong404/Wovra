@@ -443,3 +443,60 @@ def test_incremental_landing_matches_by_file_overlap_when_renamed(monkeypatch, t
     assert added == [] and updated == ["A"]                  # 没新建、更新的是 A
     assert entry["name"] == "新名字"
     assert any("文件重叠" in str(h.get("detail")) for h in task.history)
+
+
+def test_executor_index_is_derived_from_the_events(monkeypatch, tmp_path):
+    """执行者索引（事实态）：谁**实际**碰过哪些文件、在哪些轮——按 `route_to` 分段归位。"""
+    from wovra import views as views_module
+
+    rounds = [
+        _round_writing(7, "src/wovra/attachments.py"),          # Main 自己写
+        {  # R8：主 agent 转交 → A 改文件（换手点在 route_to 的调用事件之后）
+            "seq": 8, "user_input": {"original": "改一下", "normalized": ""},
+            "events": [
+                make_event("R8-E01", "user", {"role": "user", "content": "改一下"}),
+                make_event("R8-E02", "tool_call", {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [{"id": "r1", "type": "function",
+                                    "function": {"name": "route_to",
+                                                 "arguments": json.dumps({"agent": "A"})}}]}),
+                make_event("R8-E03", "tool_result",
+                           {"role": "tool", "tool_call_id": "r1", "content": "已转交"},
+                           tool_name="route_to"),
+                make_event("R8-E04", "tool_call", {
+                    "role": "assistant", "content": "",
+                    "tool_calls": [{"id": "w1", "type": "function",
+                                    "function": {"name": "write_file",
+                                                 "arguments": json.dumps(
+                                                     {"path": "src/wovra/serve.py",
+                                                      "content": "x"})}}]}),
+                make_event("R8-E05", "tool_result",
+                           {"role": "tool", "tool_call_id": "w1",
+                            "content": "已写入 src/wovra/serve.py"},
+                           tool_name="write_file"),
+            ],
+            "refined_index": {}, "end_state": "completed", "org_state": "",
+            "active_view": "A",
+        },
+    ]
+    lines = views_module.executor_index_lines(rounds)
+    text = "\n".join(lines)
+
+    assert "Main：src/wovra/attachments.py（改，R7）" in text
+    assert "A：src/wovra/serve.py（改，R8）" in text
+    # 只读过标"读"（不等于归它管）
+    read_only = [{"seq": 9, "user_input": {"original": "看", "normalized": ""},
+                  "events": [
+                      make_event("R9-E01", "user", {"role": "user", "content": "看"}),
+                      make_event("R9-E02", "tool_call", {
+                          "role": "assistant", "content": "",
+                          "tool_calls": [{"id": "r2", "type": "function",
+                                          "function": {"name": "read_file",
+                                                       "arguments": json.dumps(
+                                                           {"path": "README.md"})}}]}),
+                      make_event("R9-E03", "tool_result",
+                                 {"role": "tool", "tool_call_id": "r2",
+                                  "content": "内容"}, tool_name="read_file"),
+                  ], "refined_index": {}, "end_state": "completed", "org_state": "",
+                  "active_view": "Main"}]
+    assert "README.md（读，R9）" in "\n".join(views_module.executor_index_lines(read_only))

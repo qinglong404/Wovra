@@ -385,6 +385,14 @@ class _AssemblyMixin:
             block.append("[全局职责表]（跨 agent 唯一公共信息；"
                          "路由与转交都以此为依据）")
             block.extend(resp)
+            # **执行者索引**（事实态，2026-09-17 用户口径"做了吧"）：谁**实际**碰过哪些
+            # 文件、在哪些轮——零 LLM、从分块与 `route_to` 分段直接算，不采信模型的说法。
+            # 与上面那张声明态的职责表互补：找人问细节、把活转给谁，靠这张更准。
+            index = views_module.executor_index_lines(self.rounds)
+            if index:
+                block.append("[执行者索引]（事实态：谁实际碰过哪些文件 → 哪几轮；"
+                             "与上面的职责表对不上时，以这张为准）")
+                block.extend(index)
         if str(view_name) == views_module.MAIN_AGENT_ID:
             # 主 agent 起手：把规则层的起点建议摆给它（2026-09-12 用户口径：
             # 每轮都是"主 agent 先触发 → 路由原话 → 子 agent 回复"）。

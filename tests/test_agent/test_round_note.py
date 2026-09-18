@@ -610,3 +610,119 @@ def test_multi_executor_backlog_goes_segment_by_segment(monkeypatch, tmp_path):
     ]
     assert "note" not in round_                           # 整轮那条不会混进来
     assert round_["note_state"] == "done"
+
+
+def test_fold_triggers_on_round_cap_even_below_watermark(monkeypatch, tmp_path):
+    """**轮次上限触发**（2026-09-17 用户口径"15 轮"）：连续小轮到不了水位也要折一次。"""
+    agent, task = _agent(monkeypatch, tmp_path, [], org_watermark=10 ** 9, org_grace_rounds=0)
+    agent._fold_keep = 99                                  # 窗口不参与
+    agent._fold_max_rounds = 3
+    task.rounds = [_big_round(i, chars=40) for i in range(1, 5)]   # 4 轮小轮（远低于水位）
+    agent.rounds = task.rounds
+    agent.last_context_estimate = 100                      # 体量小得离水位十万八千里
+
+    agent._advance_fold_line()
+
+    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
+    detail = [str(h.get("detail")) for h in task.history if h.get("kind") == "fold"][-1]
+    assert "轮次上限触发" in detail
+
+    # 距上次折档还没满 3 轮 → 不折
+    agent._advance_fold_line()
+    assert [int(r["seq"]) for r in task.rounds if r.get("folded")] == [1]
+
+
+def test_note_carries_awaiting_user_and_the_tail(monkeypatch, tmp_path):
+    """**等你答复**：段落里单列一行，锚里给"结尾原话"（结论草稿只取开头，取不到它）。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _batch_chunk([{
+            "seq": 1, "sentence": "给出八条不顺手项",
+            "failures": [], "awaiting_user": "要不要让 B 把第 5/6/8 条合进报告",
+        }])],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    _run(agent, 1)
+    _trigger(agent)
+
+    note = task.rounds[0]["note"]
+    assert note["awaiting_user"] == "要不要让 B 把第 5/6/8 条合进报告"
+    assert "⏳ 等你答复：要不要让 B 把第 5/6/8 条合进报告" in note_module.render_note(task.rounds[0])
+
+
+def test_anchor_carries_the_final_answer_tail():
+    """锚里给结尾原话——"我在等用户拍板"的话在结尾，草稿（开头）里没有。"""
+    round_ = {
+        "seq": 3, "user_input": {"original": "看下", "normalized": ""},
+        "events": [
+            make_event("R3-E01", "user", {"role": "user", "content": "看下"}),
+            make_event("R3-E02", "final_answer",
+                       {"role": "assistant",
+                        "content": "八条如下：①…（长正文）…要不要让 B 把这几条合进去？（我不动手，等你说。）"}),
+        ],
+        "refined_index": {}, "end_state": "", "org_state": "",
+    }
+    anchor = "\n".join(note_module.anchor_lines(round_))
+    assert "结尾原话" in anchor and "我不动手，等你说" in anchor
+
+
+# ---- 异步维护 ＋ 落地后阻塞补齐（2026-09-17 用户口径"异步吧"）----
+
+
+def test_async_dispatch_does_not_block_the_close(monkeypatch, tmp_path):
+    """异步：触发那一刻**批次冻结入队**，轮闭合处不等它（不结算任何东西）。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _plain(), _batch_chunk([_note(1), _note(2)])],
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
+    )
+    agent.async_organization = True
+    _run(agent, 2)
+    agent.last_context_estimate = _WATERMARK_OFF
+
+    agent._maybe_organize_batch()
+
+    assert agent._org_queue.qsize() == 1                    # 批次进了队列
+    assert _batches(agent) == []                            # 还没发结算调用（不阻塞）
+    assert [r.get("note_state") for r in task.rounds] == [None, None]
+
+
+def test_catch_up_settles_rounds_closed_during_maintenance(monkeypatch, tmp_path):
+    """**阻塞补齐**：维护期间聊的轮（R9 那类）无论多小都整理掉，并把折档线推到目标。
+
+    "触发整理期间聊的，无论多大，也将其整理了……阻塞式，防止整理期间又聊新的"
+    """
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _plain(), _plain(),
+         _batch_chunk([_note(1), _note(2), _note(3)])],
+        org_watermark=10 ** 9, org_grace_rounds=0,     # 水位远在天边：补齐不看它
+    )
+    agent._fold_keep = 99
+    agent._fold_max_rounds = 2                          # 未折轮 3 > 2 → 折老的那个
+    _run(agent, 3)
+    agent._open_round_on_disk = lambda: None           # 没有开放轮 → 可以折档
+
+    agent._catch_up_after_maintenance()
+
+    assert [r["note_state"] for r in task.rounds] == ["done"] * 3   # 全补齐
+    detail = "\n".join(str(h.get("detail")) for h in task.history if h.get("kind") == "note")
+    assert "维护期间闭合的轮已补齐：R1–R3" in detail
+    assert any(r.get("folded") for r in task.rounds)                # 折档也推了
+
+
+def test_catch_up_settles_but_does_not_fold_with_an_open_round(monkeypatch, tmp_path):
+    """有开放轮时补齐**只结算、不折档**——改 `folded` 会改装配字节，轮中部动它撞 §2。"""
+    agent, task = _agent(
+        monkeypatch, tmp_path,
+        [_plain(), _plain(), _batch_chunk([_note(1), _note(2)])],
+        org_watermark=10 ** 9, org_grace_rounds=0,
+    )
+    agent._fold_keep = 0
+    _run(agent, 2)
+    agent._open_round_on_disk = lambda: {"seq": 3, "end_state": "open"}
+
+    agent._catch_up_after_maintenance()
+
+    assert [r["note_state"] for r in task.rounds] == ["done"] * 2
+    assert not any(r.get("folded") for r in task.rounds)            # 一个都没折

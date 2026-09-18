@@ -27,6 +27,7 @@ from .support import (
     _FOLD_KEEP_ROUNDS_DEFAULT,
     _FOLD_TARGET_DEFAULT,
     _NOTE_BATCH_MAX_DEFAULT,
+    _FOLD_MAX_ROUNDS_DEFAULT,
     _NOTE_TIMEOUT_DEFAULT,
     _clip_quote,
     maint_tools,
@@ -348,6 +349,21 @@ class _MaintenanceMixin:
             # V4：写＝水位处**攒批结算**（一批轮一次调用，§6.1），水位只驱动这两件事
             # ＋ 结构树——不再跑整理那一路（org 那套成为历史）。换档在同一次轮闭合里
             # 由 `close_round` 的 `_advance_fold_line` 接手，读的就是刚写下的产物。
+            #
+            # **异步**（2026-09-17 用户口径："异步吧"）：触发那一刻**批次冻结**、交给后台
+            # 线程，用户不必在轮闭合处干等 20–60 秒；跑完后由后台**阻塞补齐**维护期间
+            # 聊过的新轮（见 `_catch_up_after_maintenance`）。
+            snapshot = self._maint_snapshot()
+            if snapshot is None:
+                self._maint_deferred = True
+                return
+            if self.async_organization:
+                batch = self._note_pending_rounds()
+                for r in batch:
+                    self._org_inflight.add(int(r["seq"]))
+                self._org_queue.put(("v4", batch, snapshot))
+                self._ensure_worker()
+                return
             self._settle_round_notes()
             self._maybe_split_v4()
             return
@@ -540,7 +556,7 @@ class _MaintenanceMixin:
         want = {int(seg["start"]) for seg in note_module.executor_segments(round_)}
         return bool(want) and want <= landed
 
-    def _settle_round_notes(self) -> None:
+    def _settle_round_notes(self, batch: list[dict] | None = None) -> None:
         """水位闸门里的结算：**分裂前＝攒批**（一批轮一次调用）；分裂后＝**补漏**。
 
         分裂前（§6.1，用户口径："攒着一次性整理……比每轮整理省了重复的输入"）：
@@ -555,7 +571,7 @@ class _MaintenanceMixin:
         """
         if not self._round_note_enabled():
             return
-        pending = self._note_pending_rounds()
+        pending = list(batch) if batch is not None else self._note_pending_rounds()
         if not pending:
             return
         cap = max(1, int(getattr(self, "_note_batch_max", _NOTE_BATCH_MAX_DEFAULT)))
@@ -720,7 +736,8 @@ class _MaintenanceMixin:
         if segment is None:
             round_["note"] = {
                 key: product[key]
-                for key in ("seq", "sentence", "failures", "ledger_append", "executor")
+                for key in ("seq", "sentence", "failures", "awaiting_user",
+                            "ledger_append", "executor")
                 if key in product
             }
         else:
@@ -732,6 +749,7 @@ class _MaintenanceMixin:
                 "executor": str(product.get("executor") or segment.get("executor") or "Main"),
                 "sentence": str(product.get("sentence") or ""),
                 "failures": list(product.get("failures") or []),
+                "awaiting_user": str(product.get("awaiting_user") or ""),
             }
             kept = [
                 s for s in (round_.get("note_segments") or [])
@@ -842,7 +860,7 @@ class _MaintenanceMixin:
         except (TypeError, ValueError):
             return _FOLD_TARGET_DEFAULT
 
-    def _advance_fold_line(self) -> None:
+    def _advance_fold_line(self, with_catch_up: bool = False) -> None:
         """水位到了就把"超龄且有 note"的轮**一次换到位**（§6.2/§6.3）。
 
         只在**轮闭合处**推进（轮内冻结）；水位/宽限与整理同一套旋钮（冷却不设——
@@ -855,7 +873,14 @@ class _MaintenanceMixin:
         if not closed:
             return
         current = int(closed[-1]["seq"])
-        if self.last_context_estimate < self._org_watermark or current <= self._org_grace:
+        by_water = with_catch_up or self.last_context_estimate >= self._org_watermark
+        # **轮次上限**（2026-09-17 用户口径"15 轮"）：连续小轮到不了水位时兜底——
+        # 距上一次折档已满 N 轮就折一次（"最坏情况下多久换一次"要有上限）。
+        cap = int(getattr(self, "_fold_max_rounds", _FOLD_MAX_ROUNDS_DEFAULT))
+        folded_seqs = [int(r["seq"]) for r in closed if r.get("folded")]
+        last_fold = max(folded_seqs) if folded_seqs else int(closed[0]["seq"]) - 1
+        by_rounds = current - last_fold >= cap
+        if not (by_water or by_rounds) or current <= self._org_grace:
             return
         # **一次折够**（2026-09-17 实测：按"上次折到哪"逐轮推进会让水位一直悬在线上的
         # 时候**每轮断一次前缀**——每个工作调用白付 190~260 tok；大会话里这笔是"尾部
@@ -870,13 +895,20 @@ class _MaintenanceMixin:
         # 此前这里写的是 `closed[:-1]`（"最后一轮永不折"，我加的，与用户规则相反）：
         # 实测代价 R7 一轮 96,820 tok 原文顶着 92% 的上下文，折完 R1–R6 仍 103.5K >
         # 水位 100K，于是**每轮闭合都在线上触发维护**（R8 那次白跑一遭分裂）。
+        # 未折的轮数（有产物、还没折的）——轮次上限管的就是它
+        unfolded = [r for r in closed
+                    if not r.get("folded") and str(r.get("note_state")) == "done"]
         staged: list[dict] = []
         for r in closed:                          # 最老的先；折到目标线以下为止
             over_window = int(r["seq"]) <= window_cut
-            if not over_window and size <= target:
-                break                             # 窗口内的都留着，且已经折到目标以下了
+            # 停手条件：窗口内的轮不折、且已经折到目标以下、且**未折轮数没超上限**
+            if not over_window and size <= target and len(unfolded) <= cap:
+                break
             if r.get("folded") or str(r.get("note_state")) != "done":
                 continue
+            if unfolded:
+                unfolded = unfolded[1:]           # 折掉最老的那个
+
             raw = self._estimate_messages(
                 [e.get("message") or {} for e in r.get("events") or []]
             )
@@ -890,7 +922,8 @@ class _MaintenanceMixin:
         if self.task is not None:
             self.task.record(
                 "fold",
-                f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
+                ("（轮次上限触发）" if (by_rounds and not by_water) else "")
+                + f"换档：{len(staged)} 轮换成一段话（R{staged[0]['seq']}"
                 f"{'' if len(staged) == 1 else '、…、R' + str(staged[-1]['seq'])}）；"
                 f"折到水位 {self._fold_target_ratio():.0%} 以下"
                 f"（目标 {target:,}，折前 {int(self.last_context_estimate or 0):,}）",
@@ -909,13 +942,23 @@ class _MaintenanceMixin:
 
     def _org_worker(self) -> None:
         while True:
-            batch, base_messages = self._org_queue.get()
+            item = self._org_queue.get()
+            kind, batch, base_messages = (
+                item if len(item) == 3 else ("org", item[0], item[1])
+            )
             try:
-                self._parallel_maintenance(batch, base_messages)
+                if kind == "v4":
+                    self._run_v4_maintenance(batch)
+                else:
+                    self._parallel_maintenance(batch, base_messages)
             except Exception:  # noqa: BLE001——整理失败不影响主对话
-                for r in batch:
-                    r.pop("pending_org", None)
-                    r["org_state"] = "failed"
+                if kind != "v4":
+                    for r in batch:
+                        r.pop("pending_org", None)
+                        r["org_state"] = "failed"
+                else:
+                    for r in batch:
+                        self._note_failed(r, "后台结算异常（不重发，原文继续顶着）")
                 self._persist_rounds()
             finally:
                 self._org_queue.task_done()
@@ -924,6 +967,36 @@ class _MaintenanceMixin:
                 # 后台整理跑完：用户此刻若没在轮里（正在打字/空闲），立刻生效
                 # ——子 agent 与其重组上下文在下一轮开场前就建好（§50）。
                 self._settle_after_maintenance()
+                if kind == "v4":
+                    self._catch_up_after_maintenance()
+
+    def _run_v4_maintenance(self, batch: list[dict]) -> None:
+        """后台跑完冻结批次：这批的结算（一次调用）＋ 分裂分析（树描述现状）。"""
+        if batch:
+            self._settle_round_notes(batch=batch)
+        self._maybe_split_v4()
+
+    def _catch_up_after_maintenance(self) -> None:
+        """后台维护跑完后的**阻塞补齐**（2026-09-17 用户口径）。
+
+        "触发整理期间聊的，无论多大，也将其整理了……这个时候是阻塞式的，防止整理期间又聊
+        新的"：R1–R8 在后台整理时，R9 已闭合、R10 正在回答——这里把**所有已闭合还没产物的
+        轮**同步结算掉（**不看水位**），再把折档线推到目标（**只在没有开放轮时**：改
+        `folded` 会改装配字节，轮中部动它撞 AGENTS.md §2）。
+        """
+        if not self._round_note_enabled():
+            return
+        pending = self._note_pending_rounds()
+        if pending:
+            self._settle_round_notes(batch=pending)
+            if self.task is not None:
+                self.task.record(
+                    "note",
+                    "维护期间闭合的轮已补齐："
+                    + note_module.seq_span([int(r["seq"]) for r in pending]),
+                )
+        if self._open_round_on_disk() is None:
+            self._advance_fold_line(with_catch_up=True)
 
     def _product_parent_id(self, parent: str) -> str:
         """产物挂在哪条职责线下（嵌套分裂时 = 被再裂的那个子域条目 id）。"""

@@ -40,7 +40,8 @@ _PATH_RE = re.compile(r"[\w./-]*[\w-]+\.[A-Za-z]{1,6}\b")
 
 _MAX_HINT = 6          # 一次最多给几条失败候选
 _DRAFT_CHARS = 320     # 结论草稿取多少字符（有执行动作的条：数字/路径都在里面）
-_DRAFT_CHARS_CHAT = 120  # 无工具动作的条：草稿给多了，改写就写成一张清单（实测）
+_DRAFT_CHARS_CHAT = 120
+_TAIL_CHARS = 200        # 结尾原话取多少字符（"我在等用户拍板"的话通常在这）  # 无工具动作的条：草稿给多了，改写就写成一张清单（实测）
 _HINT_CLIP = 90
 
 
@@ -176,6 +177,24 @@ def executor_segments(round_: dict, lookup: dict | None = None) -> list[dict]:
     return out
 
 
+def conclusion_tail(round_: dict, limit: int = _TAIL_CHARS,
+                    start: int = 0, end: int | None = None) -> str:
+    """这一段最终回答的**结尾**（最后 limit 字）——"我最后跟用户说了什么/问了他什么"。
+
+    为什么单独给（2026-09-17 用户口径："注意处理好这种的前面连续性问题，防止脱节"）：
+    结论草稿只取**开头**，而"等用户拍板"的话在**结尾**；取不到它，下一轮就接不上上一轮的话头
+    （实测：结尾问"要不要让 B 合进去？"，下一轮却当成新活重新查）。
+    """
+    events = round_.get("events") or []
+    end = len(events) if end is None else end
+    for e in reversed(events[start:end]):
+        if e.get("type") != "final_answer":
+            continue
+        text = str((e.get("message") or {}).get("content") or "").replace("\n", " ").strip()
+        return text[-limit:]
+    return ""
+
+
 def anchor_lines(round_: dict, segment: dict | None = None) -> list[str]:
     """给结算调用的锚（逐行，喂进指令尾部）。
 
@@ -224,6 +243,9 @@ def anchor_lines(round_: dict, segment: dict | None = None) -> list[str]:
     )
     if draft:
         lines.append(f"  结论草稿（改写成一句话，别照抄）：{draft}")
+    tail = conclusion_tail(round_, start=start, end=end)
+    if tail:
+        lines.append(f"  结尾原话（若在等用户拍板，写进 awaiting_user）：{tail}")
     return lines
 
 
@@ -322,6 +344,7 @@ def parse_notes(ordered: list, batch: list[dict],
                 failures.append({"text": text, "evidence": evidence})
         seg = (segments or {}).get(seq)
         product = {"seq": seq, "sentence": sentence, "failures": failures,
+                   "awaiting_user": str(item.get("awaiting_user") or "").strip(),
                    "ledger_append": ledger,
                    "executor": str((seg or {}).get("executor")
                                    or round_.get("active_view") or "Main")}
@@ -445,6 +468,10 @@ def render_note(round_: dict) -> str:
         if executor and executor != "Main":
             head += f"〔{executor}〕"
         lines.append(f"{head} {seg.get('sentence') or ''}")
+        awaiting = str(seg.get("awaiting_user") or "").strip()
+        if awaiting:
+            # **等你答复**：这一轮结尾把选项摆给用户了——下一轮隔着一句"话"也要接得上（防脱节）
+            lines.append(f"  ⏳ 等你答复：{awaiting}")
         for item in seg.get("failures") or []:
             evidence = str(item.get("evidence") or "")
             lines.append(f"  ⚠ {item.get('text')}" + (f"　〔{evidence}〕" if evidence else ""))
