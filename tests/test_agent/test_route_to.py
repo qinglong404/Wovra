@@ -28,7 +28,7 @@ from wovra import registry as registry_module
 from wovra import routing as routing_module
 from wovra import views as views_module
 from wovra.agent import Agent
-from wovra.agent.support import _MAX_ROUTE_HOPS
+from wovra.agent.support import max_route_hops
 from wovra.task import Task
 
 from ._helpers import *  # noqa: F401,F403
@@ -114,7 +114,7 @@ def test_route_to_refuses_past_hop_limit(monkeypatch):
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
     agent._open_or_reuse_round("这活归谁")
     agent.current_round["active_view"] = "前端"
-    agent.current_round["route_hops"] = _MAX_ROUTE_HOPS
+    agent.current_round["route_hops"] = max_route_hops()
 
     out = agent.route_to(agent="工具层", reason="还是工具层吧")
 

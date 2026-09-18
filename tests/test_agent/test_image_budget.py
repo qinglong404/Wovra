@@ -1,18 +1,15 @@
 """看图预算（2026-09-16，GAIA FINDINGS §2）：软线提示 + 硬线拒绝，防视觉题空转。
 
-被测口径：`support._IMAGE_VIEW_SOFT/HARD` 两道线，计数落在 round 的
-`image_views` 上（与 route_hops 同款持久化）。core 按值导入这两个常量，
-所以测试要改的是 core 里的名字。
+被测口径：`support.image_view_soft/hard` 两道线（调用期读环境），计数落在 round 的
+`image_views` 上（与 route_hops 同款持久化）。测试改环境变量即可。
 """
-
-from wovra.agent import core as core_module
 
 from ._helpers import _agent_with
 
 
 def _agent(*, soft, hard, monkeypatch):
-    monkeypatch.setattr(core_module, "_IMAGE_VIEW_SOFT", soft)
-    monkeypatch.setattr(core_module, "_IMAGE_VIEW_HARD", hard)
+    monkeypatch.setenv("WOVRA_IMAGE_VIEWS", str(soft))
+    monkeypatch.setenv("WOVRA_IMAGE_VIEWS_MAX", str(hard))
     seen = {"views": 0, "shots": 0}
 
     def view_image(path: str, note: str = "") -> str:

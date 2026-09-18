@@ -1,7 +1,9 @@
 """wovra serve：任务现场的只读 HTTP 投影（前端可视化的接口层）。
 
 设计契约见 docs/frontend-visualization-plan.md §3。三条铁律：
-* **GET-only**——可视化是只读的，任何状态变更都走 CLI 交互通道；
+* **会话数据 GET-only**——可视化不改会话状态，任何状态变更都走 CLI 交互通道；
+  唯一的写通道是"新建会话 / 追加一轮对话"，以及 **`/api/settings`**（写仓库根
+  `.env`，改的是运行参数、不碰任何 task.json）；
 * **task.json 是唯一事实源**——本层只做"磁盘事实 → JSON"的机械派生，
   不定义新口径（成本/命中率口径以 llm.py 的落账行为准，这里只把
   落账字符串解析成数值）；
@@ -360,7 +362,12 @@ _SAFETY_OVERRIDE: dict[str, str] = {}
 _job_lock = threading.Lock()
 
 
-_ASK_TIMEOUT = int(os.environ.get("WOVRA_ASK_TIMEOUT", "1800"))
+def _ask_timeout() -> int:
+    """问用户的等待上限（秒）——调用期读环境，配置面板改完当场生效。"""
+    try:
+        return max(10, int(float(os.environ.get("WOVRA_ASK_TIMEOUT", "1800"))))
+    except (TypeError, ValueError):
+        return 1800
 
 
 def _round_seq_for(agent, content: str | None) -> int:
@@ -440,7 +447,7 @@ def _execute_turn(job_id: str, task_id: str, content: str) -> None:
         ev.clear()
         job["pending"] = {"type": kind, "question": text,
                           "choices": choices or [], "multi": bool(multi)}
-        got = ev.wait(_ASK_TIMEOUT)
+        got = ev.wait(_ask_timeout())
         job["pending"] = None
         return (state.get("answer") or ""), got
 
@@ -1217,8 +1224,8 @@ def view_sizes(task_id: str) -> dict | None:
         sig = sig
     basis = tokens_module.caliber()
     try:
-        from .agent.support import _DEFAULT_CONTEXT_LIMIT
-        window = int(got.get("window") or _DEFAULT_CONTEXT_LIMIT)
+        from .agent.support import context_limit as _env_window
+        window = int(got.get("window") or _env_window())
     except Exception:  # noqa: BLE001——拿不到就留 0，前端按"无分母"渲染
         window = int(got.get("window") or 0)
     shared = bool(got.get("shared"))
@@ -1410,10 +1417,10 @@ def session_meta(task_id: str, data: dict) -> dict:
     # 是"这个 agent 一次都没跑过"的事实，补成 1M 会在页面上演成
     # `0/1M（0.00%）`——看起来像"窗口空着没用"，其实是"没有观测"。前端据此
     # 显示「未运行（无观测）」。
-    from .agent.support import _DEFAULT_CONTEXT_LIMIT
+    from .agent.support import context_limit as _env_window
     for e in meta["registry"] or []:
         if isinstance(e, dict) and int(e.get("window") or 0) == 100_000:
-            e["window"] = _DEFAULT_CONTEXT_LIMIT
+            e["window"] = _env_window()
     # per-agent 账**派生后补进条目**（2026-09-12 用户拍板：账本不落盘）——
     # 前端照旧读 `rounds`/`steps`/`handoffs`，但那些值现在是现场算的：
     # `rounds` = 名下轮数（落点归属），`seqs` 是**总轮 R 号**清单（显示与展开
@@ -1760,6 +1767,9 @@ class _Handler(BaseHTTPRequestHandler):
                 return self._bytes(f.read_bytes(), ctype)
             except OSError:
                 return self._json({"error": "not found"}, 404)
+        if path == "/api/settings":
+            from . import settings as settings_module
+            return self._json(settings_module.describe())
         if path == "/api/fs/ls":
             qs = parse_qs(urlparse(self.path).query)
             return self._json(fs_list((qs.get("path") or [None])[0]))
@@ -1782,8 +1792,8 @@ class _Handler(BaseHTTPRequestHandler):
             meta["live_job"] = live[0] if live else None
             meta["safety_mode"] = str(data.get("safety_mode") or "approve")
             meta["approved_tags"] = list(data.get("approved_tags") or [])
-            from .agent.support import _ORG_WATERMARK_DEFAULT
-            meta["org_watermark"] = _ORG_WATERMARK_DEFAULT   # 整理水位（账本产出条件）
+            from .agent.support import org_watermark
+            meta["org_watermark"] = org_watermark()   # 整理水位（账本产出条件）
             meta["todo_log"] = todo_log(data)                 # todo 工具调用流水
             return self._json(meta)
         m = re.fullmatch(r"/api/sessions/([^/]+)/views/(.+)", path)
@@ -1945,6 +1955,15 @@ class _Handler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/api/sessions":
             return self._create_session(body)
+        if path == "/api/settings":
+            from . import settings as settings_module
+            values = body.get("values")
+            if not isinstance(values, dict):
+                return self._json({"error": "values 必填（参数表）"}, 400)
+            result = settings_module.apply({str(k): str(v)
+                                            for k, v in values.items()})
+            result["settings"] = settings_module.describe()
+            return self._json(result, 200 if result["ok"] else 400)
         if path == "/api/shutdown":
             with _job_lock:
                 busy = any(j["status"] in ("queued", "running")

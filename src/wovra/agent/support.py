@@ -16,14 +16,8 @@ MODE_MANAGED = "managed"
 
 MODE_BASELINE = "baseline"
 
-_DEFAULT_CONTEXT_LIMIT = int(os.environ.get("WOVRA_CONTEXT_LIMIT", "1000000"))
-
-_COMPRESS_THRESHOLD = float(os.environ.get("WOVRA_COMPRESS_THRESHOLD", "0.8"))
-
 # 维护性调用的 purpose 集合：这些调用的成本与延迟**不摊给任何一轮**
 # （它们异步/在轮边界跑，混进轮账会漏记或错记）。
-# 2026-09-17 修正：`"split" "note"` 少了个逗号被隐式拼成 `"splitnote"`，
-# 于是分裂与结算的 tok/延迟一直被算进工作轮账（`working=` 里混着结算）。
 _MAINTENANCE_PURPOSES = ("organization", "compaction", "split", "note")
 
 _READ_ONLY_TOOLS = frozenset(
@@ -31,24 +25,35 @@ _READ_ONLY_TOOLS = frozenset(
      "glob_files", "web_fetch", "web_search", "list_background"}
 )
 
-_ORG_GRACE_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_GRACE_ROUNDS", "3"))
 
-_ORG_COOLDOWN_ROUNDS_DEFAULT = int(os.environ.get("WOVRA_ORG_COOLDOWN_ROUNDS", "3"))
+def _env_int(name: str, default: int) -> int:
+    """调用期读环境变量（非法值退回默认）——`WOVRA_*` 一律走这几个读取器。
 
-_ORG_WATERMARK_DEFAULT = int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
+    现读而不是 import 期快照：前端"配置"面板改完写进 `.env` 并同步进运行中
+    进程的环境，**下一轮**（新建 Agent / 下一次触发判定）就该用新值。
+    """
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
 
-# 一批结算（水位处攒批，V4 §6.1）的硬上限；超时按失败处理、只留痕。
-# 取 180s，与工作调用的读超时同档：结算的输入是**整段装配**，冷前缀（新会话第一批、
-# 缓存被驱逐）时预填本身可能几十秒。（2026-09-17 那次"60s 超时"的实测原因是
-# 端点 429 触发了 `_stream_call` 的退避重试，不是预填慢——归因更正。）
-_NOTE_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_NOTE_TIMEOUT", "180"))
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
-# 一批结算最多写多少轮的产物（V4 §6.1）。超了切几次调用——切出来的每次装配前缀
-# 都还在缓存里，多付的只是尾部与产物。设上限的理由是**产出长度**：一批几十轮的产物
-# 会把单次 completion 拉到上万 tok，撞上超时就是整批拿不到产物（失败后下一批更大 →
-# 更容易再超时）。取 12：实测 9 轮一批的产物约 2K tok。
-_NOTE_BATCH_MAX_DEFAULT = int(os.environ.get("WOVRA_NOTE_BATCH_MAX", "12"))
+def context_limit() -> int:
+    """该 agent 的模型上下文窗口（tok）。"""
+    return _env_int("WOVRA_CONTEXT_LIMIT", 1000000)
 
 
 def v4_enabled() -> bool:
@@ -63,37 +68,71 @@ def v4_enabled() -> bool:
         "0", "false", "no", "off",
     )
 
-# 换档的目标：折到水位这个比例之下（一次折够 → 下次换档要等重新长上来，天然滞后）。
-# 实测动因：按"逐轮推进"会让水位悬在线上时**每轮断一次前缀**（worklog §160）。
-_FOLD_TARGET_DEFAULT = float(os.environ.get("WOVRA_FOLD_TARGET", "0.6"))
 
-# 眼睛（2026-09-13）：`view_image` 是**只读**的（读磁盘上的图、不改任何东西），
-# 可以与其他只读工具并发执行。`screenshot` 则**不**进这个集合——它要启动无头
-# 浏览器（共用同一 user-data-dir），并发跑会互相抢 profile；且它落盘文件，属变更类。
-# 本行刻意远离上方那个集合（相隔 >3 行）：提交边界上 git 才会把它算成独立
-# hunk，从而能只提交自己这一份（见 `scripts/git_stage_hunks.py`）。
-_READ_ONLY_TOOLS = _READ_ONLY_TOOLS | {"view_image"}
+def compress_threshold() -> float:
+    """窗口保底折叠阈值（占窗口比例）。"""
+    return _env_float("WOVRA_COMPRESS_THRESHOLD", 0.8)
 
-_ORG_MAINT_TIMEOUT_DEFAULT = float(os.environ.get("WOVRA_MAINT_TIMEOUT", "900"))
 
-# 一个用户回合内的最大转交跳数（route_to，2026-09-12）：主 agent 路由给
-# 某个域、该域发现不是自己的活再转出……这条链必须收口，否则两个域可以
-# 互相踢皮球到步数上限。到顶后拒绝继续转交，要求就地处理或交回用户
-# （宁可让用户看到"没人认领"，也不要烧一整个回合的空转）。
-_MAX_ROUTE_HOPS = int(os.environ.get("WOVRA_ROUTE_HOPS", "3"))
+def org_watermark() -> int:
+    """整理水位（tok）：到线触发结算/分裂/折档。"""
+    return _env_int("WOVRA_ORG_WATERMARK", 100000)
 
-# 一个用户回合内允许"看图"（view_image）的次数（2026-09-16，GAIA 实测）。
-# 视觉题没有收敛策略时 agent 会反复裁图重看：实测两题各烧满 900s 超时
-# （output/gaia/FINDINGS.md §2：棋盘图求最佳着法、多边形面积图），工作区里
-# 堆了几十个自己写的裁剪脚本。故设两道线——到软线把"该收敛了"写进工具结果，
-# 到硬线直接拒绝本次调用（不注入新图）。宁可要一个带犹豫的答案，也不要空转。
-# 计数记在 round 上（同 route_hops），`\c` 续跑不会把预算重置掉。
-_IMAGE_VIEW_SOFT = int(os.environ.get("WOVRA_IMAGE_VIEWS", "6"))
-_IMAGE_VIEW_HARD = int(os.environ.get("WOVRA_IMAGE_VIEWS_MAX", "12"))
 
-# 会**消耗视觉模型**的工具。`screenshot` 只往盘上写 PNG、本身不注入图像
-# （要看到还得再 view_image），所以它不在预算里——挡它挡不住看图循环。
-_VISION_TOOLS = frozenset({"view_image"})
+def org_grace_rounds() -> int:
+    """会话前 N 轮硬豁免维护。"""
+    return _env_int("WOVRA_ORG_GRACE_ROUNDS", 3)
+
+
+def org_cooldown_rounds() -> int:
+    """两次维护之间的最小轮距。"""
+    return _env_int("WOVRA_ORG_COOLDOWN_ROUNDS", 3)
+
+
+def note_timeout() -> float:
+    """一批结算的硬上限（秒）；超时按失败处理、只留痕。"""
+    return _env_float("WOVRA_NOTE_TIMEOUT", 180)
+
+
+def note_batch_max() -> int:
+    """一批结算最多写多少轮的产物（超了切几次调用）。"""
+    return _env_int("WOVRA_NOTE_BATCH_MAX", 12)
+
+
+def fold_target() -> float:
+    """折到水位这个比例之下（一次折够 → 下次换档要等重新长上来）。"""
+    return _env_float("WOVRA_FOLD_TARGET", 0.6)
+
+
+def org_maint_timeout() -> float:
+    """整理/分裂那一路的硬上限（秒）。"""
+    return _env_float("WOVRA_MAINT_TIMEOUT", 900)
+
+
+def max_route_hops() -> int:
+    """一个用户回合内允许的转交跳数。"""
+    return _env_int("WOVRA_ROUTE_HOPS", 3)
+
+
+def image_view_soft() -> int:
+    """看图软线（本回合 view_image 次数）：到线把"该收敛了"写进工具结果。"""
+    return _env_int("WOVRA_IMAGE_VIEWS", 6)
+
+
+def image_view_hard() -> int:
+    """看图硬线：到线拒绝本次调用（不注入新图）。"""
+    return _env_int("WOVRA_IMAGE_VIEWS_MAX", 12)
+
+
+def state_render_budget() -> int:
+    """任务状态渲染的字符预算（每轮都进上下文的那一段）。"""
+    return _env_int("WOVRA_STATE_BUDGET", 8000)
+
+
+def max_turns() -> int:
+    """一个用户回合内的最大步数。"""
+    return _env_int("WOVRA_MAX_TURNS", 200)
+
 
 
 def image_converge_note(count: int, hard: int) -> str:
@@ -110,12 +149,9 @@ def image_budget_refusal(count: int, hard: int) -> str:
             f"最有把握的答案 + 明确标注不确定的部分；确需再看图的，改用文本工具"
             f"（page_text / read_file / search_files），或把问题交回用户。")
 
-# 任务状态渲染的字符预算（2026-09-11 机制评审）：TaskState 的 7 个列表
-# 各有 200 条上限（STATE_LIST_CAP），理论最坏 1400 条；它是**每轮都进
-# 上下文**的（信封尾部），不设预算就是一条无界常驻负担。实测当前 36 条
-# ≈2,674 tok 尚健康，但上限高一个量级——给装配处传预算，把 render 里
-# 早就写好、却因没传参而形同虚设的截断保护真正激活。
-_STATE_RENDER_BUDGET = int(os.environ.get("WOVRA_STATE_BUDGET", "8000"))
+# 会**消耗视觉模型**的工具。`screenshot` 只往盘上写 PNG、本身不注入图像
+# （要看到还得再 view_image），所以它不在预算里——挡它挡不住看图循环。
+_VISION_TOOLS = frozenset({"view_image"})
 
 # 维护调用（org/split）是否把 tools 收窄为单一出口工具。
 # 默认 False = 用**与工作对话完全相同的** tools 数组（缓存复议结论，
@@ -146,7 +182,6 @@ def maint_tools(schemas: list[dict], submit_name: str) -> list[dict]:
         ]
     return list(schemas)
 
-_DEFAULT_MAX_TURNS = int(os.environ.get("WOVRA_MAX_TURNS", "200"))
 
 _ACTION_WORDS = {
     "write_file": "写入文件",

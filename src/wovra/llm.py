@@ -158,30 +158,58 @@ class LLM:
         model: Optional[str] = None,
     ) -> None:
         # 参数优先，其次环境变量（.env 已在上面加载进环境），最后兜底默认值。
-        # 显式传入 > .env > 默认 的顺序让测试和临时换模型都很方便。
+        # 显式传入的（测试、临时换模型）**冻结**；没传的每次调用现读环境——
+        # 前端配置面板改完，下一轮/下一次调用就是新值。
+        self._explicit_key = api_key
+        self._explicit_base = base_url
+        self._explicit_model = model
         self.model = model or os.environ.get("Wovra_MODEL", "gpt-4o-mini")
-        api_key = api_key or os.environ.get("Wovra_API_KEY", "")
-        base_url = base_url or os.environ.get("Wovra_BASE_URL")
-
-        if not api_key:
+        _key, _base, _timeout = self._resolve()
+        if not _key:
             raise RuntimeError(
                 "未配置 API 密钥。请在项目根目录 .env 中填写 Wovra_API_KEY，"
                 "或通过 LLM(api_key=...) 传入。"
             )
-
         # base_url 允许为 None：此时 SDK 使用 OpenAI 官方地址。
-        self.base_url = base_url
+        self.base_url = _base
+        self._timeout = _timeout
+        self._client_key: tuple | None = None
+        self._client = None
+        self._ensure_client()
+
+    def _resolve(self) -> tuple[str, Optional[str], float]:
+        """(密钥, 端点, 读超时) —— 显式传入的优先，其余现读环境。"""
+        key = self._explicit_key or os.environ.get("Wovra_API_KEY", "")
+        base = self._explicit_base or os.environ.get("Wovra_BASE_URL")
+        raw = (os.environ.get("WOVRA_READ_TIMEOUT") or "").strip()
+        try:
+            timeout = float(raw) if raw else 180.0
+        except ValueError:
+            timeout = 180.0
+        return key, base, timeout
+
+    def _ensure_client(self) -> None:
+        """密钥/端点/超时变了就换一个客户端（SDK 把它们绑在 client 上）。"""
+        key, base, timeout = self._resolve()
+        sig = (key, base, timeout)
+        self._timeout = timeout
+        # 输出上限显式声明（2026-09-10）：不传 max_tokens 时端点默认锁
+        # 4,096——org 全覆盖产物、write_file 大参数都在此截断。官方上限
+        # 384K（393,216 token），直接声明到顶。现读环境：改完下一次调用生效。
+        raw = (os.environ.get("WOVRA_MAX_TOKENS") or "").strip()
+        try:
+            self._max_tokens = int(float(raw)) if raw else 393216
+        except ValueError:
+            self._max_tokens = 393216
+        if sig == self._client_key and self._client is not None:
+            return
+        self.base_url = base
         # 流式读超时 = 相邻分块的最大静默间隔（不是总时长）——真生成时
         # token 持续到达不会触发；端点挂流（实测空响应吊 751s）在
         # WOVRA_READ_TIMEOUT 内被切断，交给上层重试。总时长由 token 流
         # 自然决定，长思考/长输出不受限。
-        self._timeout = float(os.environ.get("WOVRA_READ_TIMEOUT", "180"))
-        # 输出上限显式声明（2026-09-10）：不传 max_tokens 时端点默认锁
-        # 4,096——org 全覆盖产物、write_file 大参数都在此截断。官方上限
-        # 384K（393,216 token），直接声明到顶，观察模型实际能用到多少
-        # （诊断用；若实际用不满可后续收窄）。
-        self._max_tokens = int(os.environ.get("WOVRA_MAX_TOKENS", "393216"))
-        self._client = OpenAI(api_key=api_key, base_url=base_url, timeout=self._timeout)
+        self._client = OpenAI(api_key=key, base_url=base, timeout=timeout)
+        self._client_key = sig
 
     def chat(self, messages: list[dict], tools: Optional[list[dict]] = None,
              stream: bool = False, **kwargs: Any):
@@ -191,6 +219,9 @@ class LLM:
         tool_calls、usage 等细节，封装掉反而碍事。
         tools=None 时 SDK 会自动省略该参数，不影响普通对话。
         """
+        if not self._explicit_model:
+            self.model = os.environ.get("Wovra_MODEL", "gpt-4o-mini")
+        self._ensure_client()
         if stream:
             # 流式默认要求服务端在最后一个分块附带 usage 统计
             # （OpenAI 协议扩展 stream_options，主流兼容服务都支持）。

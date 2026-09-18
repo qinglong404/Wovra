@@ -287,9 +287,9 @@ def test_state_render_respects_budget():
     small = TaskState(goal="小").render(8000)
     assert _STATE_TRIM_NOTE not in small
 
-    # 装配处的预算常量存在且被默认使用
-    from wovra.agent.support import _STATE_RENDER_BUDGET
-    assert _STATE_RENDER_BUDGET > 0
+    # 装配处的预算来自调用期读环境（默认 8000）
+    from wovra.agent.support import state_render_budget
+    assert state_render_budget() > 0
 
 
 def test_state_render_keeps_critical_sections_under_tight_budget():

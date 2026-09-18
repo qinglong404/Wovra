@@ -254,8 +254,8 @@ def test_screenshot_ceiling_matches_server_hard_limit():
     还会把整轮之后**每一次**请求都 400（`load_image_part` 会拒注，可那张图
     对模型就等于不存在）。故上限卡在硬上限上。
     """
-    assert max(eyes._MAX_SHOT_WIDTH, eyes._MAX_SHOT_HEIGHT) <= eyes.IMAGE_HARD_MAX_SIDE
-    assert eyes._MAX_SHOT_HEIGHT > 6000            # 但确实比原来那个 6000 宽
+    assert max(eyes.shot_max_side(), eyes.shot_max_side()) <= eyes.image_hard_max_side()
+    assert eyes.shot_max_side() > 6000            # 但确实比原来那个 6000 宽
 
 
 def test_screenshot_reports_actual_vs_requested(eye_root, monkeypatch):
@@ -322,7 +322,7 @@ def test_image_size_reads_headers_of_common_formats():
 
 def test_image_at_budget_limit_is_injected_above_is_not(eye_root, monkeypatch):
     """3000px/边 = 放行；3001px = 拦（token 经济，用户口径"上限给 3000"）。"""
-    monkeypatch.setattr(eyes, "IMAGE_MAX_SIDE", 3000)
+    monkeypatch.setenv("WOVRA_IMAGE_MAX_SIDE", "3000")
     (eye_root / "ok.png").write_bytes(_png_solid(3000, 8, (10, 20, 30)))
     (eye_root / "big.png").write_bytes(_png_solid(3001, 8, (10, 20, 30)))
 
@@ -335,7 +335,7 @@ def test_image_at_budget_limit_is_injected_above_is_not(eye_root, monkeypatch):
 
 def test_image_over_hard_limit_is_reported_as_undeliverable(eye_root, monkeypatch):
     """超过服务端硬上限（8192）要说"发不出去"——即使预算线被调高也不放行。"""
-    monkeypatch.setattr(eyes, "IMAGE_MAX_SIDE", 100_000)
+    monkeypatch.setenv("WOVRA_IMAGE_MAX_SIDE", "100000")
     (eye_root / "huge.png").write_bytes(_png_solid(8193, 8, (10, 20, 30)))
     (eye_root / "edge.png").write_bytes(_png_solid(8192, 8, (10, 20, 30)))
 
@@ -418,7 +418,7 @@ def test_eye_image_message_annotates_skipped_image(eye_root, monkeypatch):
     from wovra.agent import Agent
     from wovra.task import Task
 
-    monkeypatch.setattr(eyes, "IMAGE_MAX_SIDE", 3000)
+    monkeypatch.setenv("WOVRA_IMAGE_MAX_SIDE", "3000")
     (eye_root / "big.png").write_bytes(_png_solid(4000, 8, (1, 2, 3)))
     (eye_root / "small.png").write_bytes(_png_solid(40, 8, (1, 2, 3)))
     task = Task.create(goal="g")

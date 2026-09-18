@@ -426,14 +426,50 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
 
 .desc-clamp{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .desc-open{display:block;-webkit-line-clamp:unset;overflow:visible}
+
+/* ---------- 配置面板（2026-09-18）：密钥/模型/水位等参数在页面上改，写回 .env ---------- */
+#cfg-modal{position:fixed;inset:0;z-index:45;display:none;align-items:center;justify-content:center;background:#000a}
+#cfg-modal.open{display:flex}
+.cfg-card{width:min(1020px,94vw);max-height:90vh;display:flex;flex-direction:column;background:var(--bg1);border:1px solid var(--line2);border-radius:12px;box-shadow:0 24px 60px #000c;overflow:hidden}
+.cfg-head{display:flex;align-items:center;gap:10px;padding:14px 20px;border-bottom:1px solid var(--line)}
+.cfg-head b{font-size:14px;flex-shrink:0}
+.cfg-head .cfg-file{font-family:var(--mono);font-size:11px;color:var(--tx3);flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cfg-body{flex:1;overflow-y:auto;padding:6px 20px 18px}
+.cfg-group{margin-top:16px}
+.cfg-group h5{font-size:12px;letter-spacing:1.4px;color:var(--tx3);margin-bottom:6px;font-weight:600}
+.cfg-row{display:grid;grid-template-columns:minmax(0,240px) minmax(0,1fr);gap:12px;align-items:center;padding:7px 0;border-bottom:1px solid #161a22}
+.cfg-row:last-child{border-bottom:none}
+@media (max-width:760px){.cfg-row{grid-template-columns:1fr}}
+.cfg-lab{min-width:0}
+.cfg-lab b{font-size:12.5px;font-weight:600}
+.cfg-lab .k{font-family:var(--mono);font-size:10.5px;color:var(--tx3);display:block;margin-top:2px;word-break:break-all}
+.cfg-lab .hint{font-size:11px;color:var(--tx3);margin-top:3px;line-height:1.5}
+.cfg-in{display:flex;gap:8px;align-items:center;min-width:0}
+.cfg-in .spacer{flex:1}
+.cfg-input{flex:1;min-width:0;background:var(--bg2);border:1px solid var(--line2);border-radius:8px;color:var(--tx);padding:7px 10px;font-family:var(--mono);font-size:12px;outline:none}
+.cfg-input:focus{border-color:var(--acc-dim)}
+.cfg-input.bad{border-color:#6b2a34}
+.cfg-input.dirty{border-color:var(--acc-dim);background:#141a2b}
+.cfg-badge{font-size:10px;padding:2px 8px;border-radius:5px;font-family:var(--mono);flex-shrink:0}
+.b-live{background:#123527;color:var(--teal)}
+.b-restart{background:#33240f;color:var(--gold)}
+.cfg-mini{font-size:11px;color:var(--tx3);font-family:var(--mono);cursor:pointer;flex-shrink:0;padding:2px 6px;border-radius:5px}
+.cfg-mini:hover{color:var(--acc);background:var(--bg3)}
+.cfg-err{font-size:11px;color:var(--red);font-family:var(--mono);flex-shrink:0}
+.cfg-foot{display:flex;align-items:center;gap:10px;padding:12px 20px;border-top:1px solid var(--line);background:var(--bg0)}
+.cfg-foot .msg{font-size:12px;color:var(--tx3);flex:1;min-width:0;line-height:1.5}
+.cfg-foot .msg.ok{color:var(--teal)}
+.cfg-foot .msg.warn{color:var(--gold)}
+.cfg-foot .msg.bad{color:var(--red)}
+.cfg-foot .chip{cursor:pointer;flex-shrink:0}
 </style>
 </head>
 <body>
 <aside id="side">
-  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span><span class="newbtn" onclick="toggleBatch()" title="批量删除会话">🗑</span><span class="newbtn" onclick="newSession()" title="新建会话">＋</span></div>
+  <div class="brand"><div class="dot"></div><b>WOVRA</b><span>现场</span><span class="newbtn" onclick="openConfig()" title="运行参数配置（密钥/模型/水位…）">⚙</span><span class="newbtn" onclick="toggleBatch()" title="批量删除会话">🗑</span><span class="newbtn" onclick="newSession()" title="新建会话">＋</span></div>
   <input id="search" placeholder="搜索会话目标…">
   <div id="list"><div class="sk"></div><div class="sk"></div><div class="sk"></div></div>
-  <div class="side-foot">task.json 单一事实源 · 读 GET / 写仅对话轮<br>
+  <div class="side-foot">task.json 单一事实源 · 会话数据只读 · 写通道：对话轮 / ⚙ 配置<br>
     <span id="foot-ver">后端启动 — · 页面 —</span>
     <span id="shutdown-btn" style="float:right;cursor:pointer;color:var(--tx3)" title="终止服务进程（有轮在跑会被拒绝）" onclick="shutdownServer(this)">⏻</span></div>
 </aside>
@@ -480,6 +516,18 @@ details.hist .ev{padding:10px 14px 12px;font-size:12px;color:var(--tx2);line-hei
     <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
       <span class="chip" style="cursor:pointer" onclick="closeWsModal()">取消</span>
       <span class="chip acc" style="cursor:pointer" onclick="createSession()">创建</span>
+    </div>
+  </div>
+</div>
+<div id="cfg-modal">
+  <div class="cfg-card">
+    <div class="cfg-head"><b>运行参数配置</b><span class="cfg-file" id="cfg-file"></span>
+      <span class="chip" style="cursor:pointer" onclick="closeConfig()">✕ 关闭</span></div>
+    <div class="cfg-body" id="cfg-body"><div class="empty">加载中…</div></div>
+    <div class="cfg-foot">
+      <span class="msg" id="cfg-msg"></span>
+      <span class="chip" onclick="loadConfig()">↻ 重新读取</span>
+      <span class="chip acc" onclick="saveConfig()">保存</span>
     </div>
   </div>
 </div>
@@ -3673,6 +3721,152 @@ function renderUsage(c){
        `<li><span class="n">${esc(fmtT(r.time))}</span><pre class="mono" style="font-size:11px">[${esc(r.purpose)}] prompt=${fmtN(r.prompt||0)} cached=${fmtN(r.cached||0)} ttft=${r.ttft??'—'}s dur=${r.dur??'—'}s finish=${esc(r.finish||'')}</pre></li>`).join('')}</ul></div>`;
 }
 
+/* ---------- 配置面板（运行参数 → .env） ----------
+   两档生效口径直接画在每行上：live = 写入 .env 并同步进运行中进程，下一步/下一轮就是新值；
+   restart = 进程启动期读一次，改完要重启 `wovra serve`。密钥不回明文（只回掩码），
+   留空=不改，要清空点「清空」。 */
+let CFG=null;
+function openConfig(){
+  $('#cfg-modal').classList.add('open');
+  $('#mask').classList.add('open');
+  loadConfig();
+}
+function closeConfig(){
+  $('#cfg-modal').classList.remove('open');
+  $('#mask').classList.remove('open');
+}
+async function loadConfig(){
+  const body=$('#cfg-body');
+  try{ CFG=await api('/api/settings'); }catch(e){
+    body.innerHTML='<div class="empty">加载失败：'+esc(e.message)+'</div>';return;
+  }
+  $('#cfg-file').textContent=CFG.env_file||'';
+  const msg=$('#cfg-msg');
+  const pend=CFG.pending_restart||[];
+  msg.className='msg'+(pend.length?' warn':'');
+  msg.textContent=pend.length?`${pend.length} 项在 .env 里改过、进程还没吃上：重启后生效`:'';
+  msg.dataset.lock=pend.length?'1':'';   // 待重启提示比"待保存计数"重要，别被它顶掉
+  renderConfig();
+}
+function cfgField(it){
+  const input=`class="cfg-input" data-key="${esc(it.key)}"`;
+  if(it.kind==='bool'){
+    const cur=String(it.value||'').trim()==='' ? '' : (String(it.value).trim()==='0'?'0':'1');
+    return `<select ${input} data-init="${esc(cur)}">
+      <option value=""${cur===''?' selected':''}>默认（${esc(it.default)}）</option>
+      <option value="1"${cur==='1'?' selected':''}>开</option>
+      <option value="0"${cur==='0'?' selected':''}>关</option></select>`;
+  }
+  if(it.kind==='secret'){
+    return `<input ${input} type="text" value="" data-init="" data-secret="1"
+      placeholder="${it.set?esc(it.masked):'（未设置）'}">`;
+  }
+  const lo=it.lo!==undefined?`${it.lo}`:'', hi=it.hi!==undefined?`${it.hi}`:'';
+  const ph=esc(it.default||'')+((lo||hi)?`（${lo}~${hi}）`:'');
+  return `<input ${input} type="text" value="${esc(it.value)}" data-init="${esc(it.value)}" placeholder="${ph}">`;
+}
+function cfgRow(it){
+  const badge=it.scope==='restart'
+    ? '<span class="cfg-badge b-restart">重启后生效</span>'
+    : '<span class="cfg-badge b-live">立即生效</span>';
+  const clear=it.kind==='secret'
+    ? `<span class="cfg-mini" data-clear="${esc(it.key)}" title="把这项从 .env 里清空">清空</span>` : '';
+  const def=it.default!=='' ? `<span class="cfg-mini" data-default="${esc(it.key)}" data-dv="${esc(it.default)}" title="填回默认值">默认</span>` : '';
+  return `<div class="cfg-row" data-row="${esc(it.key)}">
+    <div class="cfg-lab"><b>${esc(it.label)}</b><span class="k">${esc(it.key)}</span>
+      ${it.hint?`<div class="hint">${esc(it.hint)}</div>`:''}</div>
+    <div class="cfg-in">${cfgField(it)}${badge}${def}${clear}
+      <span class="cfg-err" data-err="${esc(it.key)}"></span></div>
+  </div>`;
+}
+function renderConfig(){
+  if(!CFG)return;
+  const groups=(CFG.groups||[]), items=CFG.items||[];
+  let html='';
+  for(const g of groups){
+    const rows=items.filter(x=>x.group===g.id);
+    if(!rows.length)continue;
+    html+=`<div class="cfg-group" data-group="${esc(g.id)}"><h5>${esc(g.title)}</h5>`
+      + rows.map(cfgRow).join('') + '</div>';
+  }
+  const body=$('#cfg-body');
+  body.innerHTML=html;
+  body.querySelectorAll('.cfg-input').forEach(el=>{
+    // **显式把当前值写进控件**（不靠 HTML 的 value 属性）：密钥行一律留空
+    // （留空=不改），其余行填现值——这样"脏值比对"有确定基线。
+    const it=(CFG.items||[]).find(x=>String(x.key)===String(el.dataset.key));
+    if(it)el.value=it.kind==='secret'?'':String(it.value==null?'':it.value);
+    el.addEventListener(el.tagName==='SELECT'?'change':'input',()=>cfgChanged(el));
+  });
+  body.querySelectorAll('[data-default]').forEach(el=>el.addEventListener('click',()=>{
+    const box=body.querySelector(`.cfg-input[data-key="${el.dataset.default}"]`);
+    if(box){box.value=el.dataset.dv;cfgChanged(box)}
+  }));
+  body.querySelectorAll('[data-clear]').forEach(el=>el.addEventListener('click',()=>{
+    const box=body.querySelector(`.cfg-input[data-key="${el.dataset.clear}"]`);
+    if(box){box.value='\u0000';box.classList.add('dirty');toast('已标记清空：保存后从 .env 移除')}
+  }));
+  refreshCfgCount();
+}
+function cfgChanged(el){
+  const dirty=String(el.value)!==String(el.dataset.init||'');
+  el.classList.toggle('dirty',dirty);
+  el.classList.remove('bad');
+  const err=$('#cfg-body').querySelector(`[data-err="${el.dataset.key}"]`);
+  if(err)err.textContent='';
+  $('#cfg-msg').dataset.lock='';      // 又动了 → 让位给"待保存"计数
+  refreshCfgCount();
+}
+function cfgDirty(){
+  return [...$('#cfg-body').querySelectorAll('.cfg-input')]
+    .filter(el=>String(el.value)!==String(el.dataset.init||''));
+}
+function refreshCfgCount(){
+  const msg=$('#cfg-msg');
+  if(msg.dataset.lock)return;         // 保存结果说了话就不覆盖它
+  const n=cfgDirty().length;
+  if(n){msg.className='msg';msg.textContent=`${n} 项已改动，点「保存」写入 .env`}
+}
+async function saveConfig(){
+  const dirty=cfgDirty();
+  const values={};
+  for(const el of dirty)values[el.dataset.key]=el.value;
+  if(!Object.keys(values).length){toast('没有改动');return}
+  const msg=$('#cfg-msg');
+  msg.className='msg';msg.textContent='保存中…';
+  let r;
+  try{
+    r=await fetch('/api/settings',{method:'POST',
+      headers:{'Content-Type':'application/json'},body:JSON.stringify({values})}).then(x=>x.json());
+  }catch(e){msg.className='msg bad';msg.textContent='保存失败：'+e.message;return}
+  const errs=r.errors||{};
+  if(r.settings)CFG=r.settings;
+  renderConfig();
+  // **重画之后**再标注：`renderConfig` 整块重建，先标的行内提示会被抹掉；
+  // 顺带把用户刚输入的值写回（重建会把它换成服务端的现值）。
+  for(const el of dirty){
+    const k=el.dataset.key;
+    const box=$('#cfg-body').querySelector(`.cfg-input[data-key="${k}"]`);
+    if(!errs[k])continue;
+    if(box){box.value=el.value;box.classList.add('bad','dirty');
+            box.dataset.init='\u0001'}    /* 与任何输入都不等 → 保持脏，改一改就能重存 */
+    const slot=$('#cfg-body').querySelector(`[data-err="${k}"]`);
+    if(slot)slot.textContent=errs[k];
+  }
+  // 保存结果**说了话就锁住**：`renderConfig` 内部的"待保存计数"不许把它顶掉，
+  // 直到用户再动某个输入框（`cfgChanged` 会解锁）。
+  msg.dataset.lock='1';
+  if(Object.keys(errs).length){
+    msg.className='msg bad';
+    msg.textContent=`${Object.keys(errs).length} 项没保存（见行内提示）`;
+  }else{
+    const pend=(r.pending_restart||[]).length;
+    msg.className='msg'+(pend?' warn':' ok');
+    msg.textContent=`已保存 ${(r.saved||[]).length} 项到 .env`+
+      (pend?`；其中 ${pend} 项需重启 wovra serve 才生效`:'；立即生效项已同步到运行中进程');
+  }
+}
+
 /* ---------- 抽屉 ---------- */
 async function openDrawer(seq,hl){
   $('#mask').classList.add('open');$('#drawer').classList.add('open');
@@ -3693,12 +3887,14 @@ async function openDrawer(seq,hl){
 }
 function closeDrawer(){$('#drawer').classList.remove('open');$('#mask').classList.remove('open')}
 $('#mask').addEventListener('click',()=>{
-  if($('#ws-modal').classList.contains('open'))closeWsModal();
+  if($('#cfg-modal').classList.contains('open'))closeConfig();
+  else if($('#ws-modal').classList.contains('open'))closeWsModal();
   else closeDrawer();
 });
 document.addEventListener('keydown',e=>{
   if(e.key==='Escape'){
-    if($('#ws-modal').classList.contains('open'))closeWsModal();
+    if($('#cfg-modal').classList.contains('open'))closeConfig();
+    else if($('#ws-modal').classList.contains('open'))closeWsModal();
     else closeDrawer();
   }
   if(e.key==='Enter'&&$('#ws-modal').classList.contains('open'))createSession();

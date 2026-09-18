@@ -146,7 +146,7 @@ def test_usage_window_carries_across_segments_of_a_round(tmp_path, monkeypatch):
     monkeypatch.setattr(task_module, "TASKS_ROOT", tmp_path / "tasks")
     task = Task.create(goal="段账本")
     agent = Agent(llm=_StubLLM(), tools=[], task=task)
-    # 构造参数里 `max_turns=0` 会被 `or _DEFAULT_MAX_TURNS` 吞掉，故构造后直接改；
+    # 构造参数没传 max_turns 时就跟着 WOVRA_MAX_TURNS 走，故构造后直接改；
     # 0 步上限 = 循环一次都不进，只走开头那两行账本初始化（末尾照旧抛步数超限）
     agent.max_turns = 0
     agent.current_round = {"seq": 7, "active_view": "A", "events": [],

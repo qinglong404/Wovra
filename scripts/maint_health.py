@@ -32,7 +32,7 @@ from wovra import task as task_module  # noqa: E402
 from wovra import tokens as tokens_module  # noqa: E402
 from wovra import views as views_module  # noqa: E402
 from wovra.agent import Agent  # noqa: E402
-from wovra.agent.support import _STATE_RENDER_BUDGET  # noqa: E402
+from wovra.agent.support import state_render_budget  # noqa: E402
 from wovra.task import Task, _MODEL_SIDE_SECTIONS  # noqa: E402
 
 REAL_TASKS = REPO / "tasks"
@@ -186,7 +186,7 @@ def report(task_id: str) -> None:
 
         # 信封三块直接量（不靠减法反推——反推会把未计入的部分算进信封）
         state_tok = tokens_module.estimate(
-            task.get_state().render(_STATE_RENDER_BUDGET, sections=_MODEL_SIDE_SECTIONS)
+            task.get_state().render(state_render_budget(), sections=_MODEL_SIDE_SECTIONS)
         )
         organized = [r for r in task.rounds
                      if r is not agent.current_round and r.get("org_state") == "done"]
@@ -220,7 +220,7 @@ def report(task_id: str) -> None:
             verdict = "**到线且未被挡 → 下一轮闭合即触发**"
 
         state = task.get_state()
-        model_side = state.render(_STATE_RENDER_BUDGET, sections=_MODEL_SIDE_SECTIONS)
+        model_side = state.render(state_render_budget(), sections=_MODEL_SIDE_SECTIONS)
         counts = {f: len(getattr(state, f) or []) for f in _MODEL_SIDE_SECTIONS}
 
         print(f"会话 {task_id}　轮 {seq}（未整理 {len(raw_rounds)}）　"
@@ -307,7 +307,7 @@ def report(task_id: str) -> None:
             rate = f"{c / p:.1%}" if p else "—"
             print(f"{purpose}: {len(pairs)} 次　prompt {p:,}　cached {c:,}　命中 {rate}")
         print("── 模型侧账本 ──")
-        print(f"render {len(model_side):,} 字符（预算 {_STATE_RENDER_BUDGET:,}）"
+        print(f"render {len(model_side):,} 字符（预算 {state_render_budget():,}）"
               f"　分片保留 {counts}")
         all_counts = {
             f: len(getattr(state, f) or [])

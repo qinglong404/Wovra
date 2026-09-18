@@ -691,6 +691,42 @@ def test_http_plan_carries_live_ctx(server, tmp_path):
     assert main["ctx_cur"] == meta["registry"][0]["ctx_cur"]
 
 
+def test_http_settings_roundtrip(server, tmp_path, monkeypatch):
+    """`/api/settings`：GET 回参数表（密钥只回掩码）+ POST 写 `.env`。
+
+    契约要点（前端配置面板全部依赖它）：分组存在；密钥不回明文；写完
+    `.env` 真的改了、且**无关行逐字节保留**；非法值 400 且不落盘。
+    """
+    env = tmp_path / "repo.env"
+    env.write_text("# 别动这行\nWovra_MODEL=gpt-4o-mini\n", encoding="utf-8")
+    monkeypatch.setenv("WOVRA_ENV_FILE", str(env))
+    monkeypatch.setenv("Wovra_API_KEY", "sk-secret-9876")
+    monkeypatch.delenv("WOVRA_ORG_WATERMARK", raising=False)
+
+    code, body = _get(server + "/api/settings")
+    assert code == 200
+    by_key = {i["key"]: i for i in body["items"]}
+    assert by_key["Wovra_API_KEY"]["masked"].endswith("9876")
+    assert by_key["Wovra_API_KEY"]["value"] == ""
+    assert {g["id"] for g in body["groups"]} >= {"model", "search", "ctx", "maint"}
+    assert body["env_file"] == str(env)
+
+    code, body = _get(server + "/api/settings", method="POST",
+                      body={"values": {"WOVRA_ORG_WATERMARK": "42000"}})
+    assert code == 200 and body["saved"] == ["WOVRA_ORG_WATERMARK"]
+    text = env.read_text(encoding="utf-8")
+    assert "# 别动这行" in text and "Wovra_MODEL=gpt-4o-mini" in text
+    assert "WOVRA_ORG_WATERMARK=42000" in text
+    assert body["settings"]["items"][0]["key"]              # 保存后回带最新表
+
+    code, body = _get(server + "/api/settings", method="POST",
+                      body={"values": {"WOVRA_ORG_WATERMARK": "abc"}})
+    assert code == 400 and body["errors"]["WOVRA_ORG_WATERMARK"] == "要整数"
+    assert "abc" not in env.read_text(encoding="utf-8")
+    code, _ = _get(server + "/api/settings", method="POST", body={})
+    assert code == 400
+
+
 def test_http_attach_endpoint(server, tmp_path):
     """粘贴附件落盘 + 换回引用行（2026-09-17）。
 

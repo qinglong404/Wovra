@@ -23,10 +23,7 @@ from . import note as note_module
 from .support import (
     MODE_MANAGED,
     v4_enabled,
-    _COMPRESS_THRESHOLD,
-    _FOLD_TARGET_DEFAULT,
-    _NOTE_BATCH_MAX_DEFAULT,
-    _NOTE_TIMEOUT_DEFAULT,
+    compress_threshold,
     _clip_quote,
     maint_tools,
 )
@@ -572,7 +569,7 @@ class _MaintenanceMixin:
         pending = list(batch) if batch is not None else self._note_pending_rounds()
         if not pending:
             return
-        cap = max(1, int(getattr(self, "_note_batch_max", _NOTE_BATCH_MAX_DEFAULT)))
+        cap = max(1, int(self._note_batch_max))
         if not self._note_per_round():
             jobs = self._note_jobs(pending)
             for start in range(0, len(jobs), cap):
@@ -851,9 +848,9 @@ class _MaintenanceMixin:
     def _fold_target_ratio(self) -> float:
         """折到水位的这个比例之下（越小折得越狠、下次换档来得越晚）。"""
         try:
-            return float(getattr(self, "_fold_target", _FOLD_TARGET_DEFAULT))
+            return float(self._fold_target)
         except (TypeError, ValueError):
-            return _FOLD_TARGET_DEFAULT
+            return 0.6
 
     def _fold_plan(self, closed: list[dict],
                    total: int) -> tuple[list[dict], int, str]:
@@ -3904,7 +3901,7 @@ class _MaintenanceMixin:
         self._baseline_prompt_used += self.last_stats["prompt_tokens"]
         if self.task is not None:
             self.task.baseline_prompt_used = self._baseline_prompt_used
-        threshold = self.context_limit * _COMPRESS_THRESHOLD
+        threshold = self.context_limit * compress_threshold()
         if self._baseline_context_estimate() < threshold:
             return
         older = [r for r in self.rounds if not r.get("compacted")][:-2]

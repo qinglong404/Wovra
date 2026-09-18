@@ -423,9 +423,12 @@ def test_fold_goes_all_the_way_below_watermark_then_waits(monkeypatch, tmp_path)
         monkeypatch, tmp_path,
         [_plain() for _ in range(5)]
         + [_batch_chunk([_note(i) for i in range(1, 6)])],
-        org_watermark=5000, org_grace_rounds=0,
+        org_watermark=_WATERMARK_OFF, org_grace_rounds=0,
     )
     _run(agent, 5)
+    # 水位 = 折档的目标线基准（5000 × 0.6 = 3000）；跑轮期间闸门关着，
+    # 到线由下面 `_trigger` 注入体量来模拟（同本文件其余用例的写法）。
+    agent._org_watermark = 5000
     agent._fold_target = 0.6
     _trigger(agent, size=9000)                       # 到线（>5000）
     _fold(agent, size=9000)

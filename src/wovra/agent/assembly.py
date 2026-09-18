@@ -21,7 +21,7 @@ from . import note as note_module
 from .support import (
     MODE_BASELINE,
     v4_enabled,
-    _STATE_RENDER_BUDGET,
+    state_render_budget,
     _runtime_reminder,
 )
 
@@ -152,7 +152,7 @@ class _AssemblyMixin:
             # verify 验收证据的副本（实测占条目文本 62.7%），而 R16 的
             # 按节预算早把它压到 143 tok；人视图/report 不传此参照旧全量。
             state_render = self.task.get_state().render(
-                _STATE_RENDER_BUDGET, sections=_MODEL_SIDE_SECTIONS
+                state_render_budget(), sections=_MODEL_SIDE_SECTIONS
             )
 
         msgs: list[dict] = []

@@ -101,6 +101,10 @@ function parseInto(root, html){
         const cam=k.slice(5).replace(/-([a-z])/g,(_s,x)=>x.toUpperCase());
         c.dataset[cam]=v.slice(1,-1);
       }
+      // `value="..."` 也要落到 `.value`（真 DOM 的语义）：输入框的初值全靠它，
+      // 桩不解析就等于"所有输入框都空着"——脏值比对/预填断言会集体假红。
+      const vm = /\bvalue="([^"]*)"/.exec(attrs);
+      if(vm) c.value = vm[1];
       frames[frames.length-1].el.appendChild(c);
       c.textContent = ''; c._html = '';             // 由后面的文本/子标签累加填
       if(selfClose){ c._parsed = true; }
@@ -2296,6 +2300,102 @@ console.log('场景 AU｜时间线卡片要带上**与对话流轮头同一套**
     problems.push('AU: 已折的轮（R1）同时显示了"未整理"');
 }
 
+console.log('场景 BA｜配置面板：分组、两档徽章、密钥只回掩码、脏值与保存反馈');
+// **串在已有 deferred 之后**：本场景要换 global.fetch 桩，而前面的场景正靠它取数据。
+__deferred.push(Promise.all(__deferred.slice()).then(async () => {
+  const body = () => DOM.body.querySelector('#cfg-body');
+  const msg = () => String(DOM.body.querySelector('#cfg-msg').textContent || '');
+  openConfig();
+  if (!DOM.body.querySelector('#cfg-modal').classList.contains('open'))
+    problems.push('BA: 点 ⚙ 没把配置面板打开');
+  // 参数表（两档都有人，密钥只给掩码；有一条"文件里改过、进程没吃上"的重启待办）
+  CFG = {env_file:'/repo/.env', pending_restart:['WOVRA_TASKS_ROOT'], groups:[
+      {id:'model', title:'模型与密钥'}, {id:'ctx', title:'上下文与水位'},
+      {id:'misc', title:'服务与环境'}],
+    items:[
+      {key:'Wovra_API_KEY', label:'API 密钥', group:'model', kind:'secret',
+       scope:'live', value:'', masked:'******9876', set:true, default:'', hint:''},
+      {key:'Wovra_MODEL', label:'模型', group:'model', kind:'str', scope:'live',
+       value:'gpt-4o-mini', masked:'', set:true, default:'gpt-4o-mini', hint:''},
+      {key:'WOVRA_ORG_WATERMARK', label:'水位 tok', group:'ctx', kind:'int',
+       scope:'live', value:'100000', masked:'', set:true, default:'100000',
+       hint:'到线触发结算/分裂/折档；下一轮生效', lo:1000, hi:100000000},
+      {key:'WOVRA_TASKS_ROOT', label:'会话数据目录', group:'misc', kind:'str',
+       scope:'restart', value:'', masked:'', set:false, default:'',
+       hint:'改了等于换一份数据目录，需重启服务'},
+    ]};
+  const prevFetch = global.fetch;
+  global.fetch = () => Promise.resolve({ok:true, json:async()=>CFG});
+  await loadConfig();                       // 走一遍真读取：待重启提示由它画
+  const html = String(body().innerHTML || '');
+  for (const [need, why] of [
+    ['cfg-group', '没画分组'],
+    ['立即生效', '缺少"立即生效"徽章'],
+    ['重启后生效', '缺少"重启后生效"徽章'],
+    ['******9876', '密钥没回掩码占位'],
+    ['data-row="WOVRA_ORG_WATERMARK"', '水位行没画出来'],
+  ]) if (!html.includes(need)) problems.push('BA: ' + why + '（缺 ' + need + '）');
+  if (!/1 项在 \.env 里改过/.test(msg())) problems.push('BA: 重启待办没提示');
+  if (html.includes('sk-')) problems.push('BA: 页面里漏出了明文密钥');
+  if (body().querySelector('.cfg-input[data-key="Wovra_API_KEY"]').value !== '')
+    problems.push('BA: 密钥输入框预填了值（留空才是"不改"）');
+  if (body().querySelectorAll('.cfg-badge.b-live').length !== 3)
+    problems.push('BA: 立即生效徽章数量不对（应 3）');
+  if (body().querySelectorAll('.cfg-badge.b-restart').length !== 1)
+    problems.push('BA: 重启后生效徽章数量不对（应 1）');
+
+  // 改一项：脏标记 + 待保存计数 + 只发脏值
+  const wm = body().querySelector('.cfg-input[data-key="WOVRA_ORG_WATERMARK"]');
+  wm.value = '42000'; wm.dataset.init = '100000';
+  cfgChanged(wm);
+  if (!wm.classList.contains('dirty')) problems.push('BA: 改过的输入框没有脏标记');
+  if (!/1 项已改动/.test(msg())) problems.push('BA: 改了值却没提示待保存项数');
+  if (cfgDirty().length !== 1) problems.push('BA: 脏值计数不对（应 1）');
+  let sent = null;
+  const okSettings = {...CFG, pending_restart:[]};
+  global.fetch = (u, opt) => {
+    sent = {url:String(u), opt:opt||{}};
+    return Promise.resolve({ok:true, json:async()=>({
+      ok:true, saved:['WOVRA_ORG_WATERMARK'], errors:{},
+      pending_restart:[], env_file:'/repo/.env', settings:okSettings})});
+  };
+  await saveConfig();
+  if (!sent || sent.url !== '/api/settings' || sent.opt.method !== 'POST')
+    problems.push('BA: 保存没走 POST /api/settings');
+  const payload = JSON.parse((sent && sent.opt.body) || '{}');
+  if (!payload.values || payload.values.WOVRA_ORG_WATERMARK !== '42000')
+    problems.push('BA: 保存的载荷里没有改动值');
+  if (Object.keys(payload.values || {}).length !== 1)
+    problems.push('BA: 保存把没改的行也一起发了（应只发脏值）');
+  if (!/已保存 1 项/.test(msg())) problems.push('BA: 保存后没有成功反馈');
+  console.log(`   BA 分组/徽章/掩码/只发脏值=${JSON.stringify(payload.values)}`
+              + ` 反馈=${msg().replace(/\s+/g,'')}`);
+
+  // 后端校验失败：行内要有原因，且不许假装成功
+  const wm2 = body().querySelector('.cfg-input[data-key="WOVRA_ORG_WATERMARK"]');
+  wm2.value = 'abc'; wm2.dataset.init = '';
+  cfgChanged(wm2);
+  global.fetch = () => Promise.resolve({ok:false, json:async()=>({
+    ok:false, saved:[], errors:{WOVRA_ORG_WATERMARK:'要整数'},
+    pending_restart:[], env_file:'/repo/.env', settings:okSettings})});
+  await saveConfig();
+  if (!/没保存/.test(msg())) problems.push('BA: 校验失败时反馈没说"没保存"');
+  // 行内提示落在**重画之后的那个**输入框上（桩的 textContent 不进 innerHTML，故查活元素）
+  const wm3 = body().querySelector('.cfg-input[data-key="WOVRA_ORG_WATERMARK"]');
+  const slot = body().querySelector('[data-err="WOVRA_ORG_WATERMARK"]');
+  if (!slot || !/要整数/.test(String(slot.textContent||'')))
+    problems.push('BA: 校验失败的原因没画到行内');
+  if (!wm3.classList.contains('bad')) problems.push('BA: 校验失败的行没标红');
+  if (String(wm3.value) !== 'abc')
+    problems.push('BA: 校验失败后输入的值被重画冲掉了（得让人改一改就能重存）');
+  closeConfig();
+  if (DOM.body.querySelector('#cfg-modal').classList.contains('open'))
+    problems.push('BA: 关闭没生效');
+  console.log('   BA 校验失败反馈=' + msg().replace(/\s+/g,'')
+              + ' 行内=' + String(slot&&slot.textContent||''));
+  global.fetch = prevFetch;
+}));
+
 Promise.all(__deferred).then(()=>{
   if (problems.length) {
     console.log('渲染核对：失败 ' + problems.length + ' 项');
@@ -2303,7 +2403,7 @@ Promise.all(__deferred).then(()=>{
     process.exitCode = 1;
     return;
   }
-  console.log('渲染核对：通过（52 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
+  console.log('渲染核对：通过（53 个场景，无 undefined/NaN，正文无机制说明词，直播区四症状 + 收尾/轮号/整理态 + 缓存补齐/未闭合条/维护进度条/跟随尾部不变量全查）');
 });
 """
 
@@ -2328,6 +2428,9 @@ def main() -> int:
         ("el.dataset.p = join(", "目录行的 data-p（委托消费的路径）"),
         ("applyPlanKpis(d);", "顶部六格按步更新（/plan 的现算值没人应用）"),
         ("applyPlanCtx(d);", "上下文窗口按步更新（/plan 的现读观测没人应用）"),
+        ("onclick=\"openConfig()\"", "配置面板入口（⚙ 没接上就永远打不开）"),
+        ("id=\"cfg-body\"", "配置面板的主体容器"),
+        ("await api('/api/settings')", "配置面板读参数表（不读就永远是空面板）"),
     ):
         if need not in html:
             print("渲染核对：失败 1 项")

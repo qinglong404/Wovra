@@ -7,7 +7,7 @@ from typing import Optional
 
 from .. import registry as registry_module
 from ..registry import MAIN_AGENT_ID
-from .support import MODE_MANAGED, _MAX_ROUTE_HOPS
+from .support import MODE_MANAGED, max_route_hops
 
 # 动作名 v2（2026-09-12 用户口径，worklog §53）：大步→阶段、小步→工作项，
 # 让"步"专指执行步数（`steps_used`），不再与计划单位抢词。
@@ -388,7 +388,7 @@ class _LedgerMixin:
         在**工具批次跑完后**执行：批次执行期间改装配会让同批里后面的工具
         看到错乱的上下文（读 A 域文件却按 B 域视图理解）。
 
-        跳数上限（`_MAX_ROUTE_HOPS`）记在轮上：两个域互相踢皮球的链必须
+        跳数上限（`support.max_route_hops`）记在轮上：两个域互相踢皮球的链必须
         收口，否则烧光一整轮步数还是没人干活。到顶后拒绝转交，要求就地
         处理或交回用户——宁可让用户看见"没人认领"，也不空转。
         """
@@ -412,9 +412,10 @@ class _LedgerMixin:
         if target == str(current.get("active_view") or ""):
             return f"route_to：本轮已经由 {target} 接手，不要再转给自己。"
         hops = int(current.get("route_hops") or 0)
-        if hops >= _MAX_ROUTE_HOPS:
+        cap = max_route_hops()
+        if hops >= cap:
             return (
-                f"route_to：本回合已转交 {hops} 次（上限 {_MAX_ROUTE_HOPS}），"
+                f"route_to：本回合已转交 {hops} 次（上限 {cap}），"
                 "不再转交——就地处理，或把情况说明给用户请人指定归属。"
             )
         note = str(reason or "").strip()

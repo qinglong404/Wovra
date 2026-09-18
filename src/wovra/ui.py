@@ -319,7 +319,7 @@ def usage_line(stats: dict, maint: dict | None = None,
         if prompt:
             parts.append(f"缓存命中 {cached:,} tok（{cached / prompt:.1%}）")
             parts.append(f"未命中 {miss:,} tok（{miss / prompt:.1%}）")
-            parts.append(f"等效输入 {miss + cached / tokens_module.CACHE_RATE:,.0f} tok")
+            parts.append(f"等效输入 {miss + cached / tokens_module.cache_rate():,.0f} tok")
     else:
         parts.append("tokens：服务端未返回 usage")
 
@@ -601,7 +601,7 @@ def report_view(task, children: list[dict] | None = None) -> str:
 
 
 def _org_watermark() -> int:
-    """整理触发线（与 agent/support.py 的 _ORG_WATERMARK_DEFAULT 同口径，
+    """整理触发线（与 agent/support.py 的 org_watermark() 同口径，
     这里直接读环境变量，避免 ui → agent 的跨包引用）。"""
     return int(os.environ.get("WOVRA_ORG_WATERMARK", "100000"))
 

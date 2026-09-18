@@ -27,7 +27,16 @@ import unicodedata
 # **当前口径：1/50**（用户实测，2026-09-17；此前的历史默认 30 是旧服务商的读数）。
 # 各服务商差异巨大（GLM-5.3-flash 约 1/3.5）。用 WOVRA_CACHE_RATE 覆盖。
 # 折扣越浅，基座税越重——这是成本模型的关键参数。
-CACHE_RATE = float(os.environ.get("WOVRA_CACHE_RATE", "50"))
+# 调用期读环境（配置面板改完，下一次记账就是新值）。
+def cache_rate() -> float:
+    """缓存命中的计价折扣（1/N）。"""
+    raw = (os.environ.get("WOVRA_CACHE_RATE") or "").strip()
+    if not raw:
+        return 50.0
+    try:
+        return float(raw)
+    except ValueError:
+        return 50.0
 
 # tiktoken 词表必须延迟到首次使用才加载：get_encoding 在本地无缓存时
 # 会联网下载（openaipublic CDN）——放模块顶层意味着新机器/离线/网络

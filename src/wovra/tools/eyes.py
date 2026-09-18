@@ -76,8 +76,9 @@ MAX_INJECTED_IMAGES = 4
 # 故上限 = 服务端硬上限：截得出、也看得见。（模型看图另有 3000px 预算线，
 # 那条由 `image_reject_reason` 在 view_image 时讲清楚，且用户口径是
 # "鼓励小图、只截需要的区域"，不该由工具在这里替它决定截多大。）
-_MAX_SHOT_WIDTH = 8192
-_MAX_SHOT_HEIGHT = 8192
+def shot_max_side() -> int:
+    """截图每边的夹取上限（现读环境，与服务端硬上限同一个值）。"""
+    return image_hard_max_side()
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}
 
@@ -443,8 +444,9 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
         return f"截图失败：{note}"
     try:
         asked_width, asked_height = int(width), int(height)
-        width = max(64, min(asked_width, _MAX_SHOT_WIDTH))
-        height = max(64, min(asked_height, _MAX_SHOT_HEIGHT))
+        cap = shot_max_side()
+        width = max(64, min(asked_width, cap))
+        height = max(64, min(asked_height, cap))
         wait_ms = max(0, min(int(wait_ms), 30000))
     except (TypeError, ValueError):
         return "截图失败：width/height/wait_ms 需为整数"
@@ -482,11 +484,12 @@ def screenshot(target: str, width: int = 1280, height: int = 800,
     actual = _image_size(raw)
     lines = []
     if (width, height) != (asked_width, asked_height):
+        cap = shot_max_side()
         lines.append(
             f"⚠ 请求尺寸 {asked_width}×{asked_height} 超出上限"
-            f"（{_MAX_SHOT_WIDTH}×{_MAX_SHOT_HEIGHT}），已按上限截取。"
+            f"（{cap}×{cap}），已按上限截取。"
         )
-        if height == _MAX_SHOT_HEIGHT:
+        if height == cap:
             lines.append(
                 "页面可能仍未截全：要一次看更长的内容，可调小 width"
                 "（面积不变、高度更高），或分两次截不同高度再逐段看。"
@@ -575,13 +578,22 @@ def view_image(path: str, note: str = "") -> str:
 #    不是格式——图本身是合法 PNG）；8000×1440 也接受，故这是"每边"而非总面积。
 #    超过就**绝不能注入**：注入是每步重建的，一张超限图会让本轮之后**每一次**
 #    请求（含续跑）都 400——一次截图就能把整轮永久锁死（2026-09-15 实测报障）。
-IMAGE_HARD_MAX_SIDE = int(os.environ.get("WOVRA_IMAGE_HARD_MAX_SIDE", "8192"))
-#
-# ② 我们自己的**预算上限**（默认 3000，2026-09-15 用户拍板："图片上限给 3000，
-#    浪费 token；尽量鼓励小图片、范围截取"）：图片的 token 成本随像素增长，
-#    全页长图又贵又模糊——只截**需要的区域**更省更准。超这条不注入，并明确
-#    告诉模型怎么改（见 `image_reject_reason`）。
-IMAGE_MAX_SIDE = int(os.environ.get("WOVRA_IMAGE_MAX_SIDE", "3000"))
+def image_hard_max_side() -> int:
+    """服务端**物理**硬上限（每边 px）：超过就绝不能注入（现读环境）。"""
+    raw = (os.environ.get("WOVRA_IMAGE_HARD_MAX_SIDE") or "").strip()
+    try:
+        return int(float(raw)) if raw else 8192
+    except ValueError:
+        return 8192
+
+
+def image_max_side() -> int:
+    """我们自己的预算上限（每边 px，默认 3000）：超了不注入并指引范围截取。"""
+    raw = (os.environ.get("WOVRA_IMAGE_MAX_SIDE") or "").strip()
+    try:
+        return int(float(raw)) if raw else 3000
+    except ValueError:
+        return 3000
 
 
 def _side_limit() -> int:
@@ -590,7 +602,7 @@ def _side_limit() -> int:
     现算而不是 import 期算死：预算线可以被 env/测试调高，但**物理硬上限永远
     不可绕过**——调高预算线不该把"服务端根本发不出去的图"放进来。
     """
-    return min(IMAGE_MAX_SIDE, IMAGE_HARD_MAX_SIDE)
+    return min(image_max_side(), image_hard_max_side())
 
 
 def _image_size(raw: bytes) -> tuple[int, int] | None:
@@ -662,9 +674,10 @@ def image_reject_reason(path: str) -> str:
     if len(raw) > _MAX_IMAGE_BYTES:
         return f"文件过大（{len(raw):,} 字节 > 上限 {_MAX_IMAGE_BYTES:,}）"
     size = _image_size(raw)
-    if size and max(size) > IMAGE_HARD_MAX_SIDE:
-        return (f"尺寸 {size[0]}×{size[1]} 超过服务端硬上限 {IMAGE_HARD_MAX_SIDE}px/边"
-                f"（实测 {IMAGE_HARD_MAX_SIDE} 接受、{IMAGE_HARD_MAX_SIDE + 1} 被 400 拒）"
+    if size and max(size) > image_hard_max_side():
+        hard = image_hard_max_side()
+        return (f"尺寸 {size[0]}×{size[1]} 超过服务端硬上限 {hard}px/边"
+                f"（实测 {hard} 接受、{hard + 1} 被 400 拒）"
                 f"——这张图**发不出去**，请务必缩小")
     if size and max(size) > _side_limit():
         return (f"尺寸 {size[0]}×{size[1]} 超过图片上限 {_side_limit()}px/边"

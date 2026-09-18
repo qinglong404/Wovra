@@ -31,8 +31,23 @@ from . import abort, limits, safety
 # ---- 结果缓存（磁盘，output/cache/）-----------------------------------------
 
 _CACHE_DIR = "output/cache"
-_CACHE_TTL = int(os.environ.get("WOVRA_WEB_CACHE_TTL", "3600"))  # 秒，默认 1h
 _CACHE_MAX_ENTRIES = 500
+
+
+def _env_int(name: str, default: int) -> int:
+    """调用期读环境变量（非法值退回默认）：配置面板改完，下一次调用就是新值。"""
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return int(float(raw))
+    except ValueError:
+        return default
+
+
+def _cache_ttl() -> int:
+    """抓取缓存的存活时长（秒）。"""
+    return _env_int("WOVRA_WEB_CACHE_TTL", 3600)
 
 # 缓存键版本号（2026-09-15，other/TOOLING_REVIEW.md §1 附带问题）。
 # 旧版把**截断后**的渲染结果写进缓存，且键里没有 max_chars/体量维度——
@@ -66,7 +81,7 @@ def _cache_get(kind: str, key_text: str) -> str | None:
             age = time.time() - target.stat().st_mtime
         except OSError:
             return None
-        if age > _CACHE_TTL:
+        if age > _cache_ttl():
             try:
                 target.unlink()
             except OSError:
@@ -478,7 +493,7 @@ def web_fetch(url: str, max_chars: int = 0) -> str:
     # URL/分、能渲染 JS），没配或失败才落到 Firecrawl（按次计费）。这个顺序的意义就是把
     # 付费那条降成最后手段。用户口径：搜索 API 找 URL、抓取服务取内容——接在**同一次**
     # web_fetch 里，agent 不必自己串两步。
-    if len(text.strip()) < _FIRECRAWL_MIN_CHARS:
+    if len(text.strip()) < _env_int("WOVRA_FIRECRAWL_MIN_CHARS", 200):
         thin = len(text.strip())
         rich, source = _tinyfish_fetch(url), "TinyFish Fetch"
         if rich is None:
@@ -690,7 +705,8 @@ def _search_ddg(query: str, max_results: int) -> tuple[list, int, str] | str:
     url = "https://lite.duckduckgo.com/lite/?q=" + urllib.parse.quote_plus(query)
     request = urllib.request.Request(url, headers={"User-Agent": _WEB_UA})
     try:
-        with urllib.request.urlopen(request, timeout=_LOCAL_SEARCH_TIMEOUT) as resp:
+        with urllib.request.urlopen(
+                request, timeout=_env_int("WOVRA_LOCAL_SEARCH_TIMEOUT", 5)) as resp:
             html = resp.read(1_000_000).decode("utf-8", errors="replace")
     except Exception as error:  # noqa: BLE001——网络错误回传给模型自行调整
         return f"duckduckgo 失败: {error!r}"
@@ -773,15 +789,10 @@ _SEARCH_KEY_VARS: dict[str, tuple[str, ...]] = {
     "tinyfish": ("Wovra_SEARCH_KEY", "Wovra_TinyFish", "Wovra_Tinyfish",
                  "TINYFISH_API_KEY"),
 }
-_SEARCH_TIMEOUT = int(os.environ.get("WOVRA_SEARCH_TIMEOUT", "30"))
-# 本地兜底通道的超时。实测 urllib 的 timeout 会被算**两次**（连接与读取各一次，
-# 本机代理路径下抓包确认：timeout=10 → 实测 20.0s），所以这里取 5s，最坏约 10 秒
-# 就有结论——兜底通道不该让人等两分钟（改前的 lite+html 双端点各 30s 实测 120s）。
-_LOCAL_SEARCH_TIMEOUT = int(os.environ.get("WOVRA_LOCAL_SEARCH_TIMEOUT", "5"))
-
-# 自己的正文抽取少于这么多字符，就判为"没抽到东西"，改问 Firecrawl 要 Markdown
-# （它按次计费，普通页面不惊动它）
-_FIRECRAWL_MIN_CHARS = int(os.environ.get("WOVRA_FIRECRAWL_MIN_CHARS", "200"))
+# 本地兜底通道的超时（`WOVRA_LOCAL_SEARCH_TIMEOUT`，默认 5s）。实测 urllib 的
+# timeout 会被算**两次**（连接与读取各一次，本机代理路径下抓包确认：timeout=10
+# → 实测 20.0s），最坏约 10 秒就有结论——兜底通道不该让人等两分钟（改前的
+# lite+html 双端点各 30s 实测 120s）。两者都在调用期现读环境。
 _dotenv_loaded = False
 
 
@@ -859,7 +870,8 @@ def _http_json(url: str, *, payload: dict | None = None,
         data = json.dumps(payload).encode("utf-8")
         head["Content-Type"] = "application/json"
     request = urllib.request.Request(url, data=data, headers=head)
-    with urllib.request.urlopen(request, timeout=_SEARCH_TIMEOUT) as resp:
+    with urllib.request.urlopen(
+            request, timeout=_env_int("WOVRA_SEARCH_TIMEOUT", 30)) as resp:
         body = resp.read(2_000_000).decode("utf-8", errors="replace")
     return json.loads(body or "{}")
 
@@ -1063,8 +1075,8 @@ def _no_result_text(has_api: bool, signals: list[str]) -> str:
 # 逐步轨迹（进账本），也能在"停止本轮"时立刻断开。
 
 _AGENT_ENDPOINT = "https://agent.tinyfish.ai/v1/automation/run-sse"
-# 读流时单次 socket 等待上限：服务端有 HEARTBEAT，正常远小于它
-_AGENT_READ_TIMEOUT = int(os.environ.get("WOVRA_AGENT_TIMEOUT", "60"))
+# 读流时单次 socket 等待上限（`WOVRA_AGENT_TIMEOUT`，调用期现读）：服务端有
+# HEARTBEAT，正常远小于它。
 _AGENT_MAX_SECONDS = 1800
 
 
@@ -1140,7 +1152,8 @@ def web_automate(url: str, goal: str, max_duration_seconds: int = 300) -> str:
     trail: list[str] = []
     started = time.monotonic()
     try:
-        with urllib.request.urlopen(request, timeout=_AGENT_READ_TIMEOUT) as resp:
+        with urllib.request.urlopen(
+                request, timeout=_env_int("WOVRA_AGENT_TIMEOUT", 60)) as resp:
             for event in _sse_events(resp):
                 if abort.abort_requested():          # 停止本轮：断开这条流
                     walked = " / ".join(trail[-6:]) or "（无）"

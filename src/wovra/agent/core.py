@@ -26,19 +26,19 @@ from .. import views as views_module
 from .support import (
     MODE_BASELINE,
     MODE_MANAGED,
-    _DEFAULT_CONTEXT_LIMIT,
-    _DEFAULT_MAX_TURNS,
-    _IMAGE_VIEW_HARD,
-    _IMAGE_VIEW_SOFT,
     _MAINTENANCE_PURPOSES,
-    _ORG_COOLDOWN_ROUNDS_DEFAULT,
-    _ORG_GRACE_ROUNDS_DEFAULT,
-    _NOTE_BATCH_MAX_DEFAULT,
-    _NOTE_TIMEOUT_DEFAULT,
-    _FOLD_TARGET_DEFAULT,
     v4_enabled,
-    _ORG_MAINT_TIMEOUT_DEFAULT,
-    _ORG_WATERMARK_DEFAULT,
+    context_limit as _env_context_limit,
+    fold_target as _env_fold_target,
+    image_view_hard as _env_image_views_max,
+    image_view_soft as _env_image_views,
+    max_turns as _env_max_turns,
+    note_batch_max as _env_note_batch_max,
+    note_timeout as _env_note_timeout,
+    org_cooldown_rounds as _env_org_cooldown,
+    org_grace_rounds as _env_org_grace,
+    org_maint_timeout as _env_org_maint_timeout,
+    org_watermark as _env_org_watermark,
     _READ_ONLY_TOOLS,
     _VISION_TOOLS,
     _action_word,
@@ -128,7 +128,47 @@ def _same_kind_of_arg(given: str, accepted: str) -> bool:
     return shared >= 4
 
 
+class _EnvSetting:
+    """跟着环境走的实例属性：**没被显式赋过值**时每次读取都现读环境变量。
+
+    配置面板改的是环境（写 `.env` + 同步进程环境）——用这个描述符包住那批
+    原先是"import/构造期快照"的参数，改完不必重启进程：下一次读取就拿到新值。
+    显式赋过值（测试 monkeypatch、探针、构造参数）的实例照旧以赋的值为准，
+    环境改动顶不掉它。
+    """
+
+    def __init__(self, name: str, getter):
+        self._name = name
+        self._getter = getter
+
+    def __get__(self, obj, objtype=None):
+        if obj is None:
+            return self
+        if self._name in obj.__dict__:
+            return obj.__dict__[self._name]
+        return self._getter()
+
+    def __set__(self, obj, value) -> None:
+        obj.__dict__[self._name] = value
+
+    def __delete__(self, obj) -> None:
+        obj.__dict__.pop(self._name, None)
+
+
 class _CoreMixin:
+    # 进程启动期读一次的那批参数：实例没被显式赋值时，**每次读取都现读环境**
+    # （配置面板改完下一步/下一轮就生效）；显式赋过值（测试、探针、定制实例）
+    # 就优先用它，且不被环境改动顶掉。
+    max_turns = _EnvSetting("max_turns", _env_max_turns)
+    context_limit = _EnvSetting("context_limit", _env_context_limit)
+    _org_watermark = _EnvSetting("org_watermark", _env_org_watermark)
+    _org_grace = _EnvSetting("org_grace", _env_org_grace)
+    _org_cooldown = _EnvSetting("org_cooldown", _env_org_cooldown)
+    _org_maint_timeout = _EnvSetting("org_maint_timeout", _env_org_maint_timeout)
+    _note_timeout = _EnvSetting("note_timeout", _env_note_timeout)
+    _note_batch_max = _EnvSetting("note_batch_max", _env_note_batch_max)
+    _fold_target = _EnvSetting("fold_target", _env_fold_target)
+
     def __init__(
         self,
         llm: Optional[LLM] = None,
@@ -153,7 +193,10 @@ class _CoreMixin:
         # 塞图（`_strip_images` 已经从"重发兜底"升级成"能力记忆"）。这样换到
         # 不支持视觉的模型时，工具链照常工作，只是走 page_text / read_file 文本路。
         self._vision_ok = True
-        self.max_turns = max_turns or _DEFAULT_MAX_TURNS
+        # 步数上限与窗口上限只在**显式传入**时冻结；没传就跟着环境走
+        # （见类头的 `_EnvSetting`：配置面板改完下一轮生效）
+        if max_turns is not None:
+            self.max_turns = max_turns
         # 同步实时进度回调（主线程执行）：等待模型、工具动作的即时提示
         self.on_progress = on_progress
         # **事件级直播回调**（2026-09-13，worklog §92）：每落一个事件推一份直播副本。
@@ -162,15 +205,15 @@ class _CoreMixin:
         self.on_event: Optional[Callable[[dict], None]] = None
         self.task = task
         self.context_mode = context_mode
-        self.context_limit = context_limit or _DEFAULT_CONTEXT_LIMIT
+        if context_limit is not None:
+            self.context_limit = context_limit
         # 整理是否异步执行：chat 模式开（不阻塞对话），run/测试用同步（确定性）
         self.async_organization = async_organization
         # V3 水位批量整理参数（水位 = 未整理轮原始内容体量阈值；2026-09-09
         # 用户拍板：批次上限删除——触发只看窗口是否到水位，到水位收编全部
-        # 未整理轮）
-        self._org_watermark = (
-            _ORG_WATERMARK_DEFAULT if org_watermark is None else org_watermark
-        )
+        # 未整理轮）。显式传入才冻结，否则现读环境（配置面板改完下一轮生效）。
+        if org_watermark is not None:
+            self._org_watermark = org_watermark
         # 保护机制（2026-09-08 用户拍板）：宽限期 + 冷却间隔。
         # 宽限 = 会话前 N 轮硬豁免维护——开头几轮（项目导览/目标陈述）是
         # 判据二"解释现状的最小历史"的核心，且大项目首查容易瞬间装满，
@@ -178,22 +221,14 @@ class _CoreMixin:
         # 冷却 = 两次维护之间的最小轮距，适配大小不同的起点、防高频。
         # 分裂后水位按 agent 各自计量、有效容量随分裂增长，阈值无需上调
         # ——保护旋钮主要服务分裂前的单体阶段。
-        self._org_grace = (
-            _ORG_GRACE_ROUNDS_DEFAULT if org_grace_rounds is None else org_grace_rounds
-        )
-        self._org_cooldown = (
-            _ORG_COOLDOWN_ROUNDS_DEFAULT
-            if org_cooldown_rounds is None
-            else org_cooldown_rounds
-        )
-        self._org_maint_timeout = (
-            _ORG_MAINT_TIMEOUT_DEFAULT if org_maint_timeout is None else org_maint_timeout
-        )
-        # 结算（水位处攒批，V4 §6.1）的硬上限与单批轮数上限；超时按失败处理、只留痕
-        self._note_timeout = _NOTE_TIMEOUT_DEFAULT
-        self._note_batch_max = _NOTE_BATCH_MAX_DEFAULT
-        # 折到水位的比例（一次折够，见 `_fold_plan`）
-        self._fold_target = _FOLD_TARGET_DEFAULT
+        if org_grace_rounds is not None:
+            self._org_grace = org_grace_rounds
+        if org_cooldown_rounds is not None:
+            self._org_cooldown = org_cooldown_rounds
+        if org_maint_timeout is not None:
+            self._org_maint_timeout = org_maint_timeout
+        # 结算（水位处攒批，V4 §6.1）的硬上限与单批轮数上限；超时按失败处理、只留痕。
+        # 折到水位的比例同理——都现读环境（见类头的 `_EnvSetting`）。
         # 已入队/整理中的轮次 seq：命中率的计量口径里它们不算"未整理"，
         # 避免批量整理排队期间被下一次触发重复收编
         self._org_inflight: set[int] = set()
@@ -470,10 +505,10 @@ class _CoreMixin:
             "active_view": "",
             "route_hint": {},
             # 本回合已转交次数（route_to 跳数上限的落点，随轮持久化——
-            # `\c` 续跑不会把上限重置掉，见 support._MAX_ROUTE_HOPS）
+            # `\c` 续跑不会把上限重置掉，见 support.max_route_hops）
             "route_hops": 0,
             # 本回合已"看图"次数（view_image 预算的落点，同样随轮持久化——
-            # 防视觉题反复裁图空转，见 support._IMAGE_VIEW_SOFT/HARD）
+            # 防视觉题反复裁图空转，见 support.image_view_soft/hard）
             "image_views": 0,
         }
         self.rounds.append(self.current_round)
@@ -1620,8 +1655,8 @@ class _CoreMixin:
             return blocked
         # 看图预算（2026-09-16，GAIA §2）：到硬上限就不再执行——不注入新图、
         # 不产生新开销，让模型就地收口，而不是靠超时把整轮掐死
-        if name in _VISION_TOOLS and self._image_view_count() >= _IMAGE_VIEW_HARD:
-            return image_budget_refusal(self._image_view_count(), _IMAGE_VIEW_HARD)
+        if name in _VISION_TOOLS and self._image_view_count() >= _env_image_views_max():
+            return image_budget_refusal(self._image_view_count(), _env_image_views_max())
         try:
             # 文件权限守卫**按调用作用域**生效（不是构造时一绑到底）：粘性绑定
             # 会在 Agent 收工后继续拦别人（脚本/CLI 直接调文件工具、同进程里
@@ -1660,8 +1695,8 @@ class _CoreMixin:
         count = self._image_view_count() + 1
         if self.current_round is not None:
             self.current_round["image_views"] = count
-        if count == _IMAGE_VIEW_SOFT and count < _IMAGE_VIEW_HARD:
-            return f"{result}\n{image_converge_note(count, _IMAGE_VIEW_HARD)}"
+        if count == _env_image_views() and count < _env_image_views_max():
+            return f"{result}\n{image_converge_note(count, _env_image_views_max())}"
         return result
 
     def _execute(self, call_id: str, name: str, arguments: str) -> None:
@@ -2070,7 +2105,7 @@ class _CoreMixin:
             cache_info = (
                 f" 缓存命中 {cached:,} tok（{cached / prompt:.1%}）"
                 f" 未命中 {miss:,} tok（{miss / prompt:.1%}）"
-                f" 等效输入 {miss + cached / tokens.CACHE_RATE:,.0f} tok"
+                f" 等效输入 {miss + cached / tokens.cache_rate():,.0f} tok"
             )
         suffix = "" if closed else "（轮未闭合：超限/中断，成本照记）"
         ttft_info = ""
