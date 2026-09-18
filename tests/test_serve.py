@@ -1625,6 +1625,35 @@ def test_maint_state_surfaces_v4_split_failure_and_phase(monkeypatch):
     assert clean["active"] is False and clean["last_defect"] == ""
 
 
+def test_meta_running_is_derived_not_the_status_field(monkeypatch):
+    """「在跑」按**事实**派生，不读 `status` 字段（2026-09-18 用户："状态不是闭合吗？咋还是跑轮"）。
+
+    `status` 唯一的写入点是整理产物带 `is_done=True`，而 **V4 停用了整理那一路**
+    → 它永远停在 `in_progress`。前端据此判"运行中"，于是：① 顶部永远显示「● 运行中」；
+    ② 轮询门控一直放行，每 2.5s 重画并钉底——用户往上翻历史时被反复拽回最下面
+    （同一条会话的用户报障）。
+    """
+    from wovra import serve as serve_module
+
+    # 末轮已闭合、status 却还写着 in_progress（V4 的真实形状）→ 不该算在跑
+    closed = {"status": "in_progress",
+              "rounds": [{"seq": 1, "end_state": "completed"}]}
+    assert serve_module._round_open(closed) is False
+
+    # 末轮开放（或旧数据没有 end_state）→ 算在跑
+    assert serve_module._round_open({"rounds": [{"seq": 1, "end_state": "open"}]}) is True
+    assert serve_module._round_open({"rounds": [{"seq": 1, "end_state": ""}]}) is True
+    assert serve_module._round_open({"rounds": []}) is False
+    assert serve_module._round_open({}) is False
+
+    # `session_meta` 里透出的 `running` 用的是同一条判据
+    meta = serve_module.session_meta("s1", {
+        "status": "in_progress", "task_state": {}, "todo": {}, "history": [],
+        "rounds": [{"seq": 1, "end_state": "completed"}],
+    })
+    assert meta["running"] is False, "末轮闭合了就不该报运行中（status 字段不作数）"
+
+
 def test_session_summary_counts_folded_as_done_under_v4(monkeypatch):
     """列表/摘要的整理计数与时间线同一套折算（2026-09-18 实测：折过的轮被数成"未整理"）。
 

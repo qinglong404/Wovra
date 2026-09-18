@@ -935,6 +935,20 @@ def todo_log(data: dict, limit: int = 60) -> list[dict]:
     return out[-limit:]
 
 
+def _round_open(data: dict) -> bool:
+    """末轮是不是还开着（＝"这一轮还没干完"）——"在跑"的两个事实之一。
+
+    另一端是"服务端有活动作业"（`live_job`），由 `/api/sessions/<id>` 在拿到作业表
+    之后合并进 `running`（见那里的注释）。注意**别读 `status` 字段**：V4 停用整理后
+    没人写它（`is_done` 永远不来），它停在 `in_progress` 会把"在跑"永久点亮。
+    """
+    rounds = data.get("rounds") or []
+    last = rounds[-1] if rounds else None
+    if not isinstance(last, dict):
+        return False
+    return str(last.get("end_state") or "") in ("", "open")
+
+
 def session_summary(task_id: str, data: dict) -> dict:
     """会话摘要（列表视图用；小对象，常驻缓存）。"""
     rounds = data.get("rounds") or []
@@ -952,6 +966,14 @@ def session_summary(task_id: str, data: dict) -> dict:
         "id": task_id,
         "goal": data.get("goal", ""),
         "status": data.get("status", ""),
+        # **"在跑"由事实派生**（2026-09-18 用户："状态不是闭合吗？咋还是跑轮"）：
+        # `status` 字段唯一的写入点是整理产物带 `is_done=True`，而 **V4 已停用整理
+        # 那一路** → 它永远停在 `in_progress`。前端据此判"运行中"，于是：① 顶部
+        # 永远显示「● 运行中」；② 轮询那条 `if(META.status!=='in_progress') return`
+        # 一直放行，每 2.5s 重画并钉底——**用户往上翻历史时被反复拽回最下面**。
+        # 判据带**两个事实**：末轮未闭合（有轮开着）；有活动作业（服务端在跑）。
+        # 作业那半由调用方在拿到 `live_job` 后补（见 handle 里的 `_running_now`）。
+        "running": _round_open(data),
         "workspace": data.get("workspace", ""),
         "mode": data.get("mode", ""),
         "created_at": data.get("created_at", ""),
@@ -1851,6 +1873,9 @@ class _Handler(BaseHTTPRequestHandler):
                         if j["task_id"] == m.group(1)
                         and j["status"] in ("queued", "running")]
             meta["live_job"] = live[0] if live else None
+            # **"在跑" = 有活动作业 或 末轮未闭合**（两个事实任一成立）。作业这一半
+            # 在这里才拿得到（`session_meta` 不知道作业表），故在拿到后合并。
+            meta["running"] = bool(meta.get("running") or meta["live_job"])
             meta["safety_mode"] = str(data.get("safety_mode") or "approve")
             meta["approved_tags"] = list(data.get("approved_tags") or [])
             # 会话级模型选择（聊天页两个下拉读它；空 = 用渠道商当前项）

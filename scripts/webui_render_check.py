@@ -2021,13 +2021,19 @@ resetLive();
   dismissMaint();
 }
 
-console.log('场景 AV｜跟随尾部：内容一次长高超过阈值，不许"跟着跟着突然停住"');
+console.log('场景 AV｜跟随尾部：内容长高要跟着走，用户上滚要立刻停下');
 // 用户报（2026-09-15）："跟随着跟随着突然停到某一位置不跟随了"。两个叠加的毛病：
 //   ① 自动 pin 有"离底部 < tol(≥160px)"门控——内容一次长高超过它，`near` 恒假、
 //      再也不 pin，而没有任何滚动事件来纠正（FOLLOW 还挂着 ✓）；
 //   ② 关跟随的条件是"任何滚动 + 离底 >140"——内容长高/原生锚定让浏览器自己调的
 //      scrollTop 也被算成"用户滚的"，一关就不回来。
 // 口径：FOLLOW 是**用户意图**（只由真实手势改），跟随亮着就钉到底。
+// 用户报（2026-09-18）："我往上滚动看历史记录呢，一直给我跳回最下面"。根因是**两处**：
+//   ① 关跟随要求"上滚 + 距底>140"，而滚一格只有 ~100px 够不到门槛；
+//   ② "是不是我们自己写的"用 180ms 时间窗判，而 pin 每 300ms 写一次——用户的滚动
+//      事件大半落在窗口里被当成"程序滚的"丢掉，于是怎么滚都关不掉。
+// 现在：**手势本身直接关**（wheel 上滚 / 触摸下拖 / PageUp 等），且 self 判定按
+// **写入值**（`SCROLL_SELF_TOP`）而不是时间窗。
 resetLive();
 {
   const c = DOM.content;
@@ -2048,10 +2054,16 @@ resetLive();
   const stayed = c.scrollTop === 0;
   if (!stayed) problems.push('AV: FOLLOW=false 时直播重绘把视口拽到底部了');
   // ② 程序滚动（锚定/重建钳位，带 self 时间戳）不许关跟随
-  FOLLOW = true; SCROLL_SELF_TS = Date.now(); c.scrollTop = 200;
+  FOLLOW = true; c.scrollTop = 200; SCROLL_SELF_TOP = 200;   // 我们刚写下的就是 200
   followScrollEvent(c);
   const afterSelf = FOLLOW;
   if (!afterSelf) problems.push('AV: 程序滚动把跟随关掉了');
+  // ②'' 用户动了之后（值≠我们写下的），**同一个时间窗内**也要能关——
+  //      这正是旧口径（180ms 豁免）漏掉的那一半
+  FOLLOW = true; SCROLL_SELF_TOP = 200; USER_TS = Date.now();
+  c.scrollTop = 100; followScrollEvent(c);
+  const withinWindow = !FOLLOW;
+  if (!withinWindow) problems.push('AV: 时间窗内用户上滚仍被当成"程序滚的"（旧 bug 复发）');
   // ②' 无手势的自动上跳（距离不大）也不许关：从"贴底"被挪上 100/300px
   LAST_TOP = null; SCROLL_SELF_TS = 0; USER_TS = 0;
   c.scrollTop = 700; followScrollEvent(c);   // 建立 LAST_TOP（贴底）
@@ -2064,11 +2076,19 @@ resetLive();
   USER_TS = Date.now(); c.scrollTop = 0; followScrollEvent(c);
   const off = !FOLLOW;
   if (!off) problems.push('AV: 用户滚轮上滚了，跟随没关');
+  // ③' **滚一格也算**（2026-09-18 用户口径）：只上滚 ~100px、距底仍 >140 的旧门槛
+  //    现在不该拦它（手势一出现就该停手）
+  FOLLOW = true; LAST_TOP = null; SCROLL_SELF_TOP = -1;
+  c.scrollTop = 700; followScrollEvent(c);          // 贴底
+  USER_TS = Date.now(); c.scrollTop = 600; followScrollEvent(c);   // 只滚一格
+  const oneWheel = !FOLLOW;
+  if (!oneWheel) problems.push('AV: 只滚一格就关不掉（"一直跳回最下面"的根因之一）');
+  FOLLOW = true; renderFollowChip();
   // ④ 滚回底部 → 恢复
   c.scrollTop = 700; followScrollEvent(c);
   const back = FOLLOW;
   if (!back) problems.push('AV: 滚回底部后跟随没恢复');
-  console.log(`   AV 钉底=${pinned}｜不拽=${stayed}｜程序滚动不关=${afterSelf}｜自动上跳不关=${small&&mid}｜手势关=${off}｜回底恢复=${back}`);
+  console.log(`   AV 钉底=${pinned}｜不拽=${stayed}｜程序滚动不关=${afterSelf}｜窗内用户滚动=${withinWindow}｜自动上跳不关=${small&&mid}｜滚一格关=${oneWheel}｜手势关=${off}｜回底恢复=${back}`);
 }
 
 console.log('场景 AW｜consult（传话）回复要有那位 agent 的消息块——名字含中文/括号也要认');

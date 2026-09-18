@@ -605,7 +605,8 @@ const wsMid=w=>{   // 路径倒数两段（如 BC/Wovra）——比单叶子名�
 let SESSIONS=[],CUR=null,META=null,TAB='conv',POLL=null,FOLLOW=true,REBUILDING=false;
 // 跟随尾部的判据用**时间戳**把『程序滚动』与『用户手势』分开（见 followScrollEvent）：
 // SCROLL_SELF_TS=我们主动写 scrollTop 的时刻；USER_TS=最近一次真实手势；LAST_TOP=上次读到的高度
-let SCROLL_SELF_TS=0,USER_TS=0,LAST_TOP=null;
+// SCROLL_SELF_TOP=我们写下去并读回来的那个值（≠ -1 时用它判"这一跳是不是自己造成的"）
+let SCROLL_SELF_TS=0,USER_TS=0,LAST_TOP=null,SCROLL_SELF_TOP=-1;
 let CONV={session:null,seqs:[],cache:{}};
 let REG={};   // agent 身份表：id/name → registry 条目
 let AGENT_STATS=[];   // 按 agent 聚合（serve 端计算）
@@ -913,7 +914,10 @@ function renderHeader(){
   // 工具调用次数优先用 `/plan` 的现算值（跑轮期间还在长），否则用元数据里的
   // 累计值（`META.tools`，同样从 history 逐调用落账行数出来）。
   const tools=(META.tools_total!=null)?META.tools_total:(META.tools||0);
-  const st=META.status==='in_progress'?'<span class="chip ok pulse">● 运行中</span>':'<span class="chip">完成</span>';
+  // **在跑读 META.running**（由事实派生：有活动作业或末轮未闭合），不再读
+  // `status` 字段——它唯一的写入点是整理的 is_done，而 V4 停用了整理
+  // → 永远停在 in_progress，顶部就一直显示运行中（2026-09-18 用户报）。
+  const st=META.running?'<span class="chip ok pulse">● 运行中</span>':'<span class="chip">完成</span>';
   $('#chips').innerHTML=st+
     `<span class="chip mono" title="点击复制" style="cursor:pointer" onclick="copySid(this)">⧉ ${esc(META.id)}</span>`+
     `<span class="chip acc">${esc(META.mode||'managed')}</span>`+
@@ -1858,7 +1862,7 @@ function liveDoneHtml(aid,host){
     const c=fmtClock(evs[i]&&evs[i].time);
     if(isNaN(T[i]))return c;
     if(i+1<evs.length&&!isNaN(T[i+1]))return c+' · '+(fmtDur((T[i+1]-T[i])/1000)||'');
-    if(META&&META.status==='in_progress'&&i===evs.length-1){
+    if(META&&META.running&&i===evs.length-1){
       return c+' · '+(fmtDur((Date.now()-T[i])/1000)||'');
     }
     return c;
@@ -2224,7 +2228,7 @@ function fillCallResults(root, calls){
       const [txt,cls]=resultStatus(ci.name,ci.result);
       if(stEl){stEl.textContent=txt;stEl.className='t-st '+cls}
     }else if(stEl){
-      const run=(META&&META.status==='in_progress');
+      const run=(META&&META.running);
       const txt=run?'● 运行中…':'无结果',cls='t-st '+(run?'st-running':'st-run');
       if(stEl.textContent!==txt){stEl.textContent=txt;stEl.className=cls}
     }
@@ -2266,7 +2270,7 @@ function drawConv(c,toBottom){
     const durOf=i=>{
       if(isNaN(T[i]))return null;
       if(i+1<evs.length&&!isNaN(T[i+1]))return (T[i+1]-T[i])/1000;
-      if(META.status==='in_progress'&&i===evs.length-1)return (Date.now()-T[i])/1000;
+      if(META.running&&i===evs.length-1)return (Date.now()-T[i])/1000;
       return null;
     };
     const when=i=>{const c=fmtClock(evs[i]?.time),du=fmtDur(durOf(i));return c+(du?' · '+du:'')};
@@ -2442,7 +2446,7 @@ function drawConv(c,toBottom){
 function ci_status(ci){
   if(!ci||ci.result==null){
     // 轮在跑：明确"运行中"（蓝）；轮已结束仍无结果才是真的无结果
-    return (META&&META.status==='in_progress')
+    return (META&&META.running)
       ?['● 运行中…','st-running']:['无结果','st-run'];
   }
   const [t,c]=resultStatus(ci.name,ci.result);return[t,c];
@@ -2641,6 +2645,7 @@ function setScrollTop(c,v){
   if(!c)return;
   SCROLL_SELF_TS=Date.now();
   c.scrollTop=v;
+  SCROLL_SELF_TOP=c.scrollTop;   // 写回后再读：浏览器会把值夹到合法区间
 }
 function pinBottom(c){          // 钉到底：本帧写一次，下一帧确认一次（布局可能把它挪回来）
   if(!c)return;
@@ -2651,22 +2656,58 @@ function pinBottom(c){          // 钉到底：本帧写一次，下一帧确认
     if(gap<80)setScrollTop(c,c.scrollHeight);
   });
 }
+function leaveFollow(){         // 用户要看历史：关跟随（并让 ✓ 的灯如实变 ✗）
+  if(!FOLLOW)return;
+  FOLLOW=false;renderFollowChip();
+}
 function followScrollEvent(c){
   if(REBUILDING||!c)return;
   const now=Date.now();
   const top=c.scrollTop;
   const dist=c.scrollHeight-top-c.clientHeight;
+  // **"是不是我们自己写的那一次"按写入值判，不按时间窗**（2026-09-18 修）：旧口径
+  // 用 180ms 时间窗豁免，而 `pinBottom` 每 300ms 就写一次——用户的滚动事件有六成
+  // 概率落在窗口里被当成"程序滚的"丢掉，于是**怎么滚都关不掉跟随**，300ms 后又被
+  // 拽回底部（用户报的"一直给我跳回最下面"）。按值判则永不误伤：我们写了多少，
+  // 读回来就是多少；用户动过，值就不一样。
+  if(SCROLL_SELF_TOP>=0&&top===SCROLL_SELF_TOP){LAST_TOP=top;return}
   const prev=LAST_TOP;LAST_TOP=top;
-  if(now-(SCROLL_SELF_TS||0)<180)return;      // 我们自己刚写的（pin / 重建 / 锚定恢复）
-  const up=prev!=null&&top<prev-4;            // 明显往上滚
+  const up=prev!=null&&top<prev-4;            // 往上滚了
   const user=now-(USER_TS||0)<1200;           // 1.2s 内有真实手势（滚轮/触摸/按键）
   if(FOLLOW){
-    // 拖滚动条没有手势信号 → 用"滚了很远"兜底；内容自动长高的微调不再误关跟随
-    if(up&&dist>140&&(user||dist>320)){FOLLOW=false;renderFollowChip()}
+    /* **用户意图优先**（2026-09-18 用户口径："滚一下就算"）：有真实手势且往上滚
+       → 立刻关跟随。距底那条只留给**没有手势信号**的情况（拖滚动条、脚本滚动）。 */
+    if(up&&user){leaveFollow()}
+    else if(up&&dist>320){leaveFollow()}
   }else if(dist<60){FOLLOW=true;renderFollowChip()}
 }
-['wheel','touchstart','touchmove','keydown'].forEach(ev=>
-  window.addEventListener(ev,()=>{USER_TS=Date.now()},{passive:true}));
+/* 手势本身直接关跟随（**最不含糊的用户意图**，也是 2026-09-18 那次修复的主路径）：
+   滚轮往上（deltaY<0）、触摸往下拖（内容往上走）、PageUp/↑/Home 都表示"我在看历史"。
+   为什么不只靠 scroll 事件推断：pin 与手势会在事件队列里赛跑，等 scroll 事件到时
+   视口可能已被拽回底部，"往上滚"这个事实就丢了——手势事件本身不会丢。 */
+(function(){
+  let touchY=null;
+  window.addEventListener('wheel',e=>{
+    USER_TS=Date.now();
+    if((e.deltaY||0)<0)leaveFollow();
+  },{passive:true});
+  window.addEventListener('touchstart',e=>{
+    USER_TS=Date.now();
+    const t=(e.touches||[])[0];touchY=t?t.clientY:null;
+  },{passive:true});
+  window.addEventListener('touchmove',e=>{
+    USER_TS=Date.now();
+    const t=(e.touches||[])[0];
+    if(t&&touchY!=null&&t.clientY>touchY+6)leaveFollow();   // 手指下移 = 内容上滚
+    if(t)touchY=t.clientY;
+  },{passive:true});
+  window.addEventListener('keydown',e=>{
+    USER_TS=Date.now();
+    if(['PageUp','ArrowUp','Home'].includes(e.key))leaveFollow();
+  },{passive:true});
+})();
+/* 手势时间戳由上面那组监听器各自维护（它们同时负责"关跟随"），这里不再重复注册
+   ——重复注册会让 touchstart/keydown 各挂两份（2026-09-18 重构时收拢）。 */
 function renderFollowChip(){
   const el=$('#follow-chip');if(!el)return;
   el.textContent=FOLLOW?'跟随尾部 ✓':'跟随尾部 ✗';
@@ -2674,7 +2715,8 @@ function renderFollowChip(){
 }
 $('#content').addEventListener('scroll',()=>followScrollEvent($('#content')));
 setInterval(async()=>{
-  if(TAB!=='conv'||!CUR||!META||META.status!=='in_progress'||document.hidden)return;
+  // 轮询门控同用 META.running
+  if(TAB!=='conv'||!CUR||!META||!META.running||document.hidden)return;
   try{
     const lst=await api('/api/sessions');
     const s=(lst.sessions||[]).find(x=>x.id===CUR);if(!s)return;
